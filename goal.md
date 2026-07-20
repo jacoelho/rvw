@@ -370,3 +370,65 @@ no durable cross-process journal is created, and duplicate prevention is not pro
 exit. It also accepts the section 6 interpretation that the pinned dependency graph's unavoidable,
 unreachable transitive Windows module metadata is permitted while direct/runtime Windows support
 remains forbidden.
+
+### A3 — Strict TOML decoding and loaded terminal graph
+
+**Date:** 2026-07-20. **Affected steps:** G1 and G3. **Approval:** implementation detail within the
+accepted specification.
+
+- Add `github.com/BurntSushi/toml v1.6.0` as a direct dependency so configuration decoding can
+  reject undecoded keys while retaining exact TOML source positions and bounded input handling.
+- Record `github.com/bits-and-blooms/bitset v1.24.4` and
+  `github.com/clipperhouse/stringish v0.1.1` in the dependency baseline. They are existing
+  transitive dependencies of the pinned terminal modules that become visible in Go's pruned module
+  graph when the real Bubble Tea and Bubbles packages are imported.
+- Keep the accepted terminal module versions unchanged. This amendment records resolved
+  implementation dependencies; it does not alter product behavior, ownership, or the accepted
+  specification bytes.
+
+### A4 — Source identity synchronization
+
+**Date:** 2026-07-20. **Affected steps:** G1 and G5. **Approval:** implementation detail within the
+accepted source boundary.
+
+`internal/source.Service` serializes its one-time repository-root discovery and monotonic source-ID
+allocation with a narrow mutex. The coordinator remains the owner of operation scheduling and
+worker bounds; the source lock protects only service-local identity state that can be reached by
+concurrent opens and reloads. The architecture gate permits `sync` in `internal/source` for this
+specific owner-local invariant.
+
+### A5 — Nonblocking contained project-config opens
+
+**Date:** 2026-07-20. **Affected step:** G1. **Approval:** implementation detail within the accepted
+configuration boundary.
+
+`internal/config` may use the Linux/macOS `O_NONBLOCK` open flag through `syscall` when opening a
+repository-owned configuration candidate through `os.OpenRoot`. It then verifies the opened
+descriptor is a regular file before decoding it. This prevents a FIFO/device from blocking startup
+and removes the project-config symlink/stat-open race; it does not grant process-control ownership
+to configuration code.
+
+### A6 — Immutable staged-index revisions
+
+**Date:** 2026-07-20. **Affected steps:** G1 and G3. **Approval:** necessary reconciliation of two
+accepted staged-source requirements.
+
+An unmerged Git index cannot be represented by the “index tree” named in section 8 of the accepted
+specification, while the accepted JSON contract requires unmerged paths to appear as modified.
+`internal/source` therefore freezes the index entries in its private source workspace and treats
+that immutable index as the staged revision. Metadata is acquired by comparing the frozen index
+with the resolved `HEAD` tree (or empty tree), without requiring `git write-tree`. A conflicted path
+is retained as a modified file. Because an unmerged index has no single patch body, materialization
+for that file returns an explicit unavailable result rather than reading the mutable worktree,
+inventing a resolution, or failing the whole staged source.
+
+### A7 — Platform-selected clipboard delivery
+
+**Date:** 2026-07-20. **Affected step:** G4. **Approval:** implementation detail within the accepted
+delivery boundary.
+
+`internal/delivery` may inspect the supported host platform and display environment to select the
+clipboard executable (`pbcopy`, `wl-copy`, or `xclip`). It therefore owns the narrow `os` and
+`runtime` reads required for that selection. Process creation, process groups, pipes, deadlines,
+and physical child ownership remain exclusively in `internal/subprocess`; delivery receives only a
+typed commit outcome and fences an ambiguous destination for the process lifetime.

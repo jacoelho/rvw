@@ -1,5 +1,6 @@
 GO ?= go
 GO_FILES := $(shell find . -type f -name '*.go' -not -path './vendor/*' -not -path './.git/*')
+RVW := bin/rvw
 
 .PHONY: check check-g0 fmt-check test test-race vet build dependencies
 
@@ -27,5 +28,8 @@ dependencies:
 	$(GO) mod verify
 	$(GO) list -m -mod=readonly all >/dev/null
 
-build:
-	$(GO) build ./cmd/rvw
+build: $(RVW)
+
+$(RVW): $(GO_FILES) go.mod go.sum
+	@mkdir -p $(@D)
+	$(GO) build -o $@ ./cmd/rvw

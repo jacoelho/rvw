@@ -2,7 +2,9 @@ package architecture_test
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"fmt"
+	"go/ast"
 	"go/build/constraint"
 	"go/parser"
 	"go/token"
@@ -17,6 +19,8 @@ import (
 )
 
 const modulePath = "github.com/jacoelho/rvw"
+
+const acceptedSpecificationDigest = "eb71f3a3574598598690cb9953064c462c31af0172381e87bd4cc221223a51e0"
 
 var allowedInternalImports = map[string][]string{
 	"cmd/rvw": {
@@ -51,6 +55,7 @@ var pureReviewImports = []string{
 	"crypto/sha256",
 	"encoding/base64",
 	"encoding/binary",
+	"encoding/json",
 	"errors",
 	"fmt",
 	"hash",
@@ -66,6 +71,27 @@ var pureReviewImports = []string{
 	"strings",
 	"unicode",
 	"unicode/utf8",
+}
+
+func TestAcceptedSpecificationBytes(t *testing.T) {
+	root := repositoryRoot(t)
+	contents, err := os.ReadFile(filepath.Join(root, "docs", "rvw-specification.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := fmt.Sprintf("%x", sha256.Sum256(contents)); got != acceptedSpecificationDigest {
+		t.Errorf("accepted specification digest changed: got %s, want %s", got, acceptedSpecificationDigest)
+	}
+
+	digestRecord, err := os.ReadFile(filepath.Join(root, "docs", "rvw-specification.sha256"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRecord := acceptedSpecificationDigest + "  docs/rvw-specification.md"
+	if got := strings.TrimSpace(string(digestRecord)); got != wantRecord {
+		t.Errorf("specification digest record = %q, want %q", got, wantRecord)
+	}
 }
 
 func TestDependencyPins(t *testing.T) {
@@ -189,6 +215,37 @@ func TestProductionDependencyDirections(t *testing.T) {
 	for owner := range seenPackages {
 		if _, ok := allowedInternalImports[owner]; !ok {
 			t.Errorf("production package %q has no accepted architecture owner", owner)
+		}
+	}
+}
+
+func TestProductionAPIsHaveNoPositionalBooleanParameters(t *testing.T) {
+	root := repositoryRoot(t)
+	for _, filename := range productionGoFiles(t, root) {
+		relative := relativeSlash(t, root, filename)
+		fileSet := token.NewFileSet()
+		parsed, err := parser.ParseFile(fileSet, filename, nil, 0)
+		if err != nil {
+			t.Errorf("parse %s: %v", relative, err)
+			continue
+		}
+		for _, declaration := range parsed.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok || function.Type.Params == nil {
+				continue
+			}
+			for _, parameter := range function.Type.Params.List {
+				identifier, ok := parameter.Type.(*ast.Ident)
+				if !ok || identifier.Name != "bool" {
+					continue
+				}
+				t.Errorf(
+					"%s:%d: %s has a positional Boolean parameter; use a named domain value or separate operation",
+					relative,
+					fileSet.Position(function.Pos()).Line,
+					function.Name.Name,
+				)
+			}
 		}
 	}
 }
@@ -356,11 +413,11 @@ func checkEffectImport(t *testing.T, filename, owner, importPath string) {
 			fail("network effects")
 		}
 	case importPath == "os", importPath == "io/fs", importPath == "path/filepath":
-		if !allowed("cmd/rvw", "internal/config", "internal/source", "internal/subprocess") {
+		if !allowed("cmd/rvw", "internal/config", "internal/delivery", "internal/source", "internal/subprocess") {
 			fail("filesystem/process-boundary effects")
 		}
 	case importPath == "syscall":
-		if !allowed("cmd/rvw", "internal/subprocess") {
+		if !allowed("cmd/rvw", "internal/config", "internal/subprocess") {
 			fail("operating-system process control")
 		}
 	case importPath == "context":
@@ -368,7 +425,7 @@ func checkEffectImport(t *testing.T, filename, owner, importPath string) {
 			fail("cancellation/lifecycle effects")
 		}
 	case importPath == "sync" || strings.HasPrefix(importPath, "sync/"):
-		if !allowed("internal/app", "internal/delivery", "internal/subprocess") {
+		if !allowed("internal/app", "internal/delivery", "internal/source", "internal/subprocess") {
 			fail("concurrent ownership")
 		}
 	case importPath == "time":
@@ -376,7 +433,7 @@ func checkEffectImport(t *testing.T, filename, owner, importPath string) {
 			fail("clock/deadline effects")
 		}
 	case importPath == "runtime":
-		if !allowed("cmd/rvw", "internal/app", "internal/subprocess") {
+		if !allowed("cmd/rvw", "internal/app", "internal/delivery", "internal/subprocess") {
 			fail("runtime/platform behavior")
 		}
 	case importPath == "io":

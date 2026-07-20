@@ -1,0 +1,977 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/jacoelho/rvw/internal/delivery"
+	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/source"
+)
+
+func TestModelRetainsOwnerAndBuildsCompleteBoundedViews(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{
+		"alpha.txt": "first\nchanged\n",
+		"beta.txt":  "second\nchanged\n",
+	})
+
+	updated, command := model.Update(tea.WindowSizeMsg{Width: normalWidth, Height: 24})
+	if updated != model {
+		t.Fatal("Update returned a different root model owner")
+	}
+	if command != nil {
+		t.Fatal("window resize unexpectedly returned a command")
+	}
+
+	first := model.View()
+	second := model.View()
+	if first.Content != second.Content {
+		t.Fatal("View mutated observable model state")
+	}
+	if !first.AltScreen || !first.ReportFocus ||
+		first.WindowTitle != "rvw" ||
+		first.MouseMode != tea.MouseModeCellMotion ||
+		!first.KeyboardEnhancements.ReportEventTypes {
+		t.Fatalf("incomplete terminal view fields: %+v", first)
+	}
+	if lines := strings.Count(first.Content, "\n") + 1; lines != 24 {
+		t.Fatalf("rendered lines = %d, want 24", lines)
+	}
+	if rows := model.MaterializedRows(); rows > 2*(24+viewportOverscan) {
+		t.Fatalf("materialized rows = %d, exceeds viewport bound", rows)
+	}
+	if coordinator.Stats().Accepted != 1 {
+		t.Fatalf("accepted operations = %d, want 1", coordinator.Stats().Accepted)
+	}
+}
+
+func TestInitialPatchAdmissionOccursInUpdate(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	if !model.initialized {
+		t.Fatal("test model did not process the initialize message")
+	}
+	if got := coordinator.Stats().Accepted; got != 1 {
+		t.Fatalf("accepted operations after initialize = %d, want 1", got)
+	}
+}
+
+func TestSelectionAndActivationRemainDistinct(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{
+		"alpha.txt": "changed\n",
+		"beta.txt":  "changed\n",
+	})
+	_, _ = model.Update(tea.WindowSizeMsg{Width: compactWidth, Height: 18})
+	model.focus = FocusFileTree
+	activeBefore, ok := model.review.ActiveFile()
+	if !ok {
+		t.Fatal("missing initial active file")
+	}
+
+	_, _ = model.Update(keyMessage("j"))
+	selected, ok := model.review.SelectedFile()
+	if !ok || selected == activeBefore {
+		t.Fatalf("move did not select a distinct file: selected=%d active=%d", selected, activeBefore)
+	}
+	activeAfterMove, _ := model.review.ActiveFile()
+	if activeAfterMove != activeBefore {
+		t.Fatal("moving file selection activated it")
+	}
+
+	_, _ = model.Update(keyMessage("enter"))
+	activeAfterEnter, _ := model.review.ActiveFile()
+	if activeAfterEnter != selected {
+		t.Fatalf("active file = %d, want selected file %d", activeAfterEnter, selected)
+	}
+}
+
+func TestCommentEditorAnchorsSemanticLineAndRetainsChildState(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{
+		"alpha.txt": "original\nadded\n",
+	})
+	_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
+	waitContext, cancelWait := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelWait()
+	if state := coordinator.WaitReady(waitContext); state != ReadyAvailable {
+		t.Fatalf("ready state = %d", state)
+	}
+	_, _ = model.Update(outcomeReadyMsg{state: ReadyAvailable})
+
+	active, ok := model.review.ActiveFile()
+	if !ok {
+		t.Fatal("missing active file")
+	}
+	state := model.review.Patch(active)
+	lines := model.review.PatchLines(active, 0, state.Lines, 4_096)
+	found := false
+	for _, line := range lines {
+		if line.Kind() == review.PatchLineAddition {
+			model.diffCursor = line.Number
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("fixture patch has no addition")
+	}
+
+	_, focusCommand := model.Update(keyMessage("c"))
+	if model.mode != ModeCommentEdit || focusCommand == nil {
+		t.Fatalf("comment edit did not start: mode=%d command=%v", model.mode, focusCommand)
+	}
+	for _, character := range "fix this" {
+		_, _ = model.Update(tea.KeyPressMsg(tea.Key{Text: string(character), Code: character}))
+	}
+	_, _ = model.Update(tea.KeyPressMsg(tea.Key{Code: 's', Mod: tea.ModCtrl}))
+	if model.mode != ModeNormal {
+		t.Fatalf("comment editor mode = %d after save", model.mode)
+	}
+	comments := model.review.Comments()
+	if len(comments) != 1 || comments[0].Body().String() != "fix this" {
+		t.Fatalf("saved comments = %+v", comments)
+	}
+	side, start, end, ok := comments[0].Target().Lines()
+	if !ok || side != review.LineNew || start != end || start.Uint32() != 2 {
+		t.Fatalf("saved target = side %d start %d end %d ok %v", side, start, end, ok)
+	}
+	if !strings.Contains(model.View().Content, "fix this") {
+		t.Fatal("wide view does not expose the saved comment")
+	}
+}
+
+func TestAsyncStdoutExportQuitsOnlyAfterPreparedPayloadIsOwnedByModel(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	waitContext, cancelWait := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelWait()
+	if state := coordinator.WaitReady(waitContext); state != ReadyAvailable {
+		t.Fatalf("patch ready state = %d", state)
+	}
+	_, _ = model.Update(outcomeReadyMsg{state: ReadyAvailable})
+
+	_, command := model.Update(keyMessage("M"))
+	if command != nil {
+		t.Fatal("export submission returned a terminal command before preparation completed")
+	}
+	if model.overlay != OverlayExport {
+		t.Fatalf("export overlay = %d", model.overlay)
+	}
+	_, command = model.Update(keyMessage("enter"))
+	if command != nil {
+		t.Fatal("export selection returned a terminal command before preparation completed")
+	}
+	if state := coordinator.WaitReady(waitContext); state != ReadyAvailable {
+		t.Fatalf("export ready state = %d", state)
+	}
+	_, command = model.Update(outcomeReadyMsg{state: ReadyAvailable})
+	if command == nil {
+		t.Fatal("prepared stdout export did not initiate controlled quit")
+	}
+	if message := command(); message != (tea.QuitMsg{}) {
+		t.Fatalf("stdout export command returned %T", message)
+	}
+	body, ok := model.PendingStdout()
+	if !ok || body != "_No comments._" {
+		t.Fatalf("pending stdout = %q %v", body, ok)
+	}
+}
+
+func TestAsyncJSONExportUsesPostProgramStdoutHandoff(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	waitContext, cancelWait := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelWait()
+	if state := coordinator.WaitReady(waitContext); state != ReadyAvailable {
+		t.Fatalf("patch ready state = %d", state)
+	}
+	_, _ = model.Update(outcomeReadyMsg{state: ReadyAvailable})
+
+	_, command := model.Update(keyMessage("J"))
+	if command != nil {
+		t.Fatal("JSON export returned a terminal command before preparation completed")
+	}
+	if model.overlay != OverlayExport {
+		t.Fatalf("JSON export overlay = %d", model.overlay)
+	}
+	_, command = model.Update(keyMessage("enter"))
+	if command != nil {
+		t.Fatal("JSON export selection returned a terminal command before preparation completed")
+	}
+	if state := coordinator.WaitReady(waitContext); state != ReadyAvailable {
+		t.Fatalf("JSON export ready state = %d", state)
+	}
+	_, command = model.Update(outcomeReadyMsg{state: ReadyAvailable})
+	if command == nil || command() != (tea.QuitMsg{}) {
+		t.Fatal("prepared JSON export did not initiate controlled quit")
+	}
+	body, ok := model.PendingStdout()
+	if !ok || body != "{\"comments\":[]}\n" {
+		t.Fatalf("pending JSON = %q %v", body, ok)
+	}
+}
+
+func TestAsyncStdoutExportDoesNotQuitWhenOperationTransitionFails(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	operationID, err := review.NewOperationID(999)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := model.review.PrepareMarkdown(
+		model.settings.exportTemplates,
+		review.ExportOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.exportOperations[operationID] = exportRequest{
+		format:      review.ExportMarkdown,
+		destination: delivery.DestinationStdout,
+	}
+
+	command := model.applyExportOutcome(ExportOutcome{
+		ID:          operationID,
+		Prepared:    prepared,
+		Destination: delivery.DestinationStdout,
+	})
+	if command != nil || model.quitting || model.pendingStdout != nil {
+		t.Fatal("invalid operation transition initiated stdout delivery")
+	}
+	if model.notice == nil || model.notice.Kind != NoticeError {
+		t.Fatalf("operation transition notice = %+v", model.notice)
+	}
+}
+
+func TestStrokeNormalizationPreservesPrintableCase(t *testing.T) {
+	if normalizeStroke("c") == normalizeStroke("C") {
+		t.Fatal("printable key case was collapsed")
+	}
+	if normalizeStroke("Ctrl+C") != "ctrl-c" || normalizeStroke("ENTER") != "enter" {
+		t.Fatal("named/modifier keys were not normalized")
+	}
+}
+
+func TestNumericRepeatIsBoundedAndAppliedWithoutPerStepUpdates(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{
+		"a.txt": "changed\n",
+		"b.txt": "changed\n",
+		"c.txt": "changed\n",
+		"d.txt": "changed\n",
+		"e.txt": "changed\n",
+	})
+	_, _ = model.Update(tea.WindowSizeMsg{Width: compactWidth, Height: 18})
+	model.focus = FocusFileTree
+
+	_, _ = model.Update(keyMessage("3"))
+	_, _ = model.Update(keyMessage("j"))
+	selected, ok := model.review.SelectedFile()
+	if !ok || selected != model.fileOrder[3] {
+		t.Fatalf("repeated move selected %d, want %d", selected, model.fileOrder[3])
+	}
+
+	for range 5 {
+		_, _ = model.Update(keyMessage("9"))
+	}
+	if model.repeat != 0 || model.notice == nil ||
+		model.notice.Text != "numeric repeat must not exceed 9999" {
+		t.Fatalf("overflow repeat state = %d notice = %+v", model.repeat, model.notice)
+	}
+}
+
+func TestEffectiveBindingsDriveRoutingAndVisibleHelp(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{
+		"a.txt": "changed\n",
+		"b.txt": "changed\n",
+	})
+	model.settings.keybindings = append(
+		model.settings.keybindings,
+		Keybinding{
+			Context: KeyContextNormal,
+			Focus:   KeyFocusFileTree,
+			Chord:   "j",
+			Action:  KeyActionLast,
+		},
+		Keybinding{
+			Context: KeyContextMinimumSize,
+			Chord:   "j",
+			Action:  KeyActionMoveDown,
+		},
+	)
+	_, _ = model.Update(tea.WindowSizeMsg{Width: compactWidth, Height: 18})
+	model.focus = FocusFileTree
+
+	_, _ = model.Update(keyMessage("j"))
+	selected, ok := model.review.SelectedFile()
+	if !ok || selected != model.fileOrder[len(model.fileOrder)-1] {
+		t.Fatalf("focused override selected %d, want last file", selected)
+	}
+
+	model.overlay = OverlayHelp
+	help := model.View().Content
+	if !strings.Contains(help, "j") || !strings.Contains(help, KeyActionLast.String()) ||
+		strings.Contains(help, KeyActionMoveDown.String()) {
+		t.Fatalf("help did not reflect focused override:\n%s", help)
+	}
+
+	model.overlay = OverlayNone
+	_, _ = model.Update(tea.WindowSizeMsg{Width: minimumWidth - 1, Height: minimumHeight})
+	before, _ := model.review.SelectedFile()
+	_, _ = model.Update(keyMessage("j"))
+	after, _ := model.review.SelectedFile()
+	if after != before {
+		t.Fatal("non-quit minimum-size binding was routed")
+	}
+}
+
+func TestMouseTranslationReturnsOnlyImmediateTypedActions(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{
+		"a.txt": "changed\n",
+		"b.txt": "changed\n",
+	})
+	_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
+	view := model.View()
+	if view.OnMouse == nil {
+		t.Fatal("enabled mouse has no bounded action owner")
+	}
+
+	click := view.OnMouse(tea.MouseClickMsg{
+		X:      wideWidth - 1,
+		Y:      1,
+		Button: tea.MouseLeft,
+	})
+	if click == nil {
+		t.Fatal("comments-pane click returned no command")
+	}
+	message, ok := click().(mouseActionMsg)
+	if !ok || message.focus != FocusComments || message.delta != 0 {
+		t.Fatalf("click translated to %#v", message)
+	}
+	_, _ = model.Update(message)
+	if model.focus != FocusComments {
+		t.Fatalf("click focus = %d, want comments", model.focus)
+	}
+
+	wheel := view.OnMouse(tea.MouseWheelMsg{
+		X:      0,
+		Y:      1,
+		Button: tea.MouseWheelDown,
+	})
+	if wheel == nil {
+		t.Fatal("file-pane wheel returned no command")
+	}
+	message, ok = wheel().(mouseActionMsg)
+	if !ok || message.focus != FocusFileTree || message.delta != 3 {
+		t.Fatalf("wheel translated to %#v", message)
+	}
+	model.focus = FocusDiff
+	active, _ := model.review.ActiveFile()
+	model.review, _ = model.review.ToggleFileReviewed(active)
+	_, _ = model.Update(message)
+	if model.focus != FocusDiff {
+		t.Fatal("stale mouse action from an older review state was applied")
+	}
+}
+
+func TestResponsiveLayoutUsesBothWidthAndHeightBoundaries(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"a.txt": "changed\n"})
+	tests := []struct {
+		width, height  int
+		tree, comments bool
+	}{
+		{width: 179, height: 30, tree: true, comments: false},
+		{width: 180, height: 29, tree: true, comments: false},
+		{width: 180, height: 30, tree: true, comments: true},
+		{width: 120, height: 24, tree: true, comments: false},
+		{width: 120, height: 23, tree: true, comments: false},
+		{width: 85, height: 18, tree: true, comments: false},
+		{width: 84, height: 18, tree: false, comments: false},
+		{width: 85, height: 17, tree: false, comments: false},
+		{width: 20, height: 6, tree: false, comments: false},
+	}
+	for _, test := range tests {
+		_, _ = model.Update(tea.WindowSizeMsg{Width: test.width, Height: test.height})
+		layout := model.workspaceLayout(test.width, test.height)
+		if (layout.treeWidth != 0) != test.tree ||
+			(layout.commentsWidth != 0) != test.comments {
+			t.Fatalf(
+				"layout %dx%d = tree %d comments %d",
+				test.width,
+				test.height,
+				layout.treeWidth,
+				layout.commentsWidth,
+			)
+		}
+		if layout.diffWidth < 60 && (layout.treeWidth != 0 || layout.commentsWidth != 0) {
+			t.Fatalf("layout %dx%d kept optional pane with %d-column diff", test.width, test.height, layout.diffWidth)
+		}
+	}
+
+	model.commentsVisible = true
+	layout := model.workspaceLayout(120, 24)
+	if layout.treeWidth < 24 || layout.commentsWidth < 32 || layout.diffWidth < 60 {
+		t.Fatalf("normal comments layout = %+v", layout)
+	}
+	model.settings.diffView = DiffViewSideBySide
+	if !model.workspaceLayout(120, 24).sideBySideFallback ||
+		model.workspaceLayout(180, 30).sideBySideFallback {
+		t.Fatal("side-by-side fallback did not follow diff content width")
+	}
+}
+
+func TestReloadAcquisitionAndPreparationCommitAtomicallyOffUpdate(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{"a.txt": "changed\n"})
+	waitContext, cancelWait := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelWait()
+	if state := coordinator.WaitReady(waitContext); state != ReadyAvailable {
+		t.Fatalf("patch ready state = %d", state)
+	}
+	_, _ = model.Update(outcomeReadyMsg{state: ReadyAvailable})
+
+	local, ok := model.document.Local()
+	if !ok || local.Repo == nil {
+		t.Fatal("test document has no local repository")
+	}
+	if err := os.WriteFile(
+		filepath.Join(local.Repo.String(), "b.txt"),
+		[]byte("untracked\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	oldSource := model.review.Snapshot().SourceID()
+	oldWorkspace := model.review.WorkspaceRevision()
+	model.startReload()
+	if model.reloadOperation == 0 || model.reloadPreparing {
+		t.Fatalf("reload acquisition state = operation %d preparing %v", model.reloadOperation, model.reloadPreparing)
+	}
+
+	for attempts := 0; !model.reloadPreparing && attempts < 8; attempts++ {
+		if state := coordinator.WaitReady(waitContext); state != ReadyAvailable {
+			t.Fatalf("reload acquisition ready state = %d", state)
+		}
+		_, _ = model.Update(outcomeReadyMsg{state: ReadyAvailable})
+	}
+	if !model.reloadPreparing {
+		t.Fatal("reload did not enter off-loop reconciliation")
+	}
+	if model.review.Snapshot().SourceID() != oldSource {
+		t.Fatal("source became observable before prepared replacement committed")
+	}
+	var err error
+	model.review, err = model.review.ToggleFileReviewed(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for attempts := 0; model.reloadOperation != 0 && attempts < 8; attempts++ {
+		if state := coordinator.WaitReady(waitContext); state != ReadyAvailable {
+			t.Fatalf("reload preparation ready state = %d", state)
+		}
+		_, _ = model.Update(outcomeReadyMsg{state: ReadyAvailable})
+	}
+	if model.reloadOperation != 0 || model.reloadPreparing {
+		t.Fatalf("reload did not settle: operation %d preparing %v", model.reloadOperation, model.reloadPreparing)
+	}
+	if model.review.Snapshot().SourceID() == oldSource ||
+		model.review.WorkspaceRevision().Uint64() != oldWorkspace.Uint64()+1 ||
+		model.review.Snapshot().FileCount() != 2 {
+		t.Fatalf(
+			"replacement = source %d workspace %d files %d",
+			model.review.Snapshot().SourceID(),
+			model.review.WorkspaceRevision(),
+			model.review.Snapshot().FileCount(),
+		)
+	}
+	if len(model.allFileOrder) != 2 {
+		t.Fatalf("prepared file order length = %d", len(model.allFileOrder))
+	}
+	if !model.review.FileReviewed(0) {
+		t.Fatal("reload retry lost review state changed during preparation")
+	}
+}
+
+func TestCoordinatorAdmissionRetainsOutcomeUntilClaim(t *testing.T) {
+	fixture := newSourceFixture(t, map[string]string{"alpha.txt": "changed\n"})
+	workContext, cancelWork := context.WithCancel(t.Context())
+	t.Cleanup(cancelWork)
+	deliveryManager := newTestDeliveryManager(t)
+	coordinator, err := NewCoordinator(workContext, fixture.service, deliveryManager)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		coordinator.StopAdmissionAndCancel()
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := coordinator.Shutdown(shutdownContext); err != nil {
+			t.Error(err)
+		}
+	})
+
+	current, err := review.NewReview(fixture.document.Snapshot(), []review.CommentKind{"issue"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileID, ok := current.ActiveFile()
+	if !ok {
+		t.Fatal("missing active file")
+	}
+	contextLines, err := review.NewContextLines(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	patchContext, err := review.ContextAround(contextLines)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, request, err := current.RequestPatch(fileID, patchContext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstID, _ := review.NewOperationID(1)
+	secondID, _ := review.NewOperationID(2)
+	if err := coordinator.SubmitPatch(PatchWork{
+		ID: firstID, Document: fixture.document, Request: request,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.SubmitPatch(PatchWork{
+		ID: secondID, Document: fixture.document, Request: request,
+	}); err != ErrCoordinatorSaturated {
+		t.Fatalf("second admission error = %v, want %v", err, ErrCoordinatorSaturated)
+	}
+
+	waitContext, cancelWait := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelWait()
+	if state := coordinator.WaitReady(waitContext); state != ReadyAvailable {
+		t.Fatalf("ready state = %d, want available", state)
+	}
+	if stats := coordinator.Stats(); stats.Accepted != 1 || stats.Retained != 1 {
+		t.Fatalf("stats before claim = %+v", stats)
+	}
+	outcome, ok := coordinator.ClaimNext()
+	if !ok || outcome.Kind() != OutcomePatch {
+		t.Fatalf("claim = (%v, %t), want patch outcome", outcome.Kind(), ok)
+	}
+	if stats := coordinator.Stats(); stats.Accepted != 0 || stats.Retained != 0 {
+		t.Fatalf("stats after claim = %+v", stats)
+	}
+}
+
+func TestCoordinatorKeepsPublicationByteCapacityReserved(t *testing.T) {
+	fixture := newSourceFixture(t, map[string]string{"alpha.txt": "changed\n"})
+	workContext, cancelWork := context.WithCancel(t.Context())
+	t.Cleanup(cancelWork)
+	coordinator, err := NewCoordinator(
+		workContext,
+		fixture.service,
+		newTestDeliveryManager(t),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := coordinator.Shutdown(shutdownContext); err != nil {
+			t.Error(err)
+		}
+	})
+
+	ordinaryID, _ := review.NewOperationID(1)
+	if err := coordinator.submit(
+		ordinaryID,
+		MaxQueuedRequestBytes-reservedPublicationRequestBytes,
+		MaxRetainedResultBytes-reservedPublicationResultBytes,
+		func(context.Context) bool { return true },
+	); err != nil {
+		t.Fatalf("fill ordinary partition: %v", err)
+	}
+	rejectedID, _ := review.NewOperationID(2)
+	if err := coordinator.submit(
+		rejectedID,
+		1,
+		1,
+		func(context.Context) bool { return true },
+	); !errors.Is(err, ErrCoordinatorSaturated) {
+		t.Fatalf("ordinary overflow error = %v, want %v", err, ErrCoordinatorSaturated)
+	}
+
+	publicationID, _ := review.NewOperationID(3)
+	if err := coordinator.submitReservedPublication(
+		publicationID,
+		reservedPublicationRequestBytes,
+		reservedPublicationResultBytes,
+		nil,
+		nil,
+		func(context.Context) bool { return true },
+	); err != nil {
+		t.Fatalf("reserved publication admission: %v", err)
+	}
+	stats := coordinator.Stats()
+	if stats.RequestBytes != MaxQueuedRequestBytes ||
+		stats.ReservedResult != MaxRetainedResultBytes {
+		t.Fatalf("full partition stats = %+v", stats)
+	}
+}
+
+func TestCoordinatorCoalescesProgressBehindTerminalPriority(t *testing.T) {
+	fixture := newSourceFixture(t, map[string]string{"alpha.txt": "changed\n"})
+	workContext, cancelWork := context.WithCancel(t.Context())
+	t.Cleanup(cancelWork)
+	coordinator, err := NewCoordinator(
+		workContext,
+		fixture.service,
+		newTestDeliveryManager(t),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := coordinator.Shutdown(shutdownContext); err != nil {
+			t.Error(err)
+		}
+	})
+	id, _ := review.NewOperationID(1)
+	if err := coordinator.submit(
+		id,
+		1,
+		1,
+		func(context.Context) bool { return true },
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.ReportProgress(Progress{
+		ID: id, Completed: 1, Total: 3, Detail: "first",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.ReportProgress(Progress{
+		ID: id, Completed: 2, Total: 3, Detail: "latest",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitContext, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if state := coordinator.WaitReady(waitContext); state != ReadyAvailable {
+		t.Fatalf("progress ready state = %d", state)
+	}
+	outcome, ok := coordinator.ClaimNext()
+	progress, progressOK := outcome.Progress()
+	if !ok || !progressOK || progress.Completed != 2 ||
+		progress.Detail != "latest" {
+		t.Fatalf("coalesced progress = %+v, outcome kind %d", progress, outcome.Kind())
+	}
+
+	if err := coordinator.ReportProgress(Progress{
+		ID: id, Completed: 3, Total: 3, Detail: "done",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	coordinator.complete(Outcome{
+		kind:  OutcomePatch,
+		patch: PatchOutcome{ID: id},
+	})
+	outcome, ok = coordinator.ClaimNext()
+	if !ok || outcome.Kind() != OutcomePatch {
+		t.Fatalf("terminal priority claim = (%d, %t)", outcome.Kind(), ok)
+	}
+	if _, ok := coordinator.ClaimNext(); ok {
+		t.Fatal("progress survived terminal completion")
+	}
+}
+
+func TestRequiredSchedulerAllowsAtMostEightBypasses(t *testing.T) {
+	scheduler := newRequiredScheduler()
+	ids := make([]review.OperationID, 10)
+	for index := range ids {
+		ids[index], _ = review.NewOperationID(uint64(index + 1))
+		scheduler.register(ids[index])
+	}
+	starts := make([]<-chan struct{}, len(ids))
+	for index := 1; index < len(ids); index++ {
+		starts[index] = scheduler.markReady(ids[index])
+	}
+	for index := 1; index <= maxRequiredBypasses; index++ {
+		select {
+		case <-starts[index]:
+		default:
+			t.Fatalf("bypass %d was not granted", index)
+		}
+	}
+	select {
+	case <-starts[9]:
+		t.Fatal("ninth bypass was granted before the oldest operation")
+	default:
+	}
+	starts[0] = scheduler.markReady(ids[0])
+	select {
+	case <-starts[0]:
+	default:
+		t.Fatal("oldest ready operation was not granted")
+	}
+	select {
+	case <-starts[9]:
+	default:
+		t.Fatal("blocked later operation did not run after the oldest")
+	}
+}
+
+func TestReadyReceiverStopIsABoundedCompletionBarrier(t *testing.T) {
+	fixture := newSourceFixture(t, map[string]string{"alpha.txt": "changed\n"})
+	workContext, cancelWork := context.WithCancel(t.Context())
+	t.Cleanup(cancelWork)
+	deliveryManager := newTestDeliveryManager(t)
+	coordinator, err := NewCoordinator(workContext, fixture.service, deliveryManager)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		coordinator.StopAdmissionAndCancel()
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := coordinator.Shutdown(shutdownContext); err != nil {
+			t.Error(err)
+		}
+	})
+	receiver, err := NewReadyReceiver(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := receiver.Arm(coordinator)
+	if command == nil {
+		t.Fatal("receiver did not arm")
+	}
+	commandDone := make(chan tea.Msg, 1)
+	go func() {
+		commandDone <- command()
+	}()
+
+	barrierContext, cancelBarrier := context.WithTimeout(t.Context(), time.Second)
+	defer cancelBarrier()
+	if err := receiver.StopAndWait(barrierContext); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case message := <-commandDone:
+		ready, ok := message.(outcomeReadyMsg)
+		if !ok || ready.state != ReadyCancelled {
+			t.Fatalf("receiver message = %#v, want cancellation", message)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("receiver command remained blocked after barrier")
+	}
+}
+
+func newTestModel(t *testing.T, changed map[string]string) (*Model, *Coordinator) {
+	t.Helper()
+	fixture := newSourceFixture(t, changed)
+	workContext, cancelWork := context.WithCancel(t.Context())
+	deliveryManager := newTestDeliveryManager(t)
+	coordinator, err := NewCoordinator(workContext, fixture.service, deliveryManager)
+	if err != nil {
+		cancelWork()
+		t.Fatal(err)
+	}
+	receiver, err := NewReadyReceiver(t.Context())
+	if err != nil {
+		cancelWork()
+		t.Fatal(err)
+	}
+	contextLines, err := review.NewContextLines(3)
+	if err != nil {
+		cancelWork()
+		t.Fatal(err)
+	}
+	exportTemplates, err := review.CompileExportTemplates(
+		"{{comments}}",
+		"{{index}} {{comment}}",
+	)
+	if err != nil {
+		cancelWork()
+		t.Fatal(err)
+	}
+	features, err := NewSettingFeatures(FeatureMouse, FeatureWrap)
+	if err != nil {
+		cancelWork()
+		t.Fatal(err)
+	}
+	publicationPolicies, err := review.NewPublicationPolicies()
+	if err != nil {
+		cancelWork()
+		t.Fatal(err)
+	}
+	publicationOptions, err := review.NewPublicationOptions(
+		review.PublicationEventComment,
+		publicationPolicies,
+	)
+	if err != nil {
+		cancelWork()
+		t.Fatal(err)
+	}
+	syntaxSelector, err := review.NewSyntaxSelector("test")
+	if err != nil {
+		cancelWork()
+		t.Fatal(err)
+	}
+	settings, err := NewSettings(SettingsRequest{
+		Features:        features,
+		DiffView:        DiffViewUnified,
+		ContextLines:    contextLines,
+		SyntaxSelector:  syntaxSelector,
+		CommentKinds:    []review.CommentKind{"issue"},
+		ExportTemplates: exportTemplates,
+		Publication:     publicationOptions,
+		Keybindings: []Keybinding{
+			{Context: KeyContextNormal, Chord: "q", Action: KeyActionQuit},
+			{Context: KeyContextNormal, Chord: "j", Action: KeyActionMoveDown},
+			{Context: KeyContextNormal, Chord: "enter", Action: KeyActionActivate},
+			{Context: KeyContextNormal, Chord: "c", Action: KeyActionCommentAtCursor},
+			{Context: KeyContextNormal, Chord: "M", Action: KeyActionExportMarkdown},
+			{Context: KeyContextNormal, Chord: "J", Action: KeyActionExportJSON},
+			{Context: KeyContextNormal, Chord: "?", Action: KeyActionHelp},
+			{Context: KeyContextCommentEdit, Chord: "ctrl-s", Action: KeyActionSaveComment},
+			{Context: KeyContextCommentEdit, Chord: "esc", Action: KeyActionCancel},
+			{Context: KeyContextHelp, Chord: "q", Action: KeyActionCancel},
+			{Context: KeyContextExportPicker, Chord: "enter", Action: KeyActionExportSelected},
+			{Context: KeyContextExportPicker, Chord: "esc", Action: KeyActionCancel},
+			{Context: KeyContextMinimumSize, Chord: "q", Action: KeyActionQuit},
+		},
+	})
+	if err != nil {
+		cancelWork()
+		t.Fatal(err)
+	}
+	model, err := NewModel(workContext, fixture.document, settings, coordinator, receiver)
+	if err != nil {
+		cancelWork()
+		t.Fatal(err)
+	}
+	if got := coordinator.Stats().Accepted; got != 0 {
+		cancelWork()
+		t.Fatalf("model construction accepted %d operations, want 0", got)
+	}
+	updated, command := model.Update(initializeMsg{})
+	if updated != model || command != nil {
+		cancelWork()
+		t.Fatalf("initialize update = (%T, %v), want same model and no command", updated, command)
+	}
+	indexContext, cancelIndex := context.WithTimeout(t.Context(), 5*time.Second)
+	if state := coordinator.WaitReady(indexContext); state != ReadyAvailable {
+		cancelIndex()
+		cancelWork()
+		t.Fatalf("workspace index readiness = %v, want available", state)
+	}
+	cancelIndex()
+	_, _ = model.Update(outcomeReadyMsg{state: ReadyAvailable})
+	t.Cleanup(func() {
+		receiverContext, cancelReceiver := context.WithTimeout(context.Background(), time.Second)
+		defer cancelReceiver()
+		if err := receiver.StopAndWait(receiverContext); err != nil {
+			t.Error(err)
+		}
+		coordinator.StopAdmissionAndCancel()
+		shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancelShutdown()
+		if err := coordinator.Shutdown(shutdownContext); err != nil {
+			t.Error(err)
+		}
+		cancelWork()
+	})
+	return model, coordinator
+}
+
+func newTestDeliveryManager(t *testing.T) *delivery.Manager {
+	t.Helper()
+	manager, err := delivery.NewManager()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		closeContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := manager.Close(closeContext); err != nil {
+			t.Error(err)
+		}
+	})
+	return manager
+}
+
+type sourceFixture struct {
+	service  *source.Service
+	document *source.Document
+}
+
+func newSourceFixture(t *testing.T, changed map[string]string) sourceFixture {
+	t.Helper()
+	root := t.TempDir()
+	runGit(t, root, "init")
+	runGit(t, root, "config", "user.email", "rvw@example.test")
+	runGit(t, root, "config", "user.name", "rvw test")
+	for name := range changed {
+		path := filepath.Join(root, name)
+		if err := os.WriteFile(path, []byte("original\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runGit(t, root, "add", ".")
+	runGit(t, root, "commit", "-m", "initial")
+	for name, contents := range changed {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	workingDirectory, err := source.NewWorkingDirectory(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := source.NewService(workingDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := service.Open(t.Context(), source.WorktreeTarget(), source.OpenOptions{
+		IncludeUntracked: true,
+		BuiltinDefaults:  true,
+		Gitignore:        true,
+		RVWIgnore:        true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := document.Close(); err != nil {
+			t.Error(err)
+		}
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := service.Close(shutdownContext); err != nil {
+			t.Error(err)
+		}
+	})
+	return sourceFixture{service: service, document: document}
+}
+
+func runGit(t *testing.T, directory string, arguments ...string) {
+	t.Helper()
+	command := exec.Command("git", arguments...)
+	command.Dir = directory
+	command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "LC_ALL=C")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(arguments, " "), err, output)
+	}
+}
+
+func keyMessage(value string) tea.KeyPressMsg {
+	code := []rune(value)[0]
+	switch value {
+	case "enter":
+		code = tea.KeyEnter
+	}
+	return tea.KeyPressMsg(tea.Key{Text: value, Code: code})
+}

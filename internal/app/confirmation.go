@@ -1,0 +1,115 @@
+package app
+
+import (
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/jacoelho/rvw/internal/review"
+)
+
+type confirmationKind uint8
+
+const (
+	confirmationNone confirmationKind = iota
+	confirmationQuit
+	confirmationDeleteComment
+	confirmationReload
+)
+
+type confirmation struct {
+	kind    confirmationKind
+	comment review.CommentID
+}
+
+func (model *Model) requestQuit() tea.Cmd {
+	if model.review.HasLocalChanges() {
+		model.confirmation = confirmation{kind: confirmationQuit}
+		model.overlay = OverlayConfirm
+		model.chord = nil
+		model.repeat = 0
+		return nil
+	}
+	return model.quit()
+}
+
+func (model *Model) forceQuit() tea.Cmd {
+	return model.quit()
+}
+
+func (model *Model) quit() tea.Cmd {
+	model.confirmation = confirmation{}
+	model.overlay = OverlayNone
+	model.quitting = true
+	model.coordinator.StopAdmissionAndCancel()
+	return tea.Quit
+}
+
+func (model *Model) requestCommentDelete() {
+	count := model.review.CommentCount()
+	if count == 0 || model.commentCursor >= count {
+		if model.commentCursor >= count && model.review.Snapshot().RemoteThreadCount() != 0 {
+			model.notice = &Notice{Kind: NoticeInformation, Text: "remote comments are read-only"}
+		}
+		return
+	}
+	model.commentCursor = min(max(model.commentCursor, 0), count-1)
+	comment, ok := model.review.CommentAt(model.commentCursor)
+	if !ok {
+		return
+	}
+	model.confirmation = confirmation{
+		kind:    confirmationDeleteComment,
+		comment: comment.ID(),
+	}
+	model.overlay = OverlayConfirm
+	model.chord = nil
+	model.repeat = 0
+}
+
+func (model *Model) requestReload() {
+	if model.review.HasLocalChanges() {
+		model.confirmation = confirmation{kind: confirmationReload}
+		model.overlay = OverlayConfirm
+		model.chord = nil
+		model.repeat = 0
+		return
+	}
+	model.startReload()
+}
+
+func (model *Model) applyConfirmationAction(action KeyAction) tea.Cmd {
+	switch action {
+	case KeyActionCancel, KeyActionConfirmNo, KeyActionInterrupt:
+		model.confirmation = confirmation{}
+		model.overlay = OverlayNone
+	case KeyActionConfirmYes:
+		pending := model.confirmation
+		model.confirmation = confirmation{}
+		model.overlay = OverlayNone
+		switch pending.kind {
+		case confirmationQuit:
+			return model.quit()
+		case confirmationDeleteComment:
+			model.deleteComment(pending.comment)
+		case confirmationReload:
+			model.startReload()
+		}
+	}
+	return nil
+}
+
+func (model *Model) confirmationView(width, height int) string {
+	prompt := "Confirm action?"
+	switch model.confirmation.kind {
+	case confirmationQuit:
+		prompt = "Discard local review changes and quit?"
+	case confirmationDeleteComment:
+		prompt = "Delete the selected comment?"
+	case confirmationReload:
+		prompt = "Reload and discard review state that cannot be reconciled?"
+	}
+	return constrainedLines(
+		[]string{"Confirmation", "", prompt, "", model.bindingSummary(KeyContextConfirm)},
+		width,
+		height,
+	)
+}
