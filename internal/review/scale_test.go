@@ -8,6 +8,7 @@ import (
 )
 
 const (
+	scaleFileCount    = 1_024
 	scaleFileLines    = 10_000
 	scaleCommentCount = 512
 	scaleViewportRows = 80
@@ -44,8 +45,9 @@ func BenchmarkTakePatchLargeFile(b *testing.B) {
 	}
 }
 
-func BenchmarkPatchViewportLargeFile(b *testing.B) {
-	current := scaleReviewWithPatch(b, scaleFileLines)
+func BenchmarkPatchViewport10000LineFileIn1000FileReview(b *testing.B) {
+	current := scaleReviewWithFiles(b, scaleFileCount)
+	current = applyScalePatch(b, current, 0, scaleFileLines)
 	start := uint32(scaleFileLines / 2)
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -230,7 +232,11 @@ func BenchmarkPrepareSyntaxLargeFile(b *testing.B) {
 }
 
 func TestScalePatchViewportMaterializesOnlyRequestedRows(t *testing.T) {
-	current := scaleReviewWithPatch(t, scaleFileLines)
+	current := scaleReviewWithFiles(t, scaleFileCount)
+	current = applyScalePatch(t, current, 0, scaleFileLines)
+	if got := current.Snapshot().FileCount(); got != scaleFileCount {
+		t.Fatalf("snapshot files = %d, want %d", got, scaleFileCount)
+	}
 	lines := current.PatchLines(
 		0,
 		scaleFileLines/2,
@@ -243,13 +249,24 @@ func TestScalePatchViewportMaterializesOnlyRequestedRows(t *testing.T) {
 	if state := current.Patch(0); state.Lines != scaleFileLines+1 {
 		t.Fatalf("retained patch lines = %d, want %d", state.Lines, scaleFileLines+1)
 	}
+	if got, want := current.RetainedPatchBytes(), current.Patch(0).RetainedBytes(); got != want {
+		t.Fatalf("retained patch bytes = %d, want only active patch bytes %d", got, want)
+	}
+	for file := 1; file < scaleFileCount; file++ {
+		fileID, err := NewFileID(uint32(file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state := current.Patch(fileID); state.Status != PatchUnavailable {
+			t.Fatalf("file %d patch status = %d, want unavailable", file, state.Status)
+		}
+	}
 }
 
-func scaleReviewWithPatch(tb testing.TB, lineCount int) Review {
+func applyScalePatch(tb testing.TB, current Review, fileID FileID, lineCount int) Review {
 	tb.Helper()
-	current := scaleReview(tb)
 	context := WholeFileContext()
-	pending, request, err := current.RequestPatch(0, context)
+	pending, request, err := current.RequestPatch(fileID, context)
 	if err != nil {
 		tb.Fatal(err)
 	}
@@ -306,15 +323,16 @@ func scaleReviewWithComments(tb testing.TB, count int) Review {
 
 func scaleReview(tb testing.TB) Review {
 	tb.Helper()
+	return scaleReviewWithFiles(tb, 1)
+}
+
+func scaleReviewWithFiles(tb testing.TB, fileCount int) Review {
+	tb.Helper()
 	sourceID, err := NewSourceID(1)
 	if err != nil {
 		tb.Fatal(err)
 	}
-	builder, err := NewSnapshotBuilder(sourceID, 1)
-	if err != nil {
-		tb.Fatal(err)
-	}
-	path, err := NewPath([]byte("large.go"))
+	builder, err := NewSnapshotBuilder(sourceID, fileCount)
 	if err != nil {
 		tb.Fatal(err)
 	}
@@ -326,8 +344,18 @@ func scaleReview(tb testing.TB) Review {
 	if err != nil {
 		tb.Fatal(err)
 	}
-	if _, err := builder.AddFile(nil, &path, change, flags); err != nil {
-		tb.Fatal(err)
+	for index := range fileCount {
+		path, err := NewPath([]byte(fmt.Sprintf(
+			"pkg/%03d/file-%04d.go",
+			index/32,
+			index,
+		)))
+		if err != nil {
+			tb.Fatal(err)
+		}
+		if _, err := builder.AddFile(nil, &path, change, flags); err != nil {
+			tb.Fatal(err)
+		}
 	}
 	snapshot, err := builder.Finish()
 	if err != nil {

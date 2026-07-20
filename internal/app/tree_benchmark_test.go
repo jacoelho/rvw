@@ -8,7 +8,10 @@ import (
 	"github.com/jacoelho/rvw/internal/review"
 )
 
-const largeTreeFileCount = 1_024
+const (
+	largeTreeFileCount = 1_024
+	largeTreeFileLines = 10_000
+)
 
 var benchmarkFileTree fileTree
 
@@ -71,7 +74,11 @@ func largeTreeFixture(tb testing.TB, fileCount int) (review.Snapshot, []review.F
 	if err != nil {
 		tb.Fatal(err)
 	}
-	change, err := review.NewUnclassifiedChange(review.ChangeAdded, 1, 0)
+	change, err := review.NewUnclassifiedChange(
+		review.ChangeAdded,
+		largeTreeFileLines,
+		0,
+	)
 	if err != nil {
 		tb.Fatal(err)
 	}

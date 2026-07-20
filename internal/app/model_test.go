@@ -769,7 +769,7 @@ func TestReadyReceiverStopIsABoundedCompletionBarrier(t *testing.T) {
 	}
 }
 
-func newTestModel(t *testing.T, changed map[string]string) (*Model, *Coordinator) {
+func newTestModel(t testing.TB, changed map[string]string) (*Model, *Coordinator) {
 	t.Helper()
 	fixture := newSourceFixture(t, changed)
 	workContext, cancelWork := context.WithCancel(t.Context())
@@ -887,7 +887,7 @@ func newTestModel(t *testing.T, changed map[string]string) (*Model, *Coordinator
 	return model, coordinator
 }
 
-func newTestDeliveryManager(t *testing.T) *delivery.Manager {
+func newTestDeliveryManager(t testing.TB) *delivery.Manager {
 	t.Helper()
 	manager, err := delivery.NewManager()
 	if err != nil {
@@ -908,7 +908,7 @@ type sourceFixture struct {
 	document *source.Document
 }
 
-func newSourceFixture(t *testing.T, changed map[string]string) sourceFixture {
+func newSourceFixture(t testing.TB, changed map[string]string) sourceFixture {
 	t.Helper()
 	root := t.TempDir()
 	runGit(t, root, "init")
@@ -957,7 +957,7 @@ func newSourceFixture(t *testing.T, changed map[string]string) sourceFixture {
 	return sourceFixture{service: service, document: document}
 }
 
-func runGit(t *testing.T, directory string, arguments ...string) {
+func runGit(t testing.TB, directory string, arguments ...string) {
 	t.Helper()
 	command := exec.Command("git", arguments...)
 	command.Dir = directory
