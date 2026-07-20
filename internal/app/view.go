@@ -4,12 +4,11 @@ import (
 	"fmt"
 	"iter"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/rivo/uniseg"
 
 	"github.com/jacoelho/rvw/internal/review"
 )
@@ -596,23 +595,81 @@ func (model *Model) renderSyntaxContent(content syntaxContent) string {
 	}
 	var rendered strings.Builder
 	rendered.Grow(len(raw))
-	offset := 0
-	for span := range content.spans {
-		start, end := int(span.Start), int(span.End)
-		if start < offset || start > len(raw) || end <= start {
-			continue
-		}
-		if end > len(raw) {
-			limited = true
-			break
-		}
-		rendered.WriteString(safeText(raw[offset:start]))
-		rendered.WriteString(
-			syntaxStyle(span.Kind, content.styles).Render(safeText(raw[start:end])),
-		)
-		offset = end
+	sanitizer := terminalTextRenderer{}
+	spans := content.spans
+	if spans == nil {
+		spans = emptySyntaxSpans
 	}
-	rendered.WriteString(safeText(raw[offset:]))
+	nextSpan, stopSpans := iter.Pull(spans)
+	defer stopSpans()
+	var span review.SyntaxSpan
+	hasSpan := false
+	spanEnd := 0
+	advanceSpan := func() {
+		hasSpan = false
+		for {
+			candidate, ok := nextSpan()
+			if !ok {
+				return
+			}
+			start, end := int(candidate.Start), int(candidate.End)
+			if start < spanEnd || start > len(raw) || end <= start {
+				continue
+			}
+			if end > len(raw) {
+				limited = true
+				return
+			}
+			span = candidate
+			spanEnd = end
+			hasSpan = true
+			return
+		}
+	}
+	advanceSpan()
+
+	if !hasSpan {
+		rendered.WriteString(sanitizer.render(raw))
+	} else {
+		var runKind review.SyntaxKind
+		runStart, runEnd := 0, 0
+		hasRun := false
+		flushRun := func() {
+			if !hasRun || runStart == runEnd {
+				return
+			}
+			value := sanitizer.render(raw[runStart:runEnd])
+			if runKind != 0 {
+				value = syntaxStyle(runKind, content.styles).Render(value)
+			}
+			rendered.WriteString(value)
+		}
+		graphemes := uniseg.NewGraphemes(raw)
+		for graphemes.Next() {
+			start, end := graphemes.Positions()
+			for hasSpan && int(span.End) <= start {
+				advanceSpan()
+			}
+			kind := review.SyntaxKind(0)
+			if hasSpan && int(span.Start) <= start && start < int(span.End) {
+				kind = span.Kind
+			}
+			if hasRun && kind != runKind {
+				flushRun()
+				hasRun = false
+			}
+			if !hasRun {
+				runStart = start
+			}
+			runEnd = end
+			runKind = kind
+			hasRun = true
+		}
+		flushRun()
+		for hasSpan {
+			advanceSpan()
+		}
+	}
 	value := rendered.String()
 	if content.wrap {
 		if limited {
@@ -957,28 +1014,4 @@ func safeAndClip(value string, width int) string {
 		return lipgloss.NewStyle().MaxWidth(width-1).Render(safeValue) + "…"
 	}
 	return safeValue
-}
-
-func safeText(value string) string {
-	var safe strings.Builder
-	safe.Grow(len(value))
-	for len(value) > 0 {
-		character, size := utf8.DecodeRuneInString(value)
-		switch {
-		case character == utf8.RuneError && size == 1:
-			fmt.Fprintf(&safe, `\x%02X`, value[0])
-		case unicode.IsControl(character), isBidiControl(character):
-			fmt.Fprintf(&safe, `\u{%04X}`, character)
-		default:
-			safe.WriteRune(character)
-		}
-		value = value[size:]
-	}
-	return safe.String()
-}
-
-func isBidiControl(character rune) bool {
-	return character == '\u061c' || character == '\u200e' || character == '\u200f' ||
-		character >= '\u202a' && character <= '\u202e' ||
-		character >= '\u2066' && character <= '\u2069'
 }

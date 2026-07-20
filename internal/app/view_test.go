@@ -5,8 +5,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/jacoelho/rvw/internal/review"
 )
@@ -65,6 +68,89 @@ func TestWrappedDiffRetainsLongLineTailInUnifiedAndSideBySideViews(t *testing.T)
 	_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
 	if content := model.View().Content; !strings.Contains(content, tail) {
 		t.Fatalf("wrapped side-by-side view omitted long-line tail:\n%s", content)
+	}
+}
+
+func TestDiffRenderingPreservesUnicodeAndExpandsTabs(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{
+		"alpha.txt": "12\tcafé 界 e\u0301 👩‍💻\n",
+	})
+	waitContext, cancelWait := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelWait()
+	if state := coordinator.WaitReady(waitContext); state != ReadyAvailable {
+		t.Fatalf("patch ready state = %d", state)
+	}
+	_, _ = model.Update(outcomeReadyMsg{state: ReadyAvailable})
+	_, _ = model.Update(tea.WindowSizeMsg{Width: compactWidth, Height: 24})
+
+	content := model.View().Content
+	if strings.Contains(content, `\u{0009}`) {
+		t.Fatalf("diff rendered a tab as an escaped control:\n%s", content)
+	}
+	if !strings.Contains(content, "12  café 界 e\u0301 👩‍💻") {
+		t.Fatalf("diff did not preserve printable Unicode or expand its tab:\n%s", content)
+	}
+}
+
+func TestDiffRenderingEscapesHostileTextInEveryLayout(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{
+		"alpha.txt": "safe\x1b\u0085\u202e" + string([]byte{0xff}) + "\n",
+	})
+	waitContext, cancelWait := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelWait()
+	if state := coordinator.WaitReady(waitContext); state != ReadyAvailable {
+		t.Fatalf("patch ready state = %d", state)
+	}
+	_, _ = model.Update(outcomeReadyMsg{state: ReadyAvailable})
+
+	for _, test := range []struct {
+		name     string
+		view     DiffView
+		wrap     bool
+		width    int
+		expected string
+	}{
+		{"unified wrapped", DiffViewUnified, true, compactWidth, `\x1B\u{0085}\u{202E}\xFF`},
+		{"unified clipped", DiffViewUnified, false, compactWidth, `\x1B\u{0085}\u{202E}\xFF`},
+		{"side-by-side wrapped", DiffViewSideBySide, true, wideWidth, `\x1B\u{0085}\u{202E}\xFF`},
+		{"side-by-side clipped", DiffViewSideBySide, false, wideWidth, `\x1B\u{0085}\u{202E}\xFF`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			model.settings.diffView = test.view
+			model.settings.wrap = test.wrap
+			_, _ = model.Update(tea.WindowSizeMsg{Width: test.width, Height: 24})
+			content := ansi.Strip(model.View().Content)
+			if !utf8.ValidString(content) {
+				t.Fatal("view contains invalid UTF-8")
+			}
+			for _, unsafe := range []string{"\x1b", "\u0085", "\u202e", string([]byte{0xff})} {
+				if strings.Contains(content, unsafe) {
+					t.Fatalf("view emitted unsafe text %q:\n%s", unsafe, content)
+				}
+			}
+			if !strings.Contains(content, test.expected) {
+				t.Fatalf("view omitted visible escapes %q:\n%s", test.expected, content)
+			}
+		})
+	}
+}
+
+func TestSyntaxRenderingDoesNotSplitGraphemeForStyle(t *testing.T) {
+	model := Model{}
+	raw := "1️⃣\tvalue\x1b"
+	spans := func(yield func(review.SyntaxSpan) bool) {
+		yield(review.SyntaxSpan{Start: 0, End: 1, Kind: review.SyntaxNumber})
+	}
+	rendered := model.renderSyntaxContent(syntaxContent{
+		raw:    raw,
+		spans:  spans,
+		width:  80,
+		wrap:   true,
+		styles: semanticStyles{number: lipgloss.NewStyle().Bold(true)},
+	})
+	want := lipgloss.NewStyle().Bold(true).Render("1️⃣") + `  value\x1B`
+	if rendered != want {
+		t.Fatalf("syntax render = %q, want exact grapheme styling %q", rendered, want)
 	}
 }
 
