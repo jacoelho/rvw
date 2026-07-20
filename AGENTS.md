@@ -6,8 +6,10 @@ and no way to represent invalid states.
 ## Architecture specification
 
 - `docs/rvw-specification.md` is the sole product and architecture specification.
-- Its status is Draft. Treat its normative statements as proposed until the exact document is
-  explicitly accepted.
+- The exact document with SHA-256 digest
+  `eb71f3a3574598598690cb9953064c462c31af0172381e87bd4cc221223a51e0` was explicitly accepted on
+  2026-07-20. `docs/rvw-specification.acceptance.md` records that acceptance without modifying the
+  accepted bytes.
 - Do not silently resolve a conflict by relying on a deleted or historical planning artifact.
 
 ## Product
@@ -21,8 +23,9 @@ feature expansion.
 
 ## Constraints
 
-- Support Linux and macOS only. Do not add Windows or WebAssembly code, dependencies, tests,
-  fallbacks, or CI.
+- Support Linux and macOS only. Do not add project-owned or direct/runtime Windows code,
+  dependencies, tests, fallbacks, or CI, and do not add WebAssembly support. The accepted pinned
+  dependency graph's unreachable transitive Windows module metadata is the sole exception.
 - Design for 1,000+ changed files, 10,000+ line files, and hundreds of comments while keeping memory
   and CPU usage bounded.
 - Keep frame construction and rendering proportional to the viewport plus overscan. Bound retained

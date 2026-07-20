@@ -354,3 +354,19 @@ specification candidate.
 R10 remains unchanged as the immutable baseline statement of what was unknown when Charter v1 was
 written. This A1 entry supersedes that unknown for implementation and records the resolving
 evidence without rewriting the original charter.
+
+### A2 — Exact specification acceptance
+
+**Date:** 2026-07-20. **Affected step:** G0. **Approval:** explicitly accepted by the user.
+
+The accepted product and architecture contract is the exact byte sequence in
+`docs/rvw-specification.md` with SHA-256 digest
+`eb71f3a3574598598690cb9953064c462c31af0172381e87bd4cc221223a51e0`.
+`docs/rvw-specification.acceptance.md` records the acceptance without changing those accepted
+bytes.
+
+Acceptance resolves R11 as process-lifetime publication safety exactly as specified in section 9.1:
+no durable cross-process journal is created, and duplicate prevention is not promised after process
+exit. It also accepts the section 6 interpretation that the pinned dependency graph's unavoidable,
+unreachable transitive Windows module metadata is permitted while direct/runtime Windows support
+remains forbidden.
