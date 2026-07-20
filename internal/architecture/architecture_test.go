@@ -20,7 +20,7 @@ import (
 
 const modulePath = "github.com/jacoelho/rvw"
 
-const acceptedSpecificationDigest = "eb71f3a3574598598690cb9953064c462c31af0172381e87bd4cc221223a51e0"
+const acceptedSpecificationDigest = "b7860460040fb080810ece95569dd7866d8a14ce68cf97f5fede6c55420199e2"
 
 var allowedInternalImports = map[string][]string{
 	"cmd/rvw": {
@@ -322,37 +322,6 @@ func TestRepositoryHasNoRustRuntimeIntegration(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestGoSourceFilesAreCohesive(t *testing.T) {
-	root := repositoryRoot(t)
-	for _, filename := range goFiles(t, root, true) {
-		file, err := os.Open(filename)
-		if err != nil {
-			t.Error(err)
-			continue
-		}
-
-		lines := 0
-		scanner := bufio.NewScanner(file)
-		for scanner.Scan() {
-			lines++
-		}
-		scanErr := scanner.Err()
-		closeErr := file.Close()
-		if scanErr != nil {
-			t.Errorf("%s: %v", relativeSlash(t, root, filename), scanErr)
-			continue
-		}
-		if closeErr != nil {
-			t.Errorf("%s: %v", relativeSlash(t, root, filename), closeErr)
-			continue
-		}
-		if lines > 1_000 {
-			relative := relativeSlash(t, root, filename)
-			t.Errorf("%s has %d lines; maximum is 1000", relative, lines)
-		}
 	}
 }
 

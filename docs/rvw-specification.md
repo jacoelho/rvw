@@ -48,9 +48,11 @@ It has exactly three output modes:
 
 Linux and macOS are supported. Windows and WebAssembly are not supported.
 
-The product MUST remain usable with at least 1,000 changed files, files of at least 10,000 lines,
-and hundreds of comments. Memory, concurrent work, retained data, queues, per-tick work, frame
-construction, and rendering MUST remain bounded.
+The performance target is a review with at least 1,000 changed files of at least 10,000 lines each,
+plus hundreds of comments. File metadata for the source may be retained, but patch, blob, and
+syntax text MUST be materialized lazily and bounded to current work rather than loaded for every
+file. Memory, concurrent work, retained data, queues, per-tick work, frame construction, and
+rendering MUST remain bounded.
 
 Patch or stdin-patch sources, additional output modes, review persistence, tabs, chat, agents,
 plugins, and generic source registries are outside the product.
@@ -576,8 +578,8 @@ abstraction requires a current producer and consumer. Compatibility facades, dup
 paths, generic source registries, generic effect systems, component registries, and a second event
 loop are forbidden.
 
-No Go source file may exceed 1,000 lines. Splitting one cohesive implementation into shallow files
-only to satisfy that ceiling is nonconforming.
+Go source files and packages MUST be cohesive. Line count alone is neither a conformance limit nor
+justification for splitting one cohesive implementation into shallow files.
 
 ### 7. Review model
 
@@ -950,7 +952,10 @@ The renderer:
 - clips before expensive text processing;
 - never emits raw control, escape, or bidirectional-override text from external data;
 - treats invalid UTF-8 paths as displayable escaped bytes while preserving identity;
-- handles tabs, wide characters, combining marks, and grapheme boundaries deterministically;
+- expands tabs to the next four-cell stop;
+- preserves printable UTF-8, including wide characters, combining marks, and grapheme clusters;
+- renders invalid bytes and ASCII controls as visible uppercase `\xNN` escapes and non-ASCII
+  controls and bidirectional overrides as visible uppercase `\u{NNNN}` escapes;
 - bounds work for a single pathological grapheme or line;
 - keeps unified and side-by-side line identity, old/new numbers, hunks, gaps, comments, review
   state, and selections unambiguous;
@@ -1076,8 +1081,8 @@ Conformance requires all of the following:
 | Source | Git/GitHub fixture tests, hostile external data, process limits, cancellation, direct-child reaping, contained-group and escaped-descendant outcomes, lazy materialization, and publication reconciliation |
 | Runtime | Admission/claim/cancel/complete races, byte-credit release, readiness/receiver closure, deadlines, late results, retained-outcome settlement, delivery fencing, panic policy, and shutdown ordering |
 | Terminal | Root/child model retention, command capture, key/help ownership, complete `tea.View` fields, every responsive boundary, viewport bounds, Unicode/path safety, monochrome semantics, signal ownership, startup-release fallback, and PTY restoration |
-| Architecture | Go package dependency edges, effect ownership, pure-review imports, public-surface discipline, forbidden duplicate paths, supported-platform checks, dependency pins, and source-file cohesion |
-| Scale | Counter-based tests for viewport-proportional work plus retained large-file, large-tree, many-comment, search, and syntax benchmarks |
+| Architecture | Go package dependency edges, effect ownership, pure-review imports, public-surface discipline, forbidden duplicate paths, supported-platform checks, dependency pins, and cohesive ownership |
+| Scale | A combined 1,000-file by 10,000-line lazy-materialization fixture, counter-based tests for viewport-proportional work, and retained large-file, large-tree, many-comment, search, and syntax benchmarks |
 
 Performance checks require fixed fixtures, recorded environment metadata, repeated samples, and
 reported absolute results. A relative regression threshold is not meaningful without a named

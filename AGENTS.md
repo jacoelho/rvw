@@ -7,7 +7,7 @@ and no way to represent invalid states.
 
 - `docs/rvw-specification.md` is the sole product and architecture specification.
 - The exact document with SHA-256 digest
-  `eb71f3a3574598598690cb9953064c462c31af0172381e87bd4cc221223a51e0` was explicitly accepted on
+  `b7860460040fb080810ece95569dd7866d8a14ce68cf97f5fede6c55420199e2` was explicitly accepted on
   2026-07-20. `docs/rvw-specification.acceptance.md` records that acceptance without modifying the
   accepted bytes.
 - Do not silently resolve a conflict by relying on a deleted or historical planning artifact.
@@ -26,8 +26,8 @@ feature expansion.
 - Support Linux and macOS only. Do not add project-owned or direct/runtime Windows code,
   dependencies, tests, fallbacks, or CI, and do not add WebAssembly support. The accepted pinned
   dependency graph's unreachable transitive Windows module metadata is the sole exception.
-- Design for 1,000+ changed files, 10,000+ line files, and hundreds of comments while keeping memory
-  and CPU usage bounded.
+- Design for at least 1,000 changed files of at least 10,000 lines each, plus hundreds of comments,
+  while keeping memory and CPU usage bounded through lazy materialization.
 - Keep frame construction and rendering proportional to the viewport plus overscan. Bound retained
   data, queues, concurrent tasks, and per-tick work.
 - Keep filesystem, network, subprocess, blocking waits, and unbounded CPU work off the terminal
@@ -36,8 +36,8 @@ feature expansion.
   ambiguous outcomes explicit; reconcile an unknown GitHub write before retrying.
 - Cancellation and shutdown must terminate and reap child-process trees. Restore the terminal
   before waiting on background work during shutdown.
-- Prefer cohesive Go packages. The repository gate rejects source files over 1,000 lines; do not
-  use shallow splits to evade it.
+- Prefer cohesive Go packages and files. Line count is not a conformance limit and does not justify
+  shallow splits.
 - Do not use positional Boolean parameters. Use named domain values or an options value so every
   call site states what each choice means.
 - For a closed set of independent flags, prefer an opaque validated bitset with named members and
