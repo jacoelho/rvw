@@ -35,8 +35,6 @@ func (model *Model) forceQuit() tea.Cmd {
 }
 
 func (model *Model) quit() tea.Cmd {
-	model.confirmation = confirmation{}
-	model.overlay = OverlayNone
 	model.quitting = true
 	model.coordinator.StopAdmissionAndCancel()
 	return tea.Quit
@@ -80,13 +78,13 @@ func (model *Model) applyConfirmationAction(action KeyAction) tea.Cmd {
 		model.overlay = OverlayNone
 	case KeyActionConfirmYes:
 		pending := model.confirmation
+		if pending.kind == confirmationQuit {
+			return model.quit()
+		}
 		model.confirmation = confirmation{}
 		model.overlay = OverlayNone
 		switch pending.kind {
-		case confirmationNone:
-			return nil
-		case confirmationQuit:
-			return model.quit()
+		case confirmationNone, confirmationQuit:
 		case confirmationDeleteComment:
 			model.deleteComment(pending.comment)
 		case confirmationReload:

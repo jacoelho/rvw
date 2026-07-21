@@ -16,6 +16,9 @@ import (
 	"github.com/jacoelho/bdd"
 )
 
+// kittyRepeatedCtrlC is Ctrl-c with Kitty keyboard event type 2 (repeat).
+const kittyRepeatedCtrlC = "\x1b[99;5:2u"
+
 func TestTerminalRenderingContract(t *testing.T) {
 	type sizeExample struct {
 		width   int
@@ -127,13 +130,15 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 			scenario.Given("a stable worktree screen", launchStableWorktree())
 			scenario.When("help is opened and closed", func(t testing.TB, w *world) {
 				w.pty.send(t, "?")
-				w.pty.awaitScreen(t, "help", containsScreen("Effective help"))
+				screen := w.pty.awaitScreen(t, "help", containsScreen("Effective help"))
+				assertNoEscapedWidgetStyles(t, w, screen, "help")
 				w.pty.send(t, "q")
 				w.pty.awaitScreen(t, "workspace after help", containsScreen("staged contents"))
 			})
 			scenario.When("a current-file search completes", func(t testing.TB, w *world) {
 				w.pty.send(t, "/")
-				w.pty.awaitScreen(t, "search prompt", containsScreen("Search changed patches"))
+				screen := w.pty.awaitScreen(t, "search prompt", containsScreen("Search changed patches"))
+				assertNoEscapedWidgetStyles(t, w, screen, "search prompt")
 				w.pty.send(t, "staged\r")
 				w.pty.awaitScreen(t, "search result", func(screen string) bool {
 					return strings.Contains(screen, "search hits") && strings.Contains(screen, "work 0/64")
@@ -141,7 +146,8 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 			})
 			scenario.When("the command prompt opens help", func(t testing.TB, w *world) {
 				w.pty.send(t, ":")
-				w.pty.awaitScreen(t, "command prompt", containsScreen("Command"))
+				screen := w.pty.awaitScreen(t, "command prompt", containsScreen("Command"))
+				assertNoEscapedWidgetStyles(t, w, screen, "command prompt")
 				w.pty.send(t, "help\r")
 				w.pty.awaitScreen(t, "command-selected help", containsScreen("Effective help"))
 				w.pty.send(t, "q")
@@ -185,8 +191,8 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if !bytes.Contains(contents, []byte(`Please keep this deterministic\.`)) ||
-					!bytes.Contains(contents, []byte(`staged\.txt:1`)) {
+				if !bytes.Contains(contents, []byte(`Please keep this deterministic.`)) ||
+					!bytes.Contains(contents, []byte(`staged.txt:1`)) {
 					t.Fatalf("clipboard Markdown:\n%s", contents)
 				}
 				golden.RequireEqual(t, string(contents))
@@ -196,6 +202,32 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 				}
 				w.pty.send(t, ":q!\r")
 				w.pty.awaitExit(t)
+			})
+		})
+
+		feature.Scenario("holding Ctrl-c at dirty quit does not redraw the workspace", func(scenario *bdd.ScenarioSpec[*world]) {
+			var transcriptOffset int
+			scenario.Given("a stable worktree with one saved comment", bdd.Compose(
+				launchStableWorktree(),
+				saveLineComment("quit restoration remains readable"),
+			))
+			scenario.When("Ctrl-c requests dirty quit and a repeat arrives before acceptance", func(t testing.TB, w *world) {
+				w.pty.send(t, "\x03")
+				screen := w.pty.awaitScreen(t, "dirty quit confirmation", containsScreen("Discard local review changes and quit?"))
+				assertNoEscapedWidgetStyles(t, w, screen, "dirty quit")
+				transcriptOffset = len(w.pty.rawTranscript())
+				w.pty.send(t, kittyRepeatedCtrlC+"y")
+				w.pty.awaitExit(t)
+			})
+			scenario.Then("the terminal is restored without redrawing the workspace", func(t testing.TB, w *world) {
+				assertTerminalLifecycle(t, w.pty, true)
+				raw := w.pty.rawTranscript()
+				if transcriptOffset > len(raw) {
+					t.Fatalf("terminal transcript shrank from %d to %d bytes", transcriptOffset, len(raw))
+				}
+				if bytes.Contains(raw[transcriptOffset:], []byte("staged contents")) {
+					t.Fatalf("dirty quit redrew the workspace before restoration\n%s", w.pty.diagnostics(t))
+				}
 			})
 		})
 
@@ -261,6 +293,13 @@ func saveLineComment(body string) bdd.Step[*world] {
 
 func containsScreen(text string) func(string) bool {
 	return func(screen string) bool { return strings.Contains(screen, text) }
+}
+
+func assertNoEscapedWidgetStyles(t testing.TB, w *world, screen, context string) {
+	t.Helper()
+	if strings.Contains(screen, `\x1B[`) {
+		t.Fatalf("%s exposed escaped widget styling\n%s", context, w.pty.diagnostics(t))
+	}
 }
 
 func focusedCommentAnchor(screen string) bool {

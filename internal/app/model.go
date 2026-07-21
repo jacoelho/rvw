@@ -238,6 +238,11 @@ type pendingKeyChord struct {
 	generation uint64
 }
 
+type keyStroke struct {
+	value    string
+	repeated bool
+}
+
 // NewModel constructs and validates model.
 func NewModel(
 	ctx context.Context,
@@ -777,8 +782,8 @@ func (model *Model) applyForegroundEffect(effect foregroundEffect) {
 }
 
 func (model *Model) handleKey(message tea.KeyPressMsg) tea.Cmd {
-	stroke := normalizeStroke(message.String())
-	if stroke == "" {
+	stroke := keyStrokeFrom(message)
+	if stroke.value == "" {
 		return nil
 	}
 	if model.foreground.reloadIsPreparing() {
@@ -799,7 +804,7 @@ func (model *Model) handleKey(message tea.KeyPressMsg) tea.Cmd {
 		return nil
 	}
 	model.invalidateChordForOwnerChange()
-	if model.acceptRepeatDigit(stroke) {
+	if model.acceptRepeatDigit(stroke.value) {
 		return nil
 	}
 	if action, consumed, command := model.resolveKeyStroke(stroke); consumed {
@@ -815,16 +820,16 @@ func (model *Model) handleKey(message tea.KeyPressMsg) tea.Cmd {
 // resolveKeyStroke owns chord accumulation for every key context. A pending
 // prefix is consumed; when it fails to extend, the current stroke is retried as
 // the start of a new chord so modal text inputs receive only unbound strokes.
-func (model *Model) resolveKeyStroke(stroke string) (KeyAction, bool, tea.Cmd) {
-	if stroke == "" {
+func (model *Model) resolveKeyStroke(stroke keyStroke) (KeyAction, bool, tea.Cmd) {
+	if stroke.value == "" {
 		return KeyActionNone, false, nil
 	}
 	model.invalidateChordForOwnerChange()
-	if action, exact, prefix := model.resolveAction(append(model.chord.strokes, stroke)); exact {
+	if action, exact, prefix := model.resolveAction(append(model.chord.strokes, stroke.value)); exact {
 		model.completeChord()
-		return action, true, nil
+		return keyRepeatAction(stroke, action), true, nil
 	} else if prefix {
-		model.chord.strokes = append(model.chord.strokes, stroke)
+		model.chord.strokes = append(model.chord.strokes, stroke.value)
 		if len(model.chord.strokes) == 1 {
 			model.chord.context = model.keyContext()
 			model.chord.focus = model.configFocus()
@@ -834,10 +839,10 @@ func (model *Model) resolveKeyStroke(stroke string) (KeyAction, bool, tea.Cmd) {
 			chordTimeoutCmd(model.commandContext, model.chord.generation)
 	}
 	model.abandonChord()
-	if action, exact, prefix := model.resolveAction([]string{stroke}); exact {
-		return action, true, nil
+	if action, exact, prefix := model.resolveAction([]string{stroke.value}); exact {
+		return keyRepeatAction(stroke, action), true, nil
 	} else if prefix {
-		model.chord.strokes = []string{stroke}
+		model.chord.strokes = []string{stroke.value}
 		model.chord.context = model.keyContext()
 		model.chord.focus = model.configFocus()
 		model.chord.generation++
@@ -845,6 +850,20 @@ func (model *Model) resolveKeyStroke(stroke string) (KeyAction, bool, tea.Cmd) {
 			chordTimeoutCmd(model.commandContext, model.chord.generation)
 	}
 	return KeyActionNone, false, nil
+}
+
+func keyStrokeFrom(message tea.KeyPressMsg) keyStroke {
+	return keyStroke{
+		value:    normalizeStroke(message.String()),
+		repeated: message.Key().IsRepeat,
+	}
+}
+
+func keyRepeatAction(stroke keyStroke, action KeyAction) KeyAction {
+	if stroke.repeated && !actionAcceptsKeyRepeat(action) {
+		return KeyActionNone
+	}
+	return action
 }
 
 func (model *Model) invalidateChordForOwnerChange() {
@@ -916,8 +935,30 @@ func repeatableAction(action KeyAction) bool {
 	}
 }
 
+func actionAcceptsKeyRepeat(action KeyAction) bool {
+	switch action {
+	case KeyActionFocusNextPane, KeyActionFocusPreviousPane,
+		KeyActionMoveUp, KeyActionMoveDown,
+		KeyActionScrollLeft, KeyActionScrollRight,
+		KeyActionPageUp, KeyActionPageDown,
+		KeyActionHalfPageUp, KeyActionHalfPageDown,
+		KeyActionNextFile, KeyActionPreviousFile,
+		KeyActionNextHunk, KeyActionPreviousHunk,
+		KeyActionNextComment, KeyActionPreviousComment,
+		KeyActionNextSearchHit, KeyActionPreviousSearchHit,
+		KeyActionExtendUp, KeyActionExtendDown,
+		KeyActionDeleteBackward, KeyActionInsertNewline,
+		KeyActionNextHelpPage, KeyActionPreviousHelpPage,
+		KeyActionHelpLineUp, KeyActionHelpLineDown,
+		KeyActionHelpPageUp, KeyActionHelpPageDown:
+		return true
+	default:
+		return false
+	}
+}
+
 func (model *Model) handleCommentEditorKey(message tea.KeyPressMsg) tea.Cmd {
-	stroke := normalizeStroke(message.String())
+	stroke := keyStrokeFrom(message)
 	if action, consumed, command := model.resolveKeyStroke(stroke); consumed {
 		if action == KeyActionNone {
 			return command

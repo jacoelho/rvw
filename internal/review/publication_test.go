@@ -109,7 +109,7 @@ func TestPreparePublicationRecordsEveryCommentDecision(t *testing.T) {
 	}
 	if prepared.IncludedCount() != 2 || prepared.ExcludedCount() != 1 ||
 		prepared.CommentCount() != 1 ||
-		prepared.SummaryBody() != "`file\\.go`: summary" {
+		prepared.SummaryBody() != "`file.go`: summary" {
 		t.Fatalf(
 			"prepared publication = included %d excluded %d inline %d summary %q",
 			prepared.IncludedCount(),

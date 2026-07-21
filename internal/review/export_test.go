@@ -144,6 +144,42 @@ func TestPrepareMarkdownUsesTypedTemplatesForAllComments(t *testing.T) {
 	}
 }
 
+func TestPrepareMarkdownDoesNotEscapeOrdinaryPathAndProsePunctuation(t *testing.T) {
+	const path = "experimental/technical-writing-discover/SKILL.md"
+	current, err := NewReview(testSnapshot(t, 1, path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	start, _ := NewLineNumber(2)
+	end, _ := NewLineNumber(7)
+	target, _ := LineCommentTarget(0, LineNew, start, end)
+	current = saveTestComment(t, current, target, "Keep this deterministic.")
+	templates, err := CompileExportTemplates(
+		"{{comments}}",
+		"{{index}}. `{{target}}` - {{comment}}",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := current.PrepareMarkdown(templates, ExportOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "1. `experimental/technical-writing-discover/SKILL.md:2-7` - Keep this deterministic."
+	if prepared.Body() != want {
+		t.Fatalf("prepared body = %q, want %q", prepared.Body(), want)
+	}
+}
+
+func TestMarkdownEscapeRetainsStructuralListEscapes(t *testing.T) {
+	const input = "1. ordered\n- unordered\nordinary.file-name"
+	const want = "1\\. ordered\n\\- unordered\nordinary.file-name"
+	if got := markdownEscape(input); got != want {
+		t.Fatalf("markdownEscape(%q) = %q, want %q", input, got, want)
+	}
+}
+
 func TestCompileExportTemplatesRejectsUnknownPlaceholder(t *testing.T) {
 	if _, err := CompileExportTemplates("{{unknown}}", "{{comment}}"); err == nil {
 		t.Fatal("unknown placeholder was accepted")

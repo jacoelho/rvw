@@ -515,14 +515,56 @@ func exportTarget(target exportCommentTarget) (string, string, string) {
 }
 
 func markdownEscape(value string) string {
-	const punctuation = `\` + "`*_{}[]()#+-.!|>"
+	const punctuation = `\` + "`*_{}[]()#+!|>"
 	var result strings.Builder
 	result.Grow(len(value))
-	for _, character := range value {
-		if strings.ContainsRune(punctuation, character) {
+	lineStart := 0
+	for offset, character := range value {
+		if strings.ContainsRune(punctuation, character) ||
+			markdownStructuralPunctuation(value, lineStart, offset, character) {
 			result.WriteByte('\\')
 		}
 		result.WriteRune(character)
+		if character == '\n' {
+			lineStart = offset + 1
+		}
 	}
 	return result.String()
+}
+
+func markdownStructuralPunctuation(value string, lineStart, offset int, character rune) bool {
+	prefix := value[lineStart:offset]
+	indent := 0
+	for indent < len(prefix) && prefix[indent] == ' ' {
+		indent++
+	}
+	if indent > 3 {
+		return false
+	}
+	prefix = prefix[indent:]
+	switch character {
+	case '-':
+		return prefix == "" && markdownListDelimiterFollows(value, offset, '-')
+	case '.':
+		if prefix == "" || len(prefix) > 9 {
+			return false
+		}
+		for index := range len(prefix) {
+			if prefix[index] < '0' || prefix[index] > '9' {
+				return false
+			}
+		}
+		return markdownListDelimiterFollows(value, offset, 0)
+	default:
+		return false
+	}
+}
+
+func markdownListDelimiterFollows(value string, offset int, extra byte) bool {
+	if offset+1 == len(value) {
+		return true
+	}
+	next := value[offset+1]
+	return next == ' ' || next == '\t' || next == '\r' || next == '\n' ||
+		extra != 0 && next == extra
 }

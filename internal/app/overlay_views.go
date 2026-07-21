@@ -32,7 +32,7 @@ func (model *Model) helpView(width, height int) string {
 	})
 	lines := append([]string{"Effective help", ""}, strings.Split(rendered, "\n")...)
 	lines = append(lines, "", model.bindingSummary(KeyContextHelp))
-	return constrainedLines(lines, width, height)
+	return constrainedStyledLines(lines, width, height)
 }
 
 func (model *Model) statusView(width, height int) string {

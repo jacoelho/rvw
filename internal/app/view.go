@@ -1200,7 +1200,15 @@ func separatorWidth(treeWidth, commentsWidth int) int {
 func constrainedLines(lines []string, width, height int) string {
 	lines = lines[:min(len(lines), height)]
 	for index := range lines {
-		lines[index] = fitCellWidth(safeAndClip(lines[index], width), width)
+		lines[index] = safeAndClip(lines[index], width)
+	}
+	return constrainedStyledLines(lines, width, height)
+}
+
+func constrainedStyledLines(lines []string, width, height int) string {
+	lines = lines[:min(len(lines), height)]
+	for index := range lines {
+		lines[index] = fitCellWidth(lines[index], width)
 	}
 	return strings.Join(lines, "\n")
 }

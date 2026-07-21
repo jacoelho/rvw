@@ -126,6 +126,38 @@ func TestDefaultKeybindingsReserveInterruptInEveryContext(t *testing.T) {
 	}
 }
 
+func TestDefaultVisualKeybindingsPreserveNavigationAlternatives(t *testing.T) {
+	bindings, err := resolveKeybindings(nil)
+	if err != nil {
+		t.Fatalf("resolve default keybindings: %v", err)
+	}
+
+	want := map[KeyContext]map[KeyChord]KeyAction{
+		KeyContextNormal: {
+			"j":    KeyActionMoveDown,
+			"down": KeyActionMoveDown,
+			"k":    KeyActionMoveUp,
+			"up":   KeyActionMoveUp,
+		},
+		KeyContextVisual: {
+			"j":    KeyActionExtendDown,
+			"down": KeyActionExtendDown,
+			"k":    KeyActionExtendUp,
+			"up":   KeyActionExtendUp,
+		},
+	}
+	for _, binding := range bindings {
+		if actions, exists := want[binding.Context]; exists && actions[binding.Chord] == binding.Action {
+			delete(actions, binding.Chord)
+		}
+	}
+	for context, missing := range want {
+		for chord, action := range missing {
+			t.Errorf("default %q binding %q does not perform %q", context, chord, action)
+		}
+	}
+}
+
 func TestKeybindingPrefixAmbiguityIsRejectedInEitherOrder(t *testing.T) {
 	short := Keybinding{Context: KeyContextNormal, Chord: "g", Action: KeyActionQuit}
 	long := Keybinding{Context: KeyContextNormal, Chord: "g g", Action: KeyActionInterrupt}

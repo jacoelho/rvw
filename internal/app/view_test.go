@@ -77,6 +77,41 @@ func TestCommentEditorDockKeepsCodeVisibleWithoutEscapedWidgetStyles(t *testing.
 	}
 }
 
+func TestHelpViewPreservesWidgetStyles(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	_, _ = model.Update(tea.WindowSizeMsg{Width: normalWidth, Height: 24})
+	model.overlay = OverlayHelp
+	model.help.Styles.FullKey = lipgloss.NewStyle().Bold(true)
+
+	view := model.View()
+	plain := ansi.Strip(view.Content)
+	if strings.Contains(plain, `\x1B[`) {
+		t.Fatalf("help exposed escaped widget styling:\n%s", plain)
+	}
+	if !strings.Contains(view.Content, "\x1b[") {
+		t.Fatalf("help discarded widget styling:\n%q", view.Content)
+	}
+}
+
+func TestPromptViewsPreserveWidgetStyles(t *testing.T) {
+	for _, mode := range []InteractionMode{ModeSearch, ModeCommand} {
+		t.Run(fmt.Sprint(mode), func(t *testing.T) {
+			model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+			_, _ = model.Update(tea.WindowSizeMsg{Width: normalWidth, Height: 24})
+			model.mode = mode
+
+			view := model.View()
+			plain := ansi.Strip(view.Content)
+			if strings.Contains(plain, `\x1B[`) {
+				t.Fatalf("prompt exposed escaped widget styling:\n%s", plain)
+			}
+			if !strings.Contains(view.Content, "\x1b[") {
+				t.Fatalf("prompt discarded widget styling:\n%q", view.Content)
+			}
+		})
+	}
+}
+
 func TestCommentEditorDockPreservesWorkspaceAcrossHeightBoundary(t *testing.T) {
 	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	waitContext, cancelWait := context.WithTimeout(t.Context(), 5*time.Second)
@@ -238,6 +273,30 @@ func TestMinimumSizeRetainsPendingConfirmation(t *testing.T) {
 				t.Fatalf("restored view omitted confirmation:\n%s", content)
 			}
 		})
+	}
+}
+
+func TestConfirmedQuitPreservesLastViewUntilTerminalRestoration(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	_, _ = model.Update(tea.WindowSizeMsg{Width: normalWidth, Height: 24})
+	model.confirmation = confirmation{kind: confirmationQuit}
+	model.overlay = OverlayConfirm
+	before := model.View()
+
+	command := model.applyConfirmationAction(KeyActionConfirmYes)
+	if command == nil {
+		t.Fatal("confirmed quit returned no command")
+	}
+	if _, ok := command().(tea.QuitMsg); !ok {
+		t.Fatal("confirmed quit did not return tea.Quit")
+	}
+	if !model.quitting {
+		t.Fatal("confirmed quit did not enter quitting state")
+	}
+	after := model.View()
+	if after.Content != before.Content || after.AltScreen != before.AltScreen ||
+		after.Cursor != before.Cursor {
+		t.Fatalf("confirmed quit changed the final view before restoration:\nbefore: %+v\nafter: %+v", before, after)
 	}
 }
 

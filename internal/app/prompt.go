@@ -63,7 +63,7 @@ func (model *Model) beginPrompt(mode InteractionMode) tea.Cmd {
 }
 
 func (model *Model) handlePromptKey(message tea.KeyPressMsg) tea.Cmd {
-	stroke := normalizeStroke(message.String())
+	stroke := keyStrokeFrom(message)
 	if action, consumed, command := model.resolveKeyStroke(stroke); consumed {
 		if action == KeyActionNone {
 			return command
@@ -128,7 +128,7 @@ func (model *Model) promptView(width, height int) string {
 		title = "Search changed patches"
 		input = model.searchInput.View()
 	}
-	return constrainedLines(
+	return constrainedStyledLines(
 		[]string{title, model.bindingSummary(contextName), input},
 		width,
 		height,

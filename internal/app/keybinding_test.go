@@ -96,6 +96,55 @@ func TestCommentEditorTabFallsThroughUnlessExplicitlyBound(t *testing.T) {
 	}
 }
 
+func TestRepeatedInterruptDoesNotCrossIntoConfirmationContext(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	settleModelWork(t, model, coordinator)
+	_, _ = model.Update(tea.WindowSizeMsg{Width: normalWidth, Height: 24})
+	model.settings.keybindings = append(model.settings.keybindings, Keybinding{
+		Context: KeyContextConfirm,
+		Chord:   "ctrl-c",
+		Action:  KeyActionInterrupt,
+	})
+	model.confirmation = confirmation{kind: confirmationQuit}
+	model.overlay = OverlayConfirm
+	before := model.View()
+
+	repeatedInterrupt := tea.KeyPressMsg(tea.Key{
+		Code:     'c',
+		Mod:      tea.ModCtrl,
+		IsRepeat: true,
+	})
+	_, _ = model.Update(repeatedInterrupt)
+
+	if model.overlay != OverlayConfirm || model.confirmation.kind != confirmationQuit {
+		t.Fatalf("repeated interrupt dismissed dirty-quit confirmation: overlay=%v confirmation=%v", model.overlay, model.confirmation.kind)
+	}
+	after := model.View()
+	if after.Content != before.Content || after.Cursor != before.Cursor {
+		t.Fatal("repeated interrupt changed the dirty-quit confirmation view")
+	}
+}
+
+func TestRepeatedNavigationRemainsAvailable(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{
+		"alpha.txt": "changed\n",
+		"beta.txt":  "changed\n",
+	})
+	_, _ = model.Update(tea.WindowSizeMsg{Width: compactWidth, Height: 18})
+	model.focus = FocusFileTree
+
+	_, _ = model.Update(tea.KeyPressMsg(tea.Key{
+		Text:     "j",
+		Code:     'j',
+		IsRepeat: true,
+	}))
+
+	selected, ok := model.review.SelectedFile()
+	if !ok || selected != model.fileOrder[1] {
+		t.Fatalf("repeated navigation selected %d, want %d", selected, model.fileOrder[1])
+	}
+}
+
 func TestModalContextsExecuteSequentialMultiStrokeBindings(t *testing.T) {
 	testCases := []struct {
 		name       string
