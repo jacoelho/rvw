@@ -107,6 +107,25 @@ func TestEveryContextRequiresItsDeclaredActions(t *testing.T) {
 	}
 }
 
+func TestDefaultKeybindingsReserveInterruptInEveryContext(t *testing.T) {
+	bindings, err := resolveKeybindings(nil)
+	if err != nil {
+		t.Fatalf("resolve default keybindings: %v", err)
+	}
+
+	contexts := make(map[KeyContext]bool, len(keyContexts))
+	for _, binding := range bindings {
+		if binding.Chord == "Ctrl-c" && binding.Action == KeyActionInterrupt {
+			contexts[binding.Context] = true
+		}
+	}
+	for context := range keyContexts {
+		if !contexts[context] {
+			t.Errorf("context %q has no reserved Ctrl-c interrupt binding", context)
+		}
+	}
+}
+
 func TestKeybindingPrefixAmbiguityIsRejectedInEitherOrder(t *testing.T) {
 	short := Keybinding{Context: KeyContextNormal, Chord: "g", Action: KeyActionQuit}
 	long := Keybinding{Context: KeyContextNormal, Chord: "g g", Action: KeyActionInterrupt}
