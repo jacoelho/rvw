@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/source"
 )
 
 func (coordinator *Coordinator) StopAdmissionAndCancel() {
@@ -99,8 +100,15 @@ func (coordinator *Coordinator) ShutdownWithSettlement(
 		))
 	}
 	for _, outcome := range coordinator.outcomes {
-		if reload, ok := outcome.Reload(); ok && reload.Document != nil {
-			if err := reload.Document.Close(); err != nil {
+		var document *source.Document
+		switch outcome := outcome.(type) {
+		case ReloadAcquiredOutcome:
+			document = outcome.Document
+		case ReloadPreparedOutcome:
+			document = outcome.Document
+		}
+		if document != nil {
+			if err := document.Close(); err != nil {
 				shutdownErrors = append(
 					shutdownErrors,
 					fmt.Errorf("release reload document: %w", err),
@@ -131,30 +139,37 @@ func (coordinator *Coordinator) shutdownSettlementLocked(
 	settlement := ShutdownSettlement{}
 	recorded := make(map[review.OperationID]struct{})
 	for _, outcome := range coordinator.outcomes {
-		publication, ok := outcome.Publication()
-		if !ok {
+		var (
+			id             review.OperationID
+			disposition    review.PublicationDisposition
+			reconciliation review.ReconciliationDisposition
+			detail         review.OperationDetail
+		)
+		switch outcome := outcome.(type) {
+		case PublicationCommitOutcome:
+			id = outcome.ID
+			disposition = outcome.Publication.Disposition
+			detail = outcome.Publication.Detail
+		case ReconciliationOutcome:
+			id = outcome.ID
+			reconciliation = outcome.Reconciliation.Disposition
+			detail = outcome.Reconciliation.Detail
+		default:
 			continue
 		}
-		reservation, accepted := coordinator.accepted[publication.ID]
+		reservation, accepted := coordinator.accepted[id]
 		if !accepted || reservation.publication == nil {
 			continue
 		}
 		fact := PublicationShutdownFact{
-			Target: reservation.publication.target,
-			Marker: reservation.publication.marker,
-		}
-		switch publication.Stage {
-		case PublicationCommitCompleted:
-			fact.Disposition = publication.Publication.Disposition
-			fact.Detail = publication.Publication.Detail
-		case PublicationReconciliationCompleted:
-			fact.Reconciliation = publication.Reconciliation.Disposition
-			fact.Detail = publication.Reconciliation.Detail
-		default:
-			continue
+			Target:         reservation.publication.target,
+			Marker:         reservation.publication.marker,
+			Disposition:    disposition,
+			Reconciliation: reconciliation,
+			Detail:         detail,
 		}
 		settlement.Publications = append(settlement.Publications, fact)
-		recorded[publication.ID] = struct{}{}
+		recorded[id] = struct{}{}
 	}
 	if scope != settleActivePublicationAsUnknown {
 		return settlement
@@ -172,7 +187,7 @@ func (coordinator *Coordinator) shutdownSettlementLocked(
 				Target:      reservation.publication.target,
 				Marker:      reservation.publication.marker,
 				Disposition: review.PublicationDispositionUnknown,
-				Detail:      "publication worker did not quiesce before shutdown timeout",
+				Detail:      boundedOperationDetail("publication worker did not quiesce before shutdown timeout"),
 			},
 		)
 	}

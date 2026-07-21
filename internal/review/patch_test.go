@@ -119,6 +119,13 @@ func TestPreparedPatchCarriesValidatedSemanticLineIdentity(t *testing.T) {
 	if hunk, ok := lines[4].Hunk(0); !ok || hunk.Index().Uint32() != 0 {
 		t.Fatalf("last addition hunk = %+v %v", hunk, ok)
 	}
+	state := current.Patch(0)
+	if oldLine, ok := state.MaxLineNumber(LineOld); !ok || oldLine.Uint32() != 8 {
+		t.Fatalf("maximum old line = %d %v", oldLine, ok)
+	}
+	if newLine, ok := state.MaxLineNumber(LineNew); !ok || newLine.Uint32() != 9 {
+		t.Fatalf("maximum new line = %d %v", newLine, ok)
+	}
 }
 
 func TestTakePatchRejectsInconsistentHunkRanges(t *testing.T) {

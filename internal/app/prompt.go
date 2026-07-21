@@ -47,8 +47,7 @@ type commandIntent struct {
 }
 
 func (model *Model) beginPrompt(mode InteractionMode) tea.Cmd {
-	model.chord = nil
-	model.repeat = 0
+	model.abandonChord()
 	switch mode {
 	case ModeSearch:
 		model.mode = mode
@@ -65,7 +64,10 @@ func (model *Model) beginPrompt(mode InteractionMode) tea.Cmd {
 
 func (model *Model) handlePromptKey(message tea.KeyPressMsg) tea.Cmd {
 	stroke := normalizeStroke(message.String())
-	if action, exact, _ := model.resolveAction([]string{stroke}); exact {
+	if action, consumed, command := model.resolveKeyStroke(stroke); consumed {
+		if action == KeyActionNone {
+			return command
+		}
 		switch action {
 		case KeyActionCancel, KeyActionInterrupt:
 			model.cancelPrompt()
@@ -107,8 +109,7 @@ func (model *Model) cancelPrompt() {
 	model.searchInput.Blur()
 	model.commandInput.Blur()
 	model.mode = ModeNormal
-	model.chord = nil
-	model.repeat = 0
+	model.abandonChord()
 }
 
 func (model *Model) resizePrompts() {
@@ -307,9 +308,8 @@ func patchContextForCommand(intent commandIntent) (review.PatchContext, error) {
 }
 
 func (model *Model) setPatchContext(context review.PatchContext) {
-	if model.searchOperation != 0 {
-		model.pendingPatchContext = new(context)
-		model.coordinator.Cancel(model.searchOperation)
+	if operationID, active := model.foreground.requestPatchContext(context); active {
+		model.coordinator.Cancel(operationID)
 		model.notice = &Notice{
 			Kind: NoticeInformation,
 			Text: "waiting for active search cancellation before changing context",

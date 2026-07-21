@@ -116,3 +116,31 @@ func TestPreCancelledClipboardDeliveryDoesNotFenceDestination(t *testing.T) {
 		t.Fatal("pre-start cancellation fenced the clipboard")
 	}
 }
+
+func TestFencedClipboardRetryReturnsTypedFailureOutcome(t *testing.T) {
+	manager, err := NewManager()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := manager.Close(ctx); err != nil {
+			t.Error(err)
+		}
+	})
+	manager.finish(DestinationClipboard, CommitUnknown)
+	payload, err := NewPayload("review body")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	outcome, err := manager.Deliver(t.Context(), DestinationClipboard, payload)
+	if !errors.Is(err, ErrUnknown) {
+		t.Fatalf("Deliver() error = %v, want %v", err, ErrUnknown)
+	}
+	if outcome.Destination != DestinationClipboard ||
+		outcome.State != CommitFailedBeforeWrite || outcome.Bytes != payload.Bytes() {
+		t.Fatalf("fenced retry outcome = %+v", outcome)
+	}
+}

@@ -29,7 +29,7 @@ func NewCommentKind(value string) (CommentKind, error) {
 			return "", fmt.Errorf("%w: kind contains a control character", ErrInvalidComment)
 		}
 	}
-	return CommentKind(value), nil
+	return CommentKind(strings.Clone(value)), nil
 }
 
 func (kind CommentKind) String() string {
@@ -160,7 +160,7 @@ func NewCommentBody(value string) (CommentBody, error) {
 		strings.TrimSpace(value) == "" {
 		return "", fmt.Errorf("%w: body must be non-whitespace UTF-8 of at most %d bytes", ErrInvalidComment, MaxCommentBodyBytes)
 	}
-	return CommentBody(value), nil
+	return CommentBody(strings.Clone(value)), nil
 }
 
 func (body CommentBody) String() string {

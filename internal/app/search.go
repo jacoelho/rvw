@@ -14,43 +14,50 @@ func (model *Model) startSearch(value string, scope review.SearchScope) {
 		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
 		return
 	}
-	if model.reloadOperation != 0 || model.reloadDeferred || model.reloadPreparing {
+	if model.foreground.reloadActive() {
 		model.notice = &Notice{Kind: NoticeWarning, Text: "search is unavailable during reload"}
 		return
 	}
-	if model.searchOperation != 0 {
-		model.pendingSearch = &pendingSearch{query: query, scope: scope}
-		model.clearSearchAfterCancel = false
-		model.coordinator.Cancel(model.searchOperation)
-		model.notice = &Notice{Kind: NoticeInformation, Text: "replacing active search"}
-		return
+	hadSearch := model.foreground.searchOperation() != 0
+	hadPatch := model.foreground.patchCount() != 0
+	start, cancellations, ready := model.foreground.requestSearch(pendingSearch{
+		query: query,
+		scope: scope,
+	})
+	for _, operationID := range cancellations {
+		model.coordinator.Cancel(operationID)
 	}
-	if len(model.patchOperations) != 0 {
-		for operationID := range model.patchOperations {
-			model.coordinator.Cancel(operationID)
+	if !ready {
+		switch {
+		case hadSearch:
+			model.notice = &Notice{Kind: NoticeInformation, Text: "cancelling active search"}
+		case hadPatch:
+			model.notice = &Notice{
+				Kind: NoticeInformation,
+				Text: "waiting for patch acquisition cancellation",
+			}
 		}
-		model.deferredPatch = nil
-		model.pendingSearch = &pendingSearch{query: query, scope: scope}
-		model.notice = &Notice{Kind: NoticeInformation, Text: "waiting for patch acquisition cancellation"}
 		return
 	}
-	model.beginSearch(query, scope)
+	model.beginSearch(start)
 }
 
-func (model *Model) beginSearch(query review.SearchQuery, scope review.SearchScope) {
+func (model *Model) beginSearch(start foregroundStart) {
 	operationID, err := review.NewOperationID(model.nextOperation)
 	if err != nil {
+		model.rejectAndApplyForegroundStart(start)
 		model.notice = &Notice{Kind: NoticeError, Text: "operation identity exhausted"}
 		return
 	}
 	model.nextOperation++
 	next, request, err := model.review.StartSearch(
 		operationID,
-		query,
-		scope,
+		start.search.query,
+		start.search.scope,
 		model.settings.patchContext,
 	)
 	if err != nil {
+		model.rejectAndApplyForegroundStart(start)
 		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
 		return
 	}
@@ -61,10 +68,17 @@ func (model *Model) beginSearch(query review.SearchQuery, scope review.SearchSco
 	}); err != nil {
 		model.review = failSearchAdmission(next, request, err)
 		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
+		model.rejectAndApplyForegroundStart(start)
+		return
+	}
+	if !model.foreground.admitted(start, operationID) {
+		model.coordinator.Cancel(operationID)
+		err := errors.New("foreground search admission invariant violated")
+		model.review = failSearchAdmission(next, request, err)
+		model.notice = &Notice{Kind: NoticeError, Text: NoticeText(err.Error())}
 		return
 	}
 	model.review = next
-	model.searchOperation = operationID
 	model.searchCursor = 0
 	model.notice = &Notice{Kind: NoticeInformation, Text: "searching changed patches"}
 }
@@ -98,26 +112,25 @@ func failSearchAdmission(
 }
 
 func (model *Model) cancelSearch() {
-	model.pendingSearch = nil
-	model.pendingPatchContext = nil
-	if model.searchOperation == 0 {
+	operationID, active := model.foreground.requestClearSearch()
+	if !active {
 		model.review = model.review.ClearSearch()
 		model.searchCursor = 0
 		model.notice = &Notice{Kind: NoticeInformation, Text: "search cleared"}
 		return
 	}
-	model.clearSearchAfterCancel = true
-	model.coordinator.Cancel(model.searchOperation)
+	model.coordinator.Cancel(operationID)
 	model.notice = &Notice{Kind: NoticeInformation, Text: "cancelling search"}
 }
 
 func (model *Model) applySearchOutcome(outcome SearchOutcome) {
-	if outcome.ID == 0 || outcome.ID != model.searchOperation {
+	tracked, effect := model.foreground.completeSearch(outcome.ID)
+	if !tracked {
 		if outcome.ID != 0 {
 			if next, err := model.review.ResolveOperation(
 				outcome.ID,
 				review.OperationSuperseded,
-				"search result was superseded",
+				boundedOperationDetail("search result was superseded"),
 			); err == nil {
 				model.review = next
 			}
@@ -125,7 +138,6 @@ func (model *Model) applySearchOutcome(outcome SearchOutcome) {
 		model.notice = &Notice{Kind: NoticeWarning, Text: "stale search outcome"}
 		return
 	}
-	model.searchOperation = 0
 	result := outcome.Result
 	if outcome.Err != nil {
 		var err error
@@ -138,14 +150,14 @@ func (model *Model) applySearchOutcome(outcome SearchOutcome) {
 		}, nil)
 		if err != nil {
 			model.notice = &Notice{Kind: NoticeError, Text: NoticeText(err.Error())}
-			model.failClaimedSearch(outcome.ID, err)
+			model.failClaimedSearch(outcome.ID, err, effect)
 			return
 		}
 	}
 	next, err := model.review.ApplySearch(result)
 	if err != nil {
 		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
-		model.failClaimedSearch(outcome.ID, err)
+		model.failClaimedSearch(outcome.ID, err, effect)
 		return
 	}
 	status := review.OperationSucceeded
@@ -160,12 +172,13 @@ func (model *Model) applySearchOutcome(outcome SearchOutcome) {
 	next, err = next.ResolveOperation(outcome.ID, status, result.Detail())
 	if err != nil {
 		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
-		model.finishSearchDeferrals()
+		model.applyForegroundEffect(effect)
 		return
 	}
 	model.review = next
 
-	if model.finishSearchDeferrals() {
+	if effect.kind != foregroundEffectNone {
+		model.applyForegroundEffect(effect)
 		return
 	}
 	summary := model.review.SearchSummary()
@@ -192,14 +205,18 @@ func (model *Model) applySearchOutcome(outcome SearchOutcome) {
 	case review.SearchCancelled:
 		model.notice = &Notice{Kind: NoticeInformation, Text: "search cancelled"}
 	case review.SearchFailed:
-		model.notice = &Notice{Kind: NoticeError, Text: NoticeText(summary.Detail)}
+		model.notice = &Notice{Kind: NoticeError, Text: NoticeText(summary.Detail.String())}
 	}
 	if summary.HitCount != 0 {
 		model.activateSearchHit(0)
 	}
 }
 
-func (model *Model) failClaimedSearch(id review.OperationID, failure error) {
+func (model *Model) failClaimedSearch(
+	id review.OperationID,
+	failure error,
+	effect foregroundEffect,
+) {
 	model.review = model.review.ClearSearch()
 	if next, err := model.review.ResolveOperation(
 		id,
@@ -208,34 +225,7 @@ func (model *Model) failClaimedSearch(id review.OperationID, failure error) {
 	); err == nil {
 		model.review = next
 	}
-	model.finishSearchDeferrals()
-}
-
-func (model *Model) finishSearchDeferrals() bool {
-	if model.pendingPatchContext != nil {
-		context := *model.pendingPatchContext
-		model.pendingPatchContext = nil
-		model.pendingSearch = nil
-		model.clearSearchAfterCancel = false
-		model.review = model.review.ClearSearch()
-		model.applyPatchContext(context)
-		return true
-	}
-	if model.pendingSearch != nil {
-		pending := *model.pendingSearch
-		model.pendingSearch = nil
-		model.clearSearchAfterCancel = false
-		model.beginSearch(pending.query, pending.scope)
-		return true
-	}
-	if model.clearSearchAfterCancel {
-		model.clearSearchAfterCancel = false
-		model.review = model.review.ClearSearch()
-		model.searchCursor = 0
-		model.notice = &Notice{Kind: NoticeInformation, Text: "search cleared"}
-		return true
-	}
-	return false
+	model.applyForegroundEffect(effect)
 }
 
 func searchFailureStatus(err error) review.SearchStatus {
@@ -257,13 +247,13 @@ func (model *Model) activateSearchHit(index int) {
 		}
 		model.review = next
 		model.resetSyntax()
-		model.pendingSearchHit = new(hit)
+		model.foreground.setPendingSearchHit(hit)
 		model.requestActivePatch()
 		model.searchCursor = index
 		return
 	}
 	if model.review.Patch(hit.FileID()).Status != review.PatchReady {
-		model.pendingSearchHit = new(hit)
+		model.foreground.setPendingSearchHit(hit)
 		model.requestActivePatch()
 		model.searchCursor = index
 		return

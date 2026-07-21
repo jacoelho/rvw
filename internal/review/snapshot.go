@@ -463,10 +463,6 @@ func (snapshot Snapshot) FileCount() int {
 	return len(snapshot.files)
 }
 
-func (snapshot Snapshot) Files() []File {
-	return slices.Clone(snapshot.files)
-}
-
 func (snapshot Snapshot) File(id FileID) (File, bool) {
 	if int(id.Uint32()) >= len(snapshot.files) {
 		return File{}, false

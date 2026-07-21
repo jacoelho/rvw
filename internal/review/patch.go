@@ -101,6 +101,26 @@ type PatchState struct {
 	prepared *PreparedPatch
 }
 
+// MaxLineNumber returns the largest source line represented on side by this patch.
+func (state PatchState) MaxLineNumber(side LineSide) (LineNumber, bool) {
+	if state.prepared == nil {
+		return 0, false
+	}
+	var value uint32
+	switch side {
+	case LineOld:
+		value = state.prepared.maxOldLine
+	case LineNew:
+		value = state.prepared.maxNewLine
+	default:
+		return 0, false
+	}
+	if value == 0 {
+		return 0, false
+	}
+	return LineNumber(value), true
+}
+
 func (state PatchState) RetainedBytes() int64 {
 	return state.prepared.RetainedBytes()
 }
@@ -189,6 +209,8 @@ type PreparedPatch struct {
 	hunkLines   []uint32
 	hunkFirst   []uint32
 	hunkLast    []uint32
+	maxOldLine  uint32
+	maxNewLine  uint32
 }
 
 func TakePatch(text []byte) (*PreparedPatch, error) {
@@ -291,6 +313,8 @@ func TakePatch(text []byte) (*PreparedPatch, error) {
 		patch.lineKinds = append(patch.lineKinds, kind)
 		patch.oldLines = append(patch.oldLines, rowOld)
 		patch.newLines = append(patch.newLines, rowNew)
+		patch.maxOldLine = max(patch.maxOldLine, rowOld)
+		patch.maxNewLine = max(patch.maxNewLine, rowNew)
 		row := uint32(len(offsets) - 1)
 		if rowOld != 0 {
 			patch.oldLineRows = append(patch.oldLineRows, row)

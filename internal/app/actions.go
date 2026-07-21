@@ -13,15 +13,18 @@ const (
 )
 
 func (model *Model) applyAction(action KeyAction, repeat int) tea.Cmd {
-	if model.overlay == OverlayConfirm {
-		return model.applyConfirmationAction(action)
-	}
 	if model.belowMinimum() {
 		switch action {
 		case KeyActionQuit, KeyActionInterrupt:
+			if model.overlay == OverlayConfirm {
+				return nil
+			}
 			return model.requestQuit()
 		}
 		return nil
+	}
+	if model.overlay == OverlayConfirm {
+		return model.applyConfirmationAction(action)
 	}
 	if model.mode == ModeCommentEdit {
 		switch action {
@@ -74,7 +77,7 @@ func (model *Model) applyAction(action KeyAction, repeat int) tea.Cmd {
 		}
 		return nil
 	}
-	if model.reloadOperation != 0 && !actionAllowedDuringReload(action) {
+	if model.foreground.reloadActive() && !actionAllowedDuringReload(action) {
 		model.notice = &Notice{
 			Kind: NoticeInformation,
 			Text: "reload is active; this action is temporarily unavailable",
@@ -85,8 +88,8 @@ func (model *Model) applyAction(action KeyAction, repeat int) tea.Cmd {
 	case KeyActionQuit, KeyActionInterrupt:
 		return model.requestQuit()
 	case KeyActionCancel:
-		if model.reloadOperation != 0 {
-			model.coordinator.Cancel(model.reloadOperation)
+		if operationID := model.foreground.reloadOperation(); operationID != 0 {
+			model.coordinator.Cancel(operationID)
 			model.notice = &Notice{
 				Kind: NoticeInformation,
 				Text: "cancelling reload; the current source remains active",

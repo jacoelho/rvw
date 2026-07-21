@@ -144,7 +144,7 @@ func (service *Service) openPullRequest(
 			}
 			snapshot, err = snapshot.WithRemoteThreadFailure(
 				status,
-				boundedPublicationDetail(err.Error()),
+				boundedOperationDetail(err.Error()),
 			)
 		} else {
 			snapshot, err = snapshot.WithRemoteThreads(threads)

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -75,11 +76,11 @@ func NewRemoteComment(descriptor RemoteCommentDescriptor) (RemoteComment, error)
 		return RemoteComment{}, ErrInvalidRemoteThread
 	}
 	return RemoteComment{
-		id:        descriptor.ID,
-		author:    descriptor.Author,
-		body:      descriptor.Body,
-		createdAt: descriptor.CreatedAt,
-		url:       descriptor.URL,
+		id:        strings.Clone(descriptor.ID),
+		author:    strings.Clone(descriptor.Author),
+		body:      strings.Clone(descriptor.Body),
+		createdAt: strings.Clone(descriptor.CreatedAt),
+		url:       strings.Clone(descriptor.URL),
 	}, nil
 }
 
@@ -153,7 +154,7 @@ func NewRemoteThread(descriptor RemoteThreadDescriptor) (RemoteThread, error) {
 		line = new(*descriptor.Line)
 	}
 	return RemoteThread{
-		id:       descriptor.ID,
+		id:       strings.Clone(descriptor.ID),
 		resolved: descriptor.Resolved,
 		outdated: descriptor.Outdated,
 		path:     path,
@@ -247,7 +248,7 @@ func (snapshot Snapshot) WithRemoteThreads(threads []RemoteThread) (Snapshot, er
 	}
 	snapshot.remoteThreads = owned
 	snapshot.remoteThreadStatus = RemoteThreadsReady
-	snapshot.remoteThreadDetail = EmptyOperationDetail
+	snapshot.remoteThreadDetail = EmptyOperationDetail()
 	return snapshot, nil
 }
 
@@ -256,9 +257,7 @@ func (snapshot Snapshot) WithRemoteThreadFailure(
 	detail OperationDetail,
 ) (Snapshot, error) {
 	if status != RemoteThreadsUnavailable && status != RemoteThreadsLimited ||
-		detail == EmptyOperationDetail ||
-		int64(len(detail)) > MaxOperationDetail ||
-		!utf8.ValidString(detail.String()) {
+		detail.IsEmpty() {
 		return Snapshot{}, ErrInvalidRemoteThread
 	}
 	snapshot.remoteThreads = nil

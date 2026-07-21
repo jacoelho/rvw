@@ -332,7 +332,7 @@ func (runner *Runner) await(
 			pid,
 			waited,
 			lifetime,
-			requestTermGrace(request),
+			DefaultTermGrace,
 		)
 		if completed {
 			result = resultFromWait(waitErr)
@@ -355,7 +355,7 @@ func (runner *Runner) await(
 			pid,
 			waited,
 			lifetime,
-			requestTermGrace(request),
+			DefaultTermGrace,
 		)
 		if completed {
 			result = resultFromWait(waitErr)
@@ -627,10 +627,6 @@ func operationName(request Request) string {
 		return request.OperationDetail
 	}
 	return request.Name
-}
-
-func requestTermGrace(Request) time.Duration {
-	return DefaultTermGrace
 }
 
 func waitForProcessTree(

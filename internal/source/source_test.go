@@ -161,9 +161,9 @@ func TestOpenLocalSources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if staged.Snapshot().FileCount() != 1 ||
-		staged.Snapshot().Files()[0].DisplayPath() != "tracked.txt" {
-		t.Fatalf("unexpected staged snapshot: %+v", staged.Snapshot().Files())
+	stagedFile, _ := staged.Snapshot().File(0)
+	if staged.Snapshot().FileCount() != 1 || stagedFile.DisplayPath() != "tracked.txt" {
+		t.Fatalf("unexpected staged snapshot: %+v", staged.Snapshot())
 	}
 	if err := staged.Close(); err != nil {
 		t.Fatal(err)
@@ -179,9 +179,9 @@ func TestOpenLocalSources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ranged.Snapshot().FileCount() != 1 ||
-		ranged.Snapshot().Files()[0].DisplayPath() != "tracked.txt" {
-		t.Fatalf("unexpected range snapshot: %+v", ranged.Snapshot().Files())
+	rangedFile, _ := ranged.Snapshot().File(0)
+	if ranged.Snapshot().FileCount() != 1 || rangedFile.DisplayPath() != "tracked.txt" {
+		t.Fatalf("unexpected range snapshot: %+v", ranged.Snapshot())
 	}
 	if err := ranged.Close(); err != nil {
 		t.Fatal(err)
@@ -347,10 +347,10 @@ func TestOpenStagedPreservesUnmergedIndexAsUnavailablePatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer document.Close()
-	files := document.Snapshot().Files()
-	if len(files) != 1 || files[0].DisplayPath() != "conflict.txt" ||
-		files[0].Change().Kind() != review.ChangeModified {
-		t.Fatalf("unexpected staged conflict snapshot: %+v", files)
+	file, _ := document.Snapshot().File(0)
+	if document.Snapshot().FileCount() != 1 || file.DisplayPath() != "conflict.txt" ||
+		file.Change().Kind() != review.ChangeModified {
+		t.Fatalf("unexpected staged conflict snapshot: %+v", document.Snapshot())
 	}
 
 	current, err := review.NewReview(document.Snapshot(), []review.CommentKind{"issue"})
@@ -359,7 +359,7 @@ func TestOpenStagedPreservesUnmergedIndexAsUnavailablePatch(t *testing.T) {
 	}
 	contextLines, _ := review.NewContextLines(3)
 	patchContext, _ := review.ContextAround(contextLines)
-	current, request, err := current.RequestPatch(files[0].ID(), patchContext)
+	current, request, err := current.RequestPatch(file.ID(), patchContext)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -374,7 +374,7 @@ func TestOpenStagedPreservesUnmergedIndexAsUnavailablePatch(t *testing.T) {
 	if current, err = current.ApplyPatch(result); err != nil {
 		t.Fatal(err)
 	}
-	if current.Patch(files[0].ID()).Status != review.PatchUnavailable {
+	if current.Patch(file.ID()).Status != review.PatchUnavailable {
 		t.Fatal("unavailable patch state was not retained")
 	}
 }
@@ -600,9 +600,9 @@ func TestOpenUnbornWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer document.Close()
-	if document.Snapshot().FileCount() != 1 ||
-		document.Snapshot().Files()[0].DisplayPath() != "new.txt" {
-		t.Fatalf("unexpected snapshot: %+v", document.Snapshot().Files())
+	file, _ := document.Snapshot().File(0)
+	if document.Snapshot().FileCount() != 1 || file.DisplayPath() != "new.txt" {
+		t.Fatalf("unexpected snapshot: %+v", document.Snapshot())
 	}
 }
 
@@ -627,7 +627,7 @@ func TestFiltersHideWithoutRemovingMembership(t *testing.T) {
 		t.Fatalf("file count = %d", document.Snapshot().FileCount())
 	}
 	hidden := make(map[string][]string)
-	for _, file := range document.Snapshot().Files() {
+	for file := range document.Snapshot().AllFiles() {
 		for _, reason := range file.Flags().HiddenReasons() {
 			hidden[file.DisplayPath()] = append(hidden[file.DisplayPath()], string(reason))
 		}

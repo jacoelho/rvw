@@ -4,7 +4,82 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"unsafe"
 )
+
+func TestExportInputMetadataAccountingCoversCompiledLayouts(t *testing.T) {
+	if exportKindMetadataBytes < int64(unsafe.Sizeof(CommentKind(""))) {
+		t.Fatalf(
+			"kind metadata charge = %d, compiled size = %d",
+			exportKindMetadataBytes,
+			unsafe.Sizeof(CommentKind("")),
+		)
+	}
+	if exportCommentMetadataBytes < int64(unsafe.Sizeof(exportComment{})) {
+		t.Fatalf(
+			"comment metadata charge = %d, compiled size = %d",
+			exportCommentMetadataBytes,
+			unsafe.Sizeof(exportComment{}),
+		)
+	}
+	if exportTokenMetadataBytes < int64(unsafe.Sizeof(exportToken{})) {
+		t.Fatalf(
+			"template token metadata charge = %d, compiled size = %d",
+			exportTokenMetadataBytes,
+			unsafe.Sizeof(exportToken{}),
+		)
+	}
+}
+
+func TestCompiledExportTemplatesSeparateReadinessFromRetainedBytes(t *testing.T) {
+	markdown := strings.Repeat("{{comments}}", 4_096)
+	comment := "{{comment}}"
+	templates, err := CompileExportTemplates(markdown, comment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !templates.Ready() {
+		t.Fatal("placeholder-only templates are not ready")
+	}
+	wantBytes := int64(len(markdown)+len(comment)) +
+		int64(4_097)*exportTokenMetadataBytes
+	if templates.RetainedBytes() != wantBytes {
+		t.Fatalf("retained bytes = %d, want %d", templates.RetainedBytes(), wantBytes)
+	}
+	if cap(templates.markdown) != len(templates.markdown) ||
+		cap(templates.comment) != len(templates.comment) {
+		t.Fatalf(
+			"compiled token capacities = (%d, %d), lengths = (%d, %d)",
+			cap(templates.markdown), cap(templates.comment),
+			len(templates.markdown), len(templates.comment),
+		)
+	}
+	if (ExportTemplates{}).Ready() || (ExportTemplates{}).RetainedBytes() != 0 {
+		t.Fatal("zero export templates are ready")
+	}
+}
+
+func TestCompileExportTemplatesRejectsEmptyAndTooManyTokens(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		markdown string
+		comment  string
+	}{
+		{name: "empty Markdown", comment: "{{comment}}"},
+		{name: "empty comment", markdown: "{{comments}}"},
+		{
+			name:     "trailing literal is token 4097",
+			markdown: strings.Repeat("{{comments}}", 4_096) + "x",
+			comment:  "{{comment}}",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if _, err := CompileExportTemplates(testCase.markdown, testCase.comment); err == nil {
+				t.Fatal("invalid templates were accepted")
+			}
+		})
+	}
+}
 
 func TestPrepareMarkdownUsesTypedTemplatesAndSelectionPolicy(t *testing.T) {
 	issue, _ := NewCommentKind("issue")
@@ -137,5 +212,97 @@ func TestPrepareMarkdownPreflightsCumulativeLimitAndCancellation(t *testing.T) {
 		ExportOptions{},
 	); !errors.Is(err, cancelled) {
 		t.Fatalf("cancellation error = %v, want sentinel", err)
+	}
+}
+
+func TestExportInputExcludesPatchAndSearchStateAndPreservesOutput(t *testing.T) {
+	issue, _ := NewCommentKind("issue")
+	current, err := NewReview(testSnapshot(t, 1, "one.go"), []CommentKind{issue})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, _ := FileCommentTarget(0)
+	current = saveTestComment(t, current, target, issue, "short")
+	baseline := current.ExportInput()
+
+	pendingPatch, patchRequest, err := current.RequestPatch(0, WholeFileContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedPatch, err := TakePatch([]byte("@@ -1 +1 @@\n-old\n+short\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err = pendingPatch.ApplyPatch(PatchResult{
+		Workspace: patchRequest.Workspace,
+		Handle:    patchRequest.Handle,
+		Status:    PatchReady,
+		Prepared:  preparedPatch,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation, _ := NewOperationID(1)
+	query, _ := NewSearchQuery("short")
+	searching, searchRequest, err := current.StartSearch(
+		operation,
+		query,
+		SearchAllFiles,
+		WholeFileContext(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := ScanSearchBatch(preparedPatch, 0, PrepareSearchQuery(query), SearchCursor{})
+	searchResult, err := TakeSearchResult(SearchResultDescriptor{
+		Operation: operation,
+		Workspace: searchRequest.Workspace,
+		Source:    searchRequest.Source,
+		Status:    SearchComplete,
+	}, batch.Hits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err = searching.ApplySearch(searchResult)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.RetainedPatchBytes() == 0 || current.SearchSummary().HitCount == 0 {
+		t.Fatal("test review does not retain patch and search payloads")
+	}
+
+	projected := current.ExportInput()
+	if projected.RetainedBytes() != baseline.RetainedBytes() {
+		t.Fatalf(
+			"export input bytes changed with patch/search state: %d to %d",
+			baseline.RetainedBytes(),
+			projected.RetainedBytes(),
+		)
+	}
+	templates, err := CompileExportTemplates("{{comments}}", "{{comment}}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromReview, err := current.PrepareMarkdown(templates, ExportOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromInput, err := projected.PrepareMarkdownCancellable(nil, templates, ExportOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fromInput != fromReview {
+		t.Fatalf("projected Markdown = %+v, review Markdown = %+v", fromInput, fromReview)
+	}
+	reviewJSON, err := current.PrepareJSON(ExportOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputJSON, err := projected.PrepareJSONCancellable(nil, ExportOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inputJSON != reviewJSON {
+		t.Fatalf("projected JSON = %+v, review JSON = %+v", inputJSON, reviewJSON)
 	}
 }

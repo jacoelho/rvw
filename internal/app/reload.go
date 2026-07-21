@@ -16,6 +16,13 @@ type diffViewport struct {
 	visualAnchor uint32
 }
 
+type reloadPatchRequirement uint8
+
+const (
+	reloadNoPatch reloadPatchRequirement = iota + 1
+	reloadNeedsPatch
+)
+
 const maxReloadPreparationTries = 8
 
 type ReloadWork struct {
@@ -30,16 +37,14 @@ type ReloadPreparationWork struct {
 	Document *source.Document
 }
 
-type ReloadStage uint8
+type ReloadAcquiredOutcome struct {
+	ID       review.OperationID
+	Document *source.Document
+	Err      error
+}
 
-const (
-	ReloadAcquired ReloadStage = iota + 1
-	ReloadPrepared
-)
-
-type ReloadOutcome struct {
+type ReloadPreparedOutcome struct {
 	ID              review.OperationID
-	Stage           ReloadStage
 	Document        *source.Document
 	Replacement     review.PreparedReplacement
 	AllFiles        []review.FileID
@@ -59,31 +64,47 @@ func (model *Model) startReload() {
 		}
 		return
 	}
-	if model.reloadOperation != 0 || model.reloadDeferred {
+	if model.foreground.reloadActive() {
 		model.notice = &Notice{Kind: NoticeInformation, Text: "reload is already active"}
 		return
 	}
-	if len(model.patchOperations) != 0 {
-		for operationID := range model.patchOperations {
-			model.coordinator.Cancel(operationID)
-		}
-		model.reloadDeferred = true
-		model.notice = &Notice{Kind: NoticeInformation, Text: "waiting for active patch cancellation"}
+	if model.foreground.searchOperation() != 0 {
+		model.notice = &Notice{Kind: NoticeWarning, Text: "reload requires active work to finish"}
 		return
 	}
+	start, cancellations, ready := model.foreground.requestReload()
+	for _, operationID := range cancellations {
+		model.coordinator.Cancel(operationID)
+	}
+	if !ready {
+		if len(cancellations) != 0 {
+			model.notice = &Notice{
+				Kind: NoticeInformation,
+				Text: "waiting for active patch cancellation",
+			}
+		}
+		return
+	}
+	model.beginReload(start)
+}
+
+func (model *Model) beginReload(start foregroundStart) {
 	if model.coordinator.Stats().Accepted != 0 {
 		model.notice = &Notice{Kind: NoticeWarning, Text: "reload requires active work to finish"}
+		model.rejectReloadStart(start)
 		return
 	}
 	operationID, err := review.NewOperationID(model.nextOperation)
 	if err != nil {
 		model.notice = &Notice{Kind: NoticeError, Text: "operation identity exhausted"}
+		model.rejectReloadStart(start)
 		return
 	}
 	model.nextOperation++
 	next, err := model.review.BeginOperation(operationID, review.OperationReload)
 	if err != nil {
 		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
+		model.rejectReloadStart(start)
 		return
 	}
 	if err := model.coordinator.SubmitReload(ReloadWork{
@@ -93,37 +114,45 @@ func (model *Model) startReload() {
 	}); err != nil {
 		model.review = resolveRejectedOperation(next, operationID, err)
 		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
+		model.rejectReloadStart(start)
+		return
+	}
+	if !model.foreground.admitted(start, operationID) {
+		model.coordinator.Cancel(operationID)
+		err := errors.New("foreground reload admission invariant violated")
+		model.review = resolveRejectedOperation(next, operationID, err)
+		model.notice = &Notice{Kind: NoticeError, Text: NoticeText(err.Error())}
 		return
 	}
 	model.review = next
-	model.reloadOperation = operationID
-	model.reloadPreparationTries = 0
 	model.notice = &Notice{Kind: NoticeInformation, Text: "reloading source"}
 }
 
-func (model *Model) applyReloadOutcome(outcome ReloadOutcome) {
-	if outcome.ID == 0 || outcome.ID != model.reloadOperation {
+func (model *Model) rejectReloadStart(start foregroundStart) {
+	effect, ok := model.foreground.rejected(start)
+	if !ok {
+		model.notice = &Notice{Kind: NoticeError, Text: "foreground rejection invariant violated"}
+		return
+	}
+	if start.source == foregroundStartWaitingReload {
+		model.restoreForegroundAfterReloadFailure(effect)
+		return
+	}
+	model.applyForegroundEffect(effect)
+}
+
+func (model *Model) applyReloadAcquired(outcome ReloadAcquiredOutcome) {
+	if !model.foreground.reloadAcquired(outcome.ID) {
 		model.releaseReloadDocument(outcome.Document)
 		model.notice = &Notice{Kind: NoticeWarning, Text: "stale reload outcome"}
 		return
 	}
-	switch outcome.Stage {
-	case ReloadAcquired:
-		model.applyReloadAcquired(outcome)
-	case ReloadPrepared:
-		model.applyReloadPrepared(outcome)
-	default:
-		model.failReload(outcome.Document, errors.New("reload outcome has an invalid stage"))
-	}
-}
-
-func (model *Model) applyReloadAcquired(outcome ReloadOutcome) {
 	if outcome.Err != nil {
-		model.failReload(outcome.Document, outcome.Err)
+		model.failReload(outcome.ID, outcome.Document, outcome.Err)
 		return
 	}
 	if outcome.Document == nil {
-		model.failReload(nil, errors.New("reload acquired no source document"))
+		model.failReload(outcome.ID, nil, errors.New("reload acquired no source document"))
 		return
 	}
 	if err := model.coordinator.SubmitReloadPreparation(ReloadPreparationWork{
@@ -131,29 +160,44 @@ func (model *Model) applyReloadAcquired(outcome ReloadOutcome) {
 		Review:   model.review,
 		Document: outcome.Document,
 	}); err != nil {
-		model.failReload(outcome.Document, err)
+		model.failReload(outcome.ID, outcome.Document, err)
 		return
 	}
-	model.reloadPreparing = true
-	model.reloadPreparationTries = 1
+	if !model.foreground.reloadPreparationAdmitted(outcome.ID) {
+		model.coordinator.Cancel(outcome.ID)
+		model.failReload(
+			outcome.ID,
+			outcome.Document,
+			errors.New("foreground reload preparation invariant violated"),
+		)
+		return
+	}
 	model.notice = &Notice{Kind: NoticeInformation, Text: "reconciling reloaded source"}
 }
 
-func (model *Model) applyReloadPrepared(outcome ReloadOutcome) {
-	model.reloadPreparing = false
+func (model *Model) applyReloadPrepared(outcome ReloadPreparedOutcome) {
+	if !model.foreground.reloadPrepared(outcome.ID) {
+		model.releaseReloadDocument(outcome.Document)
+		model.notice = &Notice{Kind: NoticeWarning, Text: "stale reload outcome"}
+		return
+	}
 	if outcome.Err != nil {
-		model.failReload(outcome.Document, outcome.Err)
+		model.failReload(outcome.ID, outcome.Document, outcome.Err)
 		return
 	}
 	if outcome.Document == nil ||
 		len(outcome.AllFiles) != outcome.Document.Snapshot().FileCount() {
-		model.failReload(outcome.Document, errors.New("reload preparation is incomplete"))
+		model.failReload(
+			outcome.ID,
+			outcome.Document,
+			errors.New("reload preparation is incomplete"),
+		)
 		return
 	}
 	committed, report, err := model.review.CommitReplacement(outcome.Replacement)
 	if err != nil {
 		if errors.Is(err, review.ErrStaleReloadPreparation) &&
-			model.reloadPreparationTries < maxReloadPreparationTries {
+			model.foreground.reloadPreparationAttempts() < maxReloadPreparationTries {
 			if submitErr := model.coordinator.SubmitReloadPreparation(
 				ReloadPreparationWork{
 					ID:       outcome.ID,
@@ -161,8 +205,15 @@ func (model *Model) applyReloadPrepared(outcome ReloadOutcome) {
 					Document: outcome.Document,
 				},
 			); submitErr == nil {
-				model.reloadPreparing = true
-				model.reloadPreparationTries++
+				if !model.foreground.reloadPreparationRetryAdmitted(outcome.ID) {
+					model.coordinator.Cancel(outcome.ID)
+					model.failReload(
+						outcome.ID,
+						outcome.Document,
+						errors.New("foreground reload retry invariant violated"),
+					)
+					return
+				}
 				model.notice = &Notice{
 					Kind: NoticeInformation,
 					Text: "review changed during reload; reconciling latest state",
@@ -172,16 +223,16 @@ func (model *Model) applyReloadPrepared(outcome ReloadOutcome) {
 				err = submitErr
 			}
 		}
-		model.failReload(outcome.Document, err)
+		model.failReload(outcome.ID, outcome.Document, err)
 		return
 	}
 	committed, err = committed.ResolveOperation(
 		outcome.ID,
 		review.OperationSucceeded,
-		review.EmptyOperationDetail,
+		review.EmptyOperationDetail(),
 	)
 	if err != nil {
-		model.failReload(outcome.Document, err)
+		model.failReload(outcome.ID, outcome.Document, err)
 		return
 	}
 	var viewport *diffViewport
@@ -198,6 +249,23 @@ func (model *Model) applyReloadPrepared(outcome ReloadOutcome) {
 				visualAnchor: model.visualAnchor,
 			}
 		}
+	}
+	requirement := reloadNoPatch
+	if hadNewActive {
+		requirement = reloadNeedsPatch
+	}
+	effect, settled := model.foreground.finishReloadSuccess(
+		outcome.ID,
+		viewport,
+		requirement,
+	)
+	if !settled {
+		model.releaseReloadDocument(outcome.Document)
+		model.notice = &Notice{
+			Kind: NoticeError,
+			Text: "foreground reload completion invariant violated",
+		}
+		return
 	}
 
 	oldDocument := model.document
@@ -227,15 +295,12 @@ func (model *Model) applyReloadPrepared(outcome ReloadOutcome) {
 		model.fileOrder = model.visibleFileOrder
 	}
 	model.selectTreeCursor()
-	model.reloadViewport = viewport
 	if viewport == nil {
 		model.diffTop = 0
 		model.diffCursor = 0
 		model.visualAnchor = 0
 	}
 	model.commentCursor = min(model.commentCursor, max(model.commentRowCount()-1, 0))
-	model.reloadOperation = 0
-	model.reloadPreparationTries = 0
 
 	if err := model.coordinator.ReleaseDocument(oldDocument); err != nil {
 		model.retainDocumentForCleanup(oldDocument)
@@ -255,7 +320,11 @@ func (model *Model) applyReloadPrepared(outcome ReloadOutcome) {
 			),
 		}
 	}
-	model.requestActivePatch()
+	if requirement == reloadNeedsPatch {
+		model.requestActivePatch()
+	} else {
+		model.applyForegroundEffect(effect)
+	}
 }
 
 func sameFileContentIdentity(left, right review.File) bool {
@@ -272,24 +341,44 @@ func sameFileContentIdentity(left, right review.File) bool {
 	return compared
 }
 
-func (model *Model) failReload(document *source.Document, err error) {
-	model.reloadPreparing = false
-	model.reloadPreparationTries = 0
-	operationID := model.reloadOperation
-	model.reloadOperation = 0
+func (model *Model) failReload(
+	id review.OperationID,
+	document *source.Document,
+	err error,
+) {
+	operationID, effect, tracked := model.foreground.finishReloadFailure(id)
 	model.releaseReloadDocument(document)
-	if operationID != 0 {
+	if tracked {
 		status := operationStatusForWorkError(err)
 		if resolveErr := model.settleOperation(
 			operationID,
 			status,
 			boundedOperationDetail(err.Error()),
 		); resolveErr != nil {
+			model.restoreForegroundAfterReloadFailure(effect)
 			model.notice = operationTransitionNotice(resolveErr)
 			return
 		}
 	}
+	model.restoreForegroundAfterReloadFailure(effect)
 	model.notice = &Notice{Kind: NoticeError, Text: NoticeText(err.Error())}
+}
+
+func (model *Model) restoreForegroundAfterReloadFailure(effect foregroundEffect) {
+	model.applyForegroundEffect(effect)
+	model.resumeActivePatchAfterReloadFailure()
+}
+
+func (model *Model) resumeActivePatchAfterReloadFailure() {
+	active, ok := model.review.ActiveFile()
+	if !ok || model.review.Patch(active).Status == review.PatchReady {
+		return
+	}
+	if model.review.Patch(active).Status == review.PatchPending &&
+		model.foreground.patchCount() == 0 {
+		model.review = model.review.DropPatch(active)
+	}
+	model.requestActivePatch()
 }
 
 func (model *Model) releaseReloadDocument(document *source.Document) {

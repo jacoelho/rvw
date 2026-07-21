@@ -228,7 +228,7 @@ func (coordinator *Coordinator) runPublicationCheck(job publicationJob) {
 	_ = coordinator.ReportProgress(Progress{
 		ID:     job.check.ID,
 		Total:  2,
-		Detail: "preparing publication",
+		Detail: boundedOperationDetail("preparing publication"),
 	})
 	prepared, err := job.check.Review.PreparePublication(job.check.Request.Options)
 	if err == nil {
@@ -236,7 +236,7 @@ func (coordinator *Coordinator) runPublicationCheck(job publicationJob) {
 			ID:        job.check.ID,
 			Completed: 1,
 			Total:     2,
-			Detail:    "checking immutable GitHub target",
+			Detail:    boundedOperationDetail("checking immutable GitHub target"),
 		})
 		var checked *review.CheckedPublication
 		checked, err = coordinator.service.CheckPublication(
@@ -245,29 +245,21 @@ func (coordinator *Coordinator) runPublicationCheck(job publicationJob) {
 			prepared,
 		)
 		if err == nil {
-			coordinator.complete(Outcome{
-				kind: OutcomePublication,
-				publication: PublicationOutcome{
-					ID:    job.check.ID,
-					Stage: PublicationCheckCompleted,
-					Check: review.PublicationCheckResult{
-						Operation: job.check.Request.Operation,
-						Workspace: job.check.Request.Workspace,
-						Source:    job.check.Request.Source,
-						Checked:   checked,
-					},
+			coordinator.complete(PublicationCheckOutcome{
+				ID: job.check.ID,
+				Check: review.PublicationCheckResult{
+					Operation: job.check.Request.Operation,
+					Workspace: job.check.Request.Workspace,
+					Source:    job.check.Request.Source,
+					Checked:   checked,
 				},
 			})
 			return
 		}
 	}
-	coordinator.complete(Outcome{
-		kind: OutcomePublication,
-		publication: PublicationOutcome{
-			ID:    job.check.ID,
-			Stage: PublicationCheckCompleted,
-			Err:   err,
-		},
+	coordinator.complete(PublicationCheckOutcome{
+		ID:  job.check.ID,
+		Err: err,
 	})
 }
 
@@ -279,12 +271,12 @@ func (coordinator *Coordinator) runPublicationCommit(job publicationJob) {
 	}
 	if !job.permit.claim() {
 		result.Disposition = review.PublicationDispositionCancelledBeforeCommit
-		result.Detail = "publication cancelled before remote commit"
+		result.Detail = boundedOperationDetail("publication cancelled before remote commit")
 	} else {
 		_ = coordinator.ReportProgress(Progress{
 			ID:     job.publication.ID,
 			Total:  1,
-			Detail: "committing GitHub review",
+			Detail: boundedOperationDetail("committing GitHub review"),
 		})
 		commit := coordinator.service.Publish(
 			job.ctx,
@@ -294,13 +286,9 @@ func (coordinator *Coordinator) runPublicationCommit(job publicationJob) {
 		result.RemoteReview = commit.RemoteReview
 		result.Detail = commit.Detail
 	}
-	coordinator.complete(Outcome{
-		kind: OutcomePublication,
-		publication: PublicationOutcome{
-			ID:          job.publication.ID,
-			Stage:       PublicationCommitCompleted,
-			Publication: result,
-		},
+	coordinator.complete(PublicationCommitOutcome{
+		ID:          job.publication.ID,
+		Publication: result,
 	})
 }
 
@@ -308,18 +296,14 @@ func (coordinator *Coordinator) runPublicationReconciliation(job publicationJob)
 	_ = coordinator.ReportProgress(Progress{
 		ID:     job.reconciliation.ID,
 		Total:  1,
-		Detail: "enumerating GitHub review history",
+		Detail: boundedOperationDetail("enumerating GitHub review history"),
 	})
 	result := coordinator.service.ReconcilePublication(
 		job.ctx,
 		job.reconciliation.Request,
 	)
-	coordinator.complete(Outcome{
-		kind: OutcomePublication,
-		publication: PublicationOutcome{
-			ID:             job.reconciliation.ID,
-			Stage:          PublicationReconciliationCompleted,
-			Reconciliation: result,
-		},
+	coordinator.complete(ReconciliationOutcome{
+		ID:             job.reconciliation.ID,
+		Reconciliation: result,
 	})
 }

@@ -458,7 +458,7 @@ func NewSettings(request SettingsRequest) (Settings, error) {
 	if _, err := review.NewSyntaxSelector(syntaxSelector.String()); err != nil {
 		return Settings{}, fmt.Errorf("syntax selector: %w", err)
 	}
-	if exportTemplates.Bytes() == 0 {
+	if !exportTemplates.Ready() {
 		return Settings{}, errors.New("export templates are required")
 	}
 	validatedPublication, err := review.NewPublicationOptions(

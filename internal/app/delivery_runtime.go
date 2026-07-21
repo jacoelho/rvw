@@ -7,12 +7,9 @@ func (coordinator *Coordinator) runDeliveryWorker() {
 		coordinator.required.wait(job.work.ID)
 		payload, payloadErr := delivery.NewPayload(job.work.Prepared.Body())
 		if payloadErr != nil {
-			coordinator.complete(Outcome{
-				kind: OutcomeDelivery,
-				delivery: DeliveryOutcome{
-					ID:  job.work.ID,
-					Err: payloadErr,
-				},
+			coordinator.complete(DeliveryOutcome{
+				ID:  job.work.ID,
+				Err: payloadErr,
 			})
 			continue
 		}
@@ -21,13 +18,10 @@ func (coordinator *Coordinator) runDeliveryWorker() {
 			job.work.Destination,
 			payload,
 		)
-		coordinator.complete(Outcome{
-			kind: OutcomeDelivery,
-			delivery: DeliveryOutcome{
-				ID:      job.work.ID,
-				Outcome: outcome,
-				Err:     err,
-			},
+		coordinator.complete(DeliveryOutcome{
+			ID:      job.work.ID,
+			Outcome: outcome,
+			Err:     err,
 		})
 	}
 }

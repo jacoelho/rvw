@@ -46,7 +46,7 @@ func TestCommentIdentityDoesNotChangeAfterDeletion(t *testing.T) {
 
 func TestFileSelectionDoesNotActivateUntilExplicitlyRequested(t *testing.T) {
 	current := testReview(t, testSnapshot(t, 1, "a.go", "b.go"))
-	next, err := current.MoveFileSelection(NavigateNext, 1)
+	next, err := current.SelectFile(1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,6 +381,7 @@ func TestReplaceSnapshotReconcilesUnambiguousRenameAliases(t *testing.T) {
 
 func TestOperationsAreCapacityAndDetailBounded(t *testing.T) {
 	current := testReview(t, testSnapshot(t, 1, "one.go"))
+	done := mustOperationDetail("done")
 	for index := uint64(1); index <= MaxStatusRecords+32; index++ {
 		id, _ := NewOperationID(index)
 		var err error
@@ -388,7 +389,7 @@ func TestOperationsAreCapacityAndDetailBounded(t *testing.T) {
 		if err != nil {
 			t.Fatalf("begin operation %d: %v", index, err)
 		}
-		current, err = current.ResolveOperation(id, OperationSucceeded, "done")
+		current, err = current.ResolveOperation(id, OperationSucceeded, done)
 		if err != nil {
 			t.Fatalf("resolve operation %d: %v", index, err)
 		}
@@ -401,18 +402,6 @@ func TestOperationsAreCapacityAndDetailBounded(t *testing.T) {
 		t.Fatal("oldest settled status was not retired")
 	}
 
-	id, _ := NewOperationID(MaxStatusRecords + 33)
-	next, err := current.BeginOperation(id, OperationPatch)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := next.ResolveOperation(
-		id,
-		OperationFailed,
-		OperationDetail(strings.Repeat("x", int(MaxOperationDetail)+1)),
-	); err == nil {
-		t.Fatal("oversized operation detail was accepted")
-	}
 }
 
 func saveTestComment(

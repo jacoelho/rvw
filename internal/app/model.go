@@ -162,23 +162,12 @@ type Model struct {
 	statusTop            int
 
 	nextOperation          uint64
-	patchOperations        map[review.OperationID]review.FileID
+	foreground             foregroundState
 	operationProgress      map[review.OperationID]Progress
 	exportOperations       map[review.OperationID]exportRequest
 	deliveryOperations     map[review.OperationID]delivery.Destination
-	deferredPatch          *review.FileID
-	reloadOperation        review.OperationID
-	reloadDeferred         bool
-	reloadPreparing        bool
-	reloadPreparationTries uint8
-	reloadViewport         *diffViewport
 	pendingStdout          *review.PreparedExport
-	searchOperation        review.OperationID
-	pendingSearch          *pendingSearch
-	pendingPatchContext    *review.PatchContext
 	searchCursor           int
-	pendingSearchHit       *review.SearchHit
-	clearSearchAfterCancel bool
 	syntaxOperation        review.OperationID
 	syntaxFile             review.FileID
 	syntaxOld              *review.PreparedSyntax
@@ -195,11 +184,17 @@ type Model struct {
 	confirmation           confirmation
 	exportPicker           exportSelection
 
-	chord              []string
-	chordGeneration    uint64
+	chord              pendingKeyChord
 	repeat             uint16
 	treeMovePending    int
 	treeMoveGeneration uint64
+}
+
+type pendingKeyChord struct {
+	strokes    []string
+	context    KeyContext
+	focus      KeyFocus
+	generation uint64
 }
 
 func NewModel(
@@ -248,7 +243,7 @@ func NewModel(
 		commentsVisible:     false,
 		fileTreeVisible:     true,
 		nextOperation:       1,
-		patchOperations:     make(map[review.OperationID]review.FileID),
+		foreground:          newForegroundState(),
 		operationProgress:   make(map[review.OperationID]Progress),
 		exportOperations:    make(map[review.OperationID]exportRequest),
 		deliveryOperations:  make(map[review.OperationID]delivery.Destination),
@@ -293,11 +288,11 @@ func (model *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			model.help.SetWidth(message.Width)
 			model.resizeCommentEditor()
 			model.resizePrompts()
+			model.clampFocus()
 			model.clampDiffTop()
 		}
 		if wasBelowMinimum != model.belowMinimum() {
-			model.chord = nil
-			model.repeat = 0
+			model.abandonChord()
 		}
 	case initializeMsg:
 		if !model.initialized {
@@ -307,8 +302,9 @@ func (model *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case mouseActionMsg:
 		var mouseCommand tea.Cmd
 		if message.reviewState == model.review.StateRevision() &&
-			model.mode == ModeNormal && model.overlay == OverlayNone && !model.belowMinimum() {
-			model.focus = message.focus
+			model.mode == ModeNormal && model.overlay == OverlayNone && !model.belowMinimum() &&
+			model.focusVisible(message.focus) {
+			model.setFocus(message.focus)
 			model.focusReturn = 0
 			if message.delta != 0 {
 				mouseCommand = model.move(message.delta)
@@ -337,7 +333,7 @@ func (model *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return model, command
 	case tea.KeyPressMsg:
 		var command tea.Cmd
-		if model.belowMinimum() && model.overlay != OverlayConfirm {
+		if model.belowMinimum() {
 			command = model.handleKey(message)
 		} else if model.mode == ModeCommentEdit {
 			command = model.handleCommentEditorKey(message)
@@ -354,9 +350,8 @@ func (model *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		model.refreshCoordinatorStats()
 		return model, command
 	case chordTimeoutMsg:
-		if message.generation == model.chordGeneration {
-			model.chord = nil
-			model.repeat = 0
+		if message.generation == model.chord.generation && len(model.chord.strokes) != 0 {
+			model.abandonChord()
 		}
 	}
 	model.refreshCoordinatorStats()
@@ -433,119 +428,144 @@ func (model *Model) handleReady(message outcomeReadyMsg) tea.Cmd {
 }
 
 func (model *Model) applyOutcome(outcome Outcome) tea.Cmd {
-	if progress, ok := outcome.Progress(); ok {
+	if progress, ok := outcome.(Progress); ok {
 		model.operationProgress[progress.ID] = progress
 		return nil
 	}
 	delete(model.operationProgress, outcome.operationID())
-	patch, ok := outcome.Patch()
-	if ok {
-		model.applyPatchOutcome(patch)
+	switch outcome := outcome.(type) {
+	case PatchOutcome:
+		model.applyPatchOutcome(outcome)
+		return nil
+	case SearchOutcome:
+		model.applySearchOutcome(outcome)
+		return nil
+	case PublicationCheckOutcome:
+		model.applyPublicationCheckOutcome(outcome)
+		return nil
+	case PublicationCommitOutcome:
+		model.applyPublicationCommitOutcome(outcome)
+		return nil
+	case ReconciliationOutcome:
+		model.applyReconciliationOutcome(outcome)
+		return nil
+	case SyntaxOutcome:
+		model.applySyntaxOutcome(outcome)
+		return nil
+	case ExportOutcome:
+		return model.applyExportOutcome(outcome)
+	case ReloadAcquiredOutcome:
+		model.applyReloadAcquired(outcome)
+		return nil
+	case ReloadPreparedOutcome:
+		model.applyReloadPrepared(outcome)
+		return nil
+	case FileTreeOutcome:
+		return model.applyFileFilterTree(outcome)
+	case WorkspaceIndexOutcome:
+		model.applyWorkspaceIndex(outcome)
+		return nil
+	case DeliveryOutcome:
+		model.applyDeliveryOutcome(outcome)
+		return nil
+	default:
+		model.notice = &Notice{Kind: NoticeError, Text: "unknown work outcome"}
 		return nil
 	}
-	if search, ok := outcome.Search(); ok {
-		model.applySearchOutcome(search)
-		return nil
-	}
-	if publication, ok := outcome.Publication(); ok {
-		model.applyPublicationOutcome(publication)
-		return nil
-	}
-	if syntax, ok := outcome.Syntax(); ok {
-		model.applySyntaxOutcome(syntax)
-		return nil
-	}
-	if export, ok := outcome.Export(); ok {
-		return model.applyExportOutcome(export)
-	}
-	if reload, ok := outcome.Reload(); ok {
-		model.applyReloadOutcome(reload)
-		return nil
-	}
-	if tree, ok := outcome.FileTree(); ok {
-		return model.applyFileFilterTree(tree)
-	}
-	if index, ok := outcome.WorkspaceIndex(); ok {
-		model.applyWorkspaceIndex(index)
-		return nil
-	}
-	if deliveryOutcome, ok := outcome.Delivery(); ok {
-		model.applyDeliveryOutcome(deliveryOutcome)
-		return nil
-	}
-	model.notice = &Notice{Kind: NoticeError, Text: "unknown work outcome"}
-	return nil
 }
 
 func (model *Model) applyPatchOutcome(patch PatchOutcome) {
-	fileID, tracked := model.patchOperations[patch.ID]
-	delete(model.patchOperations, patch.ID)
+	fileID, tracked, effect := model.foreground.completePatch(patch.ID)
 	if !tracked {
 		model.notice = &Notice{Kind: NoticeWarning, Text: "stale patch outcome"}
 		return
 	}
 	status := review.OperationFailed
-	detail := review.EmptyOperationDetail
+	detail := review.EmptyOperationDetail()
+	result := patch.Result
 	if patch.Err != nil {
 		detail = boundedOperationDetail(patch.Err.Error())
 		model.notice = &Notice{Kind: NoticeError, Text: NoticeText(patch.Err.Error())}
+		result = model.patchFailureResult(
+			fileID,
+			patchStatusForWorkError(patch.Err),
+			patch.Err,
+		)
+	}
+	next, applyErr := model.review.ApplyPatch(result)
+	if applyErr != nil && patch.Err == nil {
+		detail = boundedOperationDetail(applyErr.Error())
+		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(applyErr.Error())}
+		result = model.patchFailureResult(fileID, review.PatchFailed, applyErr)
+		next, applyErr = model.review.ApplyPatch(result)
+	}
+	if applyErr != nil {
+		detail = boundedOperationDetail(applyErr.Error())
+		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(applyErr.Error())}
 	} else {
-		var err error
-		model.review, err = model.review.ApplyPatch(patch.Result)
-		if err != nil {
-			detail = boundedOperationDetail(err.Error())
-			model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
-		} else {
-			status = operationStatusForPatch(patch.Result.Status)
-			detail = boundedOperationDetail(patch.Result.Detail.String())
-			if model.review.RetainedPatchBytes() > MaxPresentationCacheBytes {
-				model.review = model.review.DropPatch(fileID)
-				status = review.OperationLimited
-				detail = "patch presentation cache capacity reached"
-				model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(detail)}
-			}
+		model.review = next
+		status = operationStatusForPatch(result.Status)
+		if patch.Err == nil {
+			detail = boundedOperationDetail(result.Detail.String())
+		}
+		if model.review.RetainedPatchBytes() > MaxPresentationCacheBytes {
+			model.review = model.review.DropPatch(fileID)
+			status = review.OperationLimited
+			detail = boundedOperationDetail("patch presentation cache capacity reached")
+			model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(detail.String())}
 		}
 	}
 	if next, err := model.review.ResolveOperation(patch.ID, status, detail); err == nil {
 		model.review = next
 	}
 	if active, exists := model.review.ActiveFile(); exists && active == fileID &&
-		patch.Result.Status == review.PatchReady {
-		if model.reloadViewport != nil && model.reloadViewport.file == fileID {
-			model.diffTop = model.reloadViewport.top
-			model.diffCursor = model.reloadViewport.cursor
-			model.visualAnchor = model.reloadViewport.visualAnchor
-			model.reloadViewport = nil
+		result.Status == review.PatchReady {
+		if viewport, ok := model.foreground.takeReloadViewport(fileID); ok {
+			model.diffTop = viewport.top
+			model.diffCursor = viewport.cursor
+			model.visualAnchor = viewport.visualAnchor
 			model.moveDiff(0)
 		} else {
 			model.diffTop = 0
 			model.diffCursor = 0
 		}
-		if model.pendingSearchHit != nil &&
-			model.pendingSearchHit.FileID() == fileID {
-			model.diffCursor = model.pendingSearchHit.PatchLine()
-			model.pendingSearchHit = nil
+		if hit, ok := model.foreground.takePendingSearchHit(fileID); ok {
+			model.diffCursor = hit.PatchLine()
 			model.moveDiff(0)
 		}
 		model.requestSyntax()
 	} else if active, exists := model.review.ActiveFile(); exists && active == fileID {
-		model.reloadViewport = nil
+		model.foreground.clearReloadViewport(fileID)
 	}
-	if model.reloadDeferred && len(model.patchOperations) == 0 {
-		model.reloadDeferred = false
-		model.deferredPatch = nil
-		model.startReload()
-	} else if model.pendingSearch != nil && len(model.patchOperations) == 0 {
-		pending := *model.pendingSearch
-		model.pendingSearch = nil
-		model.deferredPatch = nil
-		model.beginSearch(pending.query, pending.scope)
-	} else if model.deferredPatch != nil && len(model.patchOperations) == 0 {
-		if patch.Result.Status == review.PatchReady {
-			model.review = model.review.DropPatch(fileID)
-		}
-		model.deferredPatch = nil
-		model.requestActivePatch()
+	if effect.kind == foregroundEffectRequestPatch &&
+		result.Status == review.PatchReady {
+		model.review = model.review.DropPatch(fileID)
+	}
+	model.applyForegroundEffect(effect)
+}
+
+func (model *Model) patchFailureResult(
+	fileID review.FileID,
+	status review.PatchStatus,
+	failure error,
+) review.PatchResult {
+	file, _ := model.review.Snapshot().File(fileID)
+	return review.PatchResult{
+		Workspace: model.review.WorkspaceRevision(),
+		Handle:    file.PatchHandle(),
+		Status:    status,
+		Detail:    review.PatchDetail(boundedOperationDetail(failure.Error()).String()),
+	}
+}
+
+func patchStatusForWorkError(err error) review.PatchStatus {
+	switch operationStatusForWorkError(err) {
+	case review.OperationCancelled:
+		return review.PatchCancelled
+	case review.OperationLimited:
+		return review.PatchLimited
+	default:
+		return review.PatchFailed
 	}
 }
 
@@ -569,26 +589,33 @@ func (model *Model) requestActivePatch() {
 	if !ok {
 		return
 	}
-	if len(model.patchOperations) != 0 {
-		for operationID := range model.patchOperations {
-			model.coordinator.Cancel(operationID)
-		}
-		model.deferredPatch = new(fileID)
+	start, cancellations, ready := model.foreground.requestPatch(fileID)
+	for _, operationID := range cancellations {
+		model.coordinator.Cancel(operationID)
+	}
+	if !ready {
 		return
 	}
-	next, request, err := model.review.RequestPatch(fileID, model.settings.patchContext)
+	model.beginPatch(start)
+}
+
+func (model *Model) beginPatch(start foregroundStart) {
+	next, request, err := model.review.RequestPatch(start.file, model.settings.patchContext)
 	if err != nil {
+		model.rejectAndApplyForegroundStart(start)
 		return
 	}
 	operationID, err := review.NewOperationID(model.nextOperation)
 	if err != nil {
 		model.notice = &Notice{Kind: NoticeError, Text: "operation identity exhausted"}
+		model.rejectAndApplyForegroundStart(start)
 		return
 	}
 	model.nextOperation++
 	next, err = next.BeginOperation(operationID, review.OperationPatch)
 	if err != nil {
 		model.notice = &Notice{Kind: NoticeError, Text: NoticeText(err.Error())}
+		model.rejectAndApplyForegroundStart(start)
 		return
 	}
 	if err := model.coordinator.SubmitPatch(PatchWork{
@@ -617,10 +644,64 @@ func (model *Model) requestActivePatch() {
 			}
 		}
 		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
+		model.rejectAndApplyForegroundStart(start)
+		return
+	}
+	if !model.foreground.admitted(start, operationID) {
+		model.coordinator.Cancel(operationID)
+		err := errors.New("foreground patch admission invariant violated")
+		model.review = resolveRejectedOperation(next, operationID, err)
+		model.notice = &Notice{Kind: NoticeError, Text: NoticeText(err.Error())}
 		return
 	}
 	model.review = next
-	model.patchOperations[operationID] = fileID
+}
+
+func (model *Model) rejectAndApplyForegroundStart(start foregroundStart) {
+	effect, ok := model.foreground.rejected(start)
+	if !ok {
+		model.notice = &Notice{
+			Kind: NoticeError,
+			Text: "foreground rejection invariant violated",
+		}
+		return
+	}
+	model.applyForegroundEffect(effect)
+}
+
+func (model *Model) applyForegroundEffect(effect foregroundEffect) {
+	switch effect.kind {
+	case foregroundEffectNone:
+		return
+	case foregroundEffectRequestPatch:
+		start, ok := model.foreground.preparePatch(effect.file)
+		if !ok {
+			model.notice = &Notice{Kind: NoticeError, Text: "foreground patch continuation invariant violated"}
+			return
+		}
+		model.beginPatch(start)
+	case foregroundEffectStartSearch:
+		start, ok := model.foreground.prepareSearch(effect.search)
+		if !ok {
+			model.notice = &Notice{Kind: NoticeError, Text: "foreground search continuation invariant violated"}
+			return
+		}
+		model.beginSearch(start)
+	case foregroundEffectStartReload:
+		start, ok := model.foreground.prepareReload()
+		if !ok {
+			model.notice = &Notice{Kind: NoticeError, Text: "foreground reload continuation invariant violated"}
+			return
+		}
+		model.beginReload(start)
+	case foregroundEffectApplyPatchContext:
+		model.review = model.review.ClearSearch()
+		model.applyPatchContext(effect.context)
+	case foregroundEffectClearSearch:
+		model.review = model.review.ClearSearch()
+		model.searchCursor = 0
+		model.notice = &Notice{Kind: NoticeInformation, Text: "search cleared"}
+	}
 }
 
 func (model *Model) handleKey(message tea.KeyPressMsg) tea.Cmd {
@@ -628,11 +709,16 @@ func (model *Model) handleKey(message tea.KeyPressMsg) tea.Cmd {
 	if stroke == "" {
 		return nil
 	}
-	if model.reloadPreparing {
-		if action, exact, _ := model.resolveAction([]string{stroke}); exact &&
-			(action == KeyActionQuit || action == KeyActionInterrupt ||
-				action == KeyActionCancel) {
-			return model.applyAction(action, 1)
+	if model.foreground.reloadIsPreparing() {
+		if action, consumed, command := model.resolveKeyStroke(stroke); consumed {
+			if action == KeyActionNone {
+				return command
+			}
+			repeat := model.takeRepeat(action)
+			if action == KeyActionQuit || action == KeyActionInterrupt ||
+				action == KeyActionCancel {
+				return model.applyAction(action, repeat)
+			}
 		}
 		model.notice = &Notice{
 			Kind: NoticeInformation,
@@ -640,33 +726,82 @@ func (model *Model) handleKey(message tea.KeyPressMsg) tea.Cmd {
 		}
 		return nil
 	}
+	model.invalidateChordForOwnerChange()
 	if model.acceptRepeatDigit(stroke) {
 		return nil
 	}
-	if action, exact, prefix := model.resolveAction(append(model.chord, stroke)); exact {
-		model.chord = nil
+	if action, consumed, command := model.resolveKeyStroke(stroke); consumed {
+		if action == KeyActionNone {
+			return command
+		}
 		return model.applyAction(action, model.takeRepeat(action))
-	} else if prefix {
-		model.chord = append(model.chord, stroke)
-		model.chordGeneration++
-		return chordTimeoutCmd(model.commandContext, model.chordGeneration)
 	}
-	model.chord = nil
 	model.repeat = 0
-	if action, exact, prefix := model.resolveAction([]string{stroke}); exact {
-		return model.applyAction(action, 1)
-	} else if prefix {
-		model.chord = []string{stroke}
-		model.chordGeneration++
-		return chordTimeoutCmd(model.commandContext, model.chordGeneration)
-	}
 	return nil
+}
+
+// resolveKeyStroke owns chord accumulation for every key context. A pending
+// prefix is consumed; when it fails to extend, the current stroke is retried as
+// the start of a new chord so modal text inputs receive only unbound strokes.
+func (model *Model) resolveKeyStroke(stroke string) (KeyAction, bool, tea.Cmd) {
+	if stroke == "" {
+		return KeyActionNone, false, nil
+	}
+	model.invalidateChordForOwnerChange()
+	if action, exact, prefix := model.resolveAction(append(model.chord.strokes, stroke)); exact {
+		model.completeChord()
+		return action, true, nil
+	} else if prefix {
+		model.chord.strokes = append(model.chord.strokes, stroke)
+		if len(model.chord.strokes) == 1 {
+			model.chord.context = model.keyContext()
+			model.chord.focus = model.configFocus()
+		}
+		model.chord.generation++
+		return KeyActionNone, true,
+			chordTimeoutCmd(model.commandContext, model.chord.generation)
+	}
+	model.abandonChord()
+	if action, exact, prefix := model.resolveAction([]string{stroke}); exact {
+		return action, true, nil
+	} else if prefix {
+		model.chord.strokes = []string{stroke}
+		model.chord.context = model.keyContext()
+		model.chord.focus = model.configFocus()
+		model.chord.generation++
+		return KeyActionNone, true,
+			chordTimeoutCmd(model.commandContext, model.chord.generation)
+	}
+	return KeyActionNone, false, nil
+}
+
+func (model *Model) invalidateChordForOwnerChange() {
+	if len(model.chord.strokes) == 0 ||
+		model.chord.context == model.keyContext() &&
+			model.chord.focus == model.configFocus() {
+		return
+	}
+	model.abandonChord()
+}
+
+func (model *Model) completeChord() {
+	if len(model.chord.strokes) != 0 {
+		model.chord.generation++
+	}
+	model.chord.strokes = nil
+	model.chord.context = ""
+	model.chord.focus = ""
+}
+
+func (model *Model) abandonChord() {
+	model.completeChord()
+	model.repeat = 0
 }
 
 func (model *Model) acceptRepeatDigit(stroke string) bool {
 	if model.belowMinimum() || model.overlay != OverlayNone ||
 		model.mode != ModeNormal && model.mode != ModeVisual ||
-		len(model.chord) != 0 || len(stroke) != 1 ||
+		len(model.chord.strokes) != 0 || len(stroke) != 1 ||
 		stroke[0] < '0' || stroke[0] > '9' {
 		return false
 	}
@@ -711,7 +846,10 @@ func repeatableAction(action KeyAction) bool {
 
 func (model *Model) handleCommentEditorKey(message tea.KeyPressMsg) tea.Cmd {
 	stroke := normalizeStroke(message.String())
-	if action, exact, _ := model.resolveAction([]string{stroke}); exact {
+	if action, consumed, command := model.resolveKeyStroke(stroke); consumed {
+		if action == KeyActionNone {
+			return command
+		}
 		switch action {
 		case KeyActionDeleteBackward:
 			return model.updateCommentEditor(tea.KeyPressMsg(tea.Key{Code: tea.KeyBackspace}))
@@ -781,11 +919,11 @@ func (model *Model) resolveAction(strokes []string) (KeyAction, bool, bool) {
 }
 
 func (model *Model) keyContext() KeyContext {
-	if model.overlay == OverlayConfirm {
-		return KeyContextConfirm
-	}
 	if model.belowMinimum() {
 		return KeyContextMinimumSize
+	}
+	if model.overlay == OverlayConfirm {
+		return KeyContextConfirm
 	}
 	switch {
 	case model.mode == ModeVisual:

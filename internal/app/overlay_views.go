@@ -10,8 +10,18 @@ import (
 func (model *Model) minimumView(width, height int) string {
 	line := "rvw needs at least 20×6; current " +
 		fmt.Sprintf("%d×%d", model.size.Width, model.size.Height)
+	lines := make([]string, 0, 4)
+	if model.overlay == OverlayConfirm {
+		if height == 1 {
+			lines = append(lines, "decision pending; resize to decide")
+		} else {
+			lines = append(lines, "decision pending", "resize to decide")
+		}
+	}
+	lines = append(lines, line)
 	controls := model.bindingSummary(KeyContextMinimumSize)
-	return constrainedLines([]string{line, controls}, width, height)
+	lines = append(lines, controls)
+	return constrainedLines(lines, width, height)
 }
 
 func (model *Model) helpView(width, height int) string {
@@ -40,7 +50,7 @@ func (model *Model) statusView(width, height int) string {
 				operation.Kind.String(),
 				operation.Status.String(),
 			)
-			if operation.Detail != review.EmptyOperationDetail {
+			if !operation.Detail.IsEmpty() {
 				line += " — " + operation.Detail.String()
 			} else if progress, ok := model.operationProgress[operation.ID]; ok {
 				if progress.Total != 0 {
@@ -50,7 +60,7 @@ func (model *Model) statusView(width, height int) string {
 						progress.Total,
 					)
 				}
-				if progress.Detail != review.EmptyOperationDetail {
+				if !progress.Detail.IsEmpty() {
 					line += " " + progress.Detail.String()
 				}
 			}
@@ -82,7 +92,7 @@ func (model *Model) statusFactLines() []string {
 	publication := model.review.PublicationSummary()
 	if publication.Status != review.PublicationIdle {
 		lines = append(lines, "", "publication          "+publication.Status.String())
-		if publication.Detail != review.EmptyOperationDetail {
+		if !publication.Detail.IsEmpty() {
 			lines = append(lines, "publication detail   "+publication.Detail.String())
 		}
 		if publication.Marker != "" {
@@ -100,7 +110,7 @@ func (model *Model) statusFactLines() []string {
 				remoteThreads.Count,
 			),
 		)
-		if remoteThreads.Detail != review.EmptyOperationDetail {
+		if !remoteThreads.Detail.IsEmpty() {
 			lines = append(lines, "remote thread detail "+remoteThreads.Detail.String())
 		}
 	}

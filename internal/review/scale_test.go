@@ -21,7 +21,42 @@ var (
 	scalePublicationSink *CheckedPublication
 	scaleSearchHitsSink  int
 	scaleSyntaxSink      *PreparedSyntax
+	scaleReviewSink      Review
+	scaleFileSink        File
 )
+
+func BenchmarkNewReview100000Files(b *testing.B) {
+	snapshot := scaleReviewWithFiles(b, MaxFiles).Snapshot()
+	kind, err := NewCommentKind("issue")
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		current, err := NewReview(snapshot, []CommentKind{kind})
+		if err != nil {
+			b.Fatal(err)
+		}
+		scaleReviewSink = current
+	}
+}
+
+func BenchmarkTraverseSnapshot100000Files(b *testing.B) {
+	snapshot := scaleReviewWithFiles(b, MaxFiles).Snapshot()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		count := 0
+		for file := range snapshot.AllFiles() {
+			scaleFileSink = file
+			count++
+		}
+		if count != MaxFiles {
+			b.Fatalf("traversed files = %d, want %d", count, MaxFiles)
+		}
+	}
+}
 
 func BenchmarkTakePatchLargeFile(b *testing.B) {
 	patchText := scalePatchText(scaleFileLines)

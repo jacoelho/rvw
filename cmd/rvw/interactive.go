@@ -306,33 +306,9 @@ func interactiveSettings(resolved config.Config) (app.Settings, error) {
 	if err != nil {
 		return app.Settings{}, err
 	}
-	keybindings := make([]app.Keybinding, 0, len(ui.Keybindings))
-	for index, binding := range ui.Keybindings {
-		if binding.Unbind {
-			continue
-		}
-		contextName, err := app.NewKeyContext(binding.Context.String())
-		if err != nil {
-			return app.Settings{}, fmt.Errorf("keybinding %d context: %w", index+1, err)
-		}
-		focus, err := app.NewKeyFocus(binding.Focus.String())
-		if err != nil {
-			return app.Settings{}, fmt.Errorf("keybinding %d focus: %w", index+1, err)
-		}
-		chord, err := app.NewKeyChord(binding.Chord.String())
-		if err != nil {
-			return app.Settings{}, fmt.Errorf("keybinding %d chord: %w", index+1, err)
-		}
-		action, err := app.NewKeyAction(binding.Action.String())
-		if err != nil {
-			return app.Settings{}, fmt.Errorf("keybinding %d action: %w", index+1, err)
-		}
-		keybindings = append(keybindings, app.Keybinding{
-			Context: contextName,
-			Focus:   focus,
-			Chord:   chord,
-			Action:  action,
-		})
+	keybindings, err := interactiveKeybindings(ui.Keybindings)
+	if err != nil {
+		return app.Settings{}, err
 	}
 	paletteValues := make(map[app.PaletteRole]string)
 	if theme, ok := resolved.Theme(activeTheme); ok {
@@ -386,4 +362,36 @@ func interactiveSettings(resolved config.Config) (app.Settings, error) {
 		Keybindings:     keybindings,
 		Palette:         palette,
 	})
+}
+
+func interactiveKeybindings(bindings []config.Keybinding) ([]app.Keybinding, error) {
+	keybindings := make([]app.Keybinding, 0, len(bindings))
+	for index, binding := range bindings {
+		if binding.Unbind {
+			continue
+		}
+		contextName, err := app.NewKeyContext(binding.Context.String())
+		if err != nil {
+			return nil, fmt.Errorf("keybinding %d context: %w", index+1, err)
+		}
+		focus, err := app.NewKeyFocus(binding.Focus.String())
+		if err != nil {
+			return nil, fmt.Errorf("keybinding %d focus: %w", index+1, err)
+		}
+		chord, err := app.NewKeyChord(binding.Chord.String())
+		if err != nil {
+			return nil, fmt.Errorf("keybinding %d chord: %w", index+1, err)
+		}
+		action, err := app.NewKeyAction(binding.Action.String())
+		if err != nil {
+			return nil, fmt.Errorf("keybinding %d action: %w", index+1, err)
+		}
+		keybindings = append(keybindings, app.Keybinding{
+			Context: contextName,
+			Focus:   focus,
+			Chord:   chord,
+			Action:  action,
+		})
+	}
+	return keybindings, nil
 }

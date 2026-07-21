@@ -24,7 +24,8 @@ func (model *Model) completeView(content string, mouseHits mouseHitMap) tea.View
 	if cursorVisible && model.mode == ModeCommentEdit {
 		view.Cursor = model.commentEditor.Cursor()
 		if view.Cursor != nil {
-			view.Cursor.Y += 2
+			_, height := model.renderSize()
+			view.Cursor.Y += newCommentEditorLayout(height).editorTop
 		}
 	} else if cursorVisible && model.mode == ModeSearch {
 		view.Cursor = model.searchInput.Cursor()

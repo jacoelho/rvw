@@ -25,34 +25,31 @@ func (coordinator *Coordinator) runCPUWorker() {
 			_ = coordinator.ReportProgress(Progress{
 				ID:     job.work.ID,
 				Total:  1,
-				Detail: "preparing export",
+				Detail: boundedOperationDetail("preparing export"),
 			})
 			if !coordinator.acquireCPU(job.ctx) {
 				err = context.Cause(job.ctx)
 			} else {
 				switch job.work.Format {
 				case review.ExportMarkdown:
-					prepared, err = job.work.Review.PrepareMarkdownCancellable(
+					prepared, err = job.work.Input.PrepareMarkdownCancellable(
 						func() error { return context.Cause(job.ctx) },
 						job.work.Templates,
 						job.work.Options,
 					)
 				case review.ExportJSON:
-					prepared, err = job.work.Review.PrepareJSONCancellable(
+					prepared, err = job.work.Input.PrepareJSONCancellable(
 						func() error { return context.Cause(job.ctx) },
 						job.work.Options,
 					)
 				}
 				coordinator.releaseCPU()
 			}
-			coordinator.complete(Outcome{
-				kind: OutcomeExport,
-				export: ExportOutcome{
-					ID:          job.work.ID,
-					Prepared:    prepared,
-					Destination: job.work.Destination,
-					Err:         err,
-				},
+			coordinator.complete(ExportOutcome{
+				ID:          job.work.ID,
+				Prepared:    prepared,
+				Destination: job.work.Destination,
+				Err:         err,
 			})
 		case job, ok := <-reloadJobs:
 			if !ok {
@@ -65,7 +62,7 @@ func (coordinator *Coordinator) runCPUWorker() {
 			_ = coordinator.ReportProgress(Progress{
 				ID:     job.work.ID,
 				Total:  2,
-				Detail: "reconciling review state",
+				Detail: boundedOperationDetail("reconciling review state"),
 			})
 			if !coordinator.acquireCPU(job.ctx) {
 				err = context.Cause(job.ctx)
@@ -88,7 +85,7 @@ func (coordinator *Coordinator) runCPUWorker() {
 					ID:        job.work.ID,
 					Completed: 1,
 					Total:     2,
-					Detail:    "building file indexes",
+					Detail:    boundedOperationDetail("building file indexes"),
 				})
 				if !coordinator.acquireCPU(job.ctx) {
 					err = context.Cause(job.ctx)
@@ -119,21 +116,17 @@ func (coordinator *Coordinator) runCPUWorker() {
 					coordinator.releaseCPU()
 				}
 			}
-			coordinator.complete(Outcome{
-				kind: OutcomeReload,
-				reload: ReloadOutcome{
-					ID:              job.work.ID,
-					Stage:           ReloadPrepared,
-					Document:        job.work.Document,
-					Replacement:     prepared,
-					AllFiles:        allFiles,
-					VisibleFiles:    visibleFiles,
-					AllFileTree:     allFileTree,
-					VisibleFileTree: visibleFileTree,
-					PathFiles:       pathFiles,
-					AmbiguousPaths:  ambiguousPaths,
-					Err:             err,
-				},
+			coordinator.complete(ReloadPreparedOutcome{
+				ID:              job.work.ID,
+				Document:        job.work.Document,
+				Replacement:     prepared,
+				AllFiles:        allFiles,
+				VisibleFiles:    visibleFiles,
+				AllFileTree:     allFileTree,
+				VisibleFileTree: visibleFileTree,
+				PathFiles:       pathFiles,
+				AmbiguousPaths:  ambiguousPaths,
+				Err:             err,
 			})
 		case job, ok := <-fileTreeJobs:
 			if !ok {
@@ -153,15 +146,12 @@ func (coordinator *Coordinator) runCPUWorker() {
 				)
 				coordinator.releaseCPU()
 			}
-			coordinator.complete(Outcome{
-				kind: OutcomeFileTree,
-				fileTree: FileTreeOutcome{
-					ID:         job.work.ID,
-					Generation: job.work.Generation,
-					Files:      job.work.Files,
-					Tree:       tree,
-					Err:        err,
-				},
+			coordinator.complete(FileTreeOutcome{
+				ID:         job.work.ID,
+				Generation: job.work.Generation,
+				Files:      job.work.Files,
+				Tree:       tree,
+				Err:        err,
 			})
 		case job, ok := <-workspaceIndexJobs:
 			if !ok {
@@ -179,10 +169,7 @@ func (coordinator *Coordinator) runCPUWorker() {
 				outcome.ID = job.work.ID
 				outcome.Err = err
 			}
-			coordinator.complete(Outcome{
-				kind:      OutcomeWorkspaceIndex,
-				workspace: outcome,
-			})
+			coordinator.complete(outcome)
 		}
 	}
 }

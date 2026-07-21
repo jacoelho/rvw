@@ -132,25 +132,19 @@ func failPublicationCheck(
 	return next
 }
 
-func (model *Model) applyPublicationOutcome(outcome PublicationOutcome) {
-	if outcome.ID == 0 || outcome.ID != model.publicationOperation {
+func (model *Model) claimPublicationOutcome(id review.OperationID) bool {
+	if id == 0 || id != model.publicationOperation {
 		model.notice = &Notice{Kind: NoticeWarning, Text: "stale publication outcome"}
-		return
+		return false
 	}
 	model.publicationOperation = 0
-	switch outcome.Stage {
-	case PublicationCheckCompleted:
-		model.applyPublicationCheckOutcome(outcome)
-	case PublicationCommitCompleted:
-		model.applyPublicationCommitOutcome(outcome)
-	case PublicationReconciliationCompleted:
-		model.applyReconciliationOutcome(outcome)
-	default:
-		model.notice = &Notice{Kind: NoticeError, Text: "invalid publication outcome stage"}
-	}
+	return true
 }
 
-func (model *Model) applyPublicationCheckOutcome(outcome PublicationOutcome) {
+func (model *Model) applyPublicationCheckOutcome(outcome PublicationCheckOutcome) {
+	if !model.claimPublicationOutcome(outcome.ID) {
+		return
+	}
 	result := outcome.Check
 	if outcome.Err != nil {
 		result = review.PublicationCheckResult{
@@ -162,8 +156,17 @@ func (model *Model) applyPublicationCheckOutcome(outcome PublicationOutcome) {
 	}
 	next, err := model.review.ApplyPublicationCheck(result)
 	if err != nil {
-		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
-		return
+		result = review.PublicationCheckResult{
+			Operation: outcome.ID,
+			Workspace: model.review.WorkspaceRevision(),
+			Source:    model.review.Snapshot().SourceID(),
+			Detail:    boundedOperationDetail(err.Error()),
+		}
+		next, err = model.review.ApplyPublicationCheck(result)
+		if err != nil {
+			model.notice = &Notice{Kind: NoticeError, Text: NoticeText(err.Error())}
+			return
+		}
 	}
 	status := review.OperationSucceeded
 	if result.Checked == nil {
@@ -185,7 +188,7 @@ func (model *Model) applyPublicationCheckOutcome(outcome PublicationOutcome) {
 		return
 	}
 	if result.Checked == nil {
-		model.notice = &Notice{Kind: NoticeError, Text: NoticeText(result.Detail)}
+		model.notice = &Notice{Kind: NoticeError, Text: NoticeText(result.Detail.String())}
 		return
 	}
 	model.notice = &Notice{Kind: NoticeInformation, Text: "publication preflight is ready"}
@@ -230,14 +233,28 @@ func (model *Model) startPublication() {
 	model.notice = &Notice{Kind: NoticeInformation, Text: "publishing GitHub review"}
 }
 
-func (model *Model) applyPublicationCommitOutcome(outcome PublicationOutcome) {
-	next, err := model.review.ApplyPublication(outcome.Publication)
-	if err != nil {
-		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
+func (model *Model) applyPublicationCommitOutcome(outcome PublicationCommitOutcome) {
+	if !model.claimPublicationOutcome(outcome.ID) {
 		return
 	}
+	result := outcome.Publication
+	next, err := model.review.ApplyPublication(result)
+	if err != nil {
+		result = review.PublicationResult{
+			Operation:   outcome.ID,
+			Workspace:   model.review.WorkspaceRevision(),
+			Source:      model.review.Snapshot().SourceID(),
+			Disposition: review.PublicationDispositionUnknown,
+			Detail:      boundedOperationDetail(err.Error()),
+		}
+		next, err = model.review.ApplyPublication(result)
+		if err != nil {
+			model.notice = &Notice{Kind: NoticeError, Text: NoticeText(err.Error())}
+			return
+		}
+	}
 	status := review.OperationSucceeded
-	switch outcome.Publication.Disposition {
+	switch result.Disposition {
 	case review.PublicationDispositionUnknown:
 		status = review.OperationUnknown
 	case review.PublicationDispositionFailedBeforeCommit,
@@ -248,11 +265,11 @@ func (model *Model) applyPublicationCommitOutcome(outcome PublicationOutcome) {
 		next,
 		outcome.ID,
 		status,
-		outcome.Publication.Detail,
+		result.Detail,
 	)
 	model.review = next
 	model.publicationCancel = false
-	if outcome.Publication.Disposition == review.PublicationDispositionUnknown {
+	if result.Disposition == review.PublicationDispositionUnknown {
 		model.notice = &Notice{
 			Kind: NoticeError,
 			Text: "publication outcome is unknown; reconciling exact remote marker",
@@ -260,12 +277,12 @@ func (model *Model) applyPublicationCommitOutcome(outcome PublicationOutcome) {
 		model.startReconciliation()
 		return
 	}
-	if outcome.Publication.Disposition == review.PublicationDispositionCommitted {
+	if result.Disposition == review.PublicationDispositionCommitted {
 		model.notice = &Notice{Kind: NoticeInformation, Text: "GitHub review published"}
 	} else {
 		model.notice = &Notice{
 			Kind: NoticeWarning,
-			Text: NoticeText(outcome.Publication.Detail),
+			Text: NoticeText(result.Detail.String()),
 		}
 	}
 }
@@ -298,39 +315,53 @@ func (model *Model) startReconciliation() {
 	model.notice = &Notice{Kind: NoticeInformation, Text: "reconciling GitHub publication"}
 }
 
-func (model *Model) applyReconciliationOutcome(outcome PublicationOutcome) {
-	attempt, hasAttempt := model.review.UnknownPublicationOperation()
-	next, err := model.review.ApplyReconciliation(outcome.Reconciliation)
-	if err != nil {
-		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
+func (model *Model) applyReconciliationOutcome(outcome ReconciliationOutcome) {
+	if !model.claimPublicationOutcome(outcome.ID) {
 		return
 	}
+	attempt, hasAttempt := model.review.UnknownPublicationOperation()
+	result := outcome.Reconciliation
+	next, err := model.review.ApplyReconciliation(result)
+	if err != nil {
+		result = review.ReconciliationResult{
+			Operation:   outcome.ID,
+			Workspace:   model.review.WorkspaceRevision(),
+			Source:      model.review.Snapshot().SourceID(),
+			Disposition: review.ReconciliationStillUnknown,
+			Detail:      boundedOperationDetail(err.Error()),
+		}
+		next, err = model.review.ApplyReconciliation(result)
+		if err != nil {
+			model.notice = &Notice{Kind: NoticeError, Text: NoticeText(err.Error())}
+			return
+		}
+	}
 	reconciliationStatus := review.OperationSucceeded
-	if outcome.Reconciliation.Disposition == review.ReconciliationStillUnknown {
+	if result.Disposition == review.ReconciliationStillUnknown {
 		reconciliationStatus = review.OperationFailed
 	}
 	next = resolvePublicationOperation(
 		next,
 		outcome.ID,
 		reconciliationStatus,
-		outcome.Reconciliation.Detail,
+		result.Detail,
 	)
 	if hasAttempt &&
-		outcome.Reconciliation.Disposition != review.ReconciliationStillUnknown {
+		result.Disposition != review.ReconciliationStillUnknown {
 		settledStatus := review.OperationSucceeded
-		if outcome.Reconciliation.Disposition == review.ReconciliationNotCommitted {
+		if result.Disposition == review.ReconciliationNotCommitted {
 			settledStatus = review.OperationFailed
 		}
 		if settled, settleErr := next.SettleUnknownOperation(
 			attempt,
 			settledStatus,
-			outcome.Reconciliation.Detail,
+			result.Detail,
 		); settleErr == nil {
 			next = settled
 		}
 	}
 	model.review = next
-	switch outcome.Reconciliation.Disposition {
+	switch result.Disposition {
 	case review.ReconciliationCommitted:
 		model.notice = &Notice{
 			Kind: NoticeInformation,
@@ -586,11 +617,5 @@ func (model *Model) publicationDetailStep() int {
 }
 
 func boundedOperationDetail(value string) review.OperationDetail {
-	if len(value) > int(review.MaxOperationDetail) {
-		value = value[:review.MaxOperationDetail]
-		for !utf8.ValidString(value) {
-			value = value[:len(value)-1]
-		}
-	}
-	return review.OperationDetail(strings.TrimSpace(value))
+	return review.NewBoundedTrimmedOperationDetail(value)
 }

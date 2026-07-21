@@ -157,7 +157,7 @@ func PrepareReplacementCancellable(
 			continue
 		}
 		operation.Status = OperationSuperseded
-		operation.Detail = "source revision was replaced"
+		operation.Detail = mustOperationDetail("source revision was replaced")
 		next.operations[id] = operation
 		report.OperationsSuperseded++
 	}

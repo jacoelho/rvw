@@ -3,7 +3,6 @@ package app
 import (
 	"errors"
 	"time"
-	"unicode/utf8"
 
 	"github.com/jacoelho/rvw/internal/review"
 )
@@ -23,8 +22,7 @@ type Progress struct {
 func (coordinator *Coordinator) ReportProgress(progress Progress) error {
 	if progress.ID == 0 ||
 		progress.Total != 0 && progress.Completed > progress.Total ||
-		int64(len(progress.Detail)) > MaxOperationProgressBytes ||
-		!utf8.ValidString(progress.Detail.String()) {
+		progress.Detail.Bytes() > MaxOperationProgressBytes {
 		return errors.New("invalid operation progress")
 	}
 	coordinator.mu.Lock()
@@ -53,7 +51,7 @@ func (coordinator *Coordinator) ReportProgress(progress Progress) error {
 }
 
 func progressRetainedBytes(progress Progress) int64 {
-	return int64(len(progress.Detail)) + 32
+	return progress.Detail.Bytes() + 32
 }
 
 func (coordinator *Coordinator) runProgressNotifier() {

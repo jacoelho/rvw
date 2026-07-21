@@ -1,0 +1,652 @@
+package app
+
+import (
+	"context"
+	"io"
+	"net"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/source"
+)
+
+const (
+	publicationHelperMode = "RVW_GH_COMMIT_HELPER"
+	publicationHelperAddr = "RVW_GH_COMMIT_ADDR"
+)
+
+func TestMain(m *testing.M) {
+	if os.Getenv(publicationHelperMode) == "1" {
+		os.Exit(runPublicationCommitHelper())
+	}
+	os.Exit(m.Run())
+}
+
+func runPublicationCommitHelper() int {
+	connection, err := net.Dial("tcp", os.Getenv(publicationHelperAddr))
+	if err != nil {
+		return 2
+	}
+	defer connection.Close()
+	if _, err := connection.Write([]byte("started\n")); err != nil {
+		return 3
+	}
+	var release [1]byte
+	if _, err := io.ReadFull(connection, release[:]); err != nil {
+		return 4
+	}
+	if _, err := os.Stdout.Write([]byte("{\"id\":42}\n")); err != nil {
+		return 5
+	}
+	return 0
+}
+
+func TestPublicationCheckReadyAndCancellation(t *testing.T) {
+	t.Run("ready", func(t *testing.T) {
+		model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+		settleModelWork(t, model, coordinator)
+		id, result := beginTestPublicationCheck(t, model)
+		model.applyPublicationCheckOutcome(PublicationCheckOutcome{ID: id, Check: result})
+		if summary := model.review.PublicationSummary(); summary.Status != review.PublicationChecked || summary.Marker == "" {
+			t.Fatalf("publication check summary = %+v", summary)
+		}
+		if operation := model.review.Operations()[id]; operation.Status != review.OperationSucceeded {
+			t.Fatalf("publication check operation = %+v", operation)
+		}
+	})
+
+	t.Run("cancel after worker completion", func(t *testing.T) {
+		model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+		settleModelWork(t, model, coordinator)
+		id, result := beginTestPublicationCheck(t, model)
+		model.publicationCancel = true
+		model.overlay = OverlaySubmit
+		model.applyPublicationCheckOutcome(PublicationCheckOutcome{ID: id, Check: result})
+		if summary := model.review.PublicationSummary(); summary.Status != review.PublicationIdle {
+			t.Fatalf("cancelled publication check summary = %+v", summary)
+		}
+		if model.overlay != OverlayNone || model.publicationCancel {
+			t.Fatalf("cancelled publication UI = overlay %v cancel %v", model.overlay, model.publicationCancel)
+		}
+	})
+}
+
+func TestPublicationCommitDispositionFencesRetry(t *testing.T) {
+	testCases := []struct {
+		name        string
+		disposition review.PublicationDisposition
+		wantSummary review.PublicationStatus
+		wantStatus  review.OperationStatus
+	}{
+		{
+			name:        "committed",
+			disposition: review.PublicationDispositionCommitted,
+			wantSummary: review.PublicationCommitted,
+			wantStatus:  review.OperationSucceeded,
+		},
+		{
+			name:        "failed before commit",
+			disposition: review.PublicationDispositionFailedBeforeCommit,
+			wantSummary: review.PublicationFailedBeforeCommit,
+			wantStatus:  review.OperationFailed,
+		},
+		{
+			name:        "cancelled before commit",
+			disposition: review.PublicationDispositionCancelledBeforeCommit,
+			wantSummary: review.PublicationFailedBeforeCommit,
+			wantStatus:  review.OperationFailed,
+		},
+		{
+			name:        "unknown",
+			disposition: review.PublicationDispositionUnknown,
+			wantSummary: review.PublicationUnknown,
+			wantStatus:  review.OperationUnknown,
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			model, coordinator := checkedPublicationModel(t)
+			id, request := beginTestPublication(t, model)
+			remoteReview := uint64(0)
+			if testCase.disposition == review.PublicationDispositionCommitted {
+				remoteReview = 42
+			}
+			if testCase.disposition == review.PublicationDispositionUnknown {
+				// Keep the automatic reconciliation attempt deterministic: a
+				// closed coordinator must leave the unknown publication fenced.
+				coordinator.StopAdmissionAndCancel()
+			}
+			model.applyPublicationCommitOutcome(PublicationCommitOutcome{
+				ID: id,
+				Publication: review.PublicationResult{
+					Operation:    id,
+					Workspace:    request.Workspace,
+					Source:       request.Source,
+					Disposition:  testCase.disposition,
+					RemoteReview: remoteReview,
+					Detail:       boundedOperationDetail("terminal publication result"),
+				},
+			})
+			if summary := model.review.PublicationSummary(); summary.Status != testCase.wantSummary {
+				t.Fatalf("publication summary = %+v, want %v", summary, testCase.wantSummary)
+			}
+			if operation := model.review.Operations()[id]; operation.Status != testCase.wantStatus {
+				t.Fatalf("publication operation = %+v, want %v", operation, testCase.wantStatus)
+			}
+			if model.publicationOperation != 0 {
+				t.Fatalf("publication operation remained active: %d", model.publicationOperation)
+			}
+		})
+	}
+}
+
+func TestPublicationAdmissionFailureLeavesNoPhantomOperation(t *testing.T) {
+	model, coordinator := checkedPublicationModel(t)
+	id, _ := review.NewOperationID(model.nextOperation)
+	coordinator.StopAdmissionAndCancel()
+	model.startPublication()
+	if model.publicationOperation != 0 {
+		t.Fatalf("failed publication admission remained active: %d", model.publicationOperation)
+	}
+	if summary := model.review.PublicationSummary(); summary.Status != review.PublicationFailedBeforeCommit ||
+		summary.Detail.String() != ErrCoordinatorClosed.Error() {
+		t.Fatalf("failed publication summary = %+v", summary)
+	}
+	if operation := model.review.Operations()[id]; operation.Status != review.OperationFailed {
+		t.Fatalf("failed publication operation = %+v", operation)
+	}
+	if stats := coordinator.Stats(); stats.Accepted != 0 || stats.Retained != 0 {
+		t.Fatalf("failed publication retained accounting: %+v", stats)
+	}
+}
+
+func TestStalePublicationOutcomeDoesNotConsumeActiveAttempt(t *testing.T) {
+	model, _ := checkedPublicationModel(t)
+	id, request := beginTestPublication(t, model)
+	stale, _ := review.NewOperationID(id.Uint64() + 100)
+	model.applyPublicationCommitOutcome(PublicationCommitOutcome{
+		ID: stale,
+		Publication: review.PublicationResult{
+			Operation:   stale,
+			Workspace:   request.Workspace,
+			Source:      request.Source,
+			Disposition: review.PublicationDispositionCommitted,
+		},
+	})
+	if model.publicationOperation != id ||
+		model.review.PublicationSummary().Status != review.PublicationPublishing {
+		t.Fatal("stale publication outcome consumed the active attempt")
+	}
+	model.applyPublicationCommitOutcome(PublicationCommitOutcome{
+		ID: id,
+		Publication: review.PublicationResult{
+			Operation:   id,
+			Workspace:   request.Workspace,
+			Source:      request.Source,
+			Disposition: review.PublicationDispositionFailedBeforeCommit,
+			Detail:      boundedOperationDetail("settled after stale result"),
+		},
+	})
+}
+
+func TestPublicationReconciliationSettlesUnknownAttempt(t *testing.T) {
+	testCases := []struct {
+		name              string
+		disposition       review.ReconciliationDisposition
+		wantSummary       review.PublicationStatus
+		wantAttemptStatus review.OperationStatus
+		wantReconStatus   review.OperationStatus
+	}{
+		{
+			name:              "committed",
+			disposition:       review.ReconciliationCommitted,
+			wantSummary:       review.PublicationCommitted,
+			wantAttemptStatus: review.OperationSucceeded,
+			wantReconStatus:   review.OperationSucceeded,
+		},
+		{
+			name:              "not committed",
+			disposition:       review.ReconciliationNotCommitted,
+			wantSummary:       review.PublicationConfirmedAbsent,
+			wantAttemptStatus: review.OperationFailed,
+			wantReconStatus:   review.OperationSucceeded,
+		},
+		{
+			name:              "still unknown",
+			disposition:       review.ReconciliationStillUnknown,
+			wantSummary:       review.PublicationUnknown,
+			wantAttemptStatus: review.OperationUnknown,
+			wantReconStatus:   review.OperationFailed,
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			model, _ := checkedPublicationModel(t)
+			attempt, publicationRequest := beginTestPublication(t, model)
+			unknown := review.PublicationResult{
+				Operation:   attempt,
+				Workspace:   publicationRequest.Workspace,
+				Source:      publicationRequest.Source,
+				Disposition: review.PublicationDispositionUnknown,
+				Detail:      boundedOperationDetail("unknown publication"),
+			}
+			next, err := model.review.ApplyPublication(unknown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			next = resolvePublicationOperation(
+				next,
+				attempt,
+				review.OperationUnknown,
+				unknown.Detail,
+			)
+			model.review = next
+			model.publicationOperation = 0
+
+			reconciliation, err := model.nextOperationID()
+			if err != nil {
+				t.Fatal(err)
+			}
+			next, request, err := model.review.StartReconciliation(reconciliation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			model.review = next
+			model.publicationOperation = reconciliation
+			model.applyReconciliationOutcome(ReconciliationOutcome{
+				ID: reconciliation,
+				Reconciliation: review.ReconciliationResult{
+					Operation:   reconciliation,
+					Workspace:   request.Workspace,
+					Source:      request.Source,
+					Disposition: testCase.disposition,
+					Detail:      boundedOperationDetail("reconciliation result"),
+				},
+			})
+			summary := model.review.PublicationSummary()
+			if summary.Status != testCase.wantSummary || summary.Target.Repository() == "" ||
+				summary.Marker == "" {
+				t.Fatalf("reconciliation summary = %+v", summary)
+			}
+			operations := model.review.Operations()
+			if operations[attempt].Status != testCase.wantAttemptStatus ||
+				operations[reconciliation].Status != testCase.wantReconStatus {
+				t.Fatalf(
+					"operation statuses = attempt %v reconciliation %v",
+					operations[attempt],
+					operations[reconciliation],
+				)
+			}
+		})
+	}
+}
+
+func TestPublicationCommitPermitDefinesCancellationBoundary(t *testing.T) {
+	t.Run("cancel before claim", func(t *testing.T) {
+		permit := &publicationCommitPermit{}
+		permit.cancel()
+		if permit.claim() {
+			t.Fatal("cancelled permit crossed the commit boundary")
+		}
+	})
+
+	t.Run("claim before cancel", func(t *testing.T) {
+		permit := &publicationCommitPermit{}
+		if !permit.claim() {
+			t.Fatal("open permit did not claim the commit boundary")
+		}
+		permit.cancel()
+		if permit.state.Load() != publicationPermitClaimed {
+			t.Fatalf("claimed permit state = %d", permit.state.Load())
+		}
+	})
+}
+
+func TestPublicationWorkerCommitBoundary(t *testing.T) {
+	t.Run("cancel before claim remains retryable", func(t *testing.T) {
+		model, _ := checkedPublicationModel(t)
+		id, request := beginTestPublication(t, model)
+		controlled := newControlledPublicationCoordinator(
+			t.Context(),
+			model.coordinator.service,
+		)
+		if err := controlled.SubmitPublication(PublicationWork{
+			ID: id, Request: request,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		job := <-controlled.publicationJobs
+		if !controlled.Cancel(id) {
+			t.Fatal("publication cancellation was not accepted")
+		}
+		controlled.runPublicationCommit(job)
+		outcome, ok := controlled.ClaimNext()
+		publication, typed := outcome.(PublicationCommitOutcome)
+		if !ok || !typed ||
+			publication.Publication.Disposition != review.PublicationDispositionCancelledBeforeCommit {
+			t.Fatalf("pre-claim outcome = (%T, %+v, %v)", outcome, publication, ok)
+		}
+		model.applyPublicationCommitOutcome(publication)
+		if summary := model.review.PublicationSummary(); summary.Status != review.PublicationFailedBeforeCommit {
+			t.Fatalf("pre-claim publication summary = %+v", summary)
+		}
+		retryID, err := model.nextOperationID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := model.review.StartPublicationCheck(
+			retryID,
+			model.settings.publication,
+		); err != nil {
+			t.Fatalf("cancelled-before-commit publication is not retryable: %v", err)
+		}
+		if stats := controlled.Stats(); stats.Accepted != 0 || stats.Retained != 0 ||
+			stats.RequestBytes != 0 || stats.ReservedResult != 0 {
+			t.Fatalf("pre-claim accounting = %+v", stats)
+		}
+	})
+
+	t.Run("claimed commit completes", func(t *testing.T) {
+		listener := configurePublicationCommitHelper(t)
+		model, coordinator := checkedPublicationModel(t)
+		model.startPublication()
+		connection := acceptPublicationCommitHelper(t, listener)
+		if _, err := connection.Write([]byte{1}); err != nil {
+			connection.Close()
+			t.Fatal(err)
+		}
+		if err := connection.Close(); err != nil {
+			t.Fatal(err)
+		}
+		settleModelWork(t, model, coordinator)
+		summary := model.review.PublicationSummary()
+		if summary.Status != review.PublicationCommitted || summary.RemoteReview != 42 ||
+			summary.Target.Repository() == "" || summary.Marker == "" {
+			t.Fatalf("committed publication summary = %+v", summary)
+		}
+	})
+
+	t.Run("cancel after claim is fenced through shutdown", func(t *testing.T) {
+		listener := configurePublicationCommitHelper(t)
+		model, coordinator := checkedPublicationModel(t)
+		checked := model.review.PublicationSummary()
+		model.startPublication()
+		connection := acceptPublicationCommitHelper(t, listener)
+		defer connection.Close()
+		model.applyPublicationAction(KeyActionCancel)
+
+		settlement := shutdownTestCoordinator(t, coordinator)
+		if summary := model.review.PublicationSummary(); summary.Status != review.PublicationPublishing {
+			t.Fatalf("unobserved model publication state = %+v", summary)
+		}
+		assertPublicationShutdownFact(
+			t,
+			settlement,
+			checked.Target,
+			checked.Marker,
+			review.PublicationDispositionUnknown,
+		)
+		assertPublicationShutdownFact(
+			t,
+			model.PublicationShutdownSettlement(),
+			checked.Target,
+			checked.Marker,
+			review.PublicationDispositionUnknown,
+		)
+		if repeated := shutdownTestCoordinator(t, coordinator); len(repeated.Publications) != 0 {
+			t.Fatalf("repeated shutdown returned %d publication facts", len(repeated.Publications))
+		}
+	})
+}
+
+func newControlledPublicationCoordinator(
+	ctx context.Context,
+	service *source.Service,
+) *Coordinator {
+	coordinator := &Coordinator{
+		workContext:     ctx,
+		service:         service,
+		accepted:        make(map[review.OperationID]reservation),
+		progress:        make(map[review.OperationID]Progress),
+		required:        newRequiredScheduler(),
+		ready:           make(chan struct{}, 1),
+		publicationJobs: make(chan publicationJob, 1),
+	}
+	coordinator.stats.Store(CoordinatorStats{})
+	return coordinator
+}
+
+func configurePublicationCommitHelper(t *testing.T) net.Listener {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	if err := os.Symlink(binary, filepath.Join(directory, "gh")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv(publicationHelperMode, "1")
+	t.Setenv(publicationHelperAddr, listener.Addr().String())
+	return listener
+}
+
+func acceptPublicationCommitHelper(t *testing.T, listener net.Listener) net.Conn {
+	t.Helper()
+	if tcp, ok := listener.(*net.TCPListener); ok {
+		if err := tcp.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	connection, err := listener.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var started [8]byte
+	if _, err := io.ReadFull(connection, started[:]); err != nil {
+		connection.Close()
+		t.Fatal(err)
+	}
+	if string(started[:]) != "started\n" {
+		connection.Close()
+		t.Fatalf("publication helper signal = %q", started[:])
+	}
+	return connection
+}
+
+func assertPublicationShutdownFact(
+	t *testing.T,
+	settlement ShutdownSettlement,
+	target review.PublicationTarget,
+	marker review.PublicationMarker,
+	disposition review.PublicationDisposition,
+) {
+	t.Helper()
+	if len(settlement.Publications) != 1 {
+		t.Fatalf("publication shutdown facts = %+v", settlement.Publications)
+	}
+	fact := settlement.Publications[0]
+	if fact.Target != target || fact.Marker != marker || fact.Disposition != disposition {
+		t.Fatalf("publication shutdown fact = %+v", fact)
+	}
+}
+
+func TestInvalidPublicationResultsSettleToSafeStates(t *testing.T) {
+	t.Run("check fails closed", func(t *testing.T) {
+		model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+		settleModelWork(t, model, coordinator)
+		id, result := beginTestPublicationCheck(t, model)
+		result.Workspace = 0
+		model.applyPublicationCheckOutcome(PublicationCheckOutcome{ID: id, Check: result})
+		if summary := model.review.PublicationSummary(); summary.Status != review.PublicationFailedBeforeCommit || summary.Detail.IsEmpty() {
+			t.Fatalf("invalid check summary = %+v", summary)
+		}
+		if operation := model.review.Operations()[id]; operation.Status != review.OperationFailed {
+			t.Fatalf("invalid check operation = %+v", operation)
+		}
+	})
+
+	t.Run("commit becomes unknown", func(t *testing.T) {
+		model, coordinator := checkedPublicationModel(t)
+		id, request := beginTestPublication(t, model)
+		coordinator.StopAdmissionAndCancel()
+		model.applyPublicationCommitOutcome(PublicationCommitOutcome{
+			ID: id,
+			Publication: review.PublicationResult{
+				Operation:    id,
+				Workspace:    0,
+				Source:       request.Source,
+				Disposition:  review.PublicationDispositionCommitted,
+				RemoteReview: 42,
+			},
+		})
+		if summary := model.review.PublicationSummary(); summary.Status != review.PublicationUnknown || summary.Detail.IsEmpty() {
+			t.Fatalf("invalid commit summary = %+v", summary)
+		}
+		if operation := model.review.Operations()[id]; operation.Status != review.OperationUnknown {
+			t.Fatalf("invalid commit operation = %+v", operation)
+		}
+	})
+
+	t.Run("reconciliation remains unknown", func(t *testing.T) {
+		model, _ := checkedPublicationModel(t)
+		attempt, publicationRequest := beginTestPublication(t, model)
+		unknown := review.PublicationResult{
+			Operation:   attempt,
+			Workspace:   publicationRequest.Workspace,
+			Source:      publicationRequest.Source,
+			Disposition: review.PublicationDispositionUnknown,
+			Detail:      boundedOperationDetail("unknown publication"),
+		}
+		next, err := model.review.ApplyPublication(unknown)
+		if err != nil {
+			t.Fatal(err)
+		}
+		next = resolvePublicationOperation(
+			next,
+			attempt,
+			review.OperationUnknown,
+			unknown.Detail,
+		)
+		model.review = next
+		model.publicationOperation = 0
+		reconciliation, err := model.nextOperationID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		next, request, err := model.review.StartReconciliation(reconciliation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		model.review = next
+		model.publicationOperation = reconciliation
+		model.applyReconciliationOutcome(ReconciliationOutcome{
+			ID: reconciliation,
+			Reconciliation: review.ReconciliationResult{
+				Operation:   reconciliation,
+				Workspace:   0,
+				Source:      request.Source,
+				Disposition: review.ReconciliationCommitted,
+			},
+		})
+		if summary := model.review.PublicationSummary(); summary.Status != review.PublicationUnknown || summary.Detail.IsEmpty() {
+			t.Fatalf("invalid reconciliation summary = %+v", summary)
+		}
+		operations := model.review.Operations()
+		if operations[attempt].Status != review.OperationUnknown ||
+			operations[reconciliation].Status != review.OperationFailed {
+			t.Fatalf(
+				"invalid reconciliation operations = attempt %+v reconciliation %+v",
+				operations[attempt],
+				operations[reconciliation],
+			)
+		}
+	})
+}
+
+func beginTestPublicationCheck(
+	t *testing.T,
+	model *Model,
+) (review.OperationID, review.PublicationCheckResult) {
+	t.Helper()
+	options, err := model.publicationOptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := model.nextOperationID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := model.review
+	next, request, err := current.StartPublicationCheck(id, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := current.PreparePublication(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker, err := review.NewPublicationMarker(
+		"<!-- rvw-publication:v1:0123456789abcdef0123456789abcdef -->",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked, err := review.TakeCheckedPublication(
+		review.CheckedPublicationDescriptor{
+			Target: testPublicationTarget(t),
+			Marker: marker,
+		},
+		prepared,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.review = next
+	model.publicationOperation = id
+	return id, review.PublicationCheckResult{
+		Operation: id,
+		Workspace: request.Workspace,
+		Source:    request.Source,
+		Checked:   checked,
+	}
+}
+
+func checkedPublicationModel(t *testing.T) (*Model, *Coordinator) {
+	t.Helper()
+	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	settleModelWork(t, model, coordinator)
+	id, result := beginTestPublicationCheck(t, model)
+	model.applyPublicationCheckOutcome(PublicationCheckOutcome{ID: id, Check: result})
+	if model.review.PublicationSummary().Status != review.PublicationChecked {
+		t.Fatal("publication preflight did not become ready")
+	}
+	return model, coordinator
+}
+
+func beginTestPublication(
+	t *testing.T,
+	model *Model,
+) (review.OperationID, review.PublicationRequest) {
+	t.Helper()
+	id, err := model.nextOperationID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, request, err := model.review.StartPublication(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.review = next
+	model.publicationOperation = id
+	return id, request
+}

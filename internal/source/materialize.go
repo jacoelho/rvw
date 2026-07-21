@@ -183,7 +183,7 @@ func (service *Service) LoadSyntax(
 			default:
 				result.Status = review.SyntaxUnavailable
 			}
-			result.Detail = review.OperationDetail(boundedText(err.Error(), review.MaxOperationDetail))
+			result.Detail = boundedOperationDetail(err.Error())
 			return result, nil
 		}
 		prepared, err := review.PrepareSyntaxCancellable(
@@ -198,7 +198,7 @@ func (service *Service) LoadSyntax(
 			} else {
 				result.Status = review.SyntaxFailed
 			}
-			result.Detail = review.OperationDetail(boundedText(err.Error(), review.MaxOperationDetail))
+			result.Detail = boundedOperationDetail(err.Error())
 			return result, nil
 		}
 		switch demand.Side {

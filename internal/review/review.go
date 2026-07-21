@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 )
 
 var ErrInvalidReviewTransition = errors.New("invalid review transition")
@@ -49,7 +50,7 @@ func NewReview(snapshot Snapshot, kinds []CommentKind) (Review, error) {
 		search:      searchState{status: SearchIdle},
 		publication: publicationState{status: PublicationIdle},
 	}
-	for _, file := range snapshot.Files() {
+	for file := range snapshot.AllFiles() {
 		if !file.Flags().Hidden() {
 			id := file.ID()
 			review.active = new(id)
@@ -58,7 +59,8 @@ func NewReview(snapshot Snapshot, kinds []CommentKind) (Review, error) {
 		}
 	}
 	if review.active == nil && snapshot.FileCount() != 0 {
-		id := snapshot.Files()[0].ID()
+		file, _ := snapshot.File(0)
+		id := file.ID()
 		review.active = new(id)
 		review.selected = new(id)
 	}
@@ -118,28 +120,6 @@ const (
 	NavigateNext     NavigationDirection = 1
 )
 
-func (review Review) MoveFileSelection(direction NavigationDirection, count uint16) (Review, error) {
-	if direction != NavigatePrevious && direction != NavigateNext || count == 0 {
-		return review, ErrInvalidReviewTransition
-	}
-	files := review.VisibleFiles()
-	if len(files) == 0 {
-		return review, ErrInvalidReviewTransition
-	}
-	index := slices.IndexFunc(files, func(file File) bool {
-		return review.selected != nil && file.ID() == *review.selected
-	})
-	if index < 0 {
-		index = 0
-	}
-	delta := int(direction) * int(count)
-	index = min(max(index+delta, 0), len(files)-1)
-	next := review.clone()
-	id := files[index].ID()
-	next.selected = new(id)
-	return next, nil
-}
-
 func (review Review) ActivateSelectedFile() (Review, error) {
 	if review.selected == nil {
 		return review, ErrInvalidReviewTransition
@@ -181,16 +161,6 @@ func (review Review) HideHiddenFiles() Review {
 	return next
 }
 
-func (review Review) VisibleFiles() []File {
-	files := review.snapshot.Files()
-	if review.showHidden {
-		return files
-	}
-	return slices.DeleteFunc(files, func(file File) bool {
-		return file.Flags().Hidden()
-	})
-}
-
 func (review Review) BeginDraft(target CommentTarget, kind CommentKind) (Review, error) {
 	if review.draft != nil || !review.validTarget(target) || !slices.Contains(review.kinds, kind) {
 		return review, ErrInvalidReviewTransition
@@ -210,7 +180,7 @@ func (review Review) UpdateDraft(body string) (Review, error) {
 	}
 	next := review.clone()
 	draft := *review.draft
-	draft.body = body
+	draft.body = strings.Clone(body)
 	next.draft = new(draft)
 	return next, nil
 }
@@ -355,7 +325,6 @@ func (review Review) Draft() (Draft, bool) {
 func (review Review) clone() Review {
 	next := review
 	next.state++
-	next.kinds = slices.Clone(review.kinds)
 	if review.active != nil {
 		next.active = new(*review.active)
 	}

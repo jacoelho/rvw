@@ -54,14 +54,24 @@ func (path exportPathJSON) MarshalJSON() ([]byte, error) {
 }
 
 func (review Review) PrepareJSON(options ExportOptions) (PreparedExport, error) {
-	return review.PrepareJSONCancellable(nil, options)
+	return review.ExportInput().PrepareJSONCancellable(nil, options)
 }
 
 func (review Review) PrepareJSONCancellable(
 	cancelled func() error,
 	options ExportOptions,
 ) (PreparedExport, error) {
-	selected := review.exportComments(options)
+	return review.ExportInput().PrepareJSONCancellable(cancelled, options)
+}
+
+func (input ExportInput) PrepareJSONCancellable(
+	cancelled func() error,
+	options ExportOptions,
+) (PreparedExport, error) {
+	if !input.ready {
+		return PreparedExport{}, fmt.Errorf("%w: export input is unavailable", ErrInvalidExport)
+	}
+	selected := input.exportComments(options)
 	comments := make([]commentExportJSON, 0, len(selected))
 	for index, comment := range selected {
 		if index%256 == 0 {
@@ -69,21 +79,21 @@ func (review Review) PrepareJSONCancellable(
 				return PreparedExport{}, err
 			}
 		}
-		target, err := exportCommentTargetJSON(comment.Target())
+		target, err := exportCommentTargetJSON(comment.target)
 		if err != nil {
 			return PreparedExport{}, err
 		}
 		binding := "active"
-		if comment.Unmappable() {
+		if comment.unmappable {
 			binding = "orphaned"
-		} else if comment.Stale() {
+		} else if comment.stale {
 			binding = "stale"
 		}
 		comments = append(comments, commentExportJSON{
-			Kind:    comment.Kind().String(),
+			Kind:    comment.kind.String(),
 			Target:  target,
 			Binding: binding,
-			Comment: comment.Body().String(),
+			Comment: comment.body.String(),
 		})
 	}
 	body, err := json.Marshal(struct {
@@ -106,38 +116,35 @@ func (review Review) PrepareJSONCancellable(
 	return PreparedExport{format: ExportJSON, body: string(body)}, nil
 }
 
-func exportCommentTargetJSON(target CommentTarget) (commentTargetJSON, error) {
-	switch target.Kind() {
+func exportCommentTargetJSON(target exportCommentTarget) (commentTargetJSON, error) {
+	switch target.kind {
 	case TargetReview:
 		return commentTargetJSON{Type: "review"}, nil
 	case TargetFile:
-		path, ok := target.AnchoredPath()
-		if !ok {
+		if !target.hasPath {
 			return commentTargetJSON{}, fmt.Errorf("%w: file comment has no path", ErrInvalidExport)
 		}
 		return commentTargetJSON{
 			Type: "file",
-			Path: &exportPathJSON{path: path},
+			Path: &exportPathJSON{path: target.path},
 		}, nil
 	case TargetLine:
-		path, pathOK := target.AnchoredPath()
-		side, start, end, linesOK := target.Lines()
-		if !pathOK || !linesOK {
+		if !target.hasPath {
 			return commentTargetJSON{}, fmt.Errorf("%w: line comment target is incomplete", ErrInvalidExport)
 		}
 		sideName := "new"
-		if side == LineOld {
+		if target.side == LineOld {
 			sideName = "old"
 		}
-		startValue := start.Uint32()
+		startValue := target.start.Uint32()
 		targetJSON := commentTargetJSON{
 			Type: "line",
-			Path: &exportPathJSON{path: path},
+			Path: &exportPathJSON{path: target.path},
 			Side: sideName,
 			Line: &startValue,
 		}
-		if start != end {
-			endValue := end.Uint32()
+		if target.start != target.end {
+			endValue := target.end.Uint32()
 			targetJSON.Type = "range"
 			targetJSON.Line = nil
 			targetJSON.Start = &startValue

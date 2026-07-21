@@ -57,7 +57,7 @@ func (coordinator *Coordinator) runSyntaxWorker() {
 		_ = coordinator.ReportProgress(Progress{
 			ID:     job.work.ID,
 			Total:  1,
-			Detail: "loading and preparing syntax",
+			Detail: boundedOperationDetail("loading and preparing syntax"),
 		})
 		var result review.SyntaxResult
 		var err error
@@ -71,13 +71,10 @@ func (coordinator *Coordinator) runSyntaxWorker() {
 			)
 			coordinator.releaseCPU()
 		}
-		coordinator.complete(Outcome{
-			kind: OutcomeSyntax,
-			syntax: SyntaxOutcome{
-				ID:     job.work.ID,
-				Result: result,
-				Err:    err,
-			},
+		coordinator.complete(SyntaxOutcome{
+			ID:     job.work.ID,
+			Result: result,
+			Err:    err,
 		})
 	}
 }

@@ -22,6 +22,10 @@ const (
 	maxRenderWidth   = 1_000
 	maxRenderHeight  = 300
 	viewportOverscan = 8
+
+	commentEditorChromeHeight    = 2
+	commentEditorMaxHeight       = 6
+	commentEditorWorkspaceHeight = 3
 )
 
 type semanticStyles struct {
@@ -52,6 +56,12 @@ type workspaceLayout struct {
 	sideBySideFallback bool
 }
 
+type commentEditorLayout struct {
+	workspaceHeight int
+	editorHeight    int
+	editorTop       int
+}
+
 type mouseHitMap struct {
 	reviewState uint64
 	bodyHeight  int
@@ -77,6 +87,11 @@ const (
 	patchLineWrapped
 )
 
+type diffLineNumberWidths struct {
+	old int
+	new int
+}
+
 func (model *Model) View() tea.View {
 	width, height := model.renderSize()
 	var content string
@@ -84,10 +99,10 @@ func (model *Model) View() tea.View {
 	switch {
 	case !model.size.Known:
 		content = "rvw\nwaiting for terminal size"
-	case model.overlay == OverlayConfirm:
-		content = model.confirmationView(width, height)
 	case model.belowMinimum():
 		content = model.minimumView(width, height)
+	case model.overlay == OverlayConfirm:
+		content = model.confirmationView(width, height)
 	case model.mode == ModeCommentEdit:
 		content = model.commentEditorView(width, height)
 	case model.mode == ModeSearch || model.mode == ModeCommand:
@@ -120,6 +135,7 @@ func (model *Model) workspaceView(
 		bodyHeight,
 		styles,
 	)
+	separator := styles.muted.Render("│")
 
 	body := make([]string, bodyHeight)
 	for row := range bodyHeight {
@@ -144,7 +160,7 @@ func (model *Model) workspaceView(
 			sections = append(sections, fitCellWidth(commentLine, layout.commentsWidth))
 		}
 		body[row] = styles.panel.Render(
-			strings.Join(sections, styles.muted.Render("│")),
+			strings.Join(sections, separator),
 		)
 	}
 	title := styles.panel.Render(model.titleLine(width, styles))
@@ -296,8 +312,9 @@ func (model *Model) diffLines(
 		)
 	}
 	lines := model.review.PatchLines(active, model.diffTop, count, lineBytes)
+	numberWidths := newDiffLineNumberWidths(state)
 	if model.settings.diffView == DiffViewSideBySide && width >= 100 {
-		return model.sideBySideDiffLines(active, lines, width, height, styles)
+		return model.sideBySideDiffLines(active, lines, width, height, numberWidths, styles)
 	}
 	rendered := make([]string, 0, min(height, len(lines)))
 	rows := make([]uint32, 0, min(height, len(lines)))
@@ -327,6 +344,7 @@ func (model *Model) diffLines(
 			line,
 			contentWidth,
 			layout,
+			numberWidths,
 			styles,
 		)
 		for segmentIndex, segment := range model.wrappedLine(text, contentWidth) {
@@ -376,18 +394,12 @@ func (model *Model) renderUnifiedPatchLine(
 	line review.PatchLine,
 	width int,
 	layout patchLineLayout,
+	numberWidths diffLineNumberWidths,
 	styles semanticStyles,
 ) string {
 	wrap := layout == patchLineWrapped
 	raw := line.Text.String()
 	kind := line.Kind()
-	if width < 16 {
-		text := safeText(raw)
-		if !wrap {
-			text = safeAndClip(raw, width)
-		}
-		return stylePatchLine(text, kind, styles)
-	}
 	oldNumber, newNumber := "", ""
 	if value, ok := line.OldLine(); ok {
 		oldNumber = fmt.Sprint(value.Uint32())
@@ -395,7 +407,20 @@ func (model *Model) renderUnifiedPatchLine(
 	if value, ok := line.NewLine(); ok {
 		newNumber = fmt.Sprint(value.Uint32())
 	}
-	numberPrefix := fmt.Sprintf("%6s %6s ", oldNumber, newNumber)
+	numberPrefix := fmt.Sprintf(
+		"%*s %*s ",
+		numberWidths.old,
+		oldNumber,
+		numberWidths.new,
+		newNumber,
+	)
+	if width <= len(numberPrefix) {
+		text := safeText(raw)
+		if !wrap {
+			text = safeAndClip(raw, width)
+		}
+		return stylePatchLine(text, kind, styles)
+	}
 	if kind == review.PatchLineMetadata || kind == review.PatchLineHunkHeader ||
 		kind == review.PatchLineNoNewline {
 		text := safeText(raw)
@@ -444,10 +469,12 @@ func (model *Model) sideBySideDiffLines(
 	fileID review.FileID,
 	lines []review.PatchLine,
 	width, height int,
+	numberWidths diffLineNumberWidths,
 	styles semanticStyles,
 ) ([]string, []uint32) {
 	leftWidth := max((width-1)/2, 1)
 	rightWidth := max(width-leftWidth-1, 1)
+	separator := styles.muted.Render("│")
 	rendered := make([]string, 0, min(height, len(lines)))
 	rows := make([]uint32, 0, min(height, len(lines)))
 	for _, line := range lines {
@@ -478,26 +505,28 @@ func (model *Model) sideBySideDiffLines(
 		}
 		left, right := "", ""
 		if oldLine, ok := line.OldLine(); ok {
+			numberPrefix := fmt.Sprintf("%*d ", numberWidths.old, oldLine.Uint32())
 			content := model.renderSyntaxContent(syntaxContent{
 				raw:       text,
 				spans:     model.syntaxSpansForSide(line, review.LineOld),
-				width:     max(leftWidth-8, 1),
+				width:     max(leftWidth-2-len(numberPrefix), 1),
 				truncated: line.Truncated,
 				wrap:      model.settings.wrap,
 				styles:    styles,
 			})
-			left = fmt.Sprintf("%6d %s", oldLine.Uint32(), content)
+			left = numberPrefix + content
 		}
 		if newLine, ok := line.NewLine(); ok {
+			numberPrefix := fmt.Sprintf("%*d ", numberWidths.new, newLine.Uint32())
 			content := model.renderSyntaxContent(syntaxContent{
 				raw:       text,
 				spans:     model.syntaxSpansForSide(line, review.LineNew),
-				width:     max(rightWidth-7, 1),
+				width:     max(rightWidth-len(numberPrefix), 1),
 				truncated: line.Truncated,
 				wrap:      model.settings.wrap,
 				styles:    styles,
 			})
-			right = fmt.Sprintf("%6d %s", newLine.Uint32(), content)
+			right = numberPrefix + content
 		}
 		if line.Kind() == review.PatchLineMetadata || line.Kind() == review.PatchLineHunkHeader {
 			text := safeText(line.Text.String())
@@ -532,7 +561,7 @@ func (model *Model) sideBySideDiffLines(
 				rendered,
 				lineCursor+lineReviewed+
 					fitCellWidth(leftValue, max(leftWidth-2, 1))+
-					styles.muted.Render("│")+
+					separator+
 					fitCellWidth(rightValue, rightWidth),
 			)
 			rows = append(rows, line.Number)
@@ -542,6 +571,26 @@ func (model *Model) sideBySideDiffLines(
 		return []string{styles.muted.Render("Empty patch.")}, nil
 	}
 	return rendered, rows
+}
+
+func newDiffLineNumberWidths(state review.PatchState) diffLineNumberWidths {
+	widths := diffLineNumberWidths{old: 1, new: 1}
+	if line, ok := state.MaxLineNumber(review.LineOld); ok {
+		widths.old = decimalDigitWidth(line.Uint32())
+	}
+	if line, ok := state.MaxLineNumber(review.LineNew); ok {
+		widths.new = decimalDigitWidth(line.Uint32())
+	}
+	return widths
+}
+
+func decimalDigitWidth(value uint32) int {
+	width := 1
+	for value >= 10 {
+		value /= 10
+		width++
+	}
+	return width
 }
 
 func (model *Model) syntaxSpansForSide(
@@ -562,7 +611,7 @@ func (model *Model) syntaxSpansForSide(
 		}
 		return model.syntaxNew.Spans(sourceLine)
 	default:
-		return emptySyntaxSpans
+		return nil
 	}
 }
 
@@ -598,76 +647,76 @@ func (model *Model) renderSyntaxContent(content syntaxContent) string {
 	sanitizer := terminalTextRenderer{}
 	spans := content.spans
 	if spans == nil {
-		spans = emptySyntaxSpans
-	}
-	nextSpan, stopSpans := iter.Pull(spans)
-	defer stopSpans()
-	var span review.SyntaxSpan
-	hasSpan := false
-	spanEnd := 0
-	advanceSpan := func() {
-		hasSpan = false
-		for {
-			candidate, ok := nextSpan()
-			if !ok {
-				return
-			}
-			start, end := int(candidate.Start), int(candidate.End)
-			if start < spanEnd || start > len(raw) || end <= start {
-				continue
-			}
-			if end > len(raw) {
-				limited = true
-				return
-			}
-			span = candidate
-			spanEnd = end
-			hasSpan = true
-			return
-		}
-	}
-	advanceSpan()
-
-	if !hasSpan {
 		rendered.WriteString(sanitizer.render(raw))
 	} else {
-		var runKind review.SyntaxKind
-		runStart, runEnd := 0, 0
-		hasRun := false
-		flushRun := func() {
-			if !hasRun || runStart == runEnd {
+		nextSpan, stopSpans := iter.Pull(spans)
+		defer stopSpans()
+		var span review.SyntaxSpan
+		hasSpan := false
+		spanEnd := 0
+		advanceSpan := func() {
+			hasSpan = false
+			for {
+				candidate, ok := nextSpan()
+				if !ok {
+					return
+				}
+				start, end := int(candidate.Start), int(candidate.End)
+				if start < spanEnd || start > len(raw) || end <= start {
+					continue
+				}
+				if end > len(raw) {
+					limited = true
+					return
+				}
+				span = candidate
+				spanEnd = end
+				hasSpan = true
 				return
 			}
-			value := sanitizer.render(raw[runStart:runEnd])
-			if runKind != 0 {
-				value = syntaxStyle(runKind, content.styles).Render(value)
-			}
-			rendered.WriteString(value)
 		}
-		graphemes := uniseg.NewGraphemes(raw)
-		for graphemes.Next() {
-			start, end := graphemes.Positions()
-			for hasSpan && int(span.End) <= start {
+		advanceSpan()
+		if !hasSpan {
+			rendered.WriteString(sanitizer.render(raw))
+		} else {
+			var runKind review.SyntaxKind
+			runStart, runEnd := 0, 0
+			hasRun := false
+			flushRun := func() {
+				if !hasRun || runStart == runEnd {
+					return
+				}
+				value := sanitizer.render(raw[runStart:runEnd])
+				if runKind != 0 {
+					value = syntaxStyle(runKind, content.styles).Render(value)
+				}
+				rendered.WriteString(value)
+			}
+			graphemes := uniseg.NewGraphemes(raw)
+			for graphemes.Next() {
+				start, end := graphemes.Positions()
+				for hasSpan && int(span.End) <= start {
+					advanceSpan()
+				}
+				kind := review.SyntaxKind(0)
+				if hasSpan && int(span.Start) <= start && start < int(span.End) {
+					kind = span.Kind
+				}
+				if hasRun && kind != runKind {
+					flushRun()
+					hasRun = false
+				}
+				if !hasRun {
+					runStart = start
+				}
+				runEnd = end
+				runKind = kind
+				hasRun = true
+			}
+			flushRun()
+			for hasSpan {
 				advanceSpan()
 			}
-			kind := review.SyntaxKind(0)
-			if hasSpan && int(span.Start) <= start && start < int(span.End) {
-				kind = span.Kind
-			}
-			if hasRun && kind != runKind {
-				flushRun()
-				hasRun = false
-			}
-			if !hasRun {
-				runStart = start
-			}
-			runEnd = end
-			runKind = kind
-			hasRun = true
-		}
-		flushRun()
-		for hasSpan {
-			advanceSpan()
 		}
 	}
 	value := rendered.String()
@@ -712,6 +761,10 @@ func syntaxStyle(kind review.SyntaxKind, styles semanticStyles) lipgloss.Style {
 
 func (model *Model) wrappedLine(value string, width int) []string {
 	if !model.settings.wrap || width <= 1 {
+		return []string{value}
+	}
+	if len(value) <= width && !strings.Contains(value, "\n") &&
+		lipgloss.Width(value) <= width {
 		return []string{value}
 	}
 	wrapped := lipgloss.Wrap(value, width, "")
@@ -837,17 +890,67 @@ func commentTargetText(target review.CommentTarget) string {
 }
 
 func (model *Model) commentEditorView(width, height int) string {
+	layout := newCommentEditorLayout(height)
+	workspace, _ := model.workspaceView(
+		width,
+		layout.workspaceHeight,
+		model.workspaceLayout(width, layout.workspaceHeight),
+	)
+	styles := newSemanticStyles(model.settings)
 	draft, ok := model.review.Draft()
 	if !ok {
-		return constrainedLines([]string{"Comment editor unavailable"}, width, height)
+		return strings.Join(append(
+			[]string{
+				workspace,
+				fitCellWidth(styles.failure.Render("Comment editor unavailable"), width),
+				strings.Repeat(" ", width),
+			},
+			fittedStyledLines(model.commentEditor.View(), width, layout.editorHeight)...,
+		), "\n")
 	}
 	title := "Comment · " + draft.Kind().String() + " · " + commentTargetText(draft.Target())
-	lines := []string{
-		safeAndClip(title, width),
-		model.bindingSummary(KeyContextCommentEdit),
-		model.commentEditor.View(),
+	help := model.actionSummary(
+		KeyContextCommentEdit,
+		KeyActionSaveComment,
+		KeyActionInsertNewline,
+		KeyActionNextCommentKind,
+		KeyActionCancel,
+	)
+	lines := append(
+		[]string{
+			workspace,
+			fitCellWidth(styles.focused.Render(safeAndClip(title, width)), width),
+			fitCellWidth(styles.muted.Render(safeAndClip(help, width)), width),
+		},
+		fittedStyledLines(model.commentEditor.View(), width, layout.editorHeight)...,
+	)
+	return strings.Join(lines, "\n")
+}
+
+func newCommentEditorLayout(height int) commentEditorLayout {
+	editorHeight := min(
+		commentEditorMaxHeight,
+		max(height-commentEditorWorkspaceHeight-commentEditorChromeHeight, 1),
+	)
+	workspaceHeight := max(height-commentEditorChromeHeight-editorHeight, 1)
+	return commentEditorLayout{
+		workspaceHeight: workspaceHeight,
+		editorHeight:    editorHeight,
+		editorTop:       workspaceHeight + commentEditorChromeHeight,
 	}
-	return constrainedLines(strings.Split(strings.Join(lines, "\n"), "\n"), width, height)
+}
+
+func fittedStyledLines(value string, width, height int) []string {
+	lines := strings.Split(value, "\n")
+	fitted := make([]string, height)
+	for index := range height {
+		if index < len(lines) {
+			fitted[index] = fitCellWidth(lines[index], width)
+			continue
+		}
+		fitted[index] = strings.Repeat(" ", width)
+	}
+	return fitted
 }
 
 func (model *Model) titleLine(width int, styles semanticStyles) string {
@@ -858,7 +961,9 @@ func (model *Model) titleLine(width int, styles semanticStyles) string {
 		}
 	}
 	focus := "diff"
-	if model.focus == FocusFileTree {
+	if model.mode == ModeCommentEdit {
+		focus = "comment"
+	} else if model.focus == FocusFileTree {
 		focus = "files"
 	} else if model.focus == FocusComments {
 		focus = "comments"
@@ -874,13 +979,18 @@ func (model *Model) titleLine(width int, styles semanticStyles) string {
 }
 
 func (model *Model) statusLine(width int, styles semanticStyles) string {
-	status := model.operationSummary() + "  " + model.actionSummary(
-		KeyContextNormal,
-		KeyActionFocusNextPane,
-		KeyActionActivate,
-		KeyActionHelp,
-		KeyActionQuit,
-	)
+	status := model.operationSummary()
+	if model.mode == ModeCommentEdit {
+		status += "  comment editor owns input"
+	} else {
+		status += "  " + model.actionSummary(
+			KeyContextNormal,
+			KeyActionFocusNextPane,
+			KeyActionActivate,
+			KeyActionHelp,
+			KeyActionQuit,
+		)
+	}
 	_, height := model.renderSize()
 	if model.size.Width > maxRenderWidth || model.size.Height > maxRenderHeight {
 		status = fmt.Sprintf(
@@ -918,8 +1028,9 @@ func (model *Model) bindingSummary(contextName KeyContext) string {
 
 func (model *Model) actionSummary(contextName KeyContext, actions ...KeyAction) string {
 	var values []string
+	bindings := model.effectiveBindings(contextName)
 	for _, action := range actions {
-		for _, binding := range model.effectiveBindings(contextName) {
+		for _, binding := range bindings {
 			if binding.Action == action {
 				values = append(values, binding.Chord.String()+" "+action.String())
 				break
@@ -962,7 +1073,11 @@ func (model *Model) diffHeight() int {
 	if !model.size.Known {
 		return 1
 	}
-	return max(min(model.size.Height, maxRenderHeight)-2, 1)
+	height := min(model.size.Height, maxRenderHeight)
+	if model.mode == ModeCommentEdit {
+		height = newCommentEditorLayout(height).workspaceHeight
+	}
+	return max(height-2, 1)
 }
 
 func separatorWidth(treeWidth, commentsWidth int) int {

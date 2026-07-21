@@ -739,14 +739,12 @@ func (review Review) ApplyPublicationCheck(result PublicationCheckResult) (Revie
 	if review.publication.status != PublicationChecking ||
 		review.publication.operation != result.Operation ||
 		review.workspace != result.Workspace ||
-		review.snapshot.SourceID() != result.Source ||
-		len(result.Detail) > int(MaxOperationDetail) ||
-		!utf8.ValidString(result.Detail.String()) {
+		review.snapshot.SourceID() != result.Source {
 		return review, ErrInvalidPublication
 	}
 	next := review.clone()
 	if result.Checked == nil {
-		if result.Detail == "" {
+		if result.Detail.IsEmpty() {
 			return review, ErrInvalidPublication
 		}
 		next.publication = publicationState{
@@ -823,9 +821,7 @@ func (review Review) ApplyPublication(result PublicationResult) (Review, error) 
 		review.workspace != result.Workspace ||
 		review.snapshot.SourceID() != result.Source ||
 		result.Disposition < PublicationDispositionCommitted ||
-		result.Disposition > PublicationDispositionCancelledBeforeCommit ||
-		len(result.Detail) > int(MaxOperationDetail) ||
-		!utf8.ValidString(result.Detail.String()) {
+		result.Disposition > PublicationDispositionCancelledBeforeCommit {
 		return review, ErrInvalidPublication
 	}
 	next := review.clone()
@@ -901,9 +897,7 @@ func (review Review) ApplyReconciliation(result ReconciliationResult) (Review, e
 		review.workspace != result.Workspace ||
 		review.snapshot.SourceID() != result.Source ||
 		result.Disposition < ReconciliationCommitted ||
-		result.Disposition > ReconciliationStillUnknown ||
-		len(result.Detail) > int(MaxOperationDetail) ||
-		!utf8.ValidString(result.Detail.String()) {
+		result.Disposition > ReconciliationStillUnknown {
 		return review, ErrInvalidPublication
 	}
 	next := review.clone()

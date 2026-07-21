@@ -9,7 +9,7 @@ import (
 
 func (model *Model) requestSyntax() {
 	if !model.size.Known || model.belowMinimum() ||
-		model.reloadOperation != 0 || model.reloadPreparing ||
+		model.foreground.reloadActive() ||
 		model.mode != ModeNormal || model.overlay != OverlayNone {
 		return
 	}
@@ -130,7 +130,7 @@ func (model *Model) applySyntaxOutcome(outcome SyntaxOutcome) {
 		if next, err := model.review.ResolveOperation(
 			outcome.ID,
 			review.OperationSuperseded,
-			"syntax result did not match the active revision",
+			boundedOperationDetail("syntax result did not match the active revision"),
 		); err == nil {
 			model.review = next
 		}
@@ -146,16 +146,16 @@ func (model *Model) applySyntaxOutcome(outcome SyntaxOutcome) {
 	case review.SyntaxLimited:
 		status = review.OperationLimited
 		model.suppressSyntaxResult(result)
-		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(result.Detail)}
+		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(result.Detail.String())}
 	case review.SyntaxUnavailable:
 		status = review.OperationFailed
 		model.suppressSyntaxResult(result)
 	case review.SyntaxFailed:
 		status = review.OperationFailed
-		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(result.Detail)}
+		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(result.Detail.String())}
 	default:
 		status = review.OperationFailed
-		result.Detail = "syntax worker returned an invalid status"
+		result.Detail = boundedOperationDetail("syntax worker returned an invalid status")
 	}
 	if next, err := model.review.ResolveOperation(
 		outcome.ID,
@@ -215,7 +215,5 @@ func (model *Model) syntaxSpans(line review.PatchLine) iter.Seq[review.SyntaxSpa
 	if sourceLine, ok := line.OldLine(); ok {
 		return model.syntaxOld.Spans(sourceLine)
 	}
-	return emptySyntaxSpans
+	return nil
 }
-
-func emptySyntaxSpans(func(review.SyntaxSpan) bool) {}

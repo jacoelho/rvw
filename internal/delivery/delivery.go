@@ -85,13 +85,19 @@ func (manager *Manager) Deliver(
 	payload Payload,
 ) (Outcome, error) {
 	if ctx == nil || payload.Bytes() > MaxPayloadBytes {
-		return Outcome{}, errors.New("invalid delivery request")
+		return Outcome{Destination: destination, State: CommitFailedBeforeWrite},
+			errors.New("invalid delivery request")
 	}
 	if destination != DestinationClipboard {
-		return Outcome{}, fmt.Errorf("%w: destination %d is post-program only", ErrUnavailable, destination)
+		return Outcome{Destination: destination, State: CommitFailedBeforeWrite},
+			fmt.Errorf("%w: destination %d is post-program only", ErrUnavailable, destination)
 	}
 	if err := manager.reserve(destination); err != nil {
-		return Outcome{}, err
+		return Outcome{
+			Destination: destination,
+			State:       CommitFailedBeforeWrite,
+			Bytes:       payload.Bytes(),
+		}, err
 	}
 
 	name, arguments, err := clipboardCommand()

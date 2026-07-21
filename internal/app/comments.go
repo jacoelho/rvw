@@ -108,7 +108,8 @@ func (model *Model) beginComment(target review.CommentTarget) tea.Cmd {
 	model.commentEditor.SetValue("")
 	model.resizeCommentEditor()
 	model.mode = ModeCommentEdit
-	model.chord = nil
+	model.clampDiffTop()
+	model.abandonChord()
 	return model.commentEditor.Focus()
 }
 
@@ -132,6 +133,7 @@ func (model *Model) beginEditComment() tea.Cmd {
 	model.commentEditor.SetValue(draft.Body())
 	model.resizeCommentEditor()
 	model.mode = ModeCommentEdit
+	model.clampDiffTop()
 	return model.commentEditor.Focus()
 }
 
@@ -273,6 +275,7 @@ func (model *Model) moveAndActivateFile(delta int) {
 
 func (model *Model) resizeCommentEditor() {
 	width, height := model.renderSize()
-	model.commentEditor.SetWidth(max(width-4, 1))
-	model.commentEditor.SetHeight(max(min(height-6, 12), 1))
+	layout := newCommentEditorLayout(height)
+	model.commentEditor.SetWidth(max(width, 1))
+	model.commentEditor.SetHeight(layout.editorHeight)
 }

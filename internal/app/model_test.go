@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -376,6 +375,59 @@ func TestMouseTranslationReturnsOnlyImmediateTypedActions(t *testing.T) {
 	}
 }
 
+func TestMouseActionForHiddenPaneDoesNotMutateInputOwnership(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		mouseX     int
+		hideWidth  int
+		hideHeight int
+	}{
+		{name: "file tree", mouseX: 0, hideWidth: compactWidth, hideHeight: 18},
+		{name: "comments", mouseX: wideWidth - 1, hideWidth: normalWidth, hideHeight: 24},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+			settleModelWork(t, model, coordinator)
+			_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
+			view := model.View()
+			command := view.OnMouse(tea.MouseClickMsg{
+				X: testCase.mouseX, Y: 1, Button: tea.MouseLeft,
+			})
+			if command == nil {
+				t.Fatal("visible-pane click returned no command")
+			}
+			message, ok := command().(mouseActionMsg)
+			if !ok {
+				t.Fatalf("click message type = %T", command())
+			}
+
+			model.settings.keybindings = []Keybinding{{
+				Context: KeyContextNormal,
+				Focus:   KeyFocusDiff,
+				Chord:   "x t",
+				Action:  KeyActionToggleWrap,
+			}}
+			_, _ = model.Update(keyMessage("5"))
+			_, _ = model.Update(keyMessage("x"))
+			_, _ = model.Update(tea.WindowSizeMsg{
+				Width: testCase.hideWidth, Height: testCase.hideHeight,
+			})
+			if model.focusVisible(message.focus) {
+				t.Fatalf("mouse focus %v remained visible", message.focus)
+			}
+
+			_, _ = model.Update(message)
+			if model.focus != FocusDiff || model.repeat != 5 ||
+				len(model.chord.strokes) != 1 || model.chord.strokes[0] != "x" {
+				t.Fatalf(
+					"stale mouse changed focus=%v repeat=%d chord=%v",
+					model.focus, model.repeat, model.chord.strokes,
+				)
+			}
+		})
+	}
+}
+
 func TestResponsiveLayoutUsesBothWidthAndHeightBoundaries(t *testing.T) {
 	model, _ := newTestModel(t, map[string]string{"a.txt": "changed\n"})
 	tests := []struct {
@@ -445,17 +497,21 @@ func TestReloadAcquisitionAndPreparationCommitAtomicallyOffUpdate(t *testing.T) 
 	oldSource := model.review.Snapshot().SourceID()
 	oldWorkspace := model.review.WorkspaceRevision()
 	model.startReload()
-	if model.reloadOperation == 0 || model.reloadPreparing {
-		t.Fatalf("reload acquisition state = operation %d preparing %v", model.reloadOperation, model.reloadPreparing)
+	if model.foreground.reloadOperation() == 0 || model.foreground.reloadIsPreparing() {
+		t.Fatalf(
+			"reload acquisition state = operation %d preparing %v",
+			model.foreground.reloadOperation(),
+			model.foreground.reloadIsPreparing(),
+		)
 	}
 
-	for attempts := 0; !model.reloadPreparing && attempts < 8; attempts++ {
+	for attempts := 0; !model.foreground.reloadIsPreparing() && attempts < 8; attempts++ {
 		if state := coordinator.WaitReady(waitContext); state != ReadyAvailable {
 			t.Fatalf("reload acquisition ready state = %d", state)
 		}
 		_, _ = model.Update(outcomeReadyMsg{state: ReadyAvailable})
 	}
-	if !model.reloadPreparing {
+	if !model.foreground.reloadIsPreparing() {
 		t.Fatal("reload did not enter off-loop reconciliation")
 	}
 	if model.review.Snapshot().SourceID() != oldSource {
@@ -467,14 +523,18 @@ func TestReloadAcquisitionAndPreparationCommitAtomicallyOffUpdate(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	for attempts := 0; model.reloadOperation != 0 && attempts < 8; attempts++ {
+	for attempts := 0; model.foreground.reloadOperation() != 0 && attempts < 8; attempts++ {
 		if state := coordinator.WaitReady(waitContext); state != ReadyAvailable {
 			t.Fatalf("reload preparation ready state = %d", state)
 		}
 		_, _ = model.Update(outcomeReadyMsg{state: ReadyAvailable})
 	}
-	if model.reloadOperation != 0 || model.reloadPreparing {
-		t.Fatalf("reload did not settle: operation %d preparing %v", model.reloadOperation, model.reloadPreparing)
+	if model.foreground.reloadOperation() != 0 || model.foreground.reloadIsPreparing() {
+		t.Fatalf(
+			"reload did not settle: operation %d preparing %v",
+			model.foreground.reloadOperation(),
+			model.foreground.reloadIsPreparing(),
+		)
 	}
 	if model.review.Snapshot().SourceID() == oldSource ||
 		model.review.WorkspaceRevision().Uint64() != oldWorkspace.Uint64()+1 ||
@@ -491,281 +551,6 @@ func TestReloadAcquisitionAndPreparationCommitAtomicallyOffUpdate(t *testing.T) 
 	}
 	if !model.review.FileReviewed(0) {
 		t.Fatal("reload retry lost review state changed during preparation")
-	}
-}
-
-func TestCoordinatorAdmissionRetainsOutcomeUntilClaim(t *testing.T) {
-	fixture := newSourceFixture(t, map[string]string{"alpha.txt": "changed\n"})
-	workContext, cancelWork := context.WithCancel(t.Context())
-	t.Cleanup(cancelWork)
-	deliveryManager := newTestDeliveryManager(t)
-	coordinator, err := NewCoordinator(workContext, fixture.service, deliveryManager)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		coordinator.StopAdmissionAndCancel()
-		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := coordinator.Shutdown(shutdownContext); err != nil {
-			t.Error(err)
-		}
-	})
-
-	current, err := review.NewReview(fixture.document.Snapshot(), []review.CommentKind{"issue"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	fileID, ok := current.ActiveFile()
-	if !ok {
-		t.Fatal("missing active file")
-	}
-	contextLines, err := review.NewContextLines(3)
-	if err != nil {
-		t.Fatal(err)
-	}
-	patchContext, err := review.ContextAround(contextLines)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, request, err := current.RequestPatch(fileID, patchContext)
-	if err != nil {
-		t.Fatal(err)
-	}
-	firstID, _ := review.NewOperationID(1)
-	secondID, _ := review.NewOperationID(2)
-	if err := coordinator.SubmitPatch(PatchWork{
-		ID: firstID, Document: fixture.document, Request: request,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := coordinator.SubmitPatch(PatchWork{
-		ID: secondID, Document: fixture.document, Request: request,
-	}); err != ErrCoordinatorSaturated {
-		t.Fatalf("second admission error = %v, want %v", err, ErrCoordinatorSaturated)
-	}
-
-	waitContext, cancelWait := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancelWait()
-	if state := coordinator.WaitReady(waitContext); state != ReadyAvailable {
-		t.Fatalf("ready state = %d, want available", state)
-	}
-	if stats := coordinator.Stats(); stats.Accepted != 1 || stats.Retained != 1 {
-		t.Fatalf("stats before claim = %+v", stats)
-	}
-	outcome, ok := coordinator.ClaimNext()
-	if !ok || outcome.Kind() != OutcomePatch {
-		t.Fatalf("claim = (%v, %t), want patch outcome", outcome.Kind(), ok)
-	}
-	if stats := coordinator.Stats(); stats.Accepted != 0 || stats.Retained != 0 {
-		t.Fatalf("stats after claim = %+v", stats)
-	}
-}
-
-func TestCoordinatorKeepsPublicationByteCapacityReserved(t *testing.T) {
-	fixture := newSourceFixture(t, map[string]string{"alpha.txt": "changed\n"})
-	workContext, cancelWork := context.WithCancel(t.Context())
-	t.Cleanup(cancelWork)
-	coordinator, err := NewCoordinator(
-		workContext,
-		fixture.service,
-		newTestDeliveryManager(t),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := coordinator.Shutdown(shutdownContext); err != nil {
-			t.Error(err)
-		}
-	})
-
-	ordinaryID, _ := review.NewOperationID(1)
-	if err := coordinator.submit(
-		ordinaryID,
-		MaxQueuedRequestBytes-reservedPublicationRequestBytes,
-		MaxRetainedResultBytes-reservedPublicationResultBytes,
-		func(context.Context) bool { return true },
-	); err != nil {
-		t.Fatalf("fill ordinary partition: %v", err)
-	}
-	rejectedID, _ := review.NewOperationID(2)
-	if err := coordinator.submit(
-		rejectedID,
-		1,
-		1,
-		func(context.Context) bool { return true },
-	); !errors.Is(err, ErrCoordinatorSaturated) {
-		t.Fatalf("ordinary overflow error = %v, want %v", err, ErrCoordinatorSaturated)
-	}
-
-	publicationID, _ := review.NewOperationID(3)
-	if err := coordinator.submitReservedPublication(
-		publicationID,
-		reservedPublicationRequestBytes,
-		reservedPublicationResultBytes,
-		nil,
-		nil,
-		func(context.Context) bool { return true },
-	); err != nil {
-		t.Fatalf("reserved publication admission: %v", err)
-	}
-	stats := coordinator.Stats()
-	if stats.RequestBytes != MaxQueuedRequestBytes ||
-		stats.ReservedResult != MaxRetainedResultBytes {
-		t.Fatalf("full partition stats = %+v", stats)
-	}
-}
-
-func TestCoordinatorCoalescesProgressBehindTerminalPriority(t *testing.T) {
-	fixture := newSourceFixture(t, map[string]string{"alpha.txt": "changed\n"})
-	workContext, cancelWork := context.WithCancel(t.Context())
-	t.Cleanup(cancelWork)
-	coordinator, err := NewCoordinator(
-		workContext,
-		fixture.service,
-		newTestDeliveryManager(t),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := coordinator.Shutdown(shutdownContext); err != nil {
-			t.Error(err)
-		}
-	})
-	id, _ := review.NewOperationID(1)
-	if err := coordinator.submit(
-		id,
-		1,
-		1,
-		func(context.Context) bool { return true },
-	); err != nil {
-		t.Fatal(err)
-	}
-	if err := coordinator.ReportProgress(Progress{
-		ID: id, Completed: 1, Total: 3, Detail: "first",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := coordinator.ReportProgress(Progress{
-		ID: id, Completed: 2, Total: 3, Detail: "latest",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	waitContext, cancel := context.WithTimeout(t.Context(), time.Second)
-	defer cancel()
-	if state := coordinator.WaitReady(waitContext); state != ReadyAvailable {
-		t.Fatalf("progress ready state = %d", state)
-	}
-	outcome, ok := coordinator.ClaimNext()
-	progress, progressOK := outcome.Progress()
-	if !ok || !progressOK || progress.Completed != 2 ||
-		progress.Detail != "latest" {
-		t.Fatalf("coalesced progress = %+v, outcome kind %d", progress, outcome.Kind())
-	}
-
-	if err := coordinator.ReportProgress(Progress{
-		ID: id, Completed: 3, Total: 3, Detail: "done",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	coordinator.complete(Outcome{
-		kind:  OutcomePatch,
-		patch: PatchOutcome{ID: id},
-	})
-	outcome, ok = coordinator.ClaimNext()
-	if !ok || outcome.Kind() != OutcomePatch {
-		t.Fatalf("terminal priority claim = (%d, %t)", outcome.Kind(), ok)
-	}
-	if _, ok := coordinator.ClaimNext(); ok {
-		t.Fatal("progress survived terminal completion")
-	}
-}
-
-func TestRequiredSchedulerAllowsAtMostEightBypasses(t *testing.T) {
-	scheduler := newRequiredScheduler()
-	ids := make([]review.OperationID, 10)
-	for index := range ids {
-		ids[index], _ = review.NewOperationID(uint64(index + 1))
-		scheduler.register(ids[index])
-	}
-	starts := make([]<-chan struct{}, len(ids))
-	for index := 1; index < len(ids); index++ {
-		starts[index] = scheduler.markReady(ids[index])
-	}
-	for index := 1; index <= maxRequiredBypasses; index++ {
-		select {
-		case <-starts[index]:
-		default:
-			t.Fatalf("bypass %d was not granted", index)
-		}
-	}
-	select {
-	case <-starts[9]:
-		t.Fatal("ninth bypass was granted before the oldest operation")
-	default:
-	}
-	starts[0] = scheduler.markReady(ids[0])
-	select {
-	case <-starts[0]:
-	default:
-		t.Fatal("oldest ready operation was not granted")
-	}
-	select {
-	case <-starts[9]:
-	default:
-		t.Fatal("blocked later operation did not run after the oldest")
-	}
-}
-
-func TestReadyReceiverStopIsABoundedCompletionBarrier(t *testing.T) {
-	fixture := newSourceFixture(t, map[string]string{"alpha.txt": "changed\n"})
-	workContext, cancelWork := context.WithCancel(t.Context())
-	t.Cleanup(cancelWork)
-	deliveryManager := newTestDeliveryManager(t)
-	coordinator, err := NewCoordinator(workContext, fixture.service, deliveryManager)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		coordinator.StopAdmissionAndCancel()
-		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := coordinator.Shutdown(shutdownContext); err != nil {
-			t.Error(err)
-		}
-	})
-	receiver, err := NewReadyReceiver(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	command := receiver.Arm(coordinator)
-	if command == nil {
-		t.Fatal("receiver did not arm")
-	}
-	commandDone := make(chan tea.Msg, 1)
-	go func() {
-		commandDone <- command()
-	}()
-
-	barrierContext, cancelBarrier := context.WithTimeout(t.Context(), time.Second)
-	defer cancelBarrier()
-	if err := receiver.StopAndWait(barrierContext); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case message := <-commandDone:
-		ready, ok := message.(outcomeReadyMsg)
-		if !ok || ready.state != ReadyCancelled {
-			t.Fatalf("receiver message = %#v, want cancellation", message)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("receiver command remained blocked after barrier")
 	}
 }
 

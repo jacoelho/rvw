@@ -174,11 +174,12 @@ func (prepared *PreparedSyntax) Identity() SyntaxIdentity {
 }
 
 func (prepared *PreparedSyntax) Spans(line LineNumber) iter.Seq[SyntaxSpan] {
+	if prepared == nil || len(prepared.lines[line]) == 0 {
+		return nil
+	}
+	spans := prepared.lines[line]
 	return func(yield func(SyntaxSpan) bool) {
-		if prepared == nil {
-			return
-		}
-		for _, span := range prepared.lines[line] {
+		for _, span := range spans {
 			if !yield(span) {
 				return
 			}

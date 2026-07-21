@@ -15,9 +15,11 @@ import (
 )
 
 const (
-	MaxAcceptedOperations           = 64
-	MaxQueuedRequestBytes     int64 = 32 << 20
-	MaxRetainedResultBytes    int64 = 128 << 20
+	MaxAcceptedOperations       = 64
+	MaxQueuedRequestBytes int64 = 32 << 20
+	// One search retains one maximum patch plus bounded hits while a
+	// presentation patch may complete concurrently.
+	MaxRetainedResultBytes    int64 = 256 << 20
 	MaxIOWorkers                    = 8
 	MaxCPUWorkers                   = 8
 	MaxPresentationCacheBytes int64 = 128 << 20
@@ -59,26 +61,25 @@ type SearchOutcome struct {
 	Err    error
 }
 
-type PublicationStage uint8
+type PublicationCheckOutcome struct {
+	ID    review.OperationID
+	Check review.PublicationCheckResult
+	Err   error
+}
 
-const (
-	PublicationCheckCompleted PublicationStage = iota + 1
-	PublicationCommitCompleted
-	PublicationReconciliationCompleted
-)
+type PublicationCommitOutcome struct {
+	ID          review.OperationID
+	Publication review.PublicationResult
+}
 
-type PublicationOutcome struct {
+type ReconciliationOutcome struct {
 	ID             review.OperationID
-	Stage          PublicationStage
-	Check          review.PublicationCheckResult
-	Publication    review.PublicationResult
 	Reconciliation review.ReconciliationResult
-	Err            error
 }
 
 type ExportWork struct {
 	ID          review.OperationID
-	Review      review.Review
+	Input       review.ExportInput
 	Templates   review.ExportTemplates
 	Options     review.ExportOptions
 	Format      review.ExportFormat
@@ -104,105 +105,37 @@ type DeliveryOutcome struct {
 	Err     error
 }
 
-type OutcomeKind uint8
-
-const (
-	OutcomePatch OutcomeKind = iota + 1
-	OutcomeSearch
-	OutcomeSyntax
-	OutcomePublication
-	OutcomeReload
-	OutcomeFileTree
-	OutcomeWorkspaceIndex
-	OutcomeExport
-	OutcomeDelivery
-	OutcomeProgress
-)
-
-type Outcome struct {
-	kind        OutcomeKind
-	patch       PatchOutcome
-	search      SearchOutcome
-	syntax      SyntaxOutcome
-	publication PublicationOutcome
-	reload      ReloadOutcome
-	fileTree    FileTreeOutcome
-	workspace   WorkspaceIndexOutcome
-	export      ExportOutcome
-	delivery    DeliveryOutcome
-	progress    Progress
+type Outcome interface {
+	coordinatorOutcome()
+	operationID() review.OperationID
 }
 
-func (outcome Outcome) Kind() OutcomeKind {
-	return outcome.kind
-}
-
-func (outcome Outcome) Patch() (PatchOutcome, bool) {
-	return outcome.patch, outcome.kind == OutcomePatch
-}
-
-func (outcome Outcome) Search() (SearchOutcome, bool) {
-	return outcome.search, outcome.kind == OutcomeSearch
-}
-
-func (outcome Outcome) Syntax() (SyntaxOutcome, bool) {
-	return outcome.syntax, outcome.kind == OutcomeSyntax
-}
-
-func (outcome Outcome) Publication() (PublicationOutcome, bool) {
-	return outcome.publication, outcome.kind == OutcomePublication
-}
-
-func (outcome Outcome) Reload() (ReloadOutcome, bool) {
-	return outcome.reload, outcome.kind == OutcomeReload
-}
-
-func (outcome Outcome) FileTree() (FileTreeOutcome, bool) {
-	return outcome.fileTree, outcome.kind == OutcomeFileTree
-}
-
-func (outcome Outcome) WorkspaceIndex() (WorkspaceIndexOutcome, bool) {
-	return outcome.workspace, outcome.kind == OutcomeWorkspaceIndex
-}
-
-func (outcome Outcome) Export() (ExportOutcome, bool) {
-	return outcome.export, outcome.kind == OutcomeExport
-}
-
-func (outcome Outcome) Delivery() (DeliveryOutcome, bool) {
-	return outcome.delivery, outcome.kind == OutcomeDelivery
-}
-
-func (outcome Outcome) Progress() (Progress, bool) {
-	return outcome.progress, outcome.kind == OutcomeProgress
-}
-
-func (outcome Outcome) operationID() review.OperationID {
-	switch outcome.kind {
-	case OutcomePatch:
-		return outcome.patch.ID
-	case OutcomeSearch:
-		return outcome.search.ID
-	case OutcomeSyntax:
-		return outcome.syntax.ID
-	case OutcomePublication:
-		return outcome.publication.ID
-	case OutcomeReload:
-		return outcome.reload.ID
-	case OutcomeFileTree:
-		return outcome.fileTree.ID
-	case OutcomeWorkspaceIndex:
-		return outcome.workspace.ID
-	case OutcomeExport:
-		return outcome.export.ID
-	case OutcomeDelivery:
-		return outcome.delivery.ID
-	case OutcomeProgress:
-		return outcome.progress.ID
-	default:
-		return 0
-	}
-}
+func (PatchOutcome) coordinatorOutcome()                                 {}
+func (SearchOutcome) coordinatorOutcome()                                {}
+func (SyntaxOutcome) coordinatorOutcome()                                {}
+func (PublicationCheckOutcome) coordinatorOutcome()                      {}
+func (PublicationCommitOutcome) coordinatorOutcome()                     {}
+func (ReconciliationOutcome) coordinatorOutcome()                        {}
+func (ReloadAcquiredOutcome) coordinatorOutcome()                        {}
+func (ReloadPreparedOutcome) coordinatorOutcome()                        {}
+func (FileTreeOutcome) coordinatorOutcome()                              {}
+func (WorkspaceIndexOutcome) coordinatorOutcome()                        {}
+func (ExportOutcome) coordinatorOutcome()                                {}
+func (DeliveryOutcome) coordinatorOutcome()                              {}
+func (Progress) coordinatorOutcome()                                     {}
+func (outcome PatchOutcome) operationID() review.OperationID             { return outcome.ID }
+func (outcome SearchOutcome) operationID() review.OperationID            { return outcome.ID }
+func (outcome SyntaxOutcome) operationID() review.OperationID            { return outcome.ID }
+func (outcome PublicationCheckOutcome) operationID() review.OperationID  { return outcome.ID }
+func (outcome PublicationCommitOutcome) operationID() review.OperationID { return outcome.ID }
+func (outcome ReconciliationOutcome) operationID() review.OperationID    { return outcome.ID }
+func (outcome ReloadAcquiredOutcome) operationID() review.OperationID    { return outcome.ID }
+func (outcome ReloadPreparedOutcome) operationID() review.OperationID    { return outcome.ID }
+func (outcome FileTreeOutcome) operationID() review.OperationID          { return outcome.ID }
+func (outcome WorkspaceIndexOutcome) operationID() review.OperationID    { return outcome.ID }
+func (outcome ExportOutcome) operationID() review.OperationID            { return outcome.ID }
+func (outcome DeliveryOutcome) operationID() review.OperationID          { return outcome.ID }
+func (outcome Progress) operationID() review.OperationID                 { return outcome.ID }
 
 type ReadyState uint8
 
@@ -508,13 +441,14 @@ func (coordinator *Coordinator) SubmitSearch(work SearchWork) error {
 
 func (coordinator *Coordinator) SubmitExport(work ExportWork) error {
 	if work.ID == 0 || work.Destination == 0 ||
+		work.Input.RetainedBytes() == 0 ||
 		work.Format != review.ExportMarkdown && work.Format != review.ExportJSON ||
-		work.Format == review.ExportMarkdown && work.Templates.Bytes() == 0 {
+		work.Format == review.ExportMarkdown && !work.Templates.Ready() {
 		return errors.New("invalid export work")
 	}
-	requestBytes := work.Review.RetainedCommentBytes()
+	requestBytes := work.Input.RetainedBytes()
 	if work.Format == review.ExportMarkdown {
-		requestBytes += work.Templates.Bytes()
+		requestBytes += work.Templates.RetainedBytes()
 	}
 	return coordinator.submit(
 		work.ID,
@@ -638,14 +572,13 @@ func (coordinator *Coordinator) ClaimNext() (Outcome, bool) {
 			if len(coordinator.progressOrder) != 0 {
 				coordinator.progressDirty = true
 			}
-			return Outcome{kind: OutcomeProgress, progress: progress}, true
+			return progress, true
 		}
 		coordinator.closeReadyIfFinishedLocked()
-		return Outcome{}, false
+		return nil, false
 	}
 	outcome := coordinator.outcomes[0]
-	copy(coordinator.outcomes, coordinator.outcomes[1:])
-	coordinator.outcomes = coordinator.outcomes[:len(coordinator.outcomes)-1]
+	coordinator.outcomes = slices.Delete(coordinator.outcomes, 0, 1)
 	id := outcome.operationID()
 	if reservation, exists := coordinator.accepted[id]; exists {
 		if id == coordinator.publicationActive {
@@ -656,7 +589,7 @@ func (coordinator *Coordinator) ClaimNext() (Outcome, bool) {
 		coordinator.reservedResult -= reservation.resultBytes
 		delete(coordinator.accepted, id)
 	}
-	if len(coordinator.outcomes) != 0 {
+	if len(coordinator.outcomes) != 0 || len(coordinator.progressOrder) != 0 {
 		coordinator.signalReadyLocked()
 	}
 	coordinator.updateStatsLocked()
@@ -668,13 +601,10 @@ func (coordinator *Coordinator) runPatchWorker() {
 	for job := range coordinator.patchJobs {
 		coordinator.required.wait(job.work.ID)
 		result, err := coordinator.service.LoadPatch(job.ctx, job.work.Document, job.work.Request)
-		coordinator.complete(Outcome{
-			kind: OutcomePatch,
-			patch: PatchOutcome{
-				ID:     job.work.ID,
-				Result: result,
-				Err:    err,
-			},
+		coordinator.complete(PatchOutcome{
+			ID:     job.work.ID,
+			Result: result,
+			Err:    err,
 		})
 	}
 }
@@ -683,13 +613,10 @@ func (coordinator *Coordinator) runSearchWorker() {
 	for job := range coordinator.searchJobs {
 		coordinator.required.wait(job.work.ID)
 		result, err := coordinator.executeSearch(job)
-		coordinator.complete(Outcome{
-			kind: OutcomeSearch,
-			search: SearchOutcome{
-				ID:     job.work.ID,
-				Result: result,
-				Err:    err,
-			},
+		coordinator.complete(SearchOutcome{
+			ID:     job.work.ID,
+			Result: result,
+			Err:    err,
 		})
 	}
 }
@@ -704,20 +631,27 @@ func (coordinator *Coordinator) executeSearch(job searchJob) (review.SearchResul
 	hits := make([]review.SearchHit, 0, 256)
 	var unavailable uint32
 	status := review.SearchComplete
-	files := snapshot.Files()
+	files := snapshot.AllFiles()
+	total := snapshot.FileCount()
 	if request.Scope == review.SearchCurrentFile {
 		file, ok := snapshot.File(request.File)
 		if !ok {
 			return review.SearchResult{}, errors.New("search file is unavailable")
 		}
-		files = []review.File{file}
+		files = func(yield func(review.File) bool) {
+			yield(file)
+		}
+		total = 1
 	}
-	for fileIndex, file := range files {
+	fileIndex := 0
+	for file := range files {
+		currentIndex := fileIndex
+		fileIndex++
 		_ = coordinator.ReportProgress(Progress{
 			ID:        job.work.ID,
-			Completed: uint64(fileIndex),
-			Total:     uint64(len(files)),
-			Detail:    "searching changed files",
+			Completed: uint64(currentIndex),
+			Total:     uint64(total),
+			Detail:    boundedOperationDetail("searching changed files"),
 		})
 		if err := context.Cause(job.ctx); err != nil {
 			status = review.SearchCancelled
@@ -774,11 +708,9 @@ func (coordinator *Coordinator) executeSearch(job searchJob) (review.SearchResul
 			hits = append(hits, batch.Hits...)
 			_ = coordinator.ReportProgress(Progress{
 				ID:        job.work.ID,
-				Completed: uint64(fileIndex),
-				Total:     uint64(len(files)),
-				Detail: review.OperationDetail(
-					fmt.Sprintf("%d matches retained", len(hits)),
-				),
+				Completed: uint64(currentIndex),
+				Total:     uint64(total),
+				Detail:    boundedOperationDetail(fmt.Sprintf("%d matches retained", len(hits))),
 			})
 			if batch.Done {
 				break
@@ -790,19 +722,19 @@ func (coordinator *Coordinator) executeSearch(job searchJob) (review.SearchResul
 	}
 	_ = coordinator.ReportProgress(Progress{
 		ID:        job.work.ID,
-		Completed: uint64(len(files)),
-		Total:     uint64(len(files)),
-		Detail:    "search scan complete",
+		Completed: uint64(total),
+		Total:     uint64(total),
+		Detail:    boundedOperationDetail("search scan complete"),
 	})
 	var detail review.OperationDetail
 	switch {
 	case status == review.SearchCancelled:
-		detail = "search cancelled"
+		detail = boundedOperationDetail("search cancelled")
 	case status == review.SearchLimited:
-		detail = "search result capacity reached"
+		detail = boundedOperationDetail("search result capacity reached")
 	case unavailable != 0:
 		status = review.SearchPartial
-		detail = review.OperationDetail(fmt.Sprintf("%d files unavailable", unavailable))
+		detail = boundedOperationDetail(fmt.Sprintf("%d files unavailable", unavailable))
 	}
 	return review.TakeSearchResult(review.SearchResultDescriptor{
 		Operation:        request.Operation,
@@ -828,21 +760,17 @@ func (coordinator *Coordinator) runReloadWorker() {
 			_ = coordinator.ReportProgress(Progress{
 				ID:     job.work.ID,
 				Total:  2,
-				Detail: "acquiring source revision",
+				Detail: boundedOperationDetail("acquiring source revision"),
 			})
 			document, err := coordinator.service.Reload(
 				job.ctx,
 				job.work.Document,
 				job.work.Options,
 			)
-			coordinator.complete(Outcome{
-				kind: OutcomeReload,
-				reload: ReloadOutcome{
-					ID:       job.work.ID,
-					Stage:    ReloadAcquired,
-					Document: document,
-					Err:      err,
-				},
+			coordinator.complete(ReloadAcquiredOutcome{
+				ID:       job.work.ID,
+				Document: document,
+				Err:      err,
 			})
 		case document, ok := <-retireDocuments:
 			if !ok {

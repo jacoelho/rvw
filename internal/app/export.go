@@ -66,7 +66,7 @@ func (model *Model) startExport(selection exportSelection) {
 	}
 	if err := model.coordinator.SubmitExport(ExportWork{
 		ID:          operationID,
-		Review:      model.review,
+		Input:       model.review.ExportInput(),
 		Templates:   model.settings.exportTemplates,
 		Options:     selection.options,
 		Format:      selection.format,
@@ -125,11 +125,11 @@ func (model *Model) exportPickerView(width, height int) string {
 
 func (model *Model) applyExportOutcome(outcome ExportOutcome) tea.Cmd {
 	request, tracked := model.exportOperations[outcome.ID]
-	delete(model.exportOperations, outcome.ID)
 	if !tracked || request.destination != outcome.Destination {
 		model.notice = &Notice{Kind: NoticeWarning, Text: "stale export outcome"}
 		return nil
 	}
+	delete(model.exportOperations, outcome.ID)
 	if outcome.Err != nil {
 		model.notice = &Notice{Kind: NoticeError, Text: NoticeText(outcome.Err.Error())}
 		if err := model.settleOperation(
@@ -157,7 +157,7 @@ func (model *Model) applyExportOutcome(outcome ExportOutcome) tea.Cmd {
 	if err := model.settleOperation(
 		outcome.ID,
 		review.OperationSucceeded,
-		review.EmptyOperationDetail,
+		review.EmptyOperationDetail(),
 	); err != nil {
 		model.notice = operationTransitionNotice(err)
 		return nil
@@ -214,11 +214,11 @@ func (model *Model) startDelivery(
 
 func (model *Model) applyDeliveryOutcome(outcome DeliveryOutcome) {
 	destination, tracked := model.deliveryOperations[outcome.ID]
-	delete(model.deliveryOperations, outcome.ID)
 	if !tracked || destination != outcome.Outcome.Destination {
 		model.notice = &Notice{Kind: NoticeWarning, Text: "stale delivery outcome"}
 		return
 	}
+	delete(model.deliveryOperations, outcome.ID)
 	if outcome.Err != nil {
 		status := review.OperationFailed
 		if outcome.Outcome.State == delivery.CommitUnknown {
@@ -237,7 +237,7 @@ func (model *Model) applyDeliveryOutcome(outcome DeliveryOutcome) {
 	if err := model.settleOperation(
 		outcome.ID,
 		review.OperationSucceeded,
-		review.EmptyOperationDetail,
+		review.EmptyOperationDetail(),
 	); err != nil {
 		model.notice = operationTransitionNotice(err)
 		return

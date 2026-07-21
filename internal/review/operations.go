@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -49,12 +50,71 @@ type Operation struct {
 	Detail OperationDetail
 }
 
-type OperationDetail string
+type OperationDetail struct {
+	value string
+}
 
-const EmptyOperationDetail OperationDetail = ""
+func EmptyOperationDetail() OperationDetail {
+	return OperationDetail{}
+}
+
+func NewOperationDetail(value string) (OperationDetail, error) {
+	if int64(len(value)) > MaxOperationDetail || !utf8.ValidString(value) {
+		return OperationDetail{}, fmt.Errorf(
+			"%w: operation detail is invalid or exceeds %d bytes",
+			ErrInvalidOperation,
+			MaxOperationDetail,
+		)
+	}
+	return OperationDetail{value: strings.Clone(value)}, nil
+}
+
+// NewBoundedOperationDetail converts external text to a valid operation
+// detail while preserving whitespace. Work and temporary allocation are
+// bounded independently of the original input length.
+func NewBoundedOperationDetail(value string) OperationDetail {
+	return mustOperationDetail(boundedOperationDetailText(value))
+}
+
+// NewBoundedTrimmedOperationDetail converts external text to a valid
+// operation detail and trims its bounded result. Work and temporary allocation
+// are bounded independently of the original input length.
+func NewBoundedTrimmedOperationDetail(value string) OperationDetail {
+	return mustOperationDetail(strings.TrimSpace(boundedOperationDetailText(value)))
+}
+
+func boundedOperationDetailText(value string) string {
+	if len(value) > int(MaxOperationDetail) {
+		value = value[:MaxOperationDetail]
+	}
+	value = strings.ToValidUTF8(value, "\uFFFD")
+	if len(value) > int(MaxOperationDetail) {
+		value = value[:MaxOperationDetail]
+		for !utf8.ValidString(value) {
+			value = value[:len(value)-1]
+		}
+	}
+	return value
+}
 
 func (detail OperationDetail) String() string {
-	return string(detail)
+	return detail.value
+}
+
+func (detail OperationDetail) Bytes() int64 {
+	return int64(len(detail.value))
+}
+
+func (detail OperationDetail) IsEmpty() bool {
+	return detail.value == ""
+}
+
+func mustOperationDetail(value string) OperationDetail {
+	detail, err := NewOperationDetail(value)
+	if err != nil {
+		panic(err)
+	}
+	return detail
 }
 
 func (kind OperationKind) String() string {
@@ -137,9 +197,6 @@ func (review Review) ResolveOperation(
 	if !exists || operation.Status != OperationPending || !terminalOperationStatus(status) {
 		return review, ErrInvalidOperation
 	}
-	if int64(len(detail)) > MaxOperationDetail || !utf8.ValidString(detail.String()) {
-		return review, fmt.Errorf("%w: operation detail is invalid or exceeds %d bytes", ErrInvalidOperation, MaxOperationDetail)
-	}
 	next := review.clone()
 	next.operations = maps.Clone(review.operations)
 	operation.Status = status
@@ -161,9 +218,7 @@ func (review Review) SettleUnknownOperation(
 ) (Review, error) {
 	operation, exists := review.operations[id]
 	if !exists || operation.Status != OperationUnknown ||
-		status != OperationSucceeded && status != OperationFailed ||
-		int64(len(detail)) > MaxOperationDetail ||
-		!utf8.ValidString(detail.String()) {
+		status != OperationSucceeded && status != OperationFailed {
 		return review, ErrInvalidOperation
 	}
 	next := review.clone()
@@ -234,7 +289,7 @@ func compactOperations(
 	var detailBytes int64
 	for _, id := range mandatory {
 		operation := operations[id]
-		detailBytes += int64(len(operation.Detail))
+		detailBytes += operation.Detail.Bytes()
 		if detailBytes > MaxStatusBytes {
 			return nil, fmt.Errorf("%w: unresolved status bytes exceed %d", ErrInvalidOperation, MaxStatusBytes)
 		}
@@ -242,10 +297,10 @@ func compactOperations(
 	}
 	for index := len(settled) - 1; index >= 0 && len(result) < limit; index-- {
 		operation := operations[settled[index]]
-		if detailBytes+int64(len(operation.Detail)) > MaxStatusBytes {
+		if detailBytes+operation.Detail.Bytes() > MaxStatusBytes {
 			continue
 		}
-		detailBytes += int64(len(operation.Detail))
+		detailBytes += operation.Detail.Bytes()
 		result[operation.ID] = operation
 	}
 	return result, nil

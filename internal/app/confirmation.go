@@ -24,8 +24,7 @@ func (model *Model) requestQuit() tea.Cmd {
 	if model.review.HasLocalChanges() {
 		model.confirmation = confirmation{kind: confirmationQuit}
 		model.overlay = OverlayConfirm
-		model.chord = nil
-		model.repeat = 0
+		model.abandonChord()
 		return nil
 	}
 	return model.quit()
@@ -61,16 +60,14 @@ func (model *Model) requestCommentDelete() {
 		comment: comment.ID(),
 	}
 	model.overlay = OverlayConfirm
-	model.chord = nil
-	model.repeat = 0
+	model.abandonChord()
 }
 
 func (model *Model) requestReload() {
 	if model.review.HasLocalChanges() {
 		model.confirmation = confirmation{kind: confirmationReload}
 		model.overlay = OverlayConfirm
-		model.chord = nil
-		model.repeat = 0
+		model.abandonChord()
 		return
 	}
 	model.startReload()

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/jacoelho/rvw/internal/review"
 )
@@ -19,6 +20,7 @@ var (
 	benchmarkScaleReview review.Review
 	benchmarkScaleIndex  WorkspaceIndexOutcome
 	benchmarkScaleView   tea.View
+	benchmarkWrappedLine []string
 )
 
 func BenchmarkConstructReviewAtScale(b *testing.B) {
@@ -48,6 +50,73 @@ func BenchmarkRenderReviewAtScale(b *testing.B) {
 	}
 }
 
+func BenchmarkRenderReviewAtMaxGeometry(b *testing.B) {
+	model, _ := appScaleModel(b)
+	model.size = TerminalSize{Width: maxRenderWidth, Height: maxRenderHeight, Known: true}
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for b.Loop() {
+		benchmarkScaleView = model.View()
+	}
+}
+
+func BenchmarkRenderReviewModesAtScale(b *testing.B) {
+	testCases := []struct {
+		name string
+		view DiffView
+		wrap bool
+	}{
+		{name: "unified/wrap", view: DiffViewUnified, wrap: true},
+		{name: "unified/no-wrap", view: DiffViewUnified},
+		{name: "side-by-side/wrap", view: DiffViewSideBySide, wrap: true},
+		{name: "side-by-side/no-wrap", view: DiffViewSideBySide},
+	}
+	for _, testCase := range testCases {
+		b.Run(testCase.name, func(b *testing.B) {
+			model, _ := appScaleModel(b)
+			model.settings.diffView = testCase.view
+			model.settings.wrap = testCase.wrap
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				benchmarkScaleView = model.View()
+			}
+		})
+	}
+}
+
+func BenchmarkWrappedLineCases(b *testing.B) {
+	testCases := []struct {
+		name  string
+		value string
+		width int
+	}{
+		{name: "fitting-ascii", value: "func retainedViewport() error", width: 80},
+		{
+			name: "styled-unicode",
+			value: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12")).Render(
+				"résumé λ-value",
+			),
+			width: 80,
+		},
+		{name: "ansi", value: "\x1b[31mred text\x1b[0m", width: 80},
+		{name: "wide-grapheme", value: "界🙂‍↕️界🙂‍↕️", width: 80},
+		{name: "long-overflow", value: strings.Repeat("overflow ", 64), width: 40},
+	}
+	for _, testCase := range testCases {
+		b.Run(testCase.name, func(b *testing.B) {
+			model := &Model{}
+			model.settings.wrap = true
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				benchmarkWrappedLine = model.wrappedLine(testCase.value, testCase.width)
+			}
+		})
+	}
+}
+
 func BenchmarkNavigateReviewAtScale(b *testing.B) {
 	model, _ := appScaleModel(b)
 	b.ReportAllocs()
@@ -57,6 +126,48 @@ func BenchmarkNavigateReviewAtScale(b *testing.B) {
 		model.moveFile(1)
 		model.moveFile(-1)
 	}
+}
+
+func BenchmarkNavigateAndRenderReviewAtScale(b *testing.B) {
+	model, _ := appScaleModel(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for b.Loop() {
+		model.moveFile(1)
+		benchmarkScaleView = model.View()
+		model.moveFile(-1)
+		benchmarkScaleView = model.View()
+	}
+}
+
+func BenchmarkConstructReviewStagesAtScale(b *testing.B) {
+	patch := appScalePatchText()
+	b.Run("snapshot", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			snapshot, _ := largeTreeFixture(b, largeTreeFileCount)
+			_ = snapshot
+		}
+	})
+	b.Run("review-state", func(b *testing.B) {
+		snapshot, files := largeTreeFixture(b, largeTreeFileCount)
+		b.ReportAllocs()
+		for b.Loop() {
+			benchmarkScaleReview = appScaleReview(b, snapshot, files, patch)
+		}
+	})
+	b.Run("workspace-index", func(b *testing.B) {
+		snapshot, _ := largeTreeFixture(b, largeTreeFileCount)
+		b.ReportAllocs()
+		for b.Loop() {
+			index, err := buildWorkspaceIndex(context.Background(), snapshot)
+			if err != nil {
+				b.Fatal(err)
+			}
+			benchmarkScaleIndex = index
+		}
+	})
 }
 
 func TestActivatingFileDropsPriorLargePatchAtScale(t *testing.T) {
@@ -91,7 +202,7 @@ func TestActivatingFileDropsPriorLargePatchAtScale(t *testing.T) {
 func appScaleModel(tb testing.TB) (*Model, *Coordinator) {
 	tb.Helper()
 	model, coordinator := newTestModel(tb, map[string]string{"seed.go": "changed\n"})
-	if len(model.patchOperations) != 0 {
+	if model.foreground.patchCount() != 0 {
 		waitContext, cancelWait := context.WithTimeout(tb.Context(), 5*time.Second)
 		if state := coordinator.WaitReady(waitContext); state != ReadyAvailable {
 			cancelWait()

@@ -166,9 +166,7 @@ func TakeSearchResult(
 	if descriptor.Operation == 0 || descriptor.Workspace == 0 || descriptor.Source == 0 ||
 		!terminalSearchStatus(descriptor.Status) ||
 		len(hits) > MaxSearchHits ||
-		int64(len(hits))*searchHitRetainedBytes > MaxSearchHitBytes ||
-		len(descriptor.Detail) > int(MaxOperationDetail) ||
-		!utf8.ValidString(descriptor.Detail.String()) {
+		int64(len(hits))*searchHitRetainedBytes > MaxSearchHitBytes {
 		return SearchResult{}, fmt.Errorf("%w: malformed terminal result", ErrInvalidSearch)
 	}
 	for _, hit := range hits {
@@ -247,9 +245,7 @@ func (review Review) ApplySearch(result SearchResult) (Review, error) {
 		return review, ErrInvalidSearch
 	}
 	if len(result.hits) > MaxSearchHits ||
-		int64(len(result.hits))*searchHitRetainedBytes > MaxSearchHitBytes ||
-		len(result.detail) > int(MaxOperationDetail) ||
-		!utf8.ValidString(result.detail.String()) {
+		int64(len(result.hits))*searchHitRetainedBytes > MaxSearchHitBytes {
 		return review, fmt.Errorf("%w: result capacity exceeded", ErrInvalidSearch)
 	}
 	next := review.clone()
@@ -271,7 +267,7 @@ func (review Review) SupersedeSearch() Review {
 	next := review.clone()
 	next.search.status = SearchSuperseded
 	next.search.hits = nil
-	next.search.detail = "search was superseded"
+	next.search.detail = mustOperationDetail("search was superseded")
 	return next
 }
 

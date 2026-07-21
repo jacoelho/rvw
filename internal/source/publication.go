@@ -109,7 +109,7 @@ func (service *Service) Publish(
 	if checked == nil || checked.PayloadSize() == 0 {
 		return PublicationCommit{
 			Disposition: review.PublicationDispositionFailedBeforeCommit,
-			Detail:      "checked publication is unavailable",
+			Detail:      boundedOperationDetail("checked publication is unavailable"),
 		}
 	}
 	target := checked.Target()
@@ -137,13 +137,13 @@ func (service *Service) Publish(
 		}
 		return PublicationCommit{
 			Disposition: disposition,
-			Detail:      boundedPublicationDetail(err.Error()),
+			Detail:      boundedOperationDetail(err.Error()),
 		}
 	}
 	if !utf8.Valid(result.Stdout) {
 		return PublicationCommit{
 			Disposition: review.PublicationDispositionUnknown,
-			Detail:      "GitHub publication response is not valid UTF-8",
+			Detail:      boundedOperationDetail("GitHub publication response is not valid UTF-8"),
 		}
 	}
 	var response struct {
@@ -156,7 +156,7 @@ func (service *Service) Publish(
 		}
 		return PublicationCommit{
 			Disposition: review.PublicationDispositionUnknown,
-			Detail:      boundedPublicationDetail(detail),
+			Detail:      boundedOperationDetail(detail),
 		}
 	}
 	return PublicationCommit{
@@ -184,32 +184,32 @@ func (service *Service) ReconcilePublication(
 		review.MaxPublicationBytes,
 	)
 	if err != nil {
-		result.Detail = boundedPublicationDetail(err.Error())
+		result.Detail = boundedOperationDetail(err.Error())
 		return result
 	}
 	if !utf8.Valid(command.Stdout) {
-		result.Detail = "GitHub review history is not valid UTF-8"
+		result.Detail = boundedOperationDetail("GitHub review history is not valid UTF-8")
 		return result
 	}
 	bodies, err := decodeReviewBodies(command.Stdout)
 	if err != nil {
-		result.Detail = boundedPublicationDetail(err.Error())
+		result.Detail = boundedOperationDetail(err.Error())
 		return result
 	}
 	matches := 0
 	for _, body := range bodies {
 		matches += strings.Count(body, request.Marker.String())
 		if matches > 1 {
-			result.Detail = "publication marker is ambiguous in GitHub review history"
+			result.Detail = boundedOperationDetail("publication marker is ambiguous in GitHub review history")
 			return result
 		}
 	}
 	if matches == 1 {
 		result.Disposition = review.ReconciliationCommitted
-		result.Detail = "publication marker confirmed"
+		result.Detail = boundedOperationDetail("publication marker confirmed")
 	} else {
 		result.Disposition = review.ReconciliationNotCommitted
-		result.Detail = "publication marker confirmed absent"
+		result.Detail = boundedOperationDetail("publication marker confirmed absent")
 	}
 	return result
 }
@@ -327,12 +327,6 @@ func (item *reviewHistoryItem) UnmarshalJSON(value []byte) error {
 	return nil
 }
 
-func boundedPublicationDetail(value string) review.OperationDetail {
-	if len(value) > int(review.MaxOperationDetail) {
-		value = value[:review.MaxOperationDetail]
-		for !utf8.ValidString(value) {
-			value = value[:len(value)-1]
-		}
-	}
-	return review.OperationDetail(value)
+func boundedOperationDetail(value string) review.OperationDetail {
+	return review.NewBoundedOperationDetail(value)
 }

@@ -65,13 +65,31 @@ func TestSnapshotRequiresSequentialCrossConsistentIdentities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.FileCount() != 1 || snapshot.Files()[0].DisplayPath() != "file.go" {
+	first, _ := snapshot.File(0)
+	if snapshot.FileCount() != 1 || first.DisplayPath() != "file.go" {
 		t.Fatalf("unexpected snapshot: %+v", snapshot)
 	}
 
 	otherSource, _ := NewSourceID(8)
 	if _, err := NewSnapshot(otherSource, []File{file}); !errors.Is(err, ErrInvalidSnapshot) {
 		t.Fatalf("NewSnapshot() error = %v, want ErrInvalidSnapshot", err)
+	}
+}
+
+func TestReviewConstructorOwnsCommentKinds(t *testing.T) {
+	issue, _ := NewCommentKind("issue")
+	note, _ := NewCommentKind("note")
+	kinds := []CommentKind{issue}
+	current, err := NewReview(testSnapshot(t, 1, "file.go"), kinds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kinds[0] = note
+	if _, err := current.BeginDraft(ReviewCommentTarget(), issue); err != nil {
+		t.Fatalf("constructor-owned kind was changed through caller alias: %v", err)
+	}
+	if _, err := current.BeginDraft(ReviewCommentTarget(), note); !errors.Is(err, ErrInvalidReviewTransition) {
+		t.Fatalf("caller-injected kind error = %v, want ErrInvalidReviewTransition", err)
 	}
 }
 

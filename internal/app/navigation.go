@@ -269,21 +269,42 @@ func (model *Model) cycleFocus(delta int) {
 	}
 	delta %= len(owners)
 	index = (index + delta + len(owners)) % len(owners)
-	model.focus = owners[index]
+	model.setFocus(owners[index])
 }
 
 func (model *Model) clampFocus() {
 	if model.focus == FocusFileTree && !model.showFileTree() ||
 		model.focus == FocusComments && !model.showCommentsPane() {
 		model.focusReturn = model.focus
-		model.focus = FocusDiff
+		model.setFocus(FocusDiff)
 		return
 	}
 	if model.focus == FocusDiff &&
 		(model.focusReturn == FocusFileTree && model.showFileTree() ||
 			model.focusReturn == FocusComments && model.showCommentsPane()) {
-		model.focus = model.focusReturn
+		model.setFocus(model.focusReturn)
 		model.focusReturn = 0
+	}
+}
+
+func (model *Model) setFocus(owner FocusOwner) {
+	if model.focus == owner {
+		return
+	}
+	model.focus = owner
+	model.abandonChord()
+}
+
+func (model *Model) focusVisible(owner FocusOwner) bool {
+	switch owner {
+	case FocusFileTree:
+		return model.showFileTree()
+	case FocusDiff:
+		return true
+	case FocusComments:
+		return model.showCommentsPane()
+	default:
+		return false
 	}
 }
 
