@@ -812,8 +812,10 @@ func (model *Model) commentLines(
 				continue
 			}
 			target := commentTargetText(comment.Target())
-			line = safeAndClip(
-				prefix+"["+comment.Kind().String()+"] "+target+" — ",
+			line = clipStyled(prefix, 0, width)
+			line = appendSafeAndClip(
+				line,
+				"["+comment.Kind().String()+"] "+target+" — ",
 				width,
 			)
 			remaining := max(width-lipgloss.Width(line), 0)
@@ -836,7 +838,12 @@ func (model *Model) commentLines(
 			if sourceLine, ok := thread.Line(); ok {
 				location += fmt.Sprintf(":%d", sourceLine.Uint32())
 			}
-			line = safeAndClip(prefix+"[remote "+state+"] "+location+" — ", width)
+			line = clipStyled(prefix, 0, width)
+			line = appendSafeAndClip(
+				line,
+				"[remote "+state+"] "+location+" — ",
+				width,
+			)
 			comments := thread.Comments(0, 1)
 			if len(comments) != 0 {
 				author := comments[0].Author()
@@ -856,6 +863,14 @@ func (model *Model) commentLines(
 		rows = append(rows, index)
 	}
 	return lines, rows
+}
+
+func appendSafeAndClip(line, value string, width int) string {
+	remaining := max(width-lipgloss.Width(line), 0)
+	if remaining == 0 {
+		return line
+	}
+	return line + safeAndClip(value, remaining)
 }
 
 func commentTargetText(target review.CommentTarget) string {

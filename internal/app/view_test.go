@@ -109,6 +109,56 @@ func TestCommentEditorDockPreservesWorkspaceAcrossHeightBoundary(t *testing.T) {
 	}
 }
 
+func TestFocusedCommentPanePreservesStyleSequences(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	active, ok := model.review.ActiveFile()
+	if !ok {
+		t.Fatal("missing active file")
+	}
+	target, err := review.FileCommentTarget(active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := model.review.BeginDraft(target, model.settings.commentKinds[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err = current.UpdateDraft("comment body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, _, err = current.SaveDraft()
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.review = current
+
+	styles := newSemanticStyles(model.settings)
+	for _, test := range []struct {
+		name   string
+		focus  FocusOwner
+		marker string
+	}{
+		{name: "unfocused", focus: FocusDiff, marker: "› "},
+		{name: "focused", focus: FocusComments, marker: "▸ "},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			model.focus = test.focus
+			lines, _ := model.commentLines(40, 3, styles)
+			if len(lines) != 1 {
+				t.Fatalf("comment lines = %d, want 1", len(lines))
+			}
+			plain := ansi.Strip(lines[0])
+			if strings.Contains(plain, `\x1B[`) {
+				t.Fatalf("comment row exposed escaped styling: %q", plain)
+			}
+			if !strings.HasPrefix(plain, test.marker) || !strings.Contains(plain, "comment body") {
+				t.Fatalf("comment row = %q", plain)
+			}
+		})
+	}
+}
+
 func beginTestLineComment(t *testing.T, model *Model) {
 	t.Helper()
 	active, ok := model.review.ActiveFile()
