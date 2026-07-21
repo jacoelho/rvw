@@ -208,7 +208,7 @@ func NewModel(
 		return nil, errors.New("interactive model requires context, document, coordinator, and receiver")
 	}
 	settings = settings.clone()
-	current, err := review.NewReview(document.Snapshot(), settings.commentKinds)
+	current, err := review.NewReview(document.Snapshot())
 	if err != nil {
 		return nil, err
 	}

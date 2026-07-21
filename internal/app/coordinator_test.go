@@ -31,7 +31,7 @@ func TestCoordinatorAdmissionRetainsOutcomeUntilClaim(t *testing.T) {
 		}
 	})
 
-	current, err := review.NewReview(fixture.document.Snapshot(), []review.CommentKind{"issue"})
+	current, err := review.NewReview(fixture.document.Snapshot())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,17 +187,13 @@ func TestCoordinatorKeepsPublicationByteCapacityReserved(t *testing.T) {
 func TestCoordinatorChargesExportProjectionUntilRequestSaturation(t *testing.T) {
 	fixture := newSourceFixture(t, map[string]string{"alpha.txt": "changed\n"})
 	coordinator := newShutdownTestCoordinator(t, fixture)
-	kind, err := review.NewCommentKind("issue")
-	if err != nil {
-		t.Fatal(err)
-	}
-	current, err := review.NewReview(fixture.document.Snapshot(), []review.CommentKind{kind})
+	current, err := review.NewReview(fixture.document.Snapshot())
 	if err != nil {
 		t.Fatal(err)
 	}
 	body := strings.Repeat("x", int(review.MaxCommentBodyBytes))
 	for range int(review.MaxCommentBodyTotal / review.MaxCommentBodyBytes) {
-		current, err = current.BeginDraft(review.ReviewCommentTarget(), kind)
+		current, err = current.BeginDraft(review.ReviewCommentTarget())
 		if err != nil {
 			t.Fatal(err)
 		}

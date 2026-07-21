@@ -240,11 +240,7 @@ func appScaleReview(
 	patch []byte,
 ) review.Review {
 	tb.Helper()
-	kind, err := review.NewCommentKind("issue")
-	if err != nil {
-		tb.Fatal(err)
-	}
-	current, err := review.NewReview(snapshot, []review.CommentKind{kind})
+	current, err := review.NewReview(snapshot)
 	if err != nil {
 		tb.Fatal(err)
 	}
@@ -270,7 +266,7 @@ func appScaleReview(
 		if err != nil {
 			tb.Fatal(err)
 		}
-		current, err = current.BeginDraft(target, kind)
+		current, err = current.BeginDraft(target)
 		if err != nil {
 			tb.Fatal(err)
 		}

@@ -353,7 +353,7 @@ func TestOpenStagedPreservesUnmergedIndexAsUnavailablePatch(t *testing.T) {
 		t.Fatalf("unexpected staged conflict snapshot: %+v", document.Snapshot())
 	}
 
-	current, err := review.NewReview(document.Snapshot(), []review.CommentKind{"issue"})
+	current, err := review.NewReview(document.Snapshot())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,8 +395,7 @@ func TestLoadPatchAndReloadUseGenerationFencedIdentities(t *testing.T) {
 	}
 	defer document.Close()
 
-	kind, _ := review.NewCommentKind("issue")
-	current, err := review.NewReview(document.Snapshot(), []review.CommentKind{kind})
+	current, err := review.NewReview(document.Snapshot())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,7 +451,7 @@ func TestLoadPatchTreatsRawPathAsLiteral(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer document.Close()
-	current, err := review.NewReview(document.Snapshot(), []review.CommentKind{"issue"})
+	current, err := review.NewReview(document.Snapshot())
 	if err != nil {
 		t.Fatal(err)
 	}

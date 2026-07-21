@@ -27,14 +27,10 @@ var (
 
 func BenchmarkNewReview100000Files(b *testing.B) {
 	snapshot := scaleReviewWithFiles(b, MaxFiles).Snapshot()
-	kind, err := NewCommentKind("issue")
-	if err != nil {
-		b.Fatal(err)
-	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		current, err := NewReview(snapshot, []CommentKind{kind})
+		current, err := NewReview(snapshot)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -104,8 +100,8 @@ func BenchmarkPatchViewport10000LineFileIn1000FileReview(b *testing.B) {
 func BenchmarkPrepareMarkdownManyComments(b *testing.B) {
 	current := scaleReviewWithComments(b, scaleCommentCount)
 	templates, err := CompileExportTemplates(
-		"# Review\n\nKinds: {{comment_types}}\nCount: {{comment_count}}\n\n{{comments}}\n",
-		"- {{index}} [{{kind_upper}}] {{target}}: {{comment}}",
+		"# Review\n\nCount: {{comment_count}}\n\n{{comments}}\n",
+		"- {{index}} {{target}}: {{comment}}",
 	)
 	if err != nil {
 		b.Fatal(err)
@@ -131,7 +127,7 @@ func BenchmarkPrepareMarkdownManyComments(b *testing.B) {
 
 func BenchmarkPrepareCheckedPublicationManyComments(b *testing.B) {
 	current := scaleReviewWithComments(b, scaleCommentCount)
-	policies, err := NewPublicationPolicies(PublicationPrefixKinds)
+	policies, err := NewPublicationPolicies()
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -324,10 +320,6 @@ func applyScalePatch(tb testing.TB, current Review, fileID FileID, lineCount int
 func scaleReviewWithComments(tb testing.TB, count int) Review {
 	tb.Helper()
 	current := scaleReview(tb)
-	kind, err := NewCommentKind("issue")
-	if err != nil {
-		tb.Fatal(err)
-	}
 	for index := range count {
 		line, err := NewLineNumber(uint32(index%scaleFileLines + 1))
 		if err != nil {
@@ -337,7 +329,7 @@ func scaleReviewWithComments(tb testing.TB, count int) Review {
 		if err != nil {
 			tb.Fatal(err)
 		}
-		current, err = current.BeginDraft(target, kind)
+		current, err = current.BeginDraft(target)
 		if err != nil {
 			tb.Fatal(err)
 		}
@@ -396,11 +388,7 @@ func scaleReviewWithFiles(tb testing.TB, fileCount int) Review {
 	if err != nil {
 		tb.Fatal(err)
 	}
-	kind, err := NewCommentKind("issue")
-	if err != nil {
-		tb.Fatal(err)
-	}
-	current, err := NewReview(snapshot, []CommentKind{kind})
+	current, err := NewReview(snapshot)
 	if err != nil {
 		tb.Fatal(err)
 	}

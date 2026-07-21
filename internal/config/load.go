@@ -29,12 +29,11 @@ type rawConfig struct {
 	ThemeLight *string `toml:"theme_light"`
 	Appearance *string `toml:"appearance"`
 
-	UI       *rawUI       `toml:"ui"`
-	Diff     *rawDiff     `toml:"diff"`
-	Filter   *rawFilter   `toml:"filter"`
-	Comments *rawComments `toml:"comments"`
-	GitHub   *rawGitHub   `toml:"github"`
-	Export   *rawExport   `toml:"export"`
+	UI     *rawUI     `toml:"ui"`
+	Diff   *rawDiff   `toml:"diff"`
+	Filter *rawFilter `toml:"filter"`
+	GitHub *rawGitHub `toml:"github"`
+	Export *rawExport `toml:"export"`
 }
 
 type rawUI struct {
@@ -69,11 +68,6 @@ type rawFilter struct {
 	IgnoreFile      *string `toml:"ignore_file"`
 	Include         any     `toml:"include"`
 	Exclude         any     `toml:"exclude"`
-}
-
-type rawComments struct {
-	Kinds               any   `toml:"kinds"`
-	TypePrefixForGitHub *bool `toml:"type_prefix_for_github"`
 }
 
 type rawGitHub struct {
@@ -332,16 +326,6 @@ func applyLayer(config *Config, layer decodedLayer) error {
 		}
 	}
 
-	if raw.Comments != nil {
-		if layer.metadata.IsDefined("comments", "kinds") {
-			values, err := stringList(raw.Comments.Kinds, "comments.kinds")
-			if err != nil {
-				return fmt.Errorf("configuration %s: %w", layer.path, err)
-			}
-			config.comments.Kinds = commentKinds(values)
-		}
-		assign(&config.comments.TypePrefixForGitHub, raw.Comments.TypePrefixForGitHub)
-	}
 	if raw.GitHub != nil {
 		if raw.GitHub.SubmitDefault != nil {
 			config.github.SubmitDefault = SubmitEvent(*raw.GitHub.SubmitDefault)
@@ -423,14 +407,6 @@ func patterns(values []string) []Pattern {
 	result := make([]Pattern, len(values))
 	for index, value := range values {
 		result[index] = Pattern(value)
-	}
-	return result
-}
-
-func commentKinds(values []string) []CommentKind {
-	result := make([]CommentKind, len(values))
-	for index, value := range values {
-		result[index] = CommentKind(value)
 	}
 	return result
 }

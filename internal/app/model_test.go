@@ -610,7 +610,6 @@ func newTestModel(t testing.TB, changed map[string]string) (*Model, *Coordinator
 		DiffView:        DiffViewUnified,
 		ContextLines:    contextLines,
 		SyntaxSelector:  syntaxSelector,
-		CommentKinds:    []review.CommentKind{"issue"},
 		ExportTemplates: exportTemplates,
 		Publication:     publicationOptions,
 		Keybindings: []Keybinding{

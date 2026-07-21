@@ -7,17 +7,6 @@ import (
 )
 
 func TestValidatedCommentStringsOwnTheirBacking(t *testing.T) {
-	kindParent := strings.Repeat("x", 1<<20) + "  issue  "
-	kindSource := kindParent[len(kindParent)-9:]
-	kind, err := NewCommentKind(kindSource)
-	if err != nil {
-		t.Fatal(err)
-	}
-	trimmedKind := strings.TrimSpace(kindSource)
-	if unsafe.StringData(kind.String()) == unsafe.StringData(trimmedKind) {
-		t.Fatal("comment kind retained caller backing")
-	}
-
 	bodyParent := strings.Repeat("y", 1<<20) + "body"
 	bodySource := bodyParent[len(bodyParent)-4:]
 	body, err := NewCommentBody(bodySource)
@@ -30,15 +19,11 @@ func TestValidatedCommentStringsOwnTheirBacking(t *testing.T) {
 }
 
 func TestDraftBodyOwnsValidatedBacking(t *testing.T) {
-	kind, err := NewCommentKind("issue")
+	current, err := NewReview(testSnapshot(t, 1, "one.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	current, err := NewReview(testSnapshot(t, 1, "one.go"), []CommentKind{kind})
-	if err != nil {
-		t.Fatal(err)
-	}
-	current, err = current.BeginDraft(ReviewCommentTarget(), kind)
+	current, err = current.BeginDraft(ReviewCommentTarget())
 	if err != nil {
 		t.Fatal(err)
 	}

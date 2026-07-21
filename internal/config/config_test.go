@@ -27,8 +27,6 @@ mouse = true
 context_lines = 0
 [filter]
 include = "user/**"
-[comments]
-kinds = ["praise", "issue"]
 `)
 	writeTestFile(t, filepath.Join(root, ".rvw.toml"), `
 [diff]
@@ -63,10 +61,6 @@ exclude = "**/*.min.js"
 		got[0].String() != "project/**" || got[1].String() != "cli/**" {
 		t.Fatalf("include = %v", got)
 	}
-	if got := config.Comments().Kinds; len(got) != 2 ||
-		got[0].String() != "issue" || got[1].String() != "praise" {
-		t.Fatalf("kinds = %v", got)
-	}
 }
 
 func TestLoadRejectsUnknownFields(t *testing.T) {
@@ -75,6 +69,18 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 	_, err := Load(LoadRequest{CWD: root})
 	if !errors.Is(err, ErrInvalidConfig) && !strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("Load() error = %v", err)
+	}
+}
+
+func TestDefaultsUseExportTemplates(t *testing.T) {
+	export := Defaults().Export()
+	if got, want := export.MarkdownTemplate.String(),
+		"I reviewed your code and have the following comments. Please address them.\n\n{{comments}}\n"; got != want {
+		t.Fatalf("markdown template = %q, want %q", got, want)
+	}
+	if got, want := export.CommentTemplate.String(),
+		"{{index}}. `{{target}}` - {{comment}}"; got != want {
+		t.Fatalf("comment template = %q, want %q", got, want)
 	}
 }
 
@@ -102,16 +108,13 @@ func TestLoadAcceptsStringOrArrayLists(t *testing.T) {
 [filter]
 include = "src/**"
 exclude = ["vendor/**", "**/*.lock"]
-[comments]
-kinds = "issue"
 `)
 	config, err := Load(LoadRequest{CWD: root, Environment: []string{"HOME=" + home}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(config.Filter().Include) != 1 || len(config.Filter().Exclude) != 2 ||
-		len(config.Comments().Kinds) != 1 {
-		t.Fatalf("unexpected lists: %+v %+v", config.Filter(), config.Comments())
+	if len(config.Filter().Include) != 1 || len(config.Filter().Exclude) != 2 {
+		t.Fatalf("unexpected lists: %+v", config.Filter())
 	}
 }
 
@@ -131,7 +134,6 @@ func TestValidationRejectsUnsafeValues(t *testing.T) {
 	}{
 		{name: "context", content: "[diff]\ncontext_lines = 10001\n"},
 		{name: "ignore path", content: "[filter]\nignore_file = \"../ignore\"\n"},
-		{name: "duplicate kinds", content: "[comments]\nkinds = [\"issue\", \" issue \"]\n"},
 		{name: "unknown placeholder", content: "[export]\nmarkdown_template = \"{{unknown}}\"\n"},
 		{name: "reserved key", content: "[[ui.keybindings]]\ncontext=\"normal\"\nchord=\"Ctrl-c\"\naction=\"quit\"\n"},
 		{

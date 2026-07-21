@@ -3,9 +3,7 @@ package review
 import (
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 )
 
@@ -16,41 +14,6 @@ const (
 )
 
 var ErrInvalidComment = errors.New("invalid comment")
-
-type CommentKind string
-
-func NewCommentKind(value string) (CommentKind, error) {
-	value = strings.TrimSpace(value)
-	if value == "" || int64(len(value)) > 256 || !utf8.ValidString(value) {
-		return "", fmt.Errorf("%w: kind must use 1 through 256 UTF-8 bytes", ErrInvalidComment)
-	}
-	for _, character := range value {
-		if unicode.IsControl(character) {
-			return "", fmt.Errorf("%w: kind contains a control character", ErrInvalidComment)
-		}
-	}
-	return CommentKind(strings.Clone(value)), nil
-}
-
-func (kind CommentKind) String() string {
-	return string(kind)
-}
-
-type CommentKinds struct {
-	values []CommentKind
-}
-
-func NewCommentKinds(values ...CommentKind) (CommentKinds, error) {
-	validated, err := validateKinds(values)
-	if err != nil {
-		return CommentKinds{}, err
-	}
-	return CommentKinds{values: validated}, nil
-}
-
-func (kinds CommentKinds) Values() []CommentKind {
-	return slices.Clone(kinds.values)
-}
 
 type LineSide uint8
 
@@ -169,7 +132,6 @@ func (body CommentBody) String() string {
 
 type Comment struct {
 	id         CommentID
-	kind       CommentKind
 	target     CommentTarget
 	body       CommentBody
 	stale      bool
@@ -178,10 +140,6 @@ type Comment struct {
 
 func (comment Comment) ID() CommentID {
 	return comment.id
-}
-
-func (comment Comment) Kind() CommentKind {
-	return comment.kind
 }
 
 func (comment Comment) Target() CommentTarget {
@@ -201,14 +159,9 @@ func (comment Comment) Unmappable() bool {
 }
 
 type Draft struct {
-	kind    CommentKind
 	target  CommentTarget
 	body    string
 	editing *CommentID
-}
-
-func (draft Draft) Kind() CommentKind {
-	return draft.kind
 }
 
 func (draft Draft) Target() CommentTarget {
@@ -224,23 +177,4 @@ func (draft Draft) EditingComment() (CommentID, bool) {
 		return 0, false
 	}
 	return *draft.editing, true
-}
-
-func validateKinds(kinds []CommentKind) ([]CommentKind, error) {
-	if len(kinds) == 0 || len(kinds) > 32 {
-		return nil, fmt.Errorf("%w: configured kinds must contain 1 through 32 values", ErrInvalidComment)
-	}
-	owned := slices.Clone(kinds)
-	slices.Sort(owned)
-	for index, kind := range owned {
-		validated, err := NewCommentKind(kind.String())
-		if err != nil {
-			return nil, err
-		}
-		owned[index] = validated
-		if index > 0 && owned[index-1] == validated {
-			return nil, fmt.Errorf("%w: duplicate kind %q", ErrInvalidComment, kind)
-		}
-	}
-	return owned, nil
 }

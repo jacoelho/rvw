@@ -35,7 +35,8 @@ Main default controls are:
 | `:` | Open command prompt |
 | `q` / `Ctrl-c` | Quit/interrupt |
 
-Comment editing uses `Ctrl-s` to save, `Tab` and `Shift-Tab` to change kind, and `Esc` to cancel.
+Comment editing uses `Ctrl-s` to save and `Esc` to cancel. An explicitly configured valid binding
+takes precedence; otherwise `Tab` and `Shift-Tab` are delivered to the focused textarea.
 Multi-key chords time out after 750 milliseconds. Numeric repeats range from 1 through 9,999.
 Chord/repeat state resets on context changes, invalid continuation, or timeout. Effective help
 reflects user overrides. Search and command-prompt input are each limited to 64 KiB; reaching the
@@ -128,4 +129,3 @@ identity changes.
 Status presentation is deterministic and preserves simultaneous progress, warning, error, stale,
 limited, cancellation, delivery, and publication facts in the status-details layer even when the
 compact status bar can show only one summary.
-

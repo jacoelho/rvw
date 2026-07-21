@@ -106,8 +106,6 @@ const (
 	KeyActionExtendUp            KeyAction = "extend-up"
 	KeyActionExtendDown          KeyAction = "extend-down"
 	KeyActionCommentSelection    KeyAction = "comment-selection"
-	KeyActionNextCommentKind     KeyAction = "next-comment-kind"
-	KeyActionPreviousCommentKind KeyAction = "previous-comment-kind"
 	KeyActionSaveComment         KeyAction = "save-comment"
 	KeyActionToggleWrap          KeyAction = "toggle-wrap"
 	KeyActionToggleView          KeyAction = "toggle-view"
@@ -151,8 +149,6 @@ const (
 	KeyActionHelpPageDown        KeyAction = "help-page-down"
 	KeyActionHelpHome            KeyAction = "help-home"
 	KeyActionHelpEnd             KeyAction = "help-end"
-	KeyActionToggleExportNotes   KeyAction = "toggle-export-notes"
-	KeyActionToggleExportPraise  KeyAction = "toggle-export-praise"
 	KeyActionToggleExportUnmap   KeyAction = "toggle-export-unmappable"
 	KeyActionExportSelected      KeyAction = "export-selected"
 	KeyActionSubmitRecheck       KeyAction = "submit-recheck"
@@ -174,7 +170,7 @@ var validKeyActions = actionSet(
 	KeyActionEditComment, KeyActionDeleteComment, KeyActionExpandContext,
 	KeyActionVisualLine, KeyActionVisualLines, KeyActionVisualHunk,
 	KeyActionExtendUp, KeyActionExtendDown, KeyActionCommentSelection,
-	KeyActionNextCommentKind, KeyActionPreviousCommentKind, KeyActionSaveComment,
+	KeyActionSaveComment,
 	KeyActionToggleWrap, KeyActionToggleView, KeyActionAlignTop,
 	KeyActionAlignCenter, KeyActionAlignBottom, KeyActionToggleDirectory,
 	KeyActionExpandDirectory, KeyActionCollapseDirectory, KeyActionToggleHiddenFiles,
@@ -188,8 +184,8 @@ var validKeyActions = actionSet(
 	KeyActionConfirmYes, KeyActionConfirmNo, KeyActionNextHelpPage,
 	KeyActionPreviousHelpPage, KeyActionHelpLineUp, KeyActionHelpLineDown,
 	KeyActionHelpPageUp, KeyActionHelpPageDown, KeyActionHelpHome,
-	KeyActionHelpEnd, KeyActionToggleExportNotes, KeyActionToggleExportPraise,
-	KeyActionToggleExportUnmap, KeyActionExportSelected, KeyActionSubmitRecheck,
+	KeyActionHelpEnd, KeyActionToggleExportUnmap, KeyActionExportSelected,
+	KeyActionSubmitRecheck,
 	KeyActionToggleStaleOverride, KeyActionToggleSubmitExclude,
 	KeyActionToggleSubmitSummary, KeyActionSubmitReview, KeyActionToggleFilePanel,
 )
@@ -223,7 +219,6 @@ var contextKeyActions = map[KeyContext]map[KeyAction]struct{}{
 	),
 	KeyContextCommentEdit: actionSet(
 		KeyActionCancel, KeyActionInterrupt, KeyActionDeleteBackward,
-		KeyActionNextCommentKind, KeyActionPreviousCommentKind,
 		KeyActionSaveComment, KeyActionInsertNewline,
 	),
 	KeyContextSearch: actionSet(
@@ -247,9 +242,7 @@ var contextKeyActions = map[KeyContext]map[KeyAction]struct{}{
 		KeyActionCancel, KeyActionInterrupt, KeyActionConfirmYes, KeyActionConfirmNo,
 	),
 	KeyContextExportPicker: actionSet(
-		KeyActionCancel, KeyActionInterrupt, KeyActionToggleExportNotes,
-		KeyActionToggleExportPraise, KeyActionToggleExportUnmap,
-		KeyActionExportSelected,
+		KeyActionCancel, KeyActionInterrupt, KeyActionToggleExportUnmap, KeyActionExportSelected,
 	),
 	KeyContextSubmit: actionSet(
 		KeyActionCancel, KeyActionInterrupt, KeyActionSubmitRecheck,
@@ -307,7 +300,6 @@ type Settings struct {
 	diffView        DiffView
 	patchContext    review.PatchContext
 	syntaxSelector  review.SyntaxSelector
-	commentKinds    []review.CommentKind
 	exportTemplates review.ExportTemplates
 	publication     review.PublicationOptions
 	keybindings     []Keybinding
@@ -429,7 +421,6 @@ type SettingsRequest struct {
 	DiffView        DiffView
 	ContextLines    review.ContextLines
 	SyntaxSelector  review.SyntaxSelector
-	CommentKinds    []review.CommentKind
 	ExportTemplates review.ExportTemplates
 	Publication     review.PublicationOptions
 	Keybindings     []Keybinding
@@ -441,7 +432,6 @@ func NewSettings(request SettingsRequest) (Settings, error) {
 	diffView := request.DiffView
 	contextLines := request.ContextLines
 	syntaxSelector := request.SyntaxSelector
-	commentKinds := request.CommentKinds
 	exportTemplates := request.ExportTemplates
 	publication := request.Publication
 	keybindings := request.Keybindings
@@ -450,10 +440,6 @@ func NewSettings(request SettingsRequest) (Settings, error) {
 	}
 	if diffView != DiffViewUnified && diffView != DiffViewSideBySide {
 		return Settings{}, errors.New("invalid diff view")
-	}
-	validatedKinds, err := review.NewCommentKinds(commentKinds...)
-	if err != nil {
-		return Settings{}, fmt.Errorf("comment kinds: %w", err)
 	}
 	if _, err := review.NewSyntaxSelector(syntaxSelector.String()); err != nil {
 		return Settings{}, fmt.Errorf("syntax selector: %w", err)
@@ -542,7 +528,6 @@ func NewSettings(request SettingsRequest) (Settings, error) {
 		diffView:        diffView,
 		patchContext:    patchContext,
 		syntaxSelector:  syntaxSelector,
-		commentKinds:    validatedKinds.Values(),
 		exportTemplates: exportTemplates,
 		publication:     publication,
 		keybindings:     slices.Clone(keybindings),
@@ -551,7 +536,6 @@ func NewSettings(request SettingsRequest) (Settings, error) {
 }
 
 func (settings Settings) clone() Settings {
-	settings.commentKinds = slices.Clone(settings.commentKinds)
 	settings.keybindings = slices.Clone(settings.keybindings)
 	settings.publication, _ = settings.publication.WithExcludedComments(
 		settings.publication.ExcludedComments(),

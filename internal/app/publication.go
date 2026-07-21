@@ -67,9 +67,6 @@ func (model *Model) startPublicationCheck() {
 func (model *Model) publicationOptions() (review.PublicationOptions, error) {
 	var policies []review.PublicationPolicy
 	configured := model.settings.publication.Policies()
-	if configured.Has(review.PublicationPrefixKinds) {
-		policies = append(policies, review.PublicationPrefixKinds)
-	}
 	if configured.Has(review.PublicationMoveUnmappableToSummary) ||
 		model.publicationMoveSummary {
 		policies = append(policies, review.PublicationMoveUnmappableToSummary)
@@ -575,7 +572,7 @@ func (model *Model) publicationCommentLines(limit int) []string {
 			decision.CommentID() == comment.ID() {
 			state = decision.Decision().String()
 		}
-		lines = append(lines, cursor+"["+state+"] "+comment.Kind().String()+" "+
+		lines = append(lines, cursor+"["+state+"] "+
 			safeAndClip(comment.Body().String(), 80))
 	}
 	return lines

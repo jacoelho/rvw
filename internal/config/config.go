@@ -72,19 +72,6 @@ func (pattern Pattern) String() string {
 	return string(pattern)
 }
 
-type CommentKind string
-
-const (
-	CommentKindIssue      CommentKind = "issue"
-	CommentKindNote       CommentKind = "note"
-	CommentKindPraise     CommentKind = "praise"
-	CommentKindSuggestion CommentKind = "suggestion"
-)
-
-func (kind CommentKind) String() string {
-	return string(kind)
-}
-
 type IgnoreFileName string
 
 func (name IgnoreFileName) String() string {
@@ -189,8 +176,6 @@ const (
 	KeyActionExtendUp            KeyAction = "extend-up"
 	KeyActionExtendDown          KeyAction = "extend-down"
 	KeyActionCommentSelection    KeyAction = "comment-selection"
-	KeyActionNextCommentKind     KeyAction = "next-comment-kind"
-	KeyActionPreviousCommentKind KeyAction = "previous-comment-kind"
 	KeyActionSaveComment         KeyAction = "save-comment"
 	KeyActionNextFile            KeyAction = "next-file"
 	KeyActionPreviousFile        KeyAction = "previous-file"
@@ -223,8 +208,6 @@ const (
 	KeyActionHelpEnd             KeyAction = "help-end"
 	KeyActionNextHelpPage        KeyAction = "next-help-page"
 	KeyActionPreviousHelpPage    KeyAction = "previous-help-page"
-	KeyActionToggleExportNotes   KeyAction = "toggle-export-notes"
-	KeyActionToggleExportPraise  KeyAction = "toggle-export-praise"
 	KeyActionToggleExportUnmap   KeyAction = "toggle-export-unmappable"
 	KeyActionToggleSubmitExclude KeyAction = "toggle-submit-exclusion"
 	KeyActionToggleSubmitSummary KeyAction = "toggle-submit-summary"
@@ -270,11 +253,6 @@ type Filter struct {
 	Exclude         []Pattern
 }
 
-type Comments struct {
-	Kinds               []CommentKind
-	TypePrefixForGitHub bool
-}
-
 type GitHub struct {
 	SubmitDefault SubmitEvent
 	FetchThreads  bool
@@ -289,7 +267,6 @@ type Config struct {
 	ui          UI
 	diff        Diff
 	filter      Filter
-	comments    Comments
 	github      GitHub
 	export      Export
 	themes      map[ThemeName]Theme
@@ -317,23 +294,13 @@ func Defaults() Config {
 			Include:         []Pattern{},
 			Exclude:         []Pattern{},
 		},
-		comments: Comments{
-			Kinds: []CommentKind{
-				CommentKindIssue,
-				CommentKindNote,
-				CommentKindPraise,
-				CommentKindSuggestion,
-			},
-			TypePrefixForGitHub: true,
-		},
 		github: GitHub{
 			SubmitDefault: SubmitComment,
 			FetchThreads:  true,
 		},
 		export: Export{
-			MarkdownTemplate: Template("I reviewed your code and have the following comments. Please address them.\n\n" +
-				"Comment types: {{comment_types}}\n\n{{comments}}\n"),
-			CommentTemplate: Template("{{index}}. **[{{kind_upper}}]** `{{target}}` - {{comment}}"),
+			MarkdownTemplate: Template("I reviewed your code and have the following comments. Please address them.\n\n{{comments}}\n"),
+			CommentTemplate:  Template("{{index}}. `{{target}}` - {{comment}}"),
 		},
 	}
 }
@@ -353,12 +320,6 @@ func (config Config) Filter() Filter {
 	filter.Include = slices.Clone(filter.Include)
 	filter.Exclude = slices.Clone(filter.Exclude)
 	return filter
-}
-
-func (config Config) Comments() Comments {
-	comments := config.comments
-	comments.Kinds = slices.Clone(comments.Kinds)
-	return comments
 }
 
 func (config Config) GitHub() GitHub {

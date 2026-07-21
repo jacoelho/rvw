@@ -29,10 +29,6 @@ func (model *Model) applyExportPickerAction(action KeyAction) tea.Cmd {
 	switch action {
 	case KeyActionCancel, KeyActionInterrupt, KeyActionQuit:
 		model.overlay = OverlayNone
-	case KeyActionToggleExportNotes:
-		model.toggleExportOption(review.ExportNotes)
-	case KeyActionToggleExportPraise:
-		model.toggleExportOption(review.ExportPraise)
 	case KeyActionToggleExportUnmap:
 		model.toggleExportOption(review.ExportUnmappable)
 	case KeyActionExportSelected:
@@ -115,8 +111,6 @@ func (model *Model) exportPickerView(width, height int) string {
 		"format       " + format,
 		"destination  " + destination,
 		"",
-		checked(review.ExportNotes) + " include notes",
-		checked(review.ExportPraise) + " include praise",
 		checked(review.ExportUnmappable) + " include unmappable comments",
 		"",
 		model.bindingSummary(KeyContextExportPicker),

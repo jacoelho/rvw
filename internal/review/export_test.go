@@ -8,13 +8,6 @@ import (
 )
 
 func TestExportInputMetadataAccountingCoversCompiledLayouts(t *testing.T) {
-	if exportKindMetadataBytes < int64(unsafe.Sizeof(CommentKind(""))) {
-		t.Fatalf(
-			"kind metadata charge = %d, compiled size = %d",
-			exportKindMetadataBytes,
-			unsafe.Sizeof(CommentKind("")),
-		)
-	}
 	if exportCommentMetadataBytes < int64(unsafe.Sizeof(exportComment{})) {
 		t.Fatalf(
 			"comment metadata charge = %d, compiled size = %d",
@@ -59,6 +52,46 @@ func TestCompiledExportTemplatesSeparateReadinessFromRetainedBytes(t *testing.T)
 	}
 }
 
+func TestExportOptionsValidateRebasedUnmappableFlag(t *testing.T) {
+	options, err := NewExportOptions(ExportUnmappable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !options.Has(ExportUnmappable) {
+		t.Fatal("unmappable export option is absent")
+	}
+	options, err = options.Toggle(ExportUnmappable)
+	if err != nil || options.Has(ExportUnmappable) {
+		t.Fatalf("toggled options = %#v, %v", options, err)
+	}
+	if empty, err := NewExportOptions(); err != nil || empty.Has(ExportUnmappable) {
+		t.Fatalf("empty options = %#v, %v", empty, err)
+	}
+	for _, value := range []ExportOption{0, ExportUnmappable + 1} {
+		if _, err := NewExportOptions(value); err == nil {
+			t.Fatalf("invalid option %d was accepted", value)
+		}
+	}
+	invalid := ExportOptions{bits: 1 << ExportUnmappable}
+	if invalid.valid() {
+		t.Fatal("unknown export option bit was accepted")
+	}
+	if _, err := invalid.Toggle(ExportUnmappable); err == nil {
+		t.Fatal("toggle accepted options with unknown bits")
+	}
+	current := testReview(t, testSnapshot(t, 1, "one.go"))
+	templates, err := CompileExportTemplates("{{comments}}", "{{comment}}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := current.PrepareMarkdown(templates, invalid); !errors.Is(err, ErrInvalidExport) {
+		t.Fatalf("invalid Markdown options error = %v", err)
+	}
+	if _, err := current.PrepareJSON(invalid); !errors.Is(err, ErrInvalidExport) {
+		t.Fatalf("invalid JSON options error = %v", err)
+	}
+}
+
 func TestCompileExportTemplatesRejectsEmptyAndTooManyTokens(t *testing.T) {
 	for _, testCase := range []struct {
 		name     string
@@ -81,19 +114,17 @@ func TestCompileExportTemplatesRejectsEmptyAndTooManyTokens(t *testing.T) {
 	}
 }
 
-func TestPrepareMarkdownUsesTypedTemplatesAndSelectionPolicy(t *testing.T) {
-	issue, _ := NewCommentKind("issue")
-	note, _ := NewCommentKind("note")
-	current, err := NewReview(testSnapshot(t, 1, "one.go"), []CommentKind{issue, note})
+func TestPrepareMarkdownUsesTypedTemplatesForAllComments(t *testing.T) {
+	current, err := NewReview(testSnapshot(t, 1, "one.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	target, _ := FileCommentTarget(0)
-	current = saveTestComment(t, current, target, issue, "fix *this*")
-	current = saveTestComment(t, current, ReviewCommentTarget(), note, "background")
+	current = saveTestComment(t, current, target, "fix *this*")
+	current = saveTestComment(t, current, ReviewCommentTarget(), "background")
 	templates, err := CompileExportTemplates(
-		"types={{comment_types}} count={{comment_count}}\n{{comments}}",
-		"{{index}} [{{kind_upper}}] {{target}}: {{comment}}",
+		"count={{comment_count}}\n{{comments}}",
+		"{{index}} {{target}}: {{comment}}",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -103,9 +134,9 @@ func TestPrepareMarkdownUsesTypedTemplatesAndSelectionPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	if prepared.Format() != ExportMarkdown ||
-		!strings.Contains(prepared.Body(), "types=ISSUE count=1") ||
+		!strings.Contains(prepared.Body(), "count=2") ||
 		!strings.Contains(prepared.Body(), `fix \*this\*`) ||
-		strings.Contains(prepared.Body(), "background") {
+		!strings.Contains(prepared.Body(), "background") {
 		t.Fatalf("prepared body:\n%s", prepared.Body())
 	}
 	if prepared.Bytes() != int64(len(prepared.Body())) {
@@ -138,19 +169,18 @@ func TestPrepareJSONPreservesCommentSemanticsAndUnsafePathBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	issue, _ := NewCommentKind("issue")
-	current, err := NewReview(snapshot, []CommentKind{issue})
+	current, err := NewReview(snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}
 	target, _ := FileCommentTarget(0)
-	current = saveTestComment(t, current, target, issue, "quote: \"\n\u00e9")
+	current = saveTestComment(t, current, target, "quote: \"\n\u00e9")
 
 	prepared, err := current.PrepareJSON(ExportOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	const expected = "{\"comments\":[{\"kind\":\"issue\",\"target\":{\"type\":\"file\"," +
+	const expected = "{\"comments\":[{\"target\":{\"type\":\"file\"," +
 		"\"path\":\"odd/\\u00ff\\\"\\n.go\"},\"binding\":\"active\"," +
 		"\"comment\":\"quote: \\\"\\n\u00e9\"}]}\n"
 	if prepared.Format() != ExportJSON || prepared.Body() != expected {
@@ -158,39 +188,67 @@ func TestPrepareJSONPreservesCommentSemanticsAndUnsafePathBytes(t *testing.T) {
 	}
 }
 
-func TestPrepareJSONEncodesLineRangeAndSelectionPolicy(t *testing.T) {
-	issue, _ := NewCommentKind("issue")
-	note, _ := NewCommentKind("note")
-	current, err := NewReview(testSnapshot(t, 1, "one.go"), []CommentKind{issue, note})
+func TestPrepareJSONEncodesLineRangeAndAllComments(t *testing.T) {
+	current, err := NewReview(testSnapshot(t, 1, "one.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	start, _ := NewLineNumber(7)
 	end, _ := NewLineNumber(9)
 	target, _ := LineCommentTarget(0, LineOld, start, end)
-	current = saveTestComment(t, current, target, issue, "range")
-	current = saveTestComment(t, current, ReviewCommentTarget(), note, "omit")
+	current = saveTestComment(t, current, target, "range")
+	current = saveTestComment(t, current, ReviewCommentTarget(), "omit")
 
 	prepared, err := current.PrepareJSON(ExportOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	const expected = "{\"comments\":[{\"kind\":\"issue\",\"target\":{\"type\":\"range\"," +
+	const expected = "{\"comments\":[{\"target\":{\"type\":\"range\"," +
 		"\"path\":\"one.go\",\"side\":\"old\",\"start\":7,\"end\":9}," +
-		"\"binding\":\"active\",\"comment\":\"range\"}]}\n"
+		"\"binding\":\"active\",\"comment\":\"range\"},{\"target\":{" +
+		"\"type\":\"review\"},\"binding\":\"active\",\"comment\":\"omit\"}]}\n"
 	if prepared.Body() != expected {
 		t.Fatalf("prepared JSON:\n%s", prepared.Body())
 	}
 }
 
+func TestPrepareJSONRequiresOptionForUnmappableComments(t *testing.T) {
+	current := testReview(t, testSnapshot(t, 1, "gone.go"))
+	target, _ := FileCommentTarget(0)
+	current = saveTestComment(t, current, target, "orphaned")
+	current, _, err := current.ReplaceSnapshot(testSnapshot(t, 2, "new.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := current.PrepareJSON(ExportOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Body() != "{\"comments\":[]}\n" {
+		t.Fatalf("default export included unmappable comment: %s", prepared.Body())
+	}
+	options, err := NewExportOptions(ExportUnmappable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err = current.PrepareJSON(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prepared.Body(), `"binding":"orphaned"`) ||
+		!strings.Contains(prepared.Body(), `"comment":"orphaned"`) {
+		t.Fatalf("explicit export omitted unmappable comment: %s", prepared.Body())
+	}
+}
+
 func TestPrepareMarkdownPreflightsCumulativeLimitAndCancellation(t *testing.T) {
-	issue, _ := NewCommentKind("issue")
-	current, err := NewReview(testSnapshot(t, 1, "one.go"), []CommentKind{issue})
+	current, err := NewReview(testSnapshot(t, 1, "one.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	target, _ := FileCommentTarget(0)
-	current = saveTestComment(t, current, target, issue, strings.Repeat("x", 10_000))
+	current = saveTestComment(t, current, target, strings.Repeat("x", 10_000))
 
 	repeatedComment := strings.Repeat("{{comment}}", 2_048)
 	templates, err := CompileExportTemplates("{{comments}}", repeatedComment)
@@ -216,13 +274,12 @@ func TestPrepareMarkdownPreflightsCumulativeLimitAndCancellation(t *testing.T) {
 }
 
 func TestExportInputExcludesPatchAndSearchStateAndPreservesOutput(t *testing.T) {
-	issue, _ := NewCommentKind("issue")
-	current, err := NewReview(testSnapshot(t, 1, "one.go"), []CommentKind{issue})
+	current, err := NewReview(testSnapshot(t, 1, "one.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	target, _ := FileCommentTarget(0)
-	current = saveTestComment(t, current, target, issue, "short")
+	current = saveTestComment(t, current, target, "short")
 	baseline := current.ExportInput()
 
 	pendingPatch, patchRequest, err := current.RequestPatch(0, WholeFileContext())

@@ -119,7 +119,7 @@ func TestFocusedCommentPanePreservesStyleSequences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	current, err := model.review.BeginDraft(target, model.settings.commentKinds[0])
+	current, err := model.review.BeginDraft(target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,9 +452,8 @@ func TestSyntaxRenderingWithoutSpansUsesPlainSanitizedPath(t *testing.T) {
 
 func TestPublicationPreflightRendersCanonicalPayloadAndDecision(t *testing.T) {
 	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
-	kind := model.settings.commentKinds[0]
 	target, _ := review.FileCommentTarget(0)
-	current, err := model.review.BeginDraft(target, kind)
+	current, err := model.review.BeginDraft(target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -523,7 +522,7 @@ func TestPublicationPreflightRendersCanonicalPayloadAndDecision(t *testing.T) {
 
 	model.publicationCursor = 1
 	commentView := model.View().Content
-	if !strings.Contains(commentView, "[summary] issue full publication comment") ||
+	if !strings.Contains(commentView, "[summary] full publication comment") ||
 		!strings.Contains(commentView, "Full comment #0") {
 		t.Fatalf("preflight omitted comment decision/detail:\n%s", commentView)
 	}

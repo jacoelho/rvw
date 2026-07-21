@@ -69,6 +69,33 @@ func TestRuntimeKeybindingVocabularyRejectsUnknownValues(t *testing.T) {
 	}
 }
 
+func TestCommentEditorTabFallsThroughUnlessExplicitlyBound(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	settleModelWork(t, model, coordinator)
+	_ = model.beginSummaryComment()
+
+	for _, message := range []tea.KeyPressMsg{
+		tea.KeyPressMsg(tea.Key{Code: tea.KeyTab}),
+		tea.KeyPressMsg(tea.Key{Code: tea.KeyTab, Mod: tea.ModShift}),
+	} {
+		_, _ = model.Update(message)
+		if model.mode != ModeCommentEdit || model.commentEditor.Value() != "" {
+			t.Fatalf("unbound tab changed editor: mode=%d value=%q", model.mode, model.commentEditor.Value())
+		}
+	}
+
+	model.settings.keybindings = append(model.settings.keybindings, Keybinding{
+		Context: KeyContextCommentEdit,
+		Chord:   "Tab",
+		Action:  KeyActionInsertNewline,
+	})
+	_, _ = model.Update(tea.KeyPressMsg(tea.Key{Text: "a", Code: 'a'}))
+	_, _ = model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyTab}))
+	if got := model.commentEditor.Value(); got != "a\n" {
+		t.Fatalf("configured Tab override produced %q, want one newline", got)
+	}
+}
+
 func TestModalContextsExecuteSequentialMultiStrokeBindings(t *testing.T) {
 	testCases := []struct {
 		name       string

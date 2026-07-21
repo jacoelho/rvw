@@ -11,15 +11,15 @@ The interactive application uses:
 - `charm.land/bubbles/v2` at `v2.1.1`;
 - `charm.land/lipgloss/v2` at `v2.0.5`.
 
-The resolved module graph in `go.sum` is part of the accepted dependency baseline. A dependency
-upgrade is an architecture change and MUST reverify the version-specific
+The three versions above form the specified dependency baseline. A dependency upgrade is an
+architecture change and MUST reverify the version-specific
 [runtime and signal contracts](runtime-lifecycle.md).
 
 The pinned upstream modules declare `github.com/charmbracelet/x/windows` in their module metadata.
 `rvw` does not import that package, compile its Windows files, add Windows behavior, or support a
 Windows target. Requiring Bubble Tea v2 makes that unreachable transitive module metadata
-unavoidable. Acceptance of this specification set interprets the Linux/macOS-only constraint as forbidding
-direct or runtime Windows code and dependencies, not as rewriting the upstream module graph.
+unavoidable. The Linux/macOS-only constraint forbids direct or runtime Windows code and
+dependencies; it does not require rewriting the upstream module graph.
 
 The Go ownership boundaries are:
 
@@ -90,7 +90,7 @@ One review owns:
 - active file and navigation state;
 - per-file and per-hunk reviewed marks;
 - review-, file-, and line-anchored comments;
-- comment drafts and configured kinds;
+- comment drafts;
 - reload, search, export, and publication state;
 - explicit notices and failure states.
 
@@ -148,9 +148,10 @@ Context changes serialize behind active search work that uses the same patch acq
 
 ## 9. Export and publication
 
-Markdown and JSON export are prepared from an immutable review snapshot. Export options select
-whether notes, praise, and unmappable comments are included. Preparation is bounded and
-cancellable.
+Markdown and JSON export are prepared from an immutable review snapshot. Every comment is eligible
+for export except that unmappable comments require the explicit export option. Comment-export JSON
+objects contain `target`, `binding`, and `comment`; there is no category or type field. Preparation
+is bounded and cancellable.
 
 Interactive copy/write actions are in-session deliveries, not additional top-level output modes.
 
@@ -207,8 +208,8 @@ This draft proposes **process-lifetime publication safety**:
   confirming equivalent content.
 - No durable publication journal is created.
 
-Explicit acceptance of this exact specification set accepts that restart limitation. Until then GitHub
-publication implementation is blocked. Durable cross-process fencing would require a separate
-accepted contract for storage location, private permissions, interprocess locking, atomicity and
-directory durability, versioning, corruption, bounded retention, privacy, and cleanup. It MUST NOT
-be added implicitly.
+GitHub publication implementation remains blocked until this specification set is accepted.
+Durable cross-process fencing is outside this specification set and MUST NOT be added implicitly.
+Adding it requires an explicit contract for storage location, private permissions, interprocess
+locking, atomicity and directory durability, versioning, corruption, bounded retention, privacy,
+and cleanup.

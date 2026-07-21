@@ -23,14 +23,12 @@ const (
 // export work independent from presentation patches, search results,
 // publication state, and operation history.
 type ExportInput struct {
-	kinds         []CommentKind
 	comments      []exportComment
 	retainedBytes int64
 	ready         bool
 }
 
 type exportComment struct {
-	kind       CommentKind
 	target     exportCommentTarget
 	body       CommentBody
 	stale      bool
@@ -49,18 +47,12 @@ type exportCommentTarget struct {
 const (
 	// These conservative charges cover the projection element layouts on all
 	// supported targets. A test compares them with the compiled layouts.
-	exportKindMetadataBytes    int64 = 16
-	exportCommentMetadataBytes int64 = 80
+	exportCommentMetadataBytes int64 = 64
 )
 
 func (review Review) ExportInput() ExportInput {
-	kinds := slices.Clip(slices.Clone(review.kinds))
 	comments := make([]exportComment, len(review.comments))
-	retained := int64(len(kinds)) * exportKindMetadataBytes
-	for _, kind := range kinds {
-		retained += int64(len(kind))
-	}
-	retained += int64(len(comments)) * exportCommentMetadataBytes
+	retained := int64(len(comments)) * exportCommentMetadataBytes
 	for index, comment := range review.comments {
 		target := comment.Target()
 		projectedTarget := exportCommentTarget{kind: target.Kind()}
@@ -71,16 +63,14 @@ func (review Review) ExportInput() ExportInput {
 		}
 		projectedTarget.side, projectedTarget.start, projectedTarget.end, _ = target.Lines()
 		comments[index] = exportComment{
-			kind:       comment.Kind(),
 			target:     projectedTarget,
 			body:       comment.Body(),
 			stale:      comment.Stale(),
 			unmappable: comment.Unmappable(),
 		}
-		retained += int64(len(comments[index].kind) + len(comments[index].body))
+		retained += int64(len(comments[index].body))
 	}
 	return ExportInput{
-		kinds:         kinds,
 		comments:      comments,
 		retainedBytes: retained,
 		ready:         true,
@@ -94,12 +84,14 @@ func (input ExportInput) RetainedBytes() int64 {
 	return input.retainedBytes
 }
 
+func (input ExportInput) Ready() bool {
+	return input.ready
+}
+
 type ExportOption uint8
 
 const (
-	ExportNotes ExportOption = iota + 1
-	ExportPraise
-	ExportUnmappable
+	ExportUnmappable ExportOption = iota + 1
 )
 
 type ExportOptions struct {
@@ -109,7 +101,7 @@ type ExportOptions struct {
 func NewExportOptions(values ...ExportOption) (ExportOptions, error) {
 	var options ExportOptions
 	for _, value := range values {
-		if value < ExportNotes || value > ExportUnmappable {
+		if value != ExportUnmappable {
 			return ExportOptions{}, fmt.Errorf("%w: unknown option %d", ErrInvalidExport, value)
 		}
 		options.bits |= 1 << (value - 1)
@@ -118,27 +110,29 @@ func NewExportOptions(values ...ExportOption) (ExportOptions, error) {
 }
 
 func (options ExportOptions) Has(value ExportOption) bool {
-	return value >= ExportNotes && value <= ExportUnmappable &&
+	return value == ExportUnmappable &&
 		options.bits&(1<<(value-1)) != 0
 }
 
 func (options ExportOptions) Toggle(value ExportOption) (ExportOptions, error) {
-	if value < ExportNotes || value > ExportUnmappable {
+	if !options.valid() || value != ExportUnmappable {
 		return options, fmt.Errorf("%w: unknown option %d", ErrInvalidExport, value)
 	}
 	options.bits ^= 1 << (value - 1)
 	return options, nil
 }
 
+func (options ExportOptions) valid() bool {
+	const validBits = 1<<ExportUnmappable - 1
+	return options.bits&^validBits == 0
+}
+
 type ExportTemplateName uint8
 
 const (
 	TemplateComments ExportTemplateName = iota + 1
-	TemplateCommentTypes
 	TemplateCommentCount
 	TemplateIndex
-	TemplateKind
-	TemplateKindUpper
 	TemplateTarget
 	TemplatePath
 	TemplateLineOrRange
@@ -178,7 +172,6 @@ func CompileExportTemplates(markdown, comment string) (ExportTemplates, error) {
 	comment = strings.Clone(comment)
 	markdownTokens, err := compileTemplate(markdown, map[string]ExportTemplateName{
 		"comments":      TemplateComments,
-		"comment_types": TemplateCommentTypes,
 		"comment_count": TemplateCommentCount,
 	})
 	if err != nil {
@@ -189,8 +182,6 @@ func CompileExportTemplates(markdown, comment string) (ExportTemplates, error) {
 	}
 	commentTokens, err := compileTemplate(comment, map[string]ExportTemplateName{
 		"index":         TemplateIndex,
-		"kind":          TemplateKind,
-		"kind_upper":    TemplateKindUpper,
 		"target":        TemplateTarget,
 		"path":          TemplatePath,
 		"line_or_range": TemplateLineOrRange,
@@ -251,6 +242,9 @@ func (input ExportInput) PrepareMarkdownCancellable(
 	if !input.ready {
 		return PreparedExport{}, fmt.Errorf("%w: export input is unavailable", ErrInvalidExport)
 	}
+	if !options.valid() {
+		return PreparedExport{}, fmt.Errorf("%w: export options contain unknown bits", ErrInvalidExport)
+	}
 	if !templates.Ready() {
 		return PreparedExport{}, fmt.Errorf("%w: export templates are empty", ErrInvalidExport)
 	}
@@ -280,9 +274,7 @@ func (input ExportInput) PrepareMarkdownCancellable(
 	if len(selected) == 0 {
 		commentBlockBytes = int64(len("_No comments._"))
 	}
-	commentTypes := includedCommentKinds(input.kinds, options)
 	values := map[ExportTemplateName]string{
-		TemplateCommentTypes: strings.Join(commentTypes, ", "),
 		TemplateCommentCount: strconv.Itoa(len(selected)),
 	}
 	bodyBytes, err := markdownExportSize(
@@ -416,20 +408,13 @@ func exportCancellation(cancelled func() error, work *int) error {
 func (input ExportInput) exportComments(options ExportOptions) []exportComment {
 	selected := make([]exportComment, 0, len(input.comments))
 	for _, comment := range input.comments {
-		if !options.Has(ExportUnmappable) && comment.unmappable ||
-			!options.Has(ExportNotes) && comment.kind == CommentKindNote ||
-			!options.Has(ExportPraise) && comment.kind == CommentKindPraise {
+		if !options.Has(ExportUnmappable) && comment.unmappable {
 			continue
 		}
 		selected = append(selected, comment)
 	}
 	return selected
 }
-
-const (
-	CommentKindNote   CommentKind = "note"
-	CommentKindPraise CommentKind = "praise"
-)
 
 func compileTemplate(
 	value string,
@@ -496,8 +481,6 @@ func commentTemplateValues(comment exportComment, index int) map[ExportTemplateN
 	target, path, lineRange := exportTarget(comment.target)
 	return map[ExportTemplateName]string{
 		TemplateIndex:       strconv.Itoa(index),
-		TemplateKind:        comment.kind.String(),
-		TemplateKindUpper:   asciiUpper(comment.kind.String()),
 		TemplateTarget:      markdownEscape(target),
 		TemplatePath:        markdownEscape(path),
 		TemplateLineOrRange: lineRange,
@@ -528,31 +511,6 @@ func exportTarget(target exportCommentTarget) (string, string, string) {
 		lineRange += "-" + strconv.FormatUint(uint64(target.end.Uint32()), 10)
 	}
 	return path + ":" + lineRange, path, lineRange
-}
-
-func includedCommentKinds(kinds []CommentKind, options ExportOptions) []string {
-	values := make([]string, 0, len(kinds))
-	for _, kind := range kinds {
-		if !options.Has(ExportNotes) && kind == CommentKindNote ||
-			!options.Has(ExportPraise) && kind == CommentKindPraise {
-			continue
-		}
-		values = append(values, asciiUpper(kind.String()))
-	}
-	slices.Sort(values)
-	return values
-}
-
-func asciiUpper(value string) string {
-	var result strings.Builder
-	result.Grow(len(value))
-	for _, character := range value {
-		if character >= 'a' && character <= 'z' {
-			character -= 'a' - 'A'
-		}
-		result.WriteRune(character)
-	}
-	return result.String()
 }
 
 func markdownEscape(value string) string {

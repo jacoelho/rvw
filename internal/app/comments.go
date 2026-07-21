@@ -95,10 +95,7 @@ func (model *Model) beginSelectionComment() tea.Cmd {
 }
 
 func (model *Model) beginComment(target review.CommentTarget) tea.Cmd {
-	if len(model.settings.commentKinds) == 0 {
-		return nil
-	}
-	next, err := model.review.BeginDraft(target, model.settings.commentKinds[0])
+	next, err := model.review.BeginDraft(target)
 	if err != nil {
 		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
 		return nil
@@ -160,24 +157,6 @@ func (model *Model) saveComment() {
 	model.mode = ModeNormal
 	model.commentCursor = max(model.review.CommentCount()-1, 0)
 	model.notice = &Notice{Kind: NoticeInformation, Text: "comment saved"}
-}
-
-func (model *Model) cycleCommentKind(delta int) {
-	draft, ok := model.review.Draft()
-	if !ok || len(model.settings.commentKinds) == 0 {
-		return
-	}
-	index := 0
-	for position, kind := range model.settings.commentKinds {
-		if kind == draft.Kind() {
-			index = position
-			break
-		}
-	}
-	index = (index + delta + len(model.settings.commentKinds)) % len(model.settings.commentKinds)
-	if next, err := model.review.SetDraftKind(model.settings.commentKinds[index]); err == nil {
-		model.review = next
-	}
 }
 
 func (model *Model) deleteComment(id review.CommentID) {

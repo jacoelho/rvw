@@ -1,22 +1,16 @@
 # rvw specification
 
-**Status:** Draft candidate for explicit acceptance.
+**Status:** Accepted.
 
 **Scope:** Product behavior, architecture, source handling, runtime lifecycle, terminal presentation,
 resource bounds, failure semantics, and verification for `rvw`.
 
 This specification is standalone. It does not incorporate another document, implementation file,
-commit, plan, or historical decision. Its exact content remains a proposal until explicitly
-accepted.
-
-**Reconciliation provenance:** This Go-native revision was reconciled from the Rust draft at
-`../rvw-rewrite/docs/rvw-specification.md`. The source draft's SHA-256 digest is
-`ae2dea93fa1e3b2562250c1df91637ee4554ad2b20c1c20a203d77222c1bfb80`. The digest identifies input
-evidence only; the Rust draft is neither an accepted contract nor an implementation blueprint.
+commit, plan, or historical decision.
 
 ## 1. Interpretation
 
-`MUST`, `MUST NOT`, `SHOULD`, and `MAY` identify proposed normative requirements.
+`MUST`, `MUST NOT`, `SHOULD`, and `MAY` identify normative requirements.
 
 The following rules resolve ambiguity:
 
@@ -154,35 +148,26 @@ ignore_file = ".rvwignore"
 include = ["src/**"]
 exclude = ["**/*.generated.rs"]
 
-[comments]
-kinds = ["issue", "note", "praise", "suggestion"]
-type_prefix_for_github = true
-
 [github]
 submit_default = "comment" # comment, draft, approve, or request-changes
 fetch_threads = true
 
 [export]
 markdown_template = "# Review ({{comment_count}})\n\n{{comments}}"
-comment_template = "## {{kind_upper}} — {{target}}\n\n{{comment}}"
+comment_template = "## {{target}}\n\n{{comment}}"
 ```
 
-`include`, `exclude`, and `kinds` each accept either one string or an array of strings.
+`include` and `exclude` each accept either one string or an array of strings.
 
 Defaults are mouse enabled, wrapping enabled, unified view, three context lines, untracked files
 included, built-in filtering enabled, `.gitignore` enabled, `.rvwignore` enabled, remote threads
-fetched, GitHub kind prefixes enabled, submission event `comment`, and comment kinds `issue`,
-`note`, `praise`, and `suggestion` in lexical order.
+fetched, and submission event `comment`.
 
 Filter patterns are nonempty, contain no NUL, and are at most 4,096 UTF-8 bytes each. At most 4,096
 include/exclude patterns are accepted across the merged configuration and command line.
 `context_lines` is an integer from 0 through 10,000. `ignore_file`, when set, is a single path
 component that cannot escape the repository root. Independent hidden reasons accumulate.
 Filtering changes presentation, not membership of the source snapshot.
-
-Comment kinds are distinct and stored in lexical label order regardless of configuration order.
-There may be 1 through 32 kinds. Each trimmed label is nonempty, contains no control character, and
-is at most 256 UTF-8 bytes.
 
 Export templates use `{{name}}` placeholders, are each at most 256 KiB, and compile to at most 4,096
 literal-or-placeholder tokens. Invalid, unknown, unmatched, or unterminated placeholders fail
@@ -192,13 +177,11 @@ configuration rather than rendering literally.
 
 - `comments`: selected comments rendered by `comment_template`, separated by newlines, or
   `_No comments._` when none are selected;
-- `comment_types`: included configured kind labels, uppercased in ASCII and comma-separated;
 - `comment_count`: the number of selected comments.
 
 `comment_template` accepts:
 
 - `index`: one-based selected-comment index;
-- `kind` and `kind_upper`: the kind label as stored or uppercased in ASCII;
 - `target`: `review`, an escaped file path, or `<path>:<line-or-range>`;
 - `path`: the escaped target path, empty for a review-level comment;
 - `line_or_range`: a new-side line or inclusive range, or the same prefixed by `~` for the old
@@ -208,8 +191,8 @@ configuration rather than rendering literally.
 The defaults are:
 
 ```toml
-markdown_template = "I reviewed your code and have the following comments. Please address them.\n\nComment types: {{comment_types}}\n\n{{comments}}\n"
-comment_template = "{{index}}. **[{{kind_upper}}]** `{{target}}` - {{comment}}"
+markdown_template = "I reviewed your code and have the following comments. Please address them.\n\n{{comments}}\n"
+comment_template = "{{index}}. `{{target}}` - {{comment}}"
 ```
 
 #### 4.2 Keybindings
@@ -250,11 +233,10 @@ align-top, align-center, align-bottom, toggle-directory, expand-directory,
 collapse-directory, visual-line, visual-lines, visual-hunk,
 comment-selection, command, filter, help, status-details, search,
 open-submit, cancel, interrupt, delete-backward, confirm-yes, confirm-no,
-next-comment-kind, previous-comment-kind, save-comment, insert-newline,
+save-comment, insert-newline,
 extend-up, extend-down, next-help-page, previous-help-page, help-line-up,
 help-line-down, help-page-up, help-page-down, help-home, help-end,
-toggle-export-notes, toggle-export-praise, toggle-export-unmappable,
-export-selected, copy-markdown, export-markdown, export-json,
+toggle-export-unmappable, export-selected, copy-markdown, export-markdown, export-json,
 submit-recheck, toggle-stale-head-override, toggle-submit-exclusion,
 toggle-submit-summary, submit-review, reload, toggle-file-panel,
 toggle-comments, toggle-hidden-files
@@ -304,8 +286,7 @@ The optional keys are:
 
 ```text
 diff_add_bg, diff_del_bg, diff_hunk_header, file_modified, file_renamed,
-comment_note, comment_suggestion, branch_name, message_warning_fg,
-message_warning_bg, syntax_theme
+branch_name, message_warning_fg, message_warning_bg, syntax_theme
 ```
 
 Colors are `#RRGGBB` or one of:
@@ -512,15 +493,15 @@ The interactive application uses:
 - `charm.land/bubbles/v2` at `v2.1.1`;
 - `charm.land/lipgloss/v2` at `v2.0.5`.
 
-The resolved module graph in `go.sum` is part of the accepted dependency baseline. A dependency
-upgrade is an architecture change and MUST reverify the version-specific lifecycle and signal
-contracts in sections 10 and 11.
+The three versions above form the specified dependency baseline. A dependency upgrade is an
+architecture change and MUST reverify the version-specific lifecycle and signal contracts in
+sections 10 and 11.
 
 The pinned upstream modules declare `github.com/charmbracelet/x/windows` in their module metadata.
 `rvw` does not import that package, compile its Windows files, add Windows behavior, or support a
 Windows target. Requiring Bubble Tea v2 makes that unreachable transitive module metadata
-unavoidable. Acceptance of this document interprets the Linux/macOS-only constraint as forbidding
-direct or runtime Windows code and dependencies, not as rewriting the upstream module graph.
+unavoidable. The Linux/macOS-only constraint forbids direct or runtime Windows code and
+dependencies; it does not require rewriting the upstream module graph.
 
 The Go ownership boundaries are:
 
@@ -589,7 +570,7 @@ One review owns:
 - active file and navigation state;
 - per-file and per-hunk reviewed marks;
 - review-, file-, and line-anchored comments;
-- comment drafts and configured kinds;
+- comment drafts;
 - reload, search, export, and publication state;
 - explicit notices and failure states.
 
@@ -647,9 +628,10 @@ Context changes serialize behind active search work that uses the same patch acq
 
 ### 9. Export and publication
 
-Markdown and JSON export are prepared from an immutable review snapshot. Export options select
-whether notes, praise, and unmappable comments are included. Preparation is bounded and
-cancellable.
+Markdown and JSON export are prepared from an immutable review snapshot. Every comment is eligible
+for export except that unmappable comments require the explicit export option. Comment-export JSON
+objects contain `target`, `binding`, and `comment`; there is no category or type field. Preparation
+is bounded and cancellable.
 
 Interactive copy/write actions are in-session deliveries, not additional top-level output modes.
 
@@ -692,7 +674,7 @@ unavailable data, malformed remote data, or an ambiguous match leaves the attemp
 
 #### 9.1 Publication restart scope
 
-This draft proposes **process-lifetime publication safety**:
+This specification provides **process-lifetime publication safety**:
 
 - Publication attempt identity, commit-boundary state, unknown-result fencing, and reconciliation
   state exist only for the lifetime of one `rvw` process.
@@ -706,11 +688,10 @@ This draft proposes **process-lifetime publication safety**:
   confirming equivalent content.
 - No durable publication journal is created.
 
-Explicit acceptance of this exact document accepts that restart limitation. Until then GitHub
-publication implementation is blocked. Durable cross-process fencing would require a separate
-accepted contract for storage location, private permissions, interprocess locking, atomicity and
-directory durability, versioning, corruption, bounded retention, privacy, and cleanup. It MUST NOT
-be added implicitly.
+Durable cross-process fencing is outside this specification and MUST NOT be added implicitly.
+Adding it requires an explicit contract for storage location, private permissions, interprocess
+locking, atomicity and directory durability, versioning, corruption, bounded retention, privacy,
+and cleanup.
 
 ## Interactive runtime and lifecycle
 
@@ -877,7 +858,8 @@ Main default controls are:
 | `:` | Open command prompt |
 | `q` / `Ctrl-c` | Quit/interrupt |
 
-Comment editing uses `Ctrl-s` to save, `Tab` and `Shift-Tab` to change kind, and `Esc` to cancel.
+Comment editing uses `Ctrl-s` to save and `Esc` to cancel. An explicitly configured valid binding
+takes precedence; otherwise `Tab` and `Shift-Tab` are delivered to the focused textarea.
 Multi-key chords time out after 750 milliseconds. Numeric repeats range from 1 through 9,999.
 Chord/repeat state resets on context changes, invalid continuation, or timeout. Effective help
 reflects user overrides. Search and command-prompt input are each limited to 64 KiB; reaching the

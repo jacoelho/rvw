@@ -8,13 +8,12 @@ import (
 
 func TestCommentIdentityDoesNotChangeAfterDeletion(t *testing.T) {
 	review := testReview(t, testSnapshot(t, 1, "a.go"))
-	kind, _ := NewCommentKind("issue")
 
 	var ids []CommentID
 	for range 3 {
 		target, _ := FileCommentTarget(0)
 		var err error
-		review, err = review.BeginDraft(target, kind)
+		review, err = review.BeginDraft(target)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -67,9 +66,8 @@ func TestFileSelectionDoesNotActivateUntilExplicitlyRequested(t *testing.T) {
 
 func TestEditingCommentPreservesIdentity(t *testing.T) {
 	current := testReview(t, testSnapshot(t, 1, "a.go"))
-	kind, _ := NewCommentKind("issue")
 	target, _ := FileCommentTarget(0)
-	current = saveTestComment(t, current, target, kind, "before")
+	current = saveTestComment(t, current, target, "before")
 	id := current.Comments()[0].ID()
 
 	var err error
@@ -94,7 +92,6 @@ func TestEditingCommentPreservesIdentity(t *testing.T) {
 
 func TestReplaceSnapshotReconcilesByRawPathIdentity(t *testing.T) {
 	current := testReview(t, testSnapshot(t, 1, "a.go", "b.go"))
-	kind, _ := NewCommentKind("issue")
 	var err error
 	current, err = current.ActivateFile(0)
 	if err != nil {
@@ -106,10 +103,10 @@ func TestReplaceSnapshotReconcilesByRawPathIdentity(t *testing.T) {
 	}
 
 	fileTarget, _ := FileCommentTarget(0)
-	current = saveTestComment(t, current, fileTarget, kind, "file")
+	current = saveTestComment(t, current, fileTarget, "file")
 	line, _ := NewLineNumber(7)
 	lineTarget, _ := LineCommentTarget(0, LineNew, line, line)
-	current = saveTestComment(t, current, lineTarget, kind, "line")
+	current = saveTestComment(t, current, lineTarget, "line")
 
 	replacement := testSnapshot(t, 2, "c.go", "a.go")
 	next, report, err := current.ReplaceSnapshot(replacement)
@@ -204,9 +201,8 @@ func TestReplaceSnapshotPreservesOnlyProvablyIdenticalHunkMarks(t *testing.T) {
 
 func TestReplaceSnapshotPreservesUnmappableCommentPathAndBlocksDraftLoss(t *testing.T) {
 	current := testReview(t, testSnapshot(t, 1, "gone.go"))
-	kind, _ := NewCommentKind("issue")
 	target, _ := FileCommentTarget(0)
-	current = saveTestComment(t, current, target, kind, "comment")
+	current = saveTestComment(t, current, target, "comment")
 
 	replacement := testSnapshot(t, 2, "new.go")
 	next, report, err := current.ReplaceSnapshot(replacement)
@@ -223,7 +219,7 @@ func TestReplaceSnapshotPreservesUnmappableCommentPathAndBlocksDraftLoss(t *test
 		t.Fatalf("unmappable comment retained colliding file ID %d", fileID)
 	}
 
-	current, err = current.BeginDraft(target, kind)
+	current, err = current.BeginDraft(target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,10 +242,9 @@ func TestReplaceSnapshotPreservesLineCommentWhenItsSideIsIdentical(t *testing.T)
 		t,
 		testContentSnapshot(t, 1, "a.go", oldObject, newObject),
 	)
-	kind, _ := NewCommentKind("issue")
 	line, _ := NewLineNumber(7)
 	target, _ := LineCommentTarget(0, LineNew, line, line)
-	current = saveTestComment(t, current, target, kind, "line")
+	current = saveTestComment(t, current, target, "line")
 
 	identical, report, err := current.ReplaceSnapshot(
 		testContentSnapshot(t, 2, "a.go", oldObject, newObject),
@@ -280,11 +275,10 @@ func TestReplaceSnapshotRequiresIdenticalLineDraftContentAndSupersedesCPUWork(t 
 		t,
 		testContentSnapshot(t, 1, "a.go", oldObject, newObject),
 	)
-	kind, _ := NewCommentKind("issue")
 	line, _ := NewLineNumber(7)
 	target, _ := LineCommentTarget(0, LineNew, line, line)
 	var err error
-	current, err = current.BeginDraft(target, kind)
+	current, err = current.BeginDraft(target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,9 +349,8 @@ func TestPreparedReplacementIsRevisionFenced(t *testing.T) {
 
 func TestReplaceSnapshotReconcilesUnambiguousRenameAliases(t *testing.T) {
 	current := testReview(t, testSnapshot(t, 1, "before.go"))
-	kind, _ := NewCommentKind("issue")
 	target, _ := FileCommentTarget(0)
-	current = saveTestComment(t, current, target, kind, "rename")
+	current = saveTestComment(t, current, target, "rename")
 	current, err := current.ToggleFileReviewed(0)
 	if err != nil {
 		t.Fatal(err)
@@ -408,11 +401,10 @@ func saveTestComment(
 	t *testing.T,
 	current Review,
 	target CommentTarget,
-	kind CommentKind,
 	body string,
 ) Review {
 	t.Helper()
-	next, err := current.BeginDraft(target, kind)
+	next, err := current.BeginDraft(target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -429,8 +421,7 @@ func saveTestComment(
 
 func testReview(t *testing.T, snapshot Snapshot) Review {
 	t.Helper()
-	kind, _ := NewCommentKind("issue")
-	current, err := NewReview(snapshot, []CommentKind{kind})
+	current, err := NewReview(snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}

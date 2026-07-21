@@ -57,8 +57,7 @@ func (event PublicationEvent) GitHubValue() string {
 type PublicationPolicy uint8
 
 const (
-	PublicationPrefixKinds PublicationPolicy = iota + 1
-	PublicationMoveUnmappableToSummary
+	PublicationMoveUnmappableToSummary PublicationPolicy = iota + 1
 	PublicationAllowStaleHead
 )
 
@@ -69,7 +68,7 @@ type PublicationPolicies struct {
 func NewPublicationPolicies(values ...PublicationPolicy) (PublicationPolicies, error) {
 	var policies PublicationPolicies
 	for _, value := range values {
-		if value < PublicationPrefixKinds || value > PublicationAllowStaleHead {
+		if value < PublicationMoveUnmappableToSummary || value > PublicationAllowStaleHead {
 			return PublicationPolicies{}, fmt.Errorf(
 				"%w: unknown policy %d",
 				ErrInvalidPublication,
@@ -82,7 +81,7 @@ func NewPublicationPolicies(values ...PublicationPolicy) (PublicationPolicies, e
 }
 
 func (policies PublicationPolicies) Has(value PublicationPolicy) bool {
-	return value >= PublicationPrefixKinds && value <= PublicationAllowStaleHead &&
+	return value >= PublicationMoveUnmappableToSummary && value <= PublicationAllowStaleHead &&
 		policies.bits&(1<<(value-1)) != 0
 }
 
@@ -340,11 +339,7 @@ func (review Review) PreparePublication(options PublicationOptions) (PreparedPub
 			})
 			continue
 		}
-		prefix := ""
-		if options.Policies().Has(PublicationPrefixKinds) {
-			prefix = "[" + comment.Kind().String() + "] "
-		}
-		body := prefix + comment.Body().String()
+		body := comment.Body().String()
 		target := comment.Target()
 		if target.Kind() == TargetLine && !comment.Stale() && !comment.Unmappable() {
 			path, hasPath := target.AnchoredPath()

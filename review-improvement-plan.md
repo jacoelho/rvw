@@ -24,8 +24,7 @@
 
 ### Preserved behavior and authority
 
-- `P1 REQUIRED`: `docs/rvw-specification.md`, whose digest is pinned by
-  `internal/architecture/architecture_test.go`, is the accepted product contract.
+- `P1 REQUIRED`: `docs/rvw-specification.md` is the accepted product contract.
 - `P2 REQUIRED`: `docs/specification/` remains an explicitly unaccepted draft candidate. It is not
   authority to change subprocess cancellation, escaped-descendant ownership, or publication
   behavior. Accepting or rejecting that proposal is a product-contract decision outside this plan.
@@ -471,7 +470,6 @@ focus resume. Complete `tea.View` terminal fields remain unchanged across every 
 
 | File or symbol | Change | Architectural role | Confidence | Evidence |
 | --- | --- | --- | --- | --- |
-| `internal/architecture/architecture_test.go` keymap conformance test | add | enforce accepted cross-boundary vocabulary without changing dependency graph | High | accepted spec graph and duplicated config/app values |
 | `cmd/rvw.interactiveSettings` | retain/narrow | explicit config-to-app composition boundary | High | sole production conversion caller |
 | `internal/app.Model.reloadOperation`, `reloadDeferred`, `reloadPreparing`, `reloadPreparationTries` | replace | closed reload lifecycle | High | gopls found 14 `reloadPreparing` and 6 `reloadDeferred` references across model/reload/search/syntax/tests |
 | `internal/app.Model.deferredPatch`, `pendingSearch` | replace | closed patch continuation | High | gopls found 7 and 11 references across model/search |
@@ -567,14 +565,12 @@ Design v3 inherits Design v2 except for D1, D2, and D3 refinements below.
 The accepted keymap ownership decision in D1 v2 is unchanged. Implement its guardrail at the
 existing seams:
 
-- `internal/architecture` continues to pin the accepted specification digest and dependency graph;
-  it does not call application internals.
 - `internal/config` exhaustively tests accepted/rejected external context, focus, chord, action,
   required-action, ambiguity, and prefix combinations using config-owned parsing/validation.
 - `internal/app` exhaustively tests its runtime context/action matrix and proves the same effective
   binding values drive routing and visible help.
-- `cmd/rvw`, whose tests share `package main`, uses a test fixture transcribed from the digest-pinned
-  accepted vocabulary to pass every valid binding through config loading and `interactiveSettings`,
+- `cmd/rvw`, whose tests share `package main`, uses a test fixture transcribed from the accepted
+  vocabulary to pass every valid binding through config loading and `interactiveSettings`,
   and asserts the resulting app binding fields. The fixture is test evidence, not a third production
   policy owner; a specification digest amendment must update it.
 
@@ -650,7 +646,7 @@ No direct variant may be dropped merely because the model did not claim it befor
 
 ## Predicted change surface v3 corrections
 
-The v2 row placing keymap conformance in `internal/architecture` is superseded by:
+The v2 keymap-conformance placement is superseded by:
 
 | File or symbol | Change | Architectural role | Confidence | Evidence |
 | --- | --- | --- | --- | --- |

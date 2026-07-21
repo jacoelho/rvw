@@ -12,7 +12,6 @@ var ErrInvalidReviewTransition = errors.New("invalid review transition")
 type Review struct {
 	workspace WorkspaceRevision
 	snapshot  Snapshot
-	kinds     []CommentKind
 	state     uint64
 
 	active       *FileID
@@ -31,19 +30,14 @@ type Review struct {
 	publication  publicationState
 }
 
-func NewReview(snapshot Snapshot, kinds []CommentKind) (Review, error) {
+func NewReview(snapshot Snapshot) (Review, error) {
 	if snapshot.SourceID() == 0 {
 		return Review{}, fmt.Errorf("%w: snapshot has no source", ErrInvalidReviewTransition)
-	}
-	validKinds, err := validateKinds(kinds)
-	if err != nil {
-		return Review{}, err
 	}
 	workspace, _ := NewWorkspaceRevision(1)
 	review := Review{
 		workspace:   workspace,
 		snapshot:    snapshot,
-		kinds:       validKinds,
 		state:       1,
 		operations:  make(map[OperationID]Operation),
 		patches:     make(map[FileID]PatchState),
@@ -161,8 +155,8 @@ func (review Review) HideHiddenFiles() Review {
 	return next
 }
 
-func (review Review) BeginDraft(target CommentTarget, kind CommentKind) (Review, error) {
-	if review.draft != nil || !review.validTarget(target) || !slices.Contains(review.kinds, kind) {
+func (review Review) BeginDraft(target CommentTarget) (Review, error) {
+	if review.draft != nil || !review.validTarget(target) {
 		return review, ErrInvalidReviewTransition
 	}
 	if fileID, ok := target.FileID(); ok {
@@ -170,7 +164,7 @@ func (review Review) BeginDraft(target CommentTarget, kind CommentKind) (Review,
 		target = target.withPath(file.IdentityPath())
 	}
 	next := review.clone()
-	next.draft = &Draft{target: target, kind: kind}
+	next.draft = &Draft{target: target}
 	return next, nil
 }
 
@@ -207,7 +201,6 @@ func (review Review) SaveDraft() (Review, CommentID, error) {
 		}
 		id = review.comments[index].id
 		next.commentBody -= int64(len(next.comments[index].body))
-		next.comments[index].kind = review.draft.kind
 		next.comments[index].target = review.draft.target
 		next.comments[index].body = body
 		next.commentBody += int64(len(body))
@@ -219,7 +212,6 @@ func (review Review) SaveDraft() (Review, CommentID, error) {
 		id, _ = NewCommentID(review.nextComment)
 		next.comments = append(next.comments, Comment{
 			id:     id,
-			kind:   review.draft.kind,
 			target: review.draft.target,
 			body:   body,
 		})
@@ -243,25 +235,12 @@ func (review Review) BeginEditComment(id CommentID) (Review, error) {
 	comment := review.comments[index]
 	next := review.clone()
 	next.draft = &Draft{
-		kind:    comment.kind,
 		target:  comment.target,
 		body:    comment.body.String(),
 		editing: new(id),
 	}
 	return next, nil
 }
-
-func (review Review) SetDraftKind(kind CommentKind) (Review, error) {
-	if review.draft == nil || !slices.Contains(review.kinds, kind) {
-		return review, ErrInvalidReviewTransition
-	}
-	next := review.clone()
-	draft := *review.draft
-	draft.kind = kind
-	next.draft = new(draft)
-	return next, nil
-}
-
 func (review Review) CancelDraft() (Review, error) {
 	if review.draft == nil {
 		return review, ErrInvalidReviewTransition

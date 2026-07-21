@@ -815,7 +815,7 @@ func (model *Model) commentLines(
 			line = clipStyled(prefix, 0, width)
 			line = appendSafeAndClip(
 				line,
-				"["+comment.Kind().String()+"] "+target+" — ",
+				target+" — ",
 				width,
 			)
 			remaining := max(width-lipgloss.Width(line), 0)
@@ -923,12 +923,11 @@ func (model *Model) commentEditorView(width, height int) string {
 			fittedStyledLines(model.commentEditor.View(), width, layout.editorHeight)...,
 		), "\n")
 	}
-	title := "Comment · " + draft.Kind().String() + " · " + commentTargetText(draft.Target())
+	title := "Comment · " + commentTargetText(draft.Target())
 	help := model.actionSummary(
 		KeyContextCommentEdit,
 		KeyActionSaveComment,
 		KeyActionInsertNewline,
-		KeyActionNextCommentKind,
 		KeyActionCancel,
 	)
 	lines := append(

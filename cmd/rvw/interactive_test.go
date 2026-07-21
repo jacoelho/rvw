@@ -30,7 +30,7 @@ var acceptedKeybindingVocabulary = []acceptedKeybindingContext{
 		cancel interrupt move-up move-down page-up page-down extend-up extend-down comment-selection
 	`)},
 	{context: "comment-edit", actions: strings.Fields(`
-		cancel interrupt delete-backward next-comment-kind previous-comment-kind save-comment insert-newline
+		cancel interrupt delete-backward save-comment insert-newline
 	`)},
 	{context: "search", actions: strings.Fields(`cancel interrupt accept delete-backward`)},
 	{context: "command", actions: strings.Fields(`cancel interrupt accept delete-backward`)},
@@ -43,7 +43,7 @@ var acceptedKeybindingVocabulary = []acceptedKeybindingContext{
 	`)},
 	{context: "confirm", actions: strings.Fields(`cancel interrupt confirm-yes confirm-no`)},
 	{context: "export-picker", actions: strings.Fields(`
-		cancel interrupt toggle-export-notes toggle-export-praise toggle-export-unmappable export-selected
+		cancel interrupt toggle-export-unmappable export-selected
 	`)},
 	{context: "submit-preflight", actions: strings.Fields(`
 		cancel interrupt submit-recheck toggle-stale-head-override toggle-submit-exclusion

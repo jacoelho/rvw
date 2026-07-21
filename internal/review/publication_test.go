@@ -66,20 +66,19 @@ func TestTakeCheckedPublicationOwnsAndValidatesPayload(t *testing.T) {
 }
 
 func TestPreparePublicationRecordsEveryCommentDecision(t *testing.T) {
-	issue, _ := NewCommentKind("issue")
-	current, err := NewReview(testSnapshot(t, 1, "file.go"), []CommentKind{issue})
+	current, err := NewReview(testSnapshot(t, 1, "file.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	line, _ := NewLineNumber(2)
 	inlineTarget, _ := LineCommentTarget(0, LineNew, line, line)
 	fileTarget, _ := FileCommentTarget(0)
-	current = saveTestComment(t, current, inlineTarget, issue, "inline")
-	current = saveTestComment(t, current, fileTarget, issue, "summary")
-	current = saveTestComment(t, current, ReviewCommentTarget(), issue, "excluded")
+	current = saveTestComment(t, current, inlineTarget, "inline")
+	current = saveTestComment(t, current, fileTarget, "summary")
+	current = saveTestComment(t, current, ReviewCommentTarget(), "excluded")
 	excluded := current.Comments()[2].ID()
 
-	policies, _ := NewPublicationPolicies(PublicationPrefixKinds)
+	policies, _ := NewPublicationPolicies()
 	options, _ := NewPublicationOptions(PublicationEventComment, policies)
 	options, err = options.WithExcludedComments([]CommentID{excluded})
 	if err != nil {
@@ -110,7 +109,7 @@ func TestPreparePublicationRecordsEveryCommentDecision(t *testing.T) {
 	}
 	if prepared.IncludedCount() != 2 || prepared.ExcludedCount() != 1 ||
 		prepared.CommentCount() != 1 ||
-		!strings.Contains(prepared.SummaryBody(), "[issue] summary") {
+		prepared.SummaryBody() != "`file\\.go`: summary" {
 		t.Fatalf(
 			"prepared publication = included %d excluded %d inline %d summary %q",
 			prepared.IncludedCount(),
@@ -118,5 +117,34 @@ func TestPreparePublicationRecordsEveryCommentDecision(t *testing.T) {
 			prepared.CommentCount(),
 			prepared.SummaryBody(),
 		)
+	}
+	if comments := prepared.Comments(0, 1); len(comments) != 1 || comments[0].Body() != "inline" {
+		t.Fatalf("inline publication comments = %+v", comments)
+	}
+}
+
+func TestPublicationPoliciesValidateRebasedMembers(t *testing.T) {
+	policies, err := NewPublicationPolicies(
+		PublicationMoveUnmappableToSummary,
+		PublicationAllowStaleHead,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !policies.Has(PublicationMoveUnmappableToSummary) ||
+		!policies.Has(PublicationAllowStaleHead) {
+		t.Fatalf("policies = %#v", policies)
+	}
+	if empty, err := NewPublicationPolicies(); err != nil ||
+		empty.Has(PublicationMoveUnmappableToSummary) {
+		t.Fatalf("empty policies = %#v, %v", empty, err)
+	}
+	for _, value := range []PublicationPolicy{0, PublicationAllowStaleHead + 1} {
+		if _, err := NewPublicationPolicies(value); err == nil {
+			t.Fatalf("invalid policy %d was accepted", value)
+		}
+	}
+	if (PublicationPolicies{bits: 1 << PublicationAllowStaleHead}).valid() {
+		t.Fatal("unknown publication policy bit was accepted")
 	}
 }

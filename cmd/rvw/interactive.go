@@ -246,15 +246,6 @@ func interactiveSettings(resolved config.Config) (app.Settings, error) {
 		return app.Settings{}, err
 	}
 
-	comments := resolved.Comments()
-	commentKinds := make([]review.CommentKind, len(comments.Kinds))
-	for index, kind := range comments.Kinds {
-		commentKinds[index], err = review.NewCommentKind(kind.String())
-		if err != nil {
-			return app.Settings{}, fmt.Errorf("comment kind %d: %w", index+1, err)
-		}
-	}
-
 	ui := resolved.UI()
 	var settingFeatureValues []app.SettingFeature
 	if ui.Mouse {
@@ -288,14 +279,7 @@ func interactiveSettings(resolved config.Config) (app.Settings, error) {
 	case config.SubmitRequestChanges:
 		publicationEvent = review.PublicationEventRequestChanges
 	}
-	var publicationPolicyValues []review.PublicationPolicy
-	if comments.TypePrefixForGitHub {
-		publicationPolicyValues = append(
-			publicationPolicyValues,
-			review.PublicationPrefixKinds,
-		)
-	}
-	publicationPolicies, err := review.NewPublicationPolicies(publicationPolicyValues...)
+	publicationPolicies, err := review.NewPublicationPolicies()
 	if err != nil {
 		return app.Settings{}, err
 	}
@@ -356,7 +340,6 @@ func interactiveSettings(resolved config.Config) (app.Settings, error) {
 		DiffView:        diffView,
 		ContextLines:    contextLines,
 		SyntaxSelector:  syntaxSelector,
-		CommentKinds:    commentKinds,
 		ExportTemplates: exportTemplates,
 		Publication:     publicationOptions,
 		Keybindings:     keybindings,

@@ -441,7 +441,7 @@ func (coordinator *Coordinator) SubmitSearch(work SearchWork) error {
 
 func (coordinator *Coordinator) SubmitExport(work ExportWork) error {
 	if work.ID == 0 || work.Destination == 0 ||
-		work.Input.RetainedBytes() == 0 ||
+		!work.Input.Ready() ||
 		work.Format != review.ExportMarkdown && work.Format != review.ExportJSON ||
 		work.Format == review.ExportMarkdown && !work.Templates.Ready() {
 		return errors.New("invalid export work")

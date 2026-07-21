@@ -32,10 +32,6 @@ func (model *Model) applyAction(action KeyAction, repeat int) tea.Cmd {
 			model.cancelCommentEdit()
 		case KeyActionSaveComment:
 			model.saveComment()
-		case KeyActionNextCommentKind:
-			model.cycleCommentKind(1)
-		case KeyActionPreviousCommentKind:
-			model.cycleCommentKind(-1)
 		}
 		return nil
 	}

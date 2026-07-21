@@ -7,7 +7,6 @@ import (
 )
 
 type commentExportJSON struct {
-	Kind    string            `json:"kind"`
 	Target  commentTargetJSON `json:"target"`
 	Binding string            `json:"binding"`
 	Comment string            `json:"comment"`
@@ -71,6 +70,9 @@ func (input ExportInput) PrepareJSONCancellable(
 	if !input.ready {
 		return PreparedExport{}, fmt.Errorf("%w: export input is unavailable", ErrInvalidExport)
 	}
+	if !options.valid() {
+		return PreparedExport{}, fmt.Errorf("%w: export options contain unknown bits", ErrInvalidExport)
+	}
 	selected := input.exportComments(options)
 	comments := make([]commentExportJSON, 0, len(selected))
 	for index, comment := range selected {
@@ -90,7 +92,6 @@ func (input ExportInput) PrepareJSONCancellable(
 			binding = "stale"
 		}
 		comments = append(comments, commentExportJSON{
-			Kind:    comment.kind.String(),
 			Target:  target,
 			Binding: binding,
 			Comment: comment.body.String(),

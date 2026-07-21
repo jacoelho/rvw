@@ -76,23 +76,6 @@ func TestSnapshotRequiresSequentialCrossConsistentIdentities(t *testing.T) {
 	}
 }
 
-func TestReviewConstructorOwnsCommentKinds(t *testing.T) {
-	issue, _ := NewCommentKind("issue")
-	note, _ := NewCommentKind("note")
-	kinds := []CommentKind{issue}
-	current, err := NewReview(testSnapshot(t, 1, "file.go"), kinds)
-	if err != nil {
-		t.Fatal(err)
-	}
-	kinds[0] = note
-	if _, err := current.BeginDraft(ReviewCommentTarget(), issue); err != nil {
-		t.Fatalf("constructor-owned kind was changed through caller alias: %v", err)
-	}
-	if _, err := current.BeginDraft(ReviewCommentTarget(), note); !errors.Is(err, ErrInvalidReviewTransition) {
-		t.Fatalf("caller-injected kind error = %v, want ErrInvalidReviewTransition", err)
-	}
-}
-
 func TestFilePathInvariants(t *testing.T) {
 	sourceID, _ := NewSourceID(1)
 	fileID, _ := NewFileID(0)
