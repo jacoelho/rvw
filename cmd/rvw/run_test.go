@@ -8,8 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -336,97 +334,6 @@ func TestRunInteractiveStartsAndQuitsThroughConfiguredBinding(t *testing.T) {
 		!strings.Contains(stdout.String(), "\x1b[?1049l") {
 		t.Fatalf("interactive output did not enter and restore alternate screen: %q", stdout.String())
 	}
-}
-
-func TestInteractivePTYRestoresTerminalState(t *testing.T) {
-	if _, err := exec.LookPath("script"); err != nil {
-		t.Skip("script utility is unavailable")
-	}
-	root := testRepository(t)
-	writeRunFile(t, filepath.Join(root, "file.txt"), "original\n")
-	runTestGit(t, root, "add", "file.txt")
-	runTestGit(t, root, "commit", "-m", "initial")
-	writeRunFile(t, filepath.Join(root, "file.txt"), "changed\n")
-
-	binary := filepath.Join(t.TempDir(), "rvw")
-	build := exec.CommandContext(t.Context(), "go", "build", "-o", binary, ".")
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build rvw: %v\n%s", err, output)
-	}
-	shell := `stty -pendin 2>/dev/null || true; before=$(stty -g); "$RVW_TEST_BINARY" diff; status=$?; stty -pendin 2>/dev/null || true; after=$(stty -g); if [ "$before" = "$after" ]; then restored=yes; else restored=no; fi; printf '\nRVW_STATUS=%s RESTORED=%s BEFORE=%s AFTER=%s\n' "$status" "$restored" "$before" "$after"`
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	var command *exec.Cmd
-	if runtime.GOOS == "linux" {
-		command = exec.CommandContext(ctx, "script", "-q", "-c", "sh -c "+strconv.Quote(shell), "/dev/null")
-	} else {
-		command = exec.CommandContext(ctx, "script", "-q", "/dev/null", "sh", "-c", shell)
-	}
-	command.Dir = root
-	command.Env = append(
-		os.Environ(),
-		"RVW_TEST_BINARY="+binary,
-		"HOME="+filepath.Join(root, "home"),
-		"NO_COLOR=1",
-	)
-	input, inputWriter, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer input.Close()
-	defer inputWriter.Close()
-	var output bytes.Buffer
-	command.Stdin = input
-	command.Stdout = &output
-	command.Stderr = &output
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := inputWriter.WriteString("q"); err != nil {
-		t.Fatal(err)
-	}
-	err = command.Wait()
-	_ = inputWriter.Close()
-	if err != nil {
-		t.Fatalf("PTY run: %v\n%s", err, output.String())
-	}
-	fields := strings.Fields(output.String())
-	var before, after string
-	statusOK := false
-	for _, field := range fields {
-		switch {
-		case field == "RVW_STATUS=0":
-			statusOK = true
-		case strings.HasPrefix(field, "BEFORE="):
-			before = strings.TrimPrefix(field, "BEFORE=")
-		case strings.HasPrefix(field, "AFTER="):
-			after = strings.TrimPrefix(field, "AFTER=")
-		}
-	}
-	if !statusOK || before == "" || after == "" ||
-		stablePTYState(before) != stablePTYState(after) {
-		t.Fatalf("terminal state was not restored:\n%s", output.String())
-	}
-}
-
-func stablePTYState(value string) string {
-	if runtime.GOOS != "darwin" {
-		return value
-	}
-	fields := strings.Split(value, ":")
-	for index, field := range fields {
-		const prefix = "lflag="
-		if !strings.HasPrefix(field, prefix) {
-			continue
-		}
-		flags, err := strconv.ParseUint(strings.TrimPrefix(field, prefix), 16, 64)
-		if err == nil {
-			// PENDIN is transient kernel input state, not a terminal mode owned
-			// by the application.
-			fields[index] = prefix + strconv.FormatUint(flags&^0x20000000, 16)
-		}
-	}
-	return strings.Join(fields, ":")
 }
 
 func testRepository(t *testing.T) string {

@@ -32,6 +32,13 @@ feature expansion.
 - For a closed set of independent flags, prefer an opaque validated bitset with named members and
   membership queries. Do not expose raw bitwise construction or permit unknown bits.
 
+## Defect repair
+
+For a non-trivial defect, identify the violated invariant, entry point, broader failure class, and
+owning boundary. Repair that boundary so the failure class is less likely to recur; do not choose a
+symptom patch merely to minimize the diff. Remove containment made obsolete by the owner-level
+repair, without expanding product behavior.
+
 ## Go tooling
 
 - At the start of a Go code task, discover the `gopls` MCP tools if they are not already visible and
@@ -46,4 +53,3 @@ feature expansion.
   or when `gopls` cannot answer the query. State the reason when falling back.
 - Treat `gopls` diagnostics as focused validation, not as a replacement for the required project
   checks.
-
