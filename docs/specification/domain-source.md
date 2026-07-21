@@ -121,6 +121,23 @@ synthesized tree for the worktree and includes untracked files by default. Stage
 that base with the index tree. Range review compares the supplied base and head. Pull-request review
 resolves immutable base/head object IDs and metadata through `gh`.
 
+At the worktree acquisition boundary, raw Git records are grouped by validated path in first-seen
+order. One concrete record is accepted. One unmerged record plus one concrete record, in either
+order, uses the concrete record. A lone unmerged record with a nonzero new mode reads the filesystem
+object, while a zero new mode removes the path. Duplicate unmerged records, duplicate concrete
+records, and groups of three or more are invalid. Consequently a worktree conflict represents the
+actual synthesized filesystem tree relative to `HEAD`: it can be modified, added, deleted, or
+absent from the resulting diff. A staged unmerged entry remains one modified file whose patch is
+explicitly unavailable.
+
+Readable worktree objects are stably opened and read with a 128 MiB per-file limit. Raw bytes are
+staged and hashed sequentially in normal batches of at most 16 MiB, 256 entries, and 1 MiB of
+`hash-object --stdin-paths` input. A file above 16 MiB forms one isolated batch. Every batch must
+return exactly one valid object ID per entry, and every raw staging file is deleted on success,
+failure, or cancellation. There is no lifetime aggregate raw-byte rejection. Hashed objects remain
+in the lifecycle-owned private object database; the private index is not created or updated until
+raw batches, gitlinks, filter checks, and live inventory verification succeed.
+
 External bytes are validated at acquisition boundaries. Paths preserve raw byte identity and have
 a separately escaped display form. Object IDs, modes, refs, URLs, process results, GitHub payloads,
 diff structure, and remote comment data are validated before entering review semantics.

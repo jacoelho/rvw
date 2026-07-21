@@ -82,6 +82,20 @@ repositories, missing values, unknown options, and invalid configuration MUST fa
 or terminal composition. Help exits successfully. Other startup failures write terminal-safe text
 prefixed by `rvw:` to stderr and exit with status 1.
 
+After command-line parsing and the help fast path, default interactive mode requires both stdin and
+stdout to pass a termios query (`TCGETS` on Linux and `TIOCGETA` on macOS). They need not identify
+the same terminal or the controlling terminal, and stderr may be redirected. Missing either
+capability fails before signal ownership, configuration, repository discovery, Git, GitHub, or
+terminal composition with exactly:
+
+```text
+interactive mode requires terminal stdin and stdout; use --stdout or --json for noninteractive output
+```
+
+The command does not select another output mode automatically. Command-line errors take precedence,
+help bypasses terminal admission, terminal admission precedes configuration and source failures,
+and `--stdout` and `--json` do not require terminal streams.
+
 ## 4. Configuration and themes
 
 ### 4.1 Precedence and schema

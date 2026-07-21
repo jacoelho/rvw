@@ -107,6 +107,32 @@ func TestCommandLineContract(t *testing.T) {
 				}
 			})
 		})
+
+		feature.Scenario("default interactive mode rejects null stdin and piped stdout", func(scenario *bdd.ScenarioSpec[*world]) {
+			scenario.When("rvw is invoked without terminal streams", invoke("diff"))
+			scenario.Then("startup fails before terminal or source composition", func(t testing.TB, w *world) {
+				assertInteractiveTerminalFailure(t, w.last)
+			})
+		})
+
+		feature.Scenario("piped quit input does not start the interactive program", func(scenario *bdd.ScenarioSpec[*world]) {
+			scenario.When("quit is piped to default interactive mode", func(t testing.TB, w *world) {
+				w.runWithInput(t, strings.NewReader("q"), "diff")
+			})
+			scenario.Then("startup fails without emitting terminal controls", func(t testing.TB, w *world) {
+				assertInteractiveTerminalFailure(t, w.last)
+			})
+		})
+
+		feature.Scenario("nonterminal pull-request mode is rejected before GitHub", func(scenario *bdd.ScenarioSpec[*world]) {
+			scenario.When("a pull request is requested without terminal streams", invoke("pr", "7", "--repo", "fixture/repository"))
+			scenario.Then("startup fails without calling GitHub", func(t testing.TB, w *world) {
+				assertInteractiveTerminalFailure(t, w.last)
+				if calls := w.calls(t); len(calls) != 0 {
+					t.Fatalf("terminal admission called external helpers: %+v", calls)
+				}
+			})
+		})
 	})
 }
 
@@ -234,6 +260,16 @@ func assertStartupFailure(t testing.TB, result processResult, want string) {
 		if unicode.IsControl(character) && character != '\n' && character != '\t' {
 			t.Fatalf("stderr contains terminal control U+%04X: %q", character, result.stderr)
 		}
+	}
+}
+
+func assertInteractiveTerminalFailure(t testing.TB, result processResult) {
+	t.Helper()
+	const diagnostic = "interactive mode requires terminal stdin and stdout; use --stdout or --json for noninteractive output"
+	assertStartupFailure(t, result, diagnostic)
+	if len(result.stdout) != 0 || bytes.Contains(result.stderr, []byte{0x1b}) ||
+		string(result.stderr) != "rvw: "+diagnostic+"\n" {
+		t.Fatalf("stdout=%q stderr=%q", result.stdout, result.stderr)
 	}
 }
 

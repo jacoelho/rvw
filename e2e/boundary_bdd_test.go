@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -112,6 +113,83 @@ func TestOutputBoundaryContract(t *testing.T) {
 				}
 			})
 		})
+
+		feature.Scenario("worktree conflicts represent the synthesized filesystem tree", func(scenario *bdd.ScenarioSpec[*world]) {
+			scenario.Given("content and delete-modify conflicts are unresolved", func(t testing.TB, w *world) {
+				resetWorktreeFixture(t, w)
+				w.writeFile(t, filepath.Join(w.repository, "content.txt"), "base\n")
+				w.writeFile(t, filepath.Join(w.repository, "deleted-on-main.txt"), "base\n")
+				runGit(t, w.repository, w.environment, "add", ".")
+				runGit(t, w.repository, w.environment, "commit", "-m", "conflict base")
+				mainBranch := strings.TrimSpace(runGit(t, w.repository, w.environment, "branch", "--show-current"))
+				runGit(t, w.repository, w.environment, "checkout", "-b", "conflict-side")
+				w.writeFile(t, filepath.Join(w.repository, "content.txt"), "side\n")
+				w.writeFile(t, filepath.Join(w.repository, "deleted-on-main.txt"), "side\n")
+				runGit(t, w.repository, w.environment, "commit", "-am", "conflict side")
+				runGit(t, w.repository, w.environment, "checkout", mainBranch)
+				w.writeFile(t, filepath.Join(w.repository, "content.txt"), "main\n")
+				runGit(t, w.repository, w.environment, "rm", "--quiet", "deleted-on-main.txt")
+				runGit(t, w.repository, w.environment, "commit", "-am", "conflict main")
+				mergeExpectingConflict(t, w, "conflict-side")
+			})
+			scenario.When("worktree JSON is requested", invoke("diff", "--json"))
+			scenario.Then("each conflict appears once with its actual tree classification", func(t testing.TB, w *world) {
+				assertProcessSuccess(t, w.last)
+				var document struct {
+					Files []struct {
+						NewPath string `json:"new_path_display"`
+						OldPath string `json:"old_path_display"`
+						Change  struct {
+							Kind string `json:"kind"`
+						} `json:"change"`
+					}
+				}
+				if err := json.Unmarshal(w.last.stdout, &document); err != nil {
+					t.Fatal(err)
+				}
+				got := make(map[string][]string)
+				for _, file := range document.Files {
+					path := file.NewPath
+					if path == "" {
+						path = file.OldPath
+					}
+					got[path] = append(got[path], file.Change.Kind)
+				}
+				if !slices.Equal(got["content.txt"], []string{"modified"}) ||
+					!slices.Equal(got["deleted-on-main.txt"], []string{"added"}) ||
+					len(got) != 2 {
+					t.Fatalf("conflict files = %v", got)
+				}
+			})
+		})
+
+		feature.Scenario("aggregate worktree content is hashed in bounded batches", func(scenario *bdd.ScenarioSpec[*world]) {
+			scenario.Given("one hundred twenty-nine hard-linked one MiB files are changed", func(t testing.TB, w *world) {
+				resetWorktreeFixture(t, w)
+				seed := filepath.Join(w.repository, "aggregate", "000.bin")
+				w.writeBytes(t, seed, bytes.Repeat([]byte{0xa5}, 1<<20))
+				for index := 1; index < 129; index++ {
+					path := filepath.Join(w.repository, "aggregate", fmt.Sprintf("%03d.bin", index))
+					if err := os.Link(seed, path); err != nil {
+						t.Fatal(err)
+					}
+				}
+			})
+			scenario.When("worktree JSON is requested", invoke("diff", "--json"))
+			scenario.Then("all files are returned without a lifetime aggregate rejection", func(t testing.TB, w *world) {
+				assertProcessSuccess(t, w.last)
+				var document struct {
+					FileCount int   `json:"file_count"`
+					Files     []any `json:"files"`
+				}
+				if err := json.Unmarshal(w.last.stdout, &document); err != nil {
+					t.Fatal(err)
+				}
+				if document.FileCount != 129 || len(document.Files) != 129 {
+					t.Fatalf("aggregate file count = %d/%d", document.FileCount, len(document.Files))
+				}
+			})
+		})
 	})
 }
 
@@ -134,26 +212,28 @@ func TestLifecycleAndScaleContract(t *testing.T) {
 			})
 		})
 
-		feature.Scenario("one thousand changed-file metadata records remain processable", func(scenario *bdd.ScenarioSpec[*world]) {
-			scenario.Given("the worktree contains exactly one thousand changed paths", func(t testing.TB, w *world) {
-				for index := range 994 {
+		feature.Scenario("one thousand ten-thousand-line files open interactively", func(scenario *bdd.ScenarioSpec[*world]) {
+			scenario.Given("the worktree contains the exact hard-linked scale fixture", func(t testing.TB, w *world) {
+				resetWorktreeFixture(t, w)
+				seed := filepath.Join(w.repository, "scale", formatScaleIndex(0)+".txt")
+				w.writeFile(t, seed, strings.Repeat("0123456789abcde\n", 10_000))
+				for index := 1; index < 1_000; index++ {
 					path := filepath.Join(w.repository, "scale", formatScaleIndex(index)+".txt")
-					w.writeFile(t, path, "metadata only\n")
+					if err := os.Link(seed, path); err != nil {
+						t.Fatal(err)
+					}
 				}
 			})
-			scenario.When("metadata JSON is requested", invoke("diff", "--json"))
-			scenario.Then("the bounded source returns all one thousand files", func(t testing.TB, w *world) {
-				assertProcessSuccess(t, w.last)
-				var value struct {
-					FileCount int `json:"file_count"`
-					Files     []any
-				}
-				if err := json.Unmarshal(w.last.stdout, &value); err != nil {
-					t.Fatal(err)
-				}
-				if value.FileCount != 1_000 || len(value.Files) != 1_000 {
-					t.Fatalf("metadata count = %d/%d, want 1000", value.FileCount, len(value.Files))
-				}
+			scenario.When("the interactive review is opened and quit", func(t testing.TB, w *world) {
+				w.launchPTY(t, 120, 24, "diff")
+				w.pty.awaitScreen(t, "exact scale worktree", func(screen string) bool {
+					return strings.Contains(screen, "000000.txt") && strings.Contains(screen, "work 0/64")
+				})
+				w.pty.send(t, "q")
+				w.pty.awaitExit(t)
+			})
+			scenario.Then("the terminal lifecycle remains complete", func(t testing.TB, w *world) {
+				assertTerminalLifecycle(t, w.pty, true)
 			})
 		})
 
@@ -212,6 +292,22 @@ func formatScaleIndex(index int) string {
 		return value
 	}
 	return strings.Repeat("0", width-len(value)) + value
+}
+
+func resetWorktreeFixture(t testing.TB, w *world) {
+	t.Helper()
+	runGit(t, w.repository, w.environment, "reset", "--hard", "HEAD")
+	runGit(t, w.repository, w.environment, "clean", "-fdx")
+}
+
+func mergeExpectingConflict(t testing.TB, w *world, branch string) {
+	t.Helper()
+	command := exec.CommandContext(t.Context(), systemGit, "merge", "--no-ff", "--no-edit", branch)
+	command.Dir = w.repository
+	command.Env = slices.Clone(w.environment)
+	if output, err := command.CombinedOutput(); err == nil {
+		t.Fatalf("merge unexpectedly succeeded:\n%s", output)
+	}
 }
 
 func readJSONObject(t testing.TB, path string) map[string]any {

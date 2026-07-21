@@ -19,15 +19,30 @@ import (
 
 const (
 	maxWorktreeInventoryBytes int64 = 64 << 20
-	maxWorktreeRawBytes       int64 = 128 << 20
+	maxWorktreeFileBytes      int64 = 128 << 20
+	rawWorktreeBatchBytes     int64 = 16 << 20
+	rawWorktreeBatchEntries         = 256
+	rawWorktreeHashInputBytes       = 1 << 20
 	indexUpdateBatchBytes           = 1 << 20
 )
 
 type rawWorktreeEntry struct {
 	oid  *review.ObjectID
 	mode review.FileMode
-	file string
 	path []byte
+}
+
+type stagedWorktreeBlob struct {
+	file       string
+	mode       review.FileMode
+	entryIndex int
+	size       int64
+}
+
+type rawWorktreeBatch struct {
+	blobs      []stagedWorktreeBlob
+	rawBytes   int64
+	inputBytes int
 }
 
 type indexUpdate struct {
@@ -57,18 +72,6 @@ func (service *Service) synthesizeRawWorktree(
 	if indexFlagErr := service.rejectWorktreeIndexFlags(ctx, root, environment); indexFlagErr != nil {
 		return "", indexFlagErr
 	}
-	privateEnvironment, err := initializePrivateIndex(
-		ctx,
-		service,
-		root,
-		environment,
-		workspace,
-		liveIndex,
-	)
-	if err != nil {
-		return "", err
-	}
-
 	changed, err := service.worktreeChanges(ctx, root, environment)
 	if err != nil {
 		return "", err
@@ -93,7 +96,7 @@ func (service *Service) synthesizeRawWorktree(
 	if filterErr := service.rejectWorktreeFilterDrivers(ctx, root, environment, paths); filterErr != nil {
 		return "", filterErr
 	}
-	raw, err = stageRawWorktreeEntries(ctx, root, workspace, raw)
+	raw, err = service.hashRawWorktreeEntries(ctx, root, environment, workspace, raw)
 	if err != nil {
 		return "", err
 	}
@@ -116,12 +119,18 @@ func (service *Service) synthesizeRawWorktree(
 		return "", verifyErr
 	}
 
-	updates, err := service.hashRawWorktreeEntries(
+	privateEnvironment, err := initializePrivateIndex(
 		ctx,
+		service,
 		root,
-		privateEnvironment,
-		raw,
+		environment,
+		workspace,
+		liveIndex,
 	)
+	if err != nil {
+		return "", err
+	}
+	updates, err := rawWorktreeUpdates(raw)
 	if err != nil {
 		return "", err
 	}
@@ -297,10 +306,14 @@ func prepareWorktreeCandidates(
 	changed []diffRecord,
 	untracked []byte,
 ) ([]rawWorktreeEntry, []indexUpdate, [][]byte, error) {
-	raw := make([]rawWorktreeEntry, 0, len(changed))
-	removals := make([]indexUpdate, 0)
-	paths := make([][]byte, 0, len(changed))
-	seen := make(map[string]struct{}, len(changed))
+	type recordGroup struct {
+		unmerged *diffRecord
+		concrete *diffRecord
+		path     []byte
+	}
+
+	groups := make([]recordGroup, 0, len(changed))
+	groupIndexes := make(map[string]int, len(changed))
 	for _, record := range changed {
 		path := record.newPath
 		if record.status == 'D' {
@@ -310,17 +323,52 @@ func prepareWorktreeCandidates(
 			return nil, nil, nil, err
 		}
 		key := string(path)
-		if _, exists := seen[key]; exists {
-			return nil, nil, nil, fmt.Errorf("worktree inventory repeats path %q", path)
+		groupIndex, exists := groupIndexes[key]
+		if !exists {
+			groupIndex = len(groups)
+			groupIndexes[key] = groupIndex
+			groups = append(groups, recordGroup{path: bytes.Clone(path)})
 		}
-		seen[key] = struct{}{}
-		owned := bytes.Clone(path)
-		paths = append(paths, owned)
-		if record.status == 'D' {
-			removals = append(removals, indexUpdate{path: owned, remove: true})
+		group := &groups[groupIndex]
+		if record.status == 'U' {
+			if group.unmerged != nil {
+				return nil, nil, nil, fmt.Errorf(
+					"worktree inventory repeats unmerged path %q",
+					path,
+				)
+			}
+			group.unmerged = new(record)
+		} else {
+			if group.concrete != nil {
+				return nil, nil, nil, fmt.Errorf(
+					"worktree inventory repeats concrete path %q",
+					path,
+				)
+			}
+			group.concrete = new(record)
+		}
+	}
+
+	raw := make([]rawWorktreeEntry, 0, len(groups))
+	removals := make([]indexUpdate, 0)
+	paths := make([][]byte, 0, len(groups))
+	seen := make(map[string]struct{}, len(groups))
+	for _, group := range groups {
+		selected := group.concrete
+		if selected == nil {
+			selected = group.unmerged
+		}
+		if selected == nil {
+			return nil, nil, nil, errors.New("worktree record group is empty")
+		}
+		paths = append(paths, group.path)
+		seen[string(group.path)] = struct{}{}
+		if selected.status == 'D' ||
+			selected.status == 'U' && selected.newMode.String() == "000000" {
+			removals = append(removals, indexUpdate{path: group.path, remove: true})
 			continue
 		}
-		raw = append(raw, rawWorktreeEntry{path: owned, mode: record.newMode})
+		raw = append(raw, rawWorktreeEntry{path: group.path, mode: selected.newMode})
 	}
 
 	for len(untracked) > 0 {
@@ -433,9 +481,10 @@ func validateFilterAttributeOutput(output []byte, paths [][]byte) error {
 	return nil
 }
 
-func stageRawWorktreeEntries(
+func (service *Service) hashRawWorktreeEntries(
 	ctx context.Context,
 	root RepositoryPath,
+	environment map[string]string,
 	workspace string,
 	entries []rawWorktreeEntry,
 ) (result []rawWorktreeEntry, returnErr error) {
@@ -453,7 +502,10 @@ func stageRawWorktreeEntries(
 	defer func() {
 		returnErr = errors.Join(returnErr, stagingRoot.Close())
 	}()
-	var total int64
+	batch := rawWorktreeBatch{}
+	defer func() {
+		returnErr = errors.Join(returnErr, cleanupStagedWorktreeBlobs(batch.blobs))
+	}()
 	for index := range entries {
 		if err := context.Cause(ctx); err != nil {
 			return nil, err
@@ -465,18 +517,27 @@ func stageRawWorktreeEntries(
 		if err != nil {
 			return nil, fmt.Errorf("read worktree path %q: %w", entries[index].path, err)
 		}
+		entries[index].mode = mode
 		if mode.String() == "160000" {
-			entries[index].file = ""
 			continue
 		}
-		total += int64(len(body))
-		if total > maxWorktreeRawBytes {
-			return nil, fmt.Errorf(
-				"raw worktree bytes exceed %d",
-				maxWorktreeRawBytes,
-			)
-		}
 		name := "blob-" + strconv.Itoa(index)
+		filePath := filepath.Join(staging, name)
+		inputBytes := len(filePath) + 1
+		if inputBytes > rawWorktreeHashInputBytes {
+			return nil, errors.New("raw blob staging path exceeds hash input batch capacity")
+		}
+		if !batch.accepts(int64(len(body)), inputBytes) {
+			if flushErr := service.flushRawWorktreeBatch(
+				ctx,
+				root,
+				environment,
+				entries,
+				&batch,
+			); flushErr != nil {
+				return nil, flushErr
+			}
+		}
 		file, err := stagingRoot.OpenFile(
 			name,
 			os.O_WRONLY|os.O_CREATE|os.O_EXCL,
@@ -485,6 +546,12 @@ func stageRawWorktreeEntries(
 		if err != nil {
 			return nil, fmt.Errorf("create raw blob staging file: %w", err)
 		}
+		batch.add(stagedWorktreeBlob{
+			file:       filePath,
+			mode:       mode,
+			entryIndex: index,
+			size:       int64(len(body)),
+		})
 		if _, err := file.Write(body); err != nil {
 			return nil, errors.Join(
 				fmt.Errorf("write raw blob staging file: %w", err),
@@ -494,10 +561,115 @@ func stageRawWorktreeEntries(
 		if err := file.Close(); err != nil {
 			return nil, fmt.Errorf("close raw blob staging file: %w", err)
 		}
-		entries[index].mode = mode
-		entries[index].file = filepath.Join(staging, name)
+	}
+	if err := service.flushRawWorktreeBatch(
+		ctx,
+		root,
+		environment,
+		entries,
+		&batch,
+	); err != nil {
+		return nil, err
 	}
 	return entries, nil
+}
+
+func (batch *rawWorktreeBatch) accepts(rawBytes int64, inputBytes int) bool {
+	if len(batch.blobs) == 0 {
+		return inputBytes <= rawWorktreeHashInputBytes
+	}
+	return len(batch.blobs) < rawWorktreeBatchEntries &&
+		batch.rawBytes <= rawWorktreeBatchBytes-rawBytes &&
+		batch.inputBytes <= rawWorktreeHashInputBytes-inputBytes
+}
+
+func (batch *rawWorktreeBatch) add(blob stagedWorktreeBlob) {
+	batch.blobs = append(batch.blobs, blob)
+	batch.rawBytes += blob.size
+	batch.inputBytes += len(blob.file) + 1
+}
+
+func (service *Service) flushRawWorktreeBatch(
+	ctx context.Context,
+	root RepositoryPath,
+	environment map[string]string,
+	entries []rawWorktreeEntry,
+	batch *rawWorktreeBatch,
+) (returnErr error) {
+	if len(batch.blobs) == 0 {
+		return nil
+	}
+	defer func() {
+		returnErr = errors.Join(returnErr, cleanupStagedWorktreeBlobs(batch.blobs))
+		*batch = rawWorktreeBatch{}
+	}()
+	if err := context.Cause(ctx); err != nil {
+		return err
+	}
+	input := make([]byte, 0, batch.inputBytes)
+	for _, blob := range batch.blobs {
+		input = append(input, blob.file...)
+		input = append(input, '\n')
+	}
+	result, err := service.runGitWithInput(
+		ctx,
+		root.String(),
+		environment,
+		[]string{"hash-object", "--no-filters", "-w", "--stdin-paths"},
+		input,
+		nil,
+		int64(len(batch.blobs))*80,
+	)
+	if err != nil {
+		return fmt.Errorf("hash raw worktree blobs: %w", err)
+	}
+	identities, err := parseRawWorktreeIdentities(result.Stdout, len(batch.blobs))
+	if err != nil {
+		return err
+	}
+	for index, identity := range identities {
+		blob := batch.blobs[index]
+		entry := &entries[blob.entryIndex]
+		entry.oid = new(identity)
+		if entry.mode != blob.mode {
+			return fmt.Errorf("raw worktree mode changed while hashing path %q", entry.path)
+		}
+	}
+	return nil
+}
+
+func cleanupStagedWorktreeBlobs(blobs []stagedWorktreeBlob) error {
+	var cleanupErr error
+	for _, blob := range blobs {
+		if err := os.Remove(blob.file); err != nil && !errors.Is(err, os.ErrNotExist) {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove raw blob staging file: %w", err))
+		}
+	}
+	return cleanupErr
+}
+
+func parseRawWorktreeIdentities(output []byte, count int) ([]review.ObjectID, error) {
+	identities := make([]review.ObjectID, 0, count)
+	for index := range count {
+		lineEnd := bytes.IndexByte(output, '\n')
+		if lineEnd < 0 {
+			return nil, fmt.Errorf(
+				"git returned %d raw blob identities, want %d",
+				index,
+				count,
+			)
+		}
+		identity, err := review.NewObjectID(string(output[:lineEnd]))
+		if err != nil {
+			return nil, fmt.Errorf("validate raw blob identity %d: %w", index+1, err)
+		}
+		identities = append(identities, identity)
+		output = output[lineEnd+1:]
+	}
+	if len(output) != 0 {
+		return nil, fmt.Errorf("git returned extra raw blob identities after %d", count)
+	}
+	return identities, nil
 }
 
 func readRawWorktreePath(
@@ -513,6 +685,9 @@ func readRawWorktreePath(
 	}
 	switch {
 	case before.Mode().IsRegular():
+		if before.Size() > maxWorktreeFileBytes {
+			return nil, review.FileMode(""), errors.New("worktree file exceeds raw byte limit")
+		}
 		descriptor, err := unix.Open(
 			path,
 			unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK,
@@ -532,11 +707,11 @@ func readRawWorktreePath(
 		if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
 			return nil, review.FileMode(""), errors.New("worktree path changed while opening")
 		}
-		body, err := io.ReadAll(io.LimitReader(file, maxWorktreeRawBytes+1))
+		body, err := io.ReadAll(io.LimitReader(file, maxWorktreeFileBytes+1))
 		if err != nil {
 			return nil, review.FileMode(""), err
 		}
-		if int64(len(body)) > maxWorktreeRawBytes {
+		if int64(len(body)) > maxWorktreeFileBytes {
 			return nil, review.FileMode(""), errors.New("worktree file exceeds raw byte limit")
 		}
 		after, err := file.Stat()
@@ -582,69 +757,17 @@ func sameWorktreeFile(left, right os.FileInfo) bool {
 		left.ModTime().Equal(right.ModTime())
 }
 
-func (service *Service) hashRawWorktreeEntries(
-	ctx context.Context,
-	root RepositoryPath,
-	environment map[string]string,
-	entries []rawWorktreeEntry,
-) ([]indexUpdate, error) {
-	var input []byte
-	count := 0
-	for _, entry := range entries {
-		if entry.file == "" {
-			continue
-		}
-		input = append(input, entry.file...)
-		input = append(input, '\n')
-		count++
-	}
-	var lines []string
-	if count != 0 {
-		result, err := service.runGitWithInput(
-			ctx,
-			root.String(),
-			environment,
-			[]string{"hash-object", "--no-filters", "-w", "--stdin-paths"},
-			input,
-			nil,
-			int64(count)*80,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("hash raw worktree blobs: %w", err)
-		}
-		lines = strings.Split(strings.TrimSuffix(string(result.Stdout), "\n"), "\n")
-		if len(lines) != count {
-			return nil, fmt.Errorf(
-				"git returned %d raw blob identities, want %d",
-				len(lines),
-				count,
-			)
-		}
-	}
+func rawWorktreeUpdates(entries []rawWorktreeEntry) ([]indexUpdate, error) {
 	updates := make([]indexUpdate, 0, len(entries))
-	line := 0
 	for _, entry := range entries {
-		if entry.oid != nil {
-			updates = append(updates, indexUpdate{
-				path:   entry.path,
-				mode:   entry.mode,
-				object: *entry.oid,
-			})
-			continue
-		}
-		if entry.file == "" {
-			continue
-		}
-		object, err := review.NewObjectID(lines[line])
-		if err != nil {
-			return nil, fmt.Errorf("validate raw blob identity: %w", err)
+		if entry.oid == nil {
+			return nil, fmt.Errorf("worktree path %q has no object identity", entry.path)
 		}
 		updates = append(updates, indexUpdate{
 			path:   entry.path,
 			mode:   entry.mode,
-			object: object,
+			object: *entry.oid,
 		})
-		line++
 	}
 	return updates, nil
 }
@@ -680,8 +803,11 @@ func (service *Service) verifyRawWorktreeGitlinks(
 	entries []rawWorktreeEntry,
 ) error {
 	for _, entry := range entries {
-		if entry.oid == nil {
+		if entry.mode.String() != "160000" {
 			continue
+		}
+		if entry.oid == nil {
+			return fmt.Errorf("submodule %q has no object identity", entry.path)
 		}
 		current, err := service.worktreeGitlinkHead(ctx, root, environment, entry.path)
 		if err != nil {

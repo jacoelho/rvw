@@ -276,7 +276,7 @@ type world struct {
 
 func newWorld(t testing.TB) *world {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	t.Cleanup(cancel)
 
 	root := t.TempDir()
@@ -503,10 +503,19 @@ type processResult struct {
 }
 
 func (w *world) run(t testing.TB, args ...string) processResult {
+	return w.runWithInput(t, nil, args...)
+}
+
+func (w *world) runWithInput(
+	t testing.TB,
+	input io.Reader,
+	args ...string,
+) processResult {
 	t.Helper()
 	command := exec.CommandContext(w.context, rvwBinary, args...)
 	command.Dir = w.repository
 	command.Env = slices.Clone(w.environment)
+	command.Stdin = input
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr

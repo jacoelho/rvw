@@ -29,26 +29,26 @@ func main() {
 		os.Exit(1)
 	}
 	os.Exit(run(runRequest{
-		ctx:            context.Background(),
-		args:           os.Args[1:],
-		environment:    os.Environ(),
-		cwd:            cwd,
-		stdin:          os.Stdin,
-		stdout:         os.Stdout,
-		stderr:         os.Stderr,
-		stdoutTerminal: isTerminal(os.Stdout),
+		ctx:         context.Background(),
+		args:        os.Args[1:],
+		environment: os.Environ(),
+		cwd:         cwd,
+		stdin:       os.Stdin,
+		stdout:      os.Stdout,
+		stderr:      os.Stderr,
+		terminals:   detectTerminalCapabilities(os.Stdin, os.Stdout),
 	}))
 }
 
 type runRequest struct {
-	ctx            context.Context
-	stdin          io.Reader
-	stdout         io.Writer
-	stderr         io.Writer
-	cwd            string
-	args           []string
-	environment    []string
-	stdoutTerminal bool
+	ctx         context.Context
+	stdin       io.Reader
+	stdout      io.Writer
+	stderr      io.Writer
+	cwd         string
+	args        []string
+	environment []string
+	terminals   terminalCapabilities
 }
 
 func run(request runRequest) int {
@@ -68,19 +68,25 @@ func run(request runRequest) int {
 		}
 		return 0
 	}
+	if admissionErr := validateTerminalAdmission(invocation, request.terminals); admissionErr != nil {
+		if writeErr := writeStartupError(request.stderr, admissionErr); writeErr != nil {
+			return 1
+		}
+		return 1
+	}
 
 	executionContext, cancelExecution := context.WithCancel(request.ctx)
 	termination := newTerminationOwner(cancelExecution)
 	defer termination.Close()
 	err = execute(executeRequest{
-		ctx:            executionContext,
-		invocation:     invocation,
-		environment:    request.environment,
-		cwd:            request.cwd,
-		stdin:          request.stdin,
-		stdout:         request.stdout,
-		stdoutTerminal: request.stdoutTerminal,
-		termination:    termination,
+		ctx:         executionContext,
+		invocation:  invocation,
+		environment: request.environment,
+		cwd:         request.cwd,
+		stdin:       request.stdin,
+		stdout:      request.stdout,
+		terminals:   request.terminals,
+		termination: termination,
 	})
 	if err != nil {
 		if writeErr := writeStartupError(request.stderr, err); writeErr != nil {
@@ -92,14 +98,14 @@ func run(request runRequest) int {
 }
 
 type executeRequest struct {
-	ctx            context.Context
-	stdin          io.Reader
-	stdout         io.Writer
-	termination    *terminationOwner
-	cwd            string
-	environment    []string
-	invocation     Invocation
-	stdoutTerminal bool
+	ctx         context.Context
+	stdin       io.Reader
+	stdout      io.Writer
+	termination *terminationOwner
+	cwd         string
+	environment []string
+	invocation  Invocation
+	terminals   terminalCapabilities
 }
 
 func execute(request executeRequest) (returnErr error) {
@@ -158,21 +164,20 @@ func execute(request executeRequest) (returnErr error) {
 	}
 	if request.invocation.Output == OutputInteractive {
 		return runInteractive(interactiveRequest{
-			ctx:            request.ctx,
-			input:          request.stdin,
-			output:         request.stdout,
-			resolved:       resolved,
-			service:        service,
-			document:       document,
-			stdoutTerminal: request.stdoutTerminal,
-			termination:    request.termination,
+			ctx:         request.ctx,
+			input:       request.stdin,
+			output:      request.stdout,
+			resolved:    resolved,
+			service:     service,
+			document:    document,
+			termination: request.termination,
 		})
 	}
 	defer func() {
 		returnErr = errors.Join(returnErr, document.Close())
 	}()
 
-	outputOptions := output.Options{Terminal: request.stdoutTerminal}
+	outputOptions := output.Options{Terminal: request.terminals.has(terminalOutput)}
 	switch request.invocation.Output {
 	case OutputHuman:
 		err = output.WriteHuman(request.stdout, document, outputOptions)
@@ -391,9 +396,4 @@ func isBidiControl(character rune) bool {
 	return character == '\u061c' || character == '\u200e' || character == '\u200f' ||
 		character >= '\u202a' && character <= '\u202e' ||
 		character >= '\u2066' && character <= '\u2069'
-}
-
-func isTerminal(file *os.File) bool {
-	info, err := file.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }

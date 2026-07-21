@@ -23,14 +23,13 @@ const (
 )
 
 type interactiveRequest struct {
-	ctx            context.Context
-	input          io.Reader
-	output         io.Writer
-	service        *source.Service
-	document       *source.Document
-	termination    *terminationOwner
-	resolved       config.Config
-	stdoutTerminal bool
+	ctx         context.Context
+	input       io.Reader
+	output      io.Writer
+	service     *source.Service
+	document    *source.Document
+	termination *terminationOwner
+	resolved    config.Config
 }
 
 func runInteractive(request interactiveRequest) (returnErr error) {
@@ -147,9 +146,7 @@ func finishInteractive(
 	}
 	var stdoutErr error
 	if pending, ok := model.PendingStdout(); ok {
-		if request.stdoutTerminal {
-			pending, stdoutErr = terminalSafePayload(pending)
-		}
+		pending, stdoutErr = terminalSafePayload(pending)
 		if stdoutErr == nil {
 			_, stdoutErr = io.WriteString(request.output, pending)
 		}

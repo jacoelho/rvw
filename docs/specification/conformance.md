@@ -12,6 +12,8 @@ Default externally relevant limits are:
 | Changed files per source | 100,000 |
 | Bytes per path | 4,096 |
 | Total raw path bytes per source | 64 MiB |
+| One raw worktree file | 128 MiB |
+| Normal raw worktree hash batch | 16 MiB, 256 entries, and 1 MiB path input |
 | Patch bytes per file | 64 MiB |
 | Blob bytes per file | 16 MiB |
 | Patch hunks per source operation | 100,000 |

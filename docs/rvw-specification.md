@@ -107,6 +107,20 @@ repositories, missing values, unknown options, and invalid configuration MUST fa
 or terminal composition. Help exits successfully. Other startup failures write terminal-safe text
 prefixed by `rvw:` to stderr and exit with status 1.
 
+After command-line parsing and the help fast path, default interactive mode requires both stdin and
+stdout to pass a termios query (`TCGETS` on Linux and `TIOCGETA` on macOS). They need not identify
+the same terminal or the controlling terminal, and stderr may be redirected. Missing either
+capability fails before signal ownership, configuration, repository discovery, Git, GitHub, or
+terminal composition with exactly:
+
+```text
+interactive mode requires terminal stdin and stdout; use --stdout or --json for noninteractive output
+```
+
+The command does not select another output mode automatically. Command-line errors take precedence,
+help bypasses terminal admission, terminal admission precedes configuration and source failures,
+and `--stdout` and `--json` do not require terminal streams.
+
 ### 4. Configuration and themes
 
 #### 4.1 Precedence and schema
@@ -601,6 +615,23 @@ synthesized tree for the worktree and includes untracked files by default. Stage
 that base with the index tree. Range review compares the supplied base and head. Pull-request review
 resolves immutable base/head object IDs and metadata through `gh`.
 
+At the worktree acquisition boundary, raw Git records are grouped by validated path in first-seen
+order. One concrete record is accepted. One unmerged record plus one concrete record, in either
+order, uses the concrete record. A lone unmerged record with a nonzero new mode reads the filesystem
+object, while a zero new mode removes the path. Duplicate unmerged records, duplicate concrete
+records, and groups of three or more are invalid. Consequently a worktree conflict represents the
+actual synthesized filesystem tree relative to `HEAD`: it can be modified, added, deleted, or
+absent from the resulting diff. A staged unmerged entry remains one modified file whose patch is
+explicitly unavailable.
+
+Readable worktree objects are stably opened and read with a 128 MiB per-file limit. Raw bytes are
+staged and hashed sequentially in normal batches of at most 16 MiB, 256 entries, and 1 MiB of
+`hash-object --stdin-paths` input. A file above 16 MiB forms one isolated batch. Every batch must
+return exactly one valid object ID per entry, and every raw staging file is deleted on success,
+failure, or cancellation. There is no lifetime aggregate raw-byte rejection. Hashed objects remain
+in the lifecycle-owned private object database; the private index is not created or updated until
+raw batches, gitlinks, filter checks, and live inventory verification succeed.
+
 External bytes are validated at acquisition boundaries. Paths preserve raw byte identity and have
 a separately escaped display form. Object IDs, modes, refs, URLs, process results, GitHub payloads,
 diff structure, and remote comment data are validated before entering review semantics.
@@ -985,6 +1016,8 @@ Default externally relevant limits are:
 | Changed files per source | 100,000 |
 | Bytes per path | 4,096 |
 | Total raw path bytes per source | 64 MiB |
+| One raw worktree file | 128 MiB |
+| Normal raw worktree hash batch | 16 MiB, 256 entries, and 1 MiB path input |
 | Patch bytes per file | 64 MiB |
 | Blob bytes per file | 16 MiB |
 | Patch hunks per source operation | 100,000 |

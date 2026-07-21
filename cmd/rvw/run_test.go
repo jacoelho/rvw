@@ -154,6 +154,10 @@ func TestRunPullRequestOutputMatrix(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
+			terminals := terminalCapabilities{}
+			if test.name == "interactive" {
+				terminals = testTerminalCapabilities(t, terminalInput, terminalOutput)
+			}
 			status := run(runRequest{
 				ctx:         t.Context(),
 				args:        test.args,
@@ -162,6 +166,7 @@ func TestRunPullRequestOutputMatrix(t *testing.T) {
 				stdin:       strings.NewReader("q"),
 				stdout:      &stdout,
 				stderr:      &stderr,
+				terminals:   terminals,
 			})
 			if status != 0 {
 				t.Fatalf("run() status = %d, stderr = %s", status, stderr.String())
@@ -326,6 +331,7 @@ func TestRunInteractiveStartsAndQuitsThroughConfiguredBinding(t *testing.T) {
 		stdin:       strings.NewReader("q"),
 		stdout:      &stdout,
 		stderr:      &stderr,
+		terminals:   testTerminalCapabilities(t, terminalInput, terminalOutput),
 	})
 	if status != 0 {
 		t.Fatalf("run() status = %d, stderr = %s", status, stderr.String())
