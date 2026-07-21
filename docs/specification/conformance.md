@@ -118,7 +118,5 @@ baseline and therefore is not part of this specification.
 `make check` MUST run formatting verification, `go test ./...`, `go test -race ./...`,
 `go vet ./...`, `go build ./cmd/rvw`, and the architecture tests on the host. Linux and macOS
 release evidence additionally requires the platform-specific process and PTY contracts on both
-systems. Before G1 creates the real `cmd/rvw` vertical slice, `make check-g0` runs every listed host
-check except that impossible build; it MUST NOT be satisfied by a placeholder command. Release
-validation MUST run `make check` and `git diff --check` after edits stop. A check is reported as
-passed only when the command ran and exited successfully.
+systems. Release validation MUST run `make check` and `git diff --check` after edits stop. A check
+is reported as passed only when the command ran and exited successfully.

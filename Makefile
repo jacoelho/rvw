@@ -5,11 +5,9 @@ GOLANGCI_LINT_VERSION := v2.12.2
 RVW := $(BIN)/rvw
 export GOBIN := $(BIN)
 
-.PHONY: check check-g0 fmt-check lint test test-e2e test-e2e-update test-race vet build dependencies
+.PHONY: check fmt-check lint test test-e2e test-e2e-update test-race vet build dependencies
 
-check: check-g0 build test-e2e
-
-check-g0: fmt-check dependencies lint test test-race vet
+check: fmt-check dependencies lint test test-race vet build test-e2e
 
 fmt-check:
 	@test -z "$$(gofmt -l $(GO_FILES))" || { \
