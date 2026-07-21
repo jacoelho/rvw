@@ -352,15 +352,17 @@ func (model *Model) updateChildren(message tea.Msg) (tea.Cmd, tea.Cmd) {
 	if model.overlay == OverlayHelp {
 		model.help, helpCommand = model.help.Update(message)
 	}
+	if _, isPaste := message.(tea.PasteMsg); isPaste &&
+		(model.belowMinimum() || model.overlay != OverlayNone) {
+		return helpCommand, nil
+	}
 	var childCommand tea.Cmd
 	switch model.mode {
 	case ModeNormal, ModeVisual:
 	case ModeCommentEdit:
-		model.commentEditor, childCommand = model.commentEditor.Update(message)
-	case ModeSearch:
-		model.searchInput, childCommand = model.searchInput.Update(message)
-	case ModeCommand:
-		model.commandInput, childCommand = model.commandInput.Update(message)
+		childCommand = model.updateCommentEditor(message)
+	case ModeSearch, ModeCommand:
+		childCommand = model.updatePromptInput(message)
 	}
 	return helpCommand, childCommand
 }
@@ -975,13 +977,9 @@ func (model *Model) handleCommentEditorKey(message tea.KeyPressMsg) tea.Cmd {
 	return model.updateCommentEditor(message)
 }
 
-func (model *Model) updateCommentEditor(message tea.KeyPressMsg) tea.Cmd {
-	previous := model.commentEditor.Value()
-	var command tea.Cmd
-	model.commentEditor, command = model.commentEditor.Update(message)
-	value := model.commentEditor.Value()
-	if int64(len(value)) > review.MaxCommentBodyBytes {
-		model.commentEditor.SetValue(previous)
+func (model *Model) updateCommentEditor(message tea.Msg) tea.Cmd {
+	if paste, ok := message.(tea.PasteMsg); ok &&
+		int64(len(paste.Content)) > review.MaxCommentBodyBytes {
 		model.notice = &Notice{
 			Kind: NoticeWarning,
 			Text: NoticeText(
@@ -991,14 +989,42 @@ func (model *Model) updateCommentEditor(message tea.KeyPressMsg) tea.Cmd {
 		}
 		return nil
 	}
+	previous := model.commentEditor.Value()
+	previousLine := model.commentEditor.Line()
+	previousColumn := model.commentEditor.Column()
+	var command tea.Cmd
+	model.commentEditor, command = model.commentEditor.Update(message)
+	value := model.commentEditor.Value()
+	if value == previous {
+		return command
+	}
+	if int64(len(value)) > review.MaxCommentBodyBytes {
+		model.restoreCommentEditor(previous, previousLine, previousColumn)
+		model.notice = &Notice{
+			Kind: NoticeWarning,
+			Text: NoticeText(
+				"comment body limit reached: " + strconv.FormatInt(review.MaxCommentBodyBytes, 10) +
+					" bytes",
+			),
+		}
+		return command
+	}
 	next, err := model.review.UpdateDraft(value)
 	if err != nil {
-		model.commentEditor.SetValue(previous)
+		model.restoreCommentEditor(previous, previousLine, previousColumn)
 		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
-		return nil
+		return command
 	}
 	model.review = next
 	return command
+}
+
+func (model *Model) restoreCommentEditor(value string, line, column int) {
+	model.commentEditor.SetValue(value)
+	for model.commentEditor.Line() > line {
+		model.commentEditor.CursorUp()
+	}
+	model.commentEditor.SetCursorColumn(column)
 }
 
 func (model *Model) resolveAction(strokes []string) (KeyAction, bool, bool) {

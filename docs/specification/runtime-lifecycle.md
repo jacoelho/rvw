@@ -144,8 +144,9 @@ Program and work cancellation scopes are distinct. Controlled shutdown is:
 5. call the coordinator's one bounded shutdown/join operation, which settles retained outcomes,
    escalates owned subprocess groups through `internal/subprocess`, and reaps every directly owned
    child;
-6. write an immutable pending stdout export, then diagnostics, only after the Program is no longer
-   active.
+6. write an immutable, format-tagged pending stdout export, then diagnostics, only after the
+   Program is no longer active. The output boundary preflights terminal escaping and size before
+   writing; JSON escaping must preserve valid, semantically equivalent JSON.
 
 No acknowledgement, grace wait, worker join, pipe drain, child `Wait`, or output write blocks
 `Update`, `View`, or the active terminal. The application reports failure when a worker, direct

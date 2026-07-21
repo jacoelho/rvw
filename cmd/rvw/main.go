@@ -18,8 +18,7 @@ import (
 )
 
 const (
-	maxErrorBytes                 int64 = 16 << 10
-	maxInteractiveStdoutSafeBytes int64 = 16 << 20
+	maxErrorBytes int64 = 16 << 10
 )
 
 func main() {
@@ -353,30 +352,6 @@ func terminalSafeError(err error) string {
 		value = value[size:]
 	}
 	return string(safe)
-}
-
-func terminalSafePayload(value string) (string, error) {
-	safe := make([]byte, 0, min(len(value), int(maxInteractiveStdoutSafeBytes)))
-	for value != "" {
-		character, size := utf8.DecodeRuneInString(value)
-		var encoded string
-		switch {
-		case character == utf8.RuneError && size == 1:
-			encoded = `\x` + hexByte(value[0])
-		case character == '\n' || character == '\t':
-			encoded = string(character)
-		case unicode.IsControl(character), isBidiControl(character):
-			encoded = fmt.Sprintf(`\u{%04X}`, character)
-		default:
-			encoded = string(character)
-		}
-		if int64(len(safe)+len(encoded)) > maxInteractiveStdoutSafeBytes {
-			return "", errors.New("terminal-safe interactive output exceeds 16777216 bytes")
-		}
-		safe = append(safe, encoded...)
-		value = value[size:]
-	}
-	return string(safe), nil
 }
 
 func appendBounded(destination, value []byte) []byte {

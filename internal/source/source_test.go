@@ -220,6 +220,129 @@ func TestWorktreeSnapshotRejectsFilterDriversWithoutExecutingThem(t *testing.T) 
 	}
 }
 
+func TestWorktreeFilterInspectionAcceptsExactFivePathResponse(t *testing.T) {
+	root := initializedRepository(t)
+	for _, path := range []string{"a", "b"} {
+		writeFile(t, filepath.Join(root, path), "base\n")
+	}
+	runGitTest(t, root, "add", "a", "b")
+	runGitTest(t, root, "commit", "-m", "base")
+	for _, path := range []string{"a", "b"} {
+		writeFile(t, filepath.Join(root, path), "changed\n")
+	}
+	for _, path := range []string{"c", "d", "e"} {
+		writeFile(t, filepath.Join(root, path), "untracked\n")
+	}
+
+	service := newTestService(t, root)
+	defer closeTestService(t, service)
+	document, err := service.Open(
+		t.Context(),
+		WorktreeTarget(),
+		OpenOptions{IncludeUntracked: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer document.Close()
+	paths := make([]string, 0, document.Snapshot().FileCount())
+	for file := range document.Snapshot().AllFiles() {
+		paths = append(paths, file.DisplayPath())
+	}
+	slices.Sort(paths)
+	if !slices.Equal(paths, []string{"a", "b", "c", "d", "e"}) {
+		t.Fatalf("five-path snapshot = %q", paths)
+	}
+}
+
+func TestWorktreeRejectsAmbiguousFilterDriverNamesWithoutExecutingThem(t *testing.T) {
+	for _, name := range []string{"unspecified", "unset"} {
+		for _, component := range []string{"clean", "process"} {
+			t.Run(name+" "+component, func(t *testing.T) {
+				root := initializedRepository(t)
+				writeFile(t, filepath.Join(root, "tracked.txt"), "base\n")
+				runGitTest(t, root, "add", "tracked.txt")
+				runGitTest(t, root, "commit", "-m", "base")
+				writeFile(t, filepath.Join(root, "tracked.txt"), "worktree\n")
+				writeFile(t, filepath.Join(root, ".gitattributes"), "*.txt filter="+name+"\n")
+
+				marker := filepath.Join(root, "filter-ran")
+				driver := filepath.Join(root, "filter-driver")
+				writeFile(
+					t,
+					driver,
+					"#!/bin/sh\nprintf executed > "+strconv.Quote(marker)+"\nexit 1\n",
+				)
+				if err := os.Chmod(driver, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				runGitTest(t, root, "config", "filter."+name+"."+component, driver)
+
+				service := newTestService(t, root)
+				defer closeTestService(t, service)
+				if _, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{}); err == nil ||
+					!strings.Contains(err.Error(), "ambiguous with configured driver name") {
+					t.Fatalf("ambiguous filter error = %v", err)
+				}
+				if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("ambiguous filter driver ran: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestWorktreeAcceptsGenuinelyUnspecifiedFilterWithSameNamedDriverConfigured(t *testing.T) {
+	for _, attributes := range []string{"", "*.txt !filter\n"} {
+		root := initializedRepository(t)
+		writeFile(t, filepath.Join(root, "tracked.txt"), "base\n")
+		runGitTest(t, root, "add", "tracked.txt")
+		runGitTest(t, root, "commit", "-m", "base")
+		writeFile(t, filepath.Join(root, "tracked.txt"), "worktree\n")
+		if attributes != "" {
+			writeFile(t, filepath.Join(root, ".gitattributes"), attributes)
+		}
+		marker := filepath.Join(root, "filter-ran")
+		driver := filepath.Join(root, "filter-driver")
+		writeFile(t, driver, "#!/bin/sh\nprintf executed > "+strconv.Quote(marker)+"\nexit 1\n")
+		if err := os.Chmod(driver, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		runGitTest(t, root, "config", "filter.unspecified.clean", driver)
+
+		service := newTestService(t, root)
+		document, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{})
+		if err != nil {
+			closeTestService(t, service)
+			t.Fatalf("genuinely unspecified filter was rejected: %v", err)
+		}
+		if err := document.Close(); err != nil {
+			t.Error(err)
+		}
+		closeTestService(t, service)
+		if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("unrelated configured driver ran: %v", err)
+		}
+	}
+}
+
+func TestWorktreeReportsExplicitUnsetFilterAsAmbiguousWithSameNamedDriver(t *testing.T) {
+	root := initializedRepository(t)
+	writeFile(t, filepath.Join(root, "tracked.txt"), "base\n")
+	runGitTest(t, root, "add", "tracked.txt")
+	runGitTest(t, root, "commit", "-m", "base")
+	writeFile(t, filepath.Join(root, "tracked.txt"), "worktree\n")
+	writeFile(t, filepath.Join(root, ".gitattributes"), "*.txt -filter\n")
+	runGitTest(t, root, "config", "filter.unset.clean", "false")
+
+	service := newTestService(t, root)
+	defer closeTestService(t, service)
+	if _, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{}); err == nil ||
+		!strings.Contains(err.Error(), "ambiguous with configured driver name \"unset\"") {
+		t.Fatalf("explicit unset ambiguity error = %v", err)
+	}
+}
+
 func TestTrackedWorktreeUsesLiveIndexMembership(t *testing.T) {
 	root := initializedRepository(t)
 	writeFile(t, filepath.Join(root, "tracked.txt"), "base\n")
@@ -316,6 +439,164 @@ func TestWorktreeSnapshotsInitializedGitlinks(t *testing.T) {
 		file.DisplayPath() != "module" ||
 		file.Change().Kind() != review.ChangeSubmodule {
 		t.Fatalf("advanced submodule snapshot = %+v, present=%v", file, ok)
+	}
+}
+
+func TestWorktreeSnapshotsCommittedUntrackedRepositoryAsGitlink(t *testing.T) {
+	root := initializedRepository(t)
+	writeFile(t, filepath.Join(root, "base"), "base\n")
+	runGitTest(t, root, "add", "base")
+	runGitTest(t, root, "commit", "-m", "base")
+
+	nested := filepath.Join(root, "nested")
+	if err := os.Mkdir(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, nested, "init", "--quiet")
+	runGitTest(t, nested, "config", "user.email", "rvw@example.invalid")
+	runGitTest(t, nested, "config", "user.name", "rvw")
+	writeFile(t, filepath.Join(nested, "child.txt"), "child\n")
+	runGitTest(t, nested, "add", "child.txt")
+	runGitTest(t, nested, "commit", "-m", "child")
+	wantOID, err := review.NewObjectID(strings.TrimSpace(runGitTest(t, nested, "rev-parse", "HEAD")))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	service := newTestService(t, root)
+	defer closeTestService(t, service)
+	document, err := service.Open(
+		t.Context(),
+		WorktreeTarget(),
+		OpenOptions{IncludeUntracked: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer document.Close()
+	file, ok := document.Snapshot().File(0)
+	if !ok || document.Snapshot().FileCount() != 1 || file.DisplayPath() != "nested" ||
+		file.Change().Kind() != review.ChangeSubmodule {
+		t.Fatalf("embedded repository snapshot = %+v, present=%v", file, ok)
+	}
+	oldCommit, newCommit := file.Change().SubmoduleCommits()
+	if oldCommit != nil || newCommit == nil || *newCommit != wantOID {
+		t.Fatalf("embedded repository commits = old %v new %v", oldCommit, newCommit)
+	}
+}
+
+func TestWorktreeCollapsesEmbeddedRepositoryAboveTrackedDescendants(t *testing.T) {
+	root := initializedRepository(t)
+	slot := filepath.Join(root, "slot")
+	if err := os.Mkdir(slot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(slot, "tracked.txt"), "parent\n")
+	runGitTest(t, root, "add", "slot/tracked.txt")
+	runGitTest(t, root, "commit", "-m", "parent")
+	if err := os.RemoveAll(slot); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(slot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, slot, "init", "--quiet")
+	runGitTest(t, slot, "config", "user.email", "rvw@example.invalid")
+	runGitTest(t, slot, "config", "user.name", "rvw")
+	writeFile(t, filepath.Join(slot, "child.txt"), "nested\n")
+	runGitTest(t, slot, "add", "child.txt")
+	runGitTest(t, slot, "commit", "-m", "nested")
+	wantOID, err := review.NewObjectID(strings.TrimSpace(runGitTest(t, slot, "rev-parse", "HEAD")))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	service := newTestService(t, root)
+	defer closeTestService(t, service)
+	document, err := service.Open(
+		t.Context(),
+		WorktreeTarget(),
+		OpenOptions{IncludeUntracked: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer document.Close()
+	var foundGitlink bool
+	for file := range document.Snapshot().AllFiles() {
+		if file.DisplayPath() == "slot/child.txt" {
+			t.Fatal("embedded repository contents escaped into the parent snapshot")
+		}
+		if file.DisplayPath() != "slot" {
+			continue
+		}
+		foundGitlink = true
+		if file.Change().Kind() != review.ChangeSubmodule {
+			t.Fatalf("embedded repository change = %s", file.Change().Kind())
+		}
+		_, newCommit := file.Change().SubmoduleCommits()
+		if newCommit == nil || *newCommit != wantOID {
+			t.Fatalf("embedded repository HEAD = %v, want %s", newCommit, wantOID)
+		}
+	}
+	if !foundGitlink {
+		t.Fatal("embedded repository root is absent from the parent snapshot")
+	}
+}
+
+func TestWorktreeDoesNotCollapseOrdinaryDirectoryWithInvalidGitMarker(t *testing.T) {
+	root := initializedRepository(t)
+	writeFile(t, filepath.Join(root, "base"), "base\n")
+	runGitTest(t, root, "add", "base")
+	runGitTest(t, root, "commit", "-m", "base")
+	ordinary := filepath.Join(root, "ordinary")
+	if err := os.Mkdir(ordinary, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(ordinary, ".git"), "bogus\n")
+	writeFile(t, filepath.Join(ordinary, "file.txt"), "ordinary\n")
+
+	service := newTestService(t, root)
+	defer closeTestService(t, service)
+	document, err := service.Open(
+		t.Context(),
+		WorktreeTarget(),
+		OpenOptions{IncludeUntracked: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer document.Close()
+	var found bool
+	for file := range document.Snapshot().AllFiles() {
+		if file.DisplayPath() == "ordinary/file.txt" && file.Change().Kind() == review.ChangeAdded {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("ordinary directory snapshot = %+v", document.Snapshot())
+	}
+}
+
+func TestWorktreeRejectsUnbornUntrackedRepository(t *testing.T) {
+	root := initializedRepository(t)
+	writeFile(t, filepath.Join(root, "base"), "base\n")
+	runGitTest(t, root, "add", "base")
+	runGitTest(t, root, "commit", "-m", "base")
+	nested := filepath.Join(root, "nested")
+	if err := os.Mkdir(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, nested, "init", "--quiet")
+
+	service := newTestService(t, root)
+	defer closeTestService(t, service)
+	if _, err := service.Open(
+		t.Context(),
+		WorktreeTarget(),
+		OpenOptions{IncludeUntracked: true},
+	); err == nil || !strings.Contains(err.Error(), "HEAD does not resolve to a commit") {
+		t.Fatalf("unborn embedded repository error = %v", err)
 	}
 }
 

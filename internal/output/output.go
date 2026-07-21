@@ -21,6 +21,59 @@ type Options struct {
 	Terminal bool
 }
 
+// WritePreparedExport writes a completed interactive export.
+func WritePreparedExport(
+	writer io.Writer,
+	prepared review.PreparedExport,
+	options Options,
+) error {
+	if writer == nil {
+		return errors.New("write prepared export: writer is nil")
+	}
+	if prepared.Bytes() > review.MaxPreparedExportBytes {
+		return fmt.Errorf(
+			"write prepared export: prepared body exceeds %d bytes",
+			review.MaxPreparedExportBytes,
+		)
+	}
+
+	body := []byte(prepared.Body())
+	var (
+		encoded []byte
+		err     error
+	)
+	switch prepared.Format() {
+	case review.ExportMarkdown:
+		if options.Terminal {
+			encoded, err = terminalSafeMarkdown(body, review.MaxPreparedExportBytes)
+		} else {
+			encoded = body
+		}
+	case review.ExportJSON:
+		if options.Terminal {
+			encoded, err = terminalSafeJSONDocument(body, review.MaxPreparedExportBytes)
+		} else {
+			if !json.Valid(body) {
+				return errors.New("write prepared export: JSON body is invalid")
+			}
+			encoded = body
+		}
+	default:
+		return errors.New("write prepared export: format is invalid")
+	}
+	if err != nil {
+		return fmt.Errorf("write prepared export: %w", err)
+	}
+	n, err := writer.Write(encoded)
+	if err != nil {
+		return err
+	}
+	if n != len(encoded) {
+		return io.ErrShortWrite
+	}
+	return nil
+}
+
 // WriteHuman writes human.
 func WriteHuman(writer io.Writer, document *source.Document, _ Options) error {
 	if document == nil {
@@ -452,6 +505,102 @@ func terminalSafeJSON(value []byte) []byte {
 		value = value[size:]
 	}
 	return []byte(safe.String())
+}
+
+func terminalSafeMarkdown(value []byte, limit int64) ([]byte, error) {
+	if limit < 0 || int64(len(value)) > limit {
+		return nil, fmt.Errorf("terminal-safe body exceeds %d bytes", limit)
+	}
+	safe := make([]byte, 0, len(value))
+	for len(value) > 0 {
+		character, size := utf8.DecodeRune(value)
+		switch {
+		case character == utf8.RuneError && size == 1:
+			if int64(4) > limit-int64(len(safe)) {
+				return nil, fmt.Errorf("terminal-safe body exceeds %d bytes", limit)
+			}
+			safe = appendHexByteEscape(safe, value[0])
+			size = 1
+		case character == '\n' || character == '\t':
+			if int64(size) > limit-int64(len(safe)) {
+				return nil, fmt.Errorf("terminal-safe body exceeds %d bytes", limit)
+			}
+			safe = append(safe, value[:size]...)
+		case unicode.IsControl(character), bidirectionalControl(character):
+			if int64(8) > limit-int64(len(safe)) {
+				return nil, fmt.Errorf("terminal-safe body exceeds %d bytes", limit)
+			}
+			safe = appendMarkdownUnicodeEscape(safe, character)
+		default:
+			if int64(size) > limit-int64(len(safe)) {
+				return nil, fmt.Errorf("terminal-safe body exceeds %d bytes", limit)
+			}
+			safe = append(safe, value[:size]...)
+		}
+		value = value[size:]
+	}
+	return safe, nil
+}
+
+func terminalSafeJSONDocument(value []byte, limit int64) ([]byte, error) {
+	if !json.Valid(value) {
+		return nil, errors.New("JSON body is invalid")
+	}
+	if limit < 0 || int64(len(value)) > limit {
+		return nil, fmt.Errorf("terminal-safe body exceeds %d bytes", limit)
+	}
+	safe := make([]byte, 0, len(value))
+	for len(value) > 0 {
+		character, size := utf8.DecodeRune(value)
+		switch {
+		case character == ' ' || character == '\n' || character == '\r' || character == '\t':
+			if int64(size) > limit-int64(len(safe)) {
+				return nil, fmt.Errorf("terminal-safe body exceeds %d bytes", limit)
+			}
+			safe = append(safe, value[:size]...)
+		case unicode.IsControl(character), bidirectionalControl(character):
+			if int64(6) > limit-int64(len(safe)) {
+				return nil, fmt.Errorf("terminal-safe body exceeds %d bytes", limit)
+			}
+			safe = appendJSONUnicodeEscape(safe, character)
+		default:
+			if int64(size) > limit-int64(len(safe)) {
+				return nil, fmt.Errorf("terminal-safe body exceeds %d bytes", limit)
+			}
+			safe = append(safe, value[:size]...)
+		}
+		value = value[size:]
+	}
+	if !json.Valid(safe) {
+		return nil, errors.New("terminal-safe JSON body is invalid")
+	}
+	return safe, nil
+}
+
+func appendHexByteEscape(destination []byte, value byte) []byte {
+	const digits = "0123456789ABCDEF"
+	return append(destination, '\\', 'x', digits[value>>4], digits[value&0x0f])
+}
+
+func appendMarkdownUnicodeEscape(destination []byte, value rune) []byte {
+	destination = append(destination, '\\', 'u', '{')
+	destination = appendHexRune(destination, value, "0123456789ABCDEF")
+	return append(destination, '}')
+}
+
+func appendJSONUnicodeEscape(destination []byte, value rune) []byte {
+	destination = append(destination, '\\', 'u')
+	return appendHexRune(destination, value, "0123456789abcdef")
+}
+
+func appendHexRune(destination []byte, value rune, digits string) []byte {
+	return append(
+		destination,
+		digits[value>>12&0x0f],
+		digits[value>>8&0x0f],
+		digits[value>>4&0x0f],
+		digits[value&0x0f],
+	)
 }
 
 func bidirectionalControl(character rune) bool {

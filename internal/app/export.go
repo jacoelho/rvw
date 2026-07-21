@@ -257,9 +257,9 @@ func operationTransitionNotice(err error) *Notice {
 }
 
 // PendingStdout returns the receiver's pending stdout value.
-func (model *Model) PendingStdout() (string, bool) {
+func (model *Model) PendingStdout() (review.PreparedExport, bool) {
 	if model.pendingStdout == nil || !model.quitting {
-		return "", false
+		return review.PreparedExport{}, false
 	}
-	return model.pendingStdout.Body(), true
+	return *model.pendingStdout, true
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/jacoelho/rvw/internal/app"
 	"github.com/jacoelho/rvw/internal/config"
 	"github.com/jacoelho/rvw/internal/delivery"
+	"github.com/jacoelho/rvw/internal/output"
 	"github.com/jacoelho/rvw/internal/review"
 	"github.com/jacoelho/rvw/internal/source"
 )
@@ -146,10 +147,11 @@ func finishInteractive(
 	}
 	var stdoutErr error
 	if pending, ok := model.PendingStdout(); ok {
-		pending, stdoutErr = terminalSafePayload(pending)
-		if stdoutErr == nil {
-			_, stdoutErr = io.WriteString(request.output, pending)
-		}
+		stdoutErr = output.WritePreparedExport(
+			request.output,
+			pending,
+			output.Options{Terminal: true},
+		)
 	}
 	if request.termination != nil &&
 		request.termination.Received() &&

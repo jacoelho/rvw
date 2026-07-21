@@ -37,6 +37,12 @@ Main default controls are:
 
 Comment editing uses `Ctrl-s` to save and `Esc` to cancel. An explicitly configured valid binding
 takes precedence; otherwise `Tab` and `Shift-Tab` are delivered to the focused textarea.
+Every accepted textarea update, including bracketed paste, is synchronized into the domain draft
+before the next message. A rejected byte or domain limit restores the prior editor contents and
+logical cursor while preserving the textarea's returned command. A paste above 64 KiB is rejected
+before widget update, and a minimum-size or blocking overlay suppresses paste mutation of hidden
+editors. Search and command prompts apply the same pre-widget paste bound and transactional byte
+limit.
 Multi-key chords time out after 750 milliseconds. Numeric repeats range from 1 through 9,999.
 Chord/repeat state resets on context changes, invalid continuation, or timeout. Effective help
 reflects user overrides. Search and command-prompt input are each limited to 64 KiB; reaching the

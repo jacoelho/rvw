@@ -88,20 +88,33 @@ func (model *Model) handlePromptKey(message tea.KeyPressMsg) tea.Cmd {
 		}
 	}
 
+	return model.updatePromptInput(message)
+}
+
+func (model *Model) updatePromptInput(message tea.Msg) tea.Cmd {
 	input := &model.commandInput
 	if model.mode == ModeSearch {
 		input = &model.searchInput
 	}
-	previous := input.Value()
-	updated, command := input.Update(message)
-	*input = updated
-	if len(input.Value()) > maxPromptBytes {
-		input.SetValue(previous)
+	if paste, ok := message.(tea.PasteMsg); ok && len(paste.Content) > maxPromptBytes {
 		model.notice = &Notice{
 			Kind: NoticeWarning,
 			Text: "prompt input limit reached: 65536 bytes",
 		}
 		return nil
+	}
+	previous := input.Value()
+	previousPosition := input.Position()
+	updated, command := input.Update(message)
+	*input = updated
+	if len(input.Value()) > maxPromptBytes {
+		input.SetValue(previous)
+		input.SetCursor(previousPosition)
+		model.notice = &Notice{
+			Kind: NoticeWarning,
+			Text: "prompt input limit reached: 65536 bytes",
+		}
+		return command
 	}
 	return command
 }

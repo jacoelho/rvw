@@ -624,13 +624,31 @@ actual synthesized filesystem tree relative to `HEAD`: it can be modified, added
 absent from the resulting diff. A staged unmerged entry remains one modified file whose patch is
 explicitly unavailable.
 
+Untracked inventory records are parsed before reconciliation. An exact trailing slash is Git's
+embedded-repository marker and synthesizes a gitlink from that repository's validated `HEAD`
+commit; an unborn or non-commit `HEAD` is invalid. Ordinary and marker forms of the same canonical
+path, duplicate records, and malformed records are rejected rather than silently collapsed. When
+the parent index has tracked descendants and Git therefore reports ordinary child records, `.git`
+ancestor discovery validates the candidate with a non-executing Git query, then collapses the
+shallowest embedded repository to one gitlink and removes its descendant candidates. An incidental
+or invalid `.git` marker remains ordinary content. Inventory parsing enforces the file-count limit
+while retaining records.
+
 Readable worktree objects are stably opened and read with a 128 MiB per-file limit. Raw bytes are
 staged and hashed sequentially in normal batches of at most 16 MiB, 256 entries, and 1 MiB of
 `hash-object --stdin-paths` input. A file above 16 MiB forms one isolated batch. Every batch must
 return exactly one valid object ID per entry, and every raw staging file is deleted on success,
 failure, or cancellation. There is no lifetime aggregate raw-byte rejection. Hashed objects remain
 in the lifecycle-owned private object database; the private index is not created or updated until
-raw batches, gitlinks, filter checks, and live inventory verification succeed.
+raw batches, gitlinks, filter checks, and live inventory verification succeed. Regular-file copies
+use one fixed 64 KiB buffer, preserve cancellation causes, and recheck descriptor and live-path
+identity, mode, size, and modification time before accepting the hash input.
+
+Worktree filter inspection uses exact per-path `check-attr` response accounting. The special
+attribute states `unspecified` and `unset` are distinguished from literal driver names by a bounded
+configuration-name query followed by a bounded explicit-attribute query. A genuinely absent or
+reset attribute does not inherit an unrelated driver named `unspecified`; an explicit state that
+Git cannot distinguish from a same-named driver is rejected as ambiguous without executing it.
 
 External bytes are validated at acquisition boundaries. Paths preserve raw byte identity and have
 a separately escaped display form. Object IDs, modes, refs, URLs, process results, GitHub payloads,
@@ -663,6 +681,12 @@ Markdown and JSON export are prepared from an immutable review snapshot. Every c
 for export except that unmappable comments require the explicit export option. Comment-export JSON
 objects contain `target`, `binding`, and `comment`; there is no category or type field. Preparation
 is bounded and cancellable.
+
+An interactive stdout handoff retains the prepared format through terminal restoration. Markdown
+uses terminal-display escapes for invalid UTF-8, controls, and bidirectional characters. JSON uses
+JSON `\uXXXX` escapes, is validated before and after transformation, and therefore remains valid
+and semantically equivalent. The terminal-safe transformed body is preflighted against the 16 MiB
+limit before one write.
 
 Interactive copy/write actions are in-session deliveries, not additional top-level output modes.
 
@@ -834,8 +858,9 @@ Program and work cancellation scopes are distinct. Controlled shutdown is:
 5. call the coordinator's one bounded shutdown/join operation, which settles retained outcomes,
    escalates owned subprocess groups through `internal/subprocess`, and reaps every directly owned
    child;
-6. write an immutable pending stdout export, then diagnostics, only after the Program is no longer
-   active.
+6. write an immutable, format-tagged pending stdout export, then diagnostics, only after the
+   Program is no longer active. The output boundary preflights terminal escaping and size before
+   writing; JSON escaping must preserve valid, semantically equivalent JSON.
 
 No acknowledgement, grace wait, worker join, pipe drain, child `Wait`, or output write blocks
 `Update`, `View`, or the active terminal. The application reports failure when a worker, direct
@@ -891,6 +916,12 @@ Main default controls are:
 
 Comment editing uses `Ctrl-s` to save and `Esc` to cancel. An explicitly configured valid binding
 takes precedence; otherwise `Tab` and `Shift-Tab` are delivered to the focused textarea.
+Every accepted textarea update, including bracketed paste, is synchronized into the domain draft
+before the next message. A rejected byte or domain limit restores the prior editor contents and
+logical cursor while preserving the textarea's returned command. A paste above 64 KiB is rejected
+before widget update, and a minimum-size or blocking overlay suppresses paste mutation of hidden
+editors. Search and command prompts apply the same pre-widget paste bound and transactional byte
+limit.
 Multi-key chords time out after 750 milliseconds. Numeric repeats range from 1 through 9,999.
 Chord/repeat state resets on context changes, invalid continuation, or timeout. Effective help
 reflects user overrides. Search and command-prompt input are each limited to 64 KiB; reaching the

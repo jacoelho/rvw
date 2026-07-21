@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/jacoelho/rvw/internal/review"
 	"github.com/jacoelho/rvw/internal/source"
 )
 
@@ -94,6 +96,148 @@ func TestTerminalJSONEscapesBidirectionalControls(t *testing.T) {
 			t.Fatalf("terminal JSON lacks escaped control %s: %q", escaped, output.String())
 		}
 	}
+}
+
+func TestWritePreparedExportTerminalJSONRemainsValidAndRoundTrips(t *testing.T) {
+	prepared := preparedJSONWithReviewComment(t, "before\u202eafter\u009b")
+	var output bytes.Buffer
+	if err := WritePreparedExport(&output, prepared, Options{Terminal: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(output.Bytes()) {
+		t.Fatalf("terminal-safe prepared JSON is invalid: %q", output.String())
+	}
+	if bytes.Contains(output.Bytes(), []byte("\u202e")) ||
+		bytes.Contains(output.Bytes(), []byte("\u009b")) {
+		t.Fatalf("terminal-safe prepared JSON contains raw controls: %q", output.String())
+	}
+	if !bytes.Contains(output.Bytes(), []byte(`\u202e`)) ||
+		!bytes.Contains(output.Bytes(), []byte(`\u009b`)) ||
+		bytes.Contains(output.Bytes(), []byte(`\u{`)) {
+		t.Fatalf("terminal-safe prepared JSON uses invalid escaping: %q", output.String())
+	}
+	var decoded struct {
+		Comments []struct {
+			Comment string `json:"comment"`
+		} `json:"comments"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Comments) != 1 || decoded.Comments[0].Comment != "before\u202eafter\u009b" {
+		t.Fatalf("decoded comments = %+v", decoded.Comments)
+	}
+}
+
+func TestTerminalSafePreparedBodiesEnforceSanitizedSize(t *testing.T) {
+	markdownWant := []byte(`\u{202E}`)
+	if got, err := terminalSafeMarkdown([]byte("\u202e"), int64(len(markdownWant))); err != nil ||
+		!bytes.Equal(got, markdownWant) {
+		t.Fatalf("terminalSafeMarkdown exact limit = %q, %v", got, err)
+	}
+	if got, err := terminalSafeMarkdown([]byte("\u202e"), int64(len(markdownWant)-1)); err == nil || got != nil {
+		t.Fatalf("terminalSafeMarkdown over limit = %q, %v", got, err)
+	}
+
+	jsonInput := []byte("{\"comment\":\"\u202e\"}\n")
+	jsonWant := []byte("{\"comment\":\"\\u202e\"}\n")
+	if got, err := terminalSafeJSONDocument(jsonInput, int64(len(jsonWant))); err != nil ||
+		!bytes.Equal(got, jsonWant) {
+		t.Fatalf("terminalSafeJSONDocument exact limit = %q, %v", got, err)
+	}
+	if got, err := terminalSafeJSONDocument(jsonInput, int64(len(jsonWant)-1)); err == nil || got != nil {
+		t.Fatalf("terminalSafeJSONDocument over limit = %q, %v", got, err)
+	}
+	if got, err := terminalSafeJSONDocument([]byte("{invalid}"), 64); err == nil || got != nil {
+		t.Fatalf("terminalSafeJSONDocument invalid JSON = %q, %v", got, err)
+	}
+}
+
+func TestTerminalSafeMarkdownEscapesInvalidUTF8AndControls(t *testing.T) {
+	input := []byte{'a', 0xff, '\r', '\n', '\t', 0x1b}
+	got, err := terminalSafeMarkdown(input, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `a\xFF\u{000D}` + "\n\t" + `\u{001B}`; string(got) != want {
+		t.Fatalf("terminal-safe Markdown = %q, want %q", got, want)
+	}
+}
+
+func TestTerminalSafePreparedBodiesDoNotAllocatePerControl(t *testing.T) {
+	dense := strings.Repeat("\u009b", 4_096)
+	var sink []byte
+	markdownAllocs := testing.AllocsPerRun(10, func() {
+		var err error
+		sink, err = terminalSafeMarkdown([]byte(dense), 64<<10)
+		if err != nil {
+			panic(err)
+		}
+	})
+	if markdownAllocs > 16 {
+		t.Fatalf("control-dense Markdown allocations = %.1f", markdownAllocs)
+	}
+	jsonBody := []byte(`{"comment":"` + dense + `"}`)
+	jsonAllocs := testing.AllocsPerRun(10, func() {
+		var err error
+		sink, err = terminalSafeJSONDocument(jsonBody, 64<<10)
+		if err != nil {
+			panic(err)
+		}
+	})
+	if jsonAllocs > 16 {
+		t.Fatalf("control-dense JSON allocations = %.1f", jsonAllocs)
+	}
+	if len(sink) == 0 {
+		t.Fatal("allocation probe produced no output")
+	}
+}
+
+func TestWritePreparedExportRejectsInvalidValueBeforeWriting(t *testing.T) {
+	var output bytes.Buffer
+	if err := WritePreparedExport(&output, review.PreparedExport{}, Options{Terminal: true}); err == nil {
+		t.Fatal("zero prepared export was accepted")
+	}
+	if output.Len() != 0 {
+		t.Fatalf("invalid prepared export wrote %d bytes", output.Len())
+	}
+}
+
+func TestWritePreparedExportPropagatesWriterFailures(t *testing.T) {
+	prepared := preparedJSONWithReviewComment(t, "safe")
+	if err := WritePreparedExport(failingWriter{}, prepared, Options{Terminal: true}); !errors.Is(err, errWriterFailed) {
+		t.Fatalf("writer error = %v", err)
+	}
+	if err := WritePreparedExport(shortWriter{}, prepared, Options{Terminal: true}); !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("short writer error = %v", err)
+	}
+}
+
+func preparedJSONWithReviewComment(t *testing.T, body string) review.PreparedExport {
+	t.Helper()
+	document := localDocument(t, map[string]string{"a.go": "package a\n"})
+	defer document.Close()
+	current, err := review.NewReview(document.Snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err = current.BeginDraft(review.ReviewCommentTarget())
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err = current.UpdateDraft(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, _, err = current.SaveDraft()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := current.PrepareJSON(review.ExportOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return prepared
 }
 
 func TestOutputsPreserveNonUTF8PathIdentityWithoutRawTerminalBytes(t *testing.T) {
@@ -246,4 +390,10 @@ type failingWriter struct{}
 
 func (failingWriter) Write([]byte) (int, error) {
 	return 0, errWriterFailed
+}
+
+type shortWriter struct{}
+
+func (shortWriter) Write(value []byte) (int, error) {
+	return max(len(value)-1, 0), nil
 }

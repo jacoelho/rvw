@@ -178,6 +178,176 @@ func TestCommentEditorAnchorsSemanticLineAndRetainsChildState(t *testing.T) {
 	}
 }
 
+func TestCommentEditorSynchronizesPastedNewAndEditedDrafts(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{
+		"alpha.txt": "original\nadded\n",
+	})
+	_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
+	active, ok := model.review.ActiveFile()
+	if !ok {
+		t.Fatal("missing active file")
+	}
+	waitForPatch(t, model, coordinator, active)
+	beginTestLineComment(t, model)
+
+	_, _ = model.Update(tea.PasteMsg{Content: "pasted\nbody"})
+	draft, ok := model.review.Draft()
+	if !ok || draft.Body() != "pasted\nbody" || model.commentEditor.Value() != draft.Body() {
+		t.Fatalf("pasted draft = %q, editor = %q, present=%v", draft.Body(), model.commentEditor.Value(), ok)
+	}
+	_, _ = model.Update(tea.KeyPressMsg(tea.Key{Code: 's', Mod: tea.ModCtrl}))
+	comments := model.review.Comments()
+	if len(comments) != 1 || comments[0].Body().String() != "pasted\nbody" {
+		t.Fatalf("saved pasted comments = %+v", comments)
+	}
+
+	model.commentCursor = 0
+	if command := model.beginEditComment(); command == nil {
+		t.Fatal("editing pasted comment did not return a focus command")
+	}
+	_, _ = model.Update(tea.PasteMsg{Content: " edited"})
+	draft, ok = model.review.Draft()
+	if !ok || draft.Body() != "pasted\nbody edited" || model.commentEditor.Value() != draft.Body() {
+		t.Fatalf("edited pasted draft = %q, editor = %q, present=%v", draft.Body(), model.commentEditor.Value(), ok)
+	}
+}
+
+func TestCommentEditorRejectsOversizedPasteWithoutMovingLogicalCursor(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{
+		"alpha.txt": "original\nadded\n",
+	})
+	_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
+	active, ok := model.review.ActiveFile()
+	if !ok {
+		t.Fatal("missing active file")
+	}
+	waitForPatch(t, model, coordinator, active)
+	beginTestLineComment(t, model)
+	_, _ = model.Update(tea.PasteMsg{Content: "alpha\nomega"})
+	model.commentEditor.CursorUp()
+	model.commentEditor.SetCursorColumn(2)
+	wantLine := model.commentEditor.Line()
+	wantColumn := model.commentEditor.Column()
+	wantBody := model.commentEditor.Value()
+
+	_, _ = model.Update(tea.PasteMsg{Content: strings.Repeat("界", 21_844)})
+	draft, ok := model.review.Draft()
+	if !ok || model.commentEditor.Value() != wantBody || draft.Body() != wantBody {
+		t.Fatalf("rejected paste = editor %q draft %q present=%v", model.commentEditor.Value(), draft.Body(), ok)
+	}
+	if model.commentEditor.Line() != wantLine || model.commentEditor.Column() != wantColumn {
+		t.Fatalf(
+			"rejected paste cursor = %d:%d, want %d:%d",
+			model.commentEditor.Line(),
+			model.commentEditor.Column(),
+			wantLine,
+			wantColumn,
+		)
+	}
+	if model.notice == nil || !strings.Contains(string(model.notice.Text), "comment body limit reached") {
+		t.Fatalf("rejected paste notice = %+v", model.notice)
+	}
+}
+
+func TestCommentEditorRejectsRawOversizedPasteBeforeWidget(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{
+		"alpha.txt": "original\nadded\n",
+	})
+	_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
+	active, ok := model.review.ActiveFile()
+	if !ok {
+		t.Fatal("missing active file")
+	}
+	waitForPatch(t, model, coordinator, active)
+	beginTestLineComment(t, model)
+	_, _ = model.Update(tea.PasteMsg{Content: "kept"})
+	_, _ = model.Update(tea.PasteMsg{Content: strings.Repeat("x", int(review.MaxCommentBodyBytes)+1)})
+	draft, ok := model.review.Draft()
+	if !ok || draft.Body() != "kept" || model.commentEditor.Value() != "kept" {
+		t.Fatalf("raw oversized paste changed editor=%q draft=%q", model.commentEditor.Value(), draft.Body())
+	}
+}
+
+func TestBlockingPresentationPreventsPasteMutation(t *testing.T) {
+	conditions := map[string]func(*Model){
+		"minimum size": func(model *Model) {
+			_, _ = model.Update(tea.WindowSizeMsg{
+				Width:  minimumWidth - 1,
+				Height: minimumHeight - 1,
+			})
+		},
+		"overlay": func(model *Model) {
+			model.overlay = OverlayStatus
+		},
+	}
+	for name, block := range conditions {
+		t.Run(name, func(t *testing.T) {
+			commentModel, coordinator := newTestModel(t, map[string]string{
+				"alpha.txt": "original\nadded\n",
+			})
+			_, _ = commentModel.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
+			active, ok := commentModel.review.ActiveFile()
+			if !ok {
+				t.Fatal("missing active file")
+			}
+			waitForPatch(t, commentModel, coordinator, active)
+			beginTestLineComment(t, commentModel)
+			_, _ = commentModel.Update(tea.PasteMsg{Content: "visible"})
+			block(commentModel)
+			_, _ = commentModel.Update(tea.PasteMsg{Content: " hidden"})
+			draft, ok := commentModel.review.Draft()
+			if !ok || draft.Body() != "visible" || commentModel.commentEditor.Value() != "visible" {
+				t.Fatalf(
+					"blocked paste changed hidden draft: editor=%q draft=%q present=%v",
+					commentModel.commentEditor.Value(),
+					draft.Body(),
+					ok,
+				)
+			}
+
+			promptModel, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+			_ = promptModel.beginPrompt(ModeSearch)
+			promptModel.searchInput.SetValue("visible")
+			block(promptModel)
+			_, _ = promptModel.Update(tea.PasteMsg{Content: " hidden"})
+			if promptModel.searchInput.Value() != "visible" {
+				t.Fatalf("blocked paste changed hidden prompt to %q", promptModel.searchInput.Value())
+			}
+		})
+	}
+}
+
+func TestPromptPasteEnforcesByteLimitBeforeAndAfterWidgetUpdate(t *testing.T) {
+	for _, mode := range []InteractionMode{ModeSearch, ModeCommand} {
+		model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+		if command := model.beginPrompt(mode); command == nil {
+			t.Fatalf("mode %d prompt did not focus", mode)
+		}
+		input := &model.commandInput
+		if mode == ModeSearch {
+			input = &model.searchInput
+		}
+		input.SetValue("prefix")
+		input.SetCursor(2)
+		_, _ = model.Update(tea.PasteMsg{Content: strings.Repeat("x", maxPromptBytes+1)})
+		if input.Value() != "prefix" || input.Position() != 2 {
+			t.Fatalf("mode %d oversized raw paste changed prompt to %q at %d", mode, input.Value(), input.Position())
+		}
+
+		previous := strings.Repeat("é", maxPromptBytes/2-8)
+		input.SetValue(previous)
+		input.SetCursor(7)
+		model.notice = nil
+		_, _ = model.Update(tea.PasteMsg{Content: strings.Repeat("é", 16)})
+		if input.Value() != previous || input.Position() != 7 {
+			t.Fatalf("mode %d byte-expanding paste changed prompt bytes=%d cursor=%d", mode, len(input.Value()), input.Position())
+		}
+		if model.notice == nil || !strings.Contains(string(model.notice.Text), "prompt input limit reached") {
+			t.Fatalf("mode %d prompt limit notice = %+v", mode, model.notice)
+		}
+	}
+}
+
 func TestCommentActivationLoadsItsFileAndRevealsItsSemanticLine(t *testing.T) {
 	model, coordinator := newTestModel(t, map[string]string{
 		"alpha.txt": "first\nchanged\n",
@@ -454,9 +624,9 @@ func TestAsyncStdoutExportQuitsOnlyAfterPreparedPayloadIsOwnedByModel(t *testing
 	if message := command(); message != (tea.QuitMsg{}) {
 		t.Fatalf("stdout export command returned %T", message)
 	}
-	body, ok := model.PendingStdout()
-	if !ok || body != "_No comments._" {
-		t.Fatalf("pending stdout = %q %v", body, ok)
+	prepared, ok := model.PendingStdout()
+	if !ok || prepared.Format() != review.ExportMarkdown || prepared.Body() != "_No comments._" {
+		t.Fatalf("pending stdout = (%d, %q) %v", prepared.Format(), prepared.Body(), ok)
 	}
 }
 
@@ -487,9 +657,9 @@ func TestAsyncJSONExportUsesPostProgramStdoutHandoff(t *testing.T) {
 	if command == nil || command() != (tea.QuitMsg{}) {
 		t.Fatal("prepared JSON export did not initiate controlled quit")
 	}
-	body, ok := model.PendingStdout()
-	if !ok || body != "{\"comments\":[]}\n" {
-		t.Fatalf("pending JSON = %q %v", body, ok)
+	prepared, ok := model.PendingStdout()
+	if !ok || prepared.Format() != review.ExportJSON || prepared.Body() != "{\"comments\":[]}\n" {
+		t.Fatalf("pending JSON = (%d, %q) %v", prepared.Format(), prepared.Body(), ok)
 	}
 }
 

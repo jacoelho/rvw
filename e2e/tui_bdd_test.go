@@ -161,7 +161,10 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 
 		feature.Scenario("a saved comment fences quit and exports exact Markdown", func(scenario *bdd.ScenarioSpec[*world]) {
 			scenario.Given("a stable wide worktree screen", launchStableWorktreeAt(180, 30))
-			scenario.When("a line comment is saved", saveLineComment("Please keep this deterministic."))
+			scenario.When(
+				"a bracketed-paste line comment is saved",
+				savePastedLineComment("Please keep this deterministic."),
+			)
 			scenario.Then("its anchor is visible and both comment navigation paths reveal its line", func(t testing.TB, w *world) {
 				w.pty.send(t, "gg")
 				w.pty.awaitScreen(t, "visible comment anchor away from cursor", unfocusedCommentAnchor)
@@ -202,6 +205,50 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 				}
 				w.pty.send(t, ":q!\r")
 				w.pty.awaitExit(t)
+			})
+		})
+
+		feature.Scenario("post-terminal JSON export preserves comments without emitting controls", func(scenario *bdd.ScenarioSpec[*world]) {
+			scenario.Given("a stable worktree with a bidirectional-control comment", bdd.Compose(
+				launchStableWorktreeAt(180, 30),
+				saveLineComment("before\u202eafter"),
+			))
+			scenario.When("JSON stdout export is selected", func(t testing.TB, w *world) {
+				w.pty.send(t, "J")
+				w.pty.awaitScreen(t, "JSON export picker", containsScreen("Export selection"))
+				w.pty.send(t, "\r")
+				w.pty.awaitExit(t)
+			})
+			scenario.Then("the restored-terminal payload is valid escaped JSON with the exact comment", func(t testing.TB, w *world) {
+				assertTerminalLifecycle(t, w.pty, true)
+				payload := postTerminalJSONPayload(t, w.pty)
+				if !json.Valid(payload) {
+					t.Fatalf("post-terminal JSON is invalid: %q\n%s", payload, w.pty.diagnostics(t))
+				}
+				if bytes.Contains(payload, []byte("\u202e")) ||
+					bytes.Contains(payload, []byte(`\u{`)) ||
+					bytes.Contains(payload, []byte{0x1b}) {
+					t.Fatalf("post-terminal JSON contains terminal-unsafe bytes: %q", payload)
+				}
+				if !bytes.Contains(payload, []byte(`\u202e`)) {
+					t.Fatalf("post-terminal JSON lacks JSON escapes: %q", payload)
+				}
+				for _, value := range payload {
+					if value < 0x20 && value != '\n' && value != '\r' && value != '\t' {
+						t.Fatalf("post-terminal JSON contains raw control 0x%02x: %q", value, payload)
+					}
+				}
+				var decoded struct {
+					Comments []struct {
+						Comment string `json:"comment"`
+					} `json:"comments"`
+				}
+				if err := json.Unmarshal(payload, &decoded); err != nil {
+					t.Fatal(err)
+				}
+				if len(decoded.Comments) != 1 || decoded.Comments[0].Comment != "before\u202eafter" {
+					t.Fatalf("post-terminal comments = %+v", decoded.Comments)
+				}
 			})
 		})
 
@@ -291,6 +338,17 @@ func saveLineComment(body string) bdd.Step[*world] {
 	}
 }
 
+func savePastedLineComment(body string) bdd.Step[*world] {
+	return func(t testing.TB, w *world) {
+		w.pty.send(t, "Gc")
+		w.pty.awaitScreen(t, "comment editor", containsScreen("Comment ·"))
+		w.pty.send(t, "\x1b[200~"+body+"\x1b[201~")
+		w.pty.awaitScreen(t, "pasted comment body", containsScreen(body))
+		w.pty.send(t, "\x13")
+		w.pty.awaitScreen(t, "saved comment", containsScreen("comment saved"))
+	}
+}
+
 func containsScreen(text string) func(string) bool {
 	return func(screen string) bool { return strings.Contains(screen, text) }
 }
@@ -342,6 +400,25 @@ func assertTerminalLifecycle(t testing.TB, session *ptySession, wantMouse bool) 
 	if !ok || status != 0 || stableTerminalState(before) != stableTerminalState(after) {
 		t.Fatalf("terminal was not restored: status=%d before=%q after=%q parsed=%t\n%s", status, before, after, ok, session.diagnostics(t))
 	}
+}
+
+func postTerminalJSONPayload(t testing.TB, session *ptySession) []byte {
+	t.Helper()
+	raw := session.rawTranscript()
+	restore := bytes.LastIndex(raw, []byte("\x1b[?1049l"))
+	if restore < 0 {
+		t.Fatalf("alternate-screen restore is absent\n%s", session.diagnostics(t))
+	}
+	afterRestore := raw[restore+len("\x1b[?1049l"):]
+	start := bytes.Index(afterRestore, []byte(`{"comments":`))
+	if start < 0 {
+		t.Fatalf("post-terminal JSON start is absent\n%s", session.diagnostics(t))
+	}
+	status := bytes.Index(afterRestore[start:], []byte("__RVW_E2E_STATUS__="))
+	if status < 0 {
+		t.Fatalf("post-terminal status marker is absent\n%s", session.diagnostics(t))
+	}
+	return bytes.TrimSpace(afterRestore[start : start+status])
 }
 
 func (p *ptySession) hasStyledCells() bool {
