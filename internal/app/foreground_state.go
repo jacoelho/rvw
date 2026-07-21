@@ -20,9 +20,9 @@ const (
 )
 
 type patchContinuation struct {
-	kind   patchContinuationKind
-	file   review.FileID
 	search pendingSearch
+	file   review.FileID
+	kind   patchContinuationKind
 }
 
 type searchContinuationKind uint8
@@ -35,28 +35,28 @@ const (
 )
 
 type searchContinuation struct {
-	kind    searchContinuationKind
 	search  pendingSearch
 	context review.PatchContext
+	kind    searchContinuationKind
 }
 
 type reloadFlow struct {
-	phase       reloadPhase
-	operation   review.OperationID
-	attempts    uint8
 	afterReload *pendingSearch
+	operation   review.OperationID
+	phase       reloadPhase
+	attempts    uint8
 }
 
 type patchFlow struct {
 	active       map[review.OperationID]review.FileID
-	continuation patchContinuation
 	viewport     *diffViewport
 	target       *pendingDiffTarget
+	continuation patchContinuation
 }
 
 type searchFlow struct {
-	active       review.OperationID
 	continuation searchContinuation
+	active       review.OperationID
 }
 
 type diffTargetKind uint8
@@ -67,13 +67,13 @@ const (
 )
 
 type pendingDiffTarget struct {
-	kind      diffTargetKind
-	workspace review.WorkspaceRevision
 	handle    review.PatchHandle
+	workspace review.WorkspaceRevision
 	operation review.OperationID
 	patchRow  uint32
-	side      review.LineSide
 	line      review.LineNumber
+	kind      diffTargetKind
+	side      review.LineSide
 }
 
 func newPatchRowTarget(
@@ -177,10 +177,10 @@ const (
 // foregroundStart is an immutable admission decision. Preparing one does not
 // mutate foregroundState; admitted and rejected are the only terminal paths.
 type foregroundStart struct {
+	search pendingSearch
+	file   review.FileID
 	kind   foregroundStartKind
 	source foregroundStartSource
-	file   review.FileID
-	search pendingSearch
 }
 
 type foregroundEffectKind uint8
@@ -195,15 +195,25 @@ const (
 )
 
 type foregroundEffect struct {
-	kind    foregroundEffectKind
-	file    review.FileID
 	search  pendingSearch
+	file    review.FileID
 	context review.PatchContext
+	kind    foregroundEffectKind
 }
 
 func (state *foregroundState) valid() bool {
-	if state == nil || state.patch.active == nil ||
-		len(state.patch.active) > MaxAcceptedOperations {
+	if state == nil || !state.validPatchFlow() || !state.validReloadFlow() {
+		return false
+	}
+	if state.reload.phase != reloadIdle &&
+		state.patch.continuation.kind == patchContinuationBeginSearch {
+		return false
+	}
+	return state.validPatchContinuation() && state.validSearchContinuation()
+}
+
+func (state *foregroundState) validPatchFlow() bool {
+	if state.patch.active == nil || len(state.patch.active) > MaxAcceptedOperations {
 		return false
 	}
 	for operation, file := range state.patch.active {
@@ -223,6 +233,10 @@ func (state *foregroundState) valid() bool {
 			}
 		}
 	}
+	return true
+}
+
+func (state *foregroundState) validReloadFlow() bool {
 	if state.reload.afterReload != nil && !state.reload.afterReload.valid() {
 		return false
 	}
@@ -248,10 +262,10 @@ func (state *foregroundState) valid() bool {
 	default:
 		return false
 	}
-	if state.reload.phase != reloadIdle &&
-		state.patch.continuation.kind == patchContinuationBeginSearch {
-		return false
-	}
+	return true
+}
+
+func (state *foregroundState) validPatchContinuation() bool {
 	switch state.patch.continuation.kind {
 	case patchContinuationNone:
 	case patchContinuationRetry:
@@ -269,6 +283,10 @@ func (state *foregroundState) valid() bool {
 	default:
 		return false
 	}
+	return true
+}
+
+func (state *foregroundState) validSearchContinuation() bool {
 	switch state.search.continuation.kind {
 	case searchContinuationNone:
 	case searchContinuationReplace:
@@ -352,7 +370,8 @@ func (state *foregroundState) prepareSearch(search pendingSearch) (foregroundSta
 	start := foregroundStart{kind: foregroundStartSearch, search: search}
 	switch state.search.continuation.kind {
 	case searchContinuationNone:
-		if state.patch.continuation.kind == patchContinuationBeginSearch {
+		switch {
+		case state.patch.continuation.kind == patchContinuationBeginSearch:
 			if len(state.patch.active) != 0 {
 				return foregroundStart{}, false
 			}
@@ -360,10 +379,10 @@ func (state *foregroundState) prepareSearch(search pendingSearch) (foregroundSta
 				return foregroundStart{}, false
 			}
 			start.source = foregroundStartPatchSearch
-		} else if state.patch.continuation.kind == patchContinuationNone &&
-			len(state.patch.active) == 0 {
+		case state.patch.continuation.kind == patchContinuationNone &&
+			len(state.patch.active) == 0:
 			start.source = foregroundStartDirect
-		} else {
+		default:
 			return foregroundStart{}, false
 		}
 	case searchContinuationReplace:
@@ -428,10 +447,15 @@ func (state *foregroundState) admitted(
 			return false
 		}
 		switch start.source {
+		case foregroundStartDirect:
 		case foregroundStartPatchSearch:
 			state.patch.continuation = patchContinuation{}
 		case foregroundStartReplacementSearch:
 			state.search.continuation = searchContinuation{}
+		case foregroundStartPatchRetry,
+			foregroundStartPostReloadPatch,
+			foregroundStartWaitingReload:
+			return false
 		}
 		state.search.active = operation
 	case foregroundStartReload:
@@ -462,7 +486,7 @@ func (state *foregroundState) rejected(start foregroundStart) (foregroundEffect,
 		prepared, valid = state.prepareSearch(start.search)
 	case foregroundStartReload:
 		prepared, valid = state.prepareReload()
-	default:
+	case foregroundStartNone:
 		return foregroundEffect{}, false
 	}
 	if !valid || prepared != start {
@@ -471,8 +495,11 @@ func (state *foregroundState) rejected(start foregroundStart) (foregroundEffect,
 
 	var effect foregroundEffect
 	switch start.kind {
+	case foregroundStartNone:
+		return foregroundEffect{}, false
 	case foregroundStartPatch:
 		switch start.source {
+		case foregroundStartDirect:
 		case foregroundStartPatchRetry:
 			state.patch.continuation = patchContinuation{}
 		case foregroundStartPostReloadPatch:
@@ -481,6 +508,10 @@ func (state *foregroundState) rejected(start foregroundStart) (foregroundEffect,
 				search: state.patch.continuation.search,
 			}
 			state.patch.continuation = patchContinuation{}
+		case foregroundStartPatchSearch,
+			foregroundStartReplacementSearch,
+			foregroundStartWaitingReload:
+			return foregroundEffect{}, false
 		}
 		if state.patch.target != nil && state.patch.target.operation == 0 &&
 			state.patch.target.handle.FileID() == start.file {
@@ -488,10 +519,15 @@ func (state *foregroundState) rejected(start foregroundStart) (foregroundEffect,
 		}
 	case foregroundStartSearch:
 		switch start.source {
+		case foregroundStartDirect:
 		case foregroundStartPatchSearch:
 			state.patch.continuation = patchContinuation{}
 		case foregroundStartReplacementSearch:
 			state.search.continuation = searchContinuation{}
+		case foregroundStartPatchRetry,
+			foregroundStartPostReloadPatch,
+			foregroundStartWaitingReload:
+			return foregroundEffect{}, false
 		}
 	case foregroundStartReload:
 		if start.source == foregroundStartWaitingReload {

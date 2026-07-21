@@ -21,18 +21,19 @@ func (model *Model) completeView(content string, mouseHits mouseHitMap) tea.View
 	cursorVisible := model.size.Known &&
 		!model.belowMinimum() &&
 		model.overlay == OverlayNone
-	if cursorVisible && model.mode == ModeCommentEdit {
+	switch {
+	case cursorVisible && model.mode == ModeCommentEdit:
 		view.Cursor = model.commentEditor.Cursor()
 		if view.Cursor != nil {
 			_, height := model.renderSize()
 			view.Cursor.Y += newCommentEditorLayout(height).editorTop
 		}
-	} else if cursorVisible && model.mode == ModeSearch {
+	case cursorVisible && model.mode == ModeSearch:
 		view.Cursor = model.searchInput.Cursor()
 		if view.Cursor != nil {
 			view.Cursor.Y += 2
 		}
-	} else if cursorVisible && model.mode == ModeCommand {
+	case cursorVisible && model.mode == ModeCommand:
 		view.Cursor = model.commandInput.Cursor()
 		if view.Cursor != nil {
 			view.Cursor.Y += 2
@@ -62,7 +63,7 @@ func (model *Model) workspaceLayout(width, height int) workspaceLayout {
 			if width >= unifiedDiffContentWidth+diffCommentAnchorColumns+32+1 {
 				layout.commentsWidth = 32
 			}
-		} else if model.fileTreeVisible && width >= 60+24+1 {
+		} else if model.fileTreeVisible && width > 60+24 {
 			layout.treeWidth = 24
 		}
 	}

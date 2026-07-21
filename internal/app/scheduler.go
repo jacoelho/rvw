@@ -9,16 +9,16 @@ import (
 const maxRequiredBypasses = 8
 
 type scheduledOperation struct {
+	start    chan struct{}
 	id       review.OperationID
 	ready    bool
 	bypasses uint8
-	start    chan struct{}
 }
 
 type requiredScheduler struct {
-	mu      sync.Mutex
-	pending []*scheduledOperation
 	byID    map[review.OperationID]*scheduledOperation
+	pending []*scheduledOperation
+	mu      sync.Mutex
 }
 
 func newRequiredScheduler() *requiredScheduler {

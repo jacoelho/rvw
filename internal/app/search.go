@@ -47,7 +47,7 @@ func (model *Model) beginSearch(start foregroundStart) {
 	operationID, err := review.NewOperationID(model.nextOperation)
 	if err != nil {
 		model.rejectAndApplyForegroundStart(start)
-		model.notice = &Notice{Kind: NoticeError, Text: "operation identity exhausted"}
+		model.notice = &Notice{Kind: NoticeError, Text: operationIdentityExhausted}
 		return
 	}
 	model.nextOperation++
@@ -163,12 +163,15 @@ func (model *Model) applySearchOutcome(outcome SearchOutcome) {
 	}
 	status := review.OperationSucceeded
 	switch result.Status {
+	case review.SearchComplete, review.SearchPartial:
 	case review.SearchCancelled:
 		status = review.OperationCancelled
 	case review.SearchLimited:
 		status = review.OperationLimited
 	case review.SearchFailed:
 		status = review.OperationFailed
+	case review.SearchIdle, review.SearchActive, review.SearchSuperseded:
+		panic("review accepted a non-terminal search result")
 	}
 	next, err = next.ResolveOperation(outcome.ID, status, result.Detail())
 	if err != nil {
@@ -184,6 +187,8 @@ func (model *Model) applySearchOutcome(outcome SearchOutcome) {
 	}
 	summary := model.review.SearchSummary()
 	switch summary.Status {
+	case review.SearchIdle, review.SearchActive, review.SearchSuperseded:
+		return
 	case review.SearchComplete:
 		model.notice = &Notice{
 			Kind: NoticeInformation,

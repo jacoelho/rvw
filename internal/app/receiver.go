@@ -13,17 +13,18 @@ type outcomeReadyMsg struct {
 	state ReadyState
 }
 
+// ReadyReceiver represents ready receiver.
 type ReadyReceiver struct {
-	context context.Context
-	cancel  context.CancelFunc
-
+	context  context.Context
+	cancel   context.CancelFunc
+	finished chan struct{}
 	mu       sync.Mutex
 	active   bool
 	started  bool
 	stopped  bool
-	finished chan struct{}
 }
 
+// NewReadyReceiver constructs and validates ready receiver.
 func NewReadyReceiver(ctx context.Context) (*ReadyReceiver, error) {
 	if ctx == nil {
 		return nil, errors.New("readiness receiver requires a context")
@@ -32,6 +33,7 @@ func NewReadyReceiver(ctx context.Context) (*ReadyReceiver, error) {
 	return &ReadyReceiver{context: receiverContext, cancel: cancel}, nil
 }
 
+// Arm performs the arm operation.
 func (receiver *ReadyReceiver) Arm(coordinator *Coordinator) tea.Cmd {
 	receiver.mu.Lock()
 	defer receiver.mu.Unlock()
@@ -61,6 +63,7 @@ func (receiver *ReadyReceiver) Arm(coordinator *Coordinator) tea.Cmd {
 	}
 }
 
+// StopAndWait performs the stop and wait operation.
 func (receiver *ReadyReceiver) StopAndWait(ctx context.Context) error {
 	receiver.mu.Lock()
 	if !receiver.stopped {

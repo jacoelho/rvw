@@ -833,8 +833,9 @@ func TestReloadAcquisitionAndPreparationCommitAtomicallyOffUpdate(t *testing.T) 
 	}
 }
 
-func newTestModel(t testing.TB, changed map[string]string) (*Model, *Coordinator) {
-	t.Helper()
+func newTestModel(tb testing.TB, changed map[string]string) (*Model, *Coordinator) {
+	tb.Helper()
+	t := tb
 	fixture := newSourceFixture(t, changed)
 	workContext, cancelWork := context.WithCancel(t.Context())
 	deliveryManager := newTestDeliveryManager(t)
@@ -950,8 +951,9 @@ func newTestModel(t testing.TB, changed map[string]string) (*Model, *Coordinator
 	return model, coordinator
 }
 
-func newTestDeliveryManager(t testing.TB) *delivery.Manager {
-	t.Helper()
+func newTestDeliveryManager(tb testing.TB) *delivery.Manager {
+	tb.Helper()
+	t := tb
 	manager, err := delivery.NewManager()
 	if err != nil {
 		t.Fatal(err)
@@ -971,8 +973,9 @@ type sourceFixture struct {
 	document *source.Document
 }
 
-func newSourceFixture(t testing.TB, changed map[string]string) sourceFixture {
-	t.Helper()
+func newSourceFixture(tb testing.TB, changed map[string]string) sourceFixture {
+	tb.Helper()
+	t := tb
 	root := t.TempDir()
 	runGit(t, root, "init")
 	runGit(t, root, "config", "user.email", "rvw@example.test")
@@ -1020,9 +1023,10 @@ func newSourceFixture(t testing.TB, changed map[string]string) sourceFixture {
 	return sourceFixture{service: service, document: document}
 }
 
-func runGit(t testing.TB, directory string, arguments ...string) {
-	t.Helper()
-	command := exec.Command("git", arguments...)
+func runGit(tb testing.TB, directory string, arguments ...string) {
+	tb.Helper()
+	t := tb
+	command := exec.CommandContext(tb.Context(), "git", arguments...)
 	command.Dir = directory
 	command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "LC_ALL=C")
 	if output, err := command.CombinedOutput(); err != nil {
@@ -1032,8 +1036,7 @@ func runGit(t testing.TB, directory string, arguments ...string) {
 
 func keyMessage(value string) tea.KeyPressMsg {
 	code := []rune(value)[0]
-	switch value {
-	case "enter":
+	if value == "enter" {
 		code = tea.KeyEnter
 	}
 	return tea.KeyPressMsg(tea.Key{Text: value, Code: code})

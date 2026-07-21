@@ -1,9 +1,11 @@
 package source
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,8 +17,33 @@ import (
 	"github.com/jacoelho/rvw/internal/subprocess"
 )
 
+const (
+	gitNoExtDiff      = "--no-ext-diff"
+	gitNoTextconv     = "--no-textconv"
+	gitRaw            = "--raw"
+	gitDiff           = "diff"
+	gitCached         = "--cached"
+	gitNoAbbrev       = "--no-abbrev"
+	gitNoRenames      = "--no-renames"
+	gitStdin          = "--stdin"
+	gitLSFiles        = "ls-files"
+	ghAPI             = "api"
+	gitRevParse       = "rev-parse"
+	gitVerify         = "--verify"
+	gitEndOfOptions   = "--end-of-options"
+	localeAllKey      = "LC_ALL"
+	localeLanguageKey = "LANG"
+	ghPaginate        = "--paginate"
+	ghSlurp           = "--slurp"
+	gitStage          = "--stage"
+	gitUpdateIndex    = "update-index"
+	gitIndexInfo      = "--index-info"
+)
+
+// WorkingDirectory represents working directory.
 type WorkingDirectory string
 
+// NewWorkingDirectory constructs and validates working directory.
 func NewWorkingDirectory(value string) (WorkingDirectory, error) {
 	if value == "" || strings.IndexByte(value, 0) >= 0 {
 		return "", errors.New("working directory must be nonempty and contain no NUL")
@@ -24,20 +51,22 @@ func NewWorkingDirectory(value string) (WorkingDirectory, error) {
 	return WorkingDirectory(value), nil
 }
 
+// String returns the receiver's string value.
 func (directory WorkingDirectory) String() string {
 	return string(directory)
 }
 
+// Service represents service.
 type Service struct {
-	runner *subprocess.Runner
-	cwd    WorkingDirectory
-
-	mu          sync.Mutex
+	runner      *subprocess.Runner
 	repository  *RepositoryPath
 	discovering chan struct{}
+	cwd         WorkingDirectory
 	nextSource  uint64
+	mu          sync.Mutex
 }
 
+// NewService constructs and validates service.
 func NewService(cwd WorkingDirectory) (*Service, error) {
 	validated, err := NewWorkingDirectory(cwd.String())
 	if err != nil {
@@ -50,14 +79,17 @@ func NewService(cwd WorkingDirectory) (*Service, error) {
 	return &Service{runner: runner, cwd: validated}, nil
 }
 
+// Escalate performs the escalate operation.
 func (service *Service) Escalate() {
 	service.runner.Escalate()
 }
 
+// Close performs the close operation.
 func (service *Service) Close(ctx context.Context) error {
 	return service.runner.Shutdown(ctx)
 }
 
+// Open performs the open operation.
 func (service *Service) Open(
 	ctx context.Context,
 	target Target,
@@ -80,6 +112,7 @@ func (service *Service) Open(
 	}
 }
 
+// RepositoryRoot performs the repository root operation.
 func (service *Service) RepositoryRoot(ctx context.Context) (RepositoryPath, error) {
 	for {
 		service.mu.Lock()
@@ -244,7 +277,7 @@ func (service *Service) newSourceID() (review.SourceID, error) {
 }
 
 func (service *Service) discoverRepository(ctx context.Context) (RepositoryPath, error) {
-	result, err := service.runGit(ctx, service.cwd.String(), nil, []string{"rev-parse", "--show-toplevel"}, nil, 64<<10)
+	result, err := service.runGit(ctx, service.cwd.String(), nil, []string{gitRevParse, "--show-toplevel"}, nil, 64<<10)
 	if err != nil {
 		return "", fmt.Errorf("discover Git repository: %w", err)
 	}
@@ -268,41 +301,53 @@ func (service *Service) privateObjectEnvironment(
 		return "", nil, fmt.Errorf("create source workspace: %w", err)
 	}
 	objects := filepath.Join(workspace, "objects")
-	if err := os.Mkdir(objects, 0o700); err != nil {
-		_ = os.RemoveAll(workspace)
-		return "", nil, fmt.Errorf("create source object store: %w", err)
+	if mkdirErr := os.Mkdir(objects, 0o700); mkdirErr != nil {
+		return "", nil, cleanupWorkspaceError(
+			workspace,
+			fmt.Errorf("create source object store: %w", mkdirErr),
+		)
 	}
 
 	result, err := service.runGit(
 		ctx,
 		root.String(),
 		nil,
-		[]string{"rev-parse", "--git-path", "objects"},
+		[]string{gitRevParse, "--git-path", "objects"},
 		nil,
 		64<<10,
 	)
 	if err != nil {
-		_ = os.RemoveAll(workspace)
-		return "", nil, fmt.Errorf("locate Git objects: %w", err)
+		return "", nil, cleanupWorkspaceError(
+			workspace,
+			fmt.Errorf("locate Git objects: %w", err),
+		)
 	}
 	alternate, err := parseCommandScalar(result.Stdout)
 	if err != nil {
-		_ = os.RemoveAll(workspace)
-		return "", nil, fmt.Errorf("parse Git object path: %w", err)
+		return "", nil, cleanupWorkspaceError(
+			workspace,
+			fmt.Errorf("parse Git object path: %w", err),
+		)
 	}
 	if !filepath.IsAbs(alternate) {
 		alternate = filepath.Join(root.String(), alternate)
 	}
 	alternate, err = filepath.Abs(alternate)
 	if err != nil {
-		_ = os.RemoveAll(workspace)
-		return "", nil, fmt.Errorf("resolve Git object path: %w", err)
+		return "", nil, cleanupWorkspaceError(
+			workspace,
+			fmt.Errorf("resolve Git object path: %w", err),
+		)
 	}
 
 	environment := baseGitEnvironment()
 	environment["GIT_OBJECT_DIRECTORY"] = objects
 	environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = alternate
 	return workspace, environment, nil
+}
+
+func cleanupWorkspaceError(workspace string, cause error) error {
+	return errors.Join(cause, os.RemoveAll(workspace))
 }
 
 func (service *Service) headTree(
@@ -314,7 +359,7 @@ func (service *Service) headTree(
 		ctx,
 		root.String(),
 		environment,
-		[]string{"rev-parse", "--verify", "--end-of-options", "HEAD^{tree}"},
+		[]string{gitRevParse, gitVerify, gitEndOfOptions, "HEAD^{tree}"},
 		[]int{0, 128},
 		64<<10,
 	)
@@ -343,7 +388,7 @@ func (service *Service) headTree(
 		ctx,
 		root.String(),
 		environment,
-		[]string{"hash-object", "-t", "tree", "--stdin"},
+		[]string{"hash-object", "-t", "tree", gitStdin},
 		nil,
 		64<<10,
 	)
@@ -407,7 +452,7 @@ func (service *Service) copyIndex(
 		ctx,
 		root.String(),
 		environment,
-		[]string{"ls-files", "--stage", "-z"},
+		[]string{gitLSFiles, gitStage, "-z"},
 		nil,
 		64<<20,
 	)
@@ -424,7 +469,7 @@ func (service *Service) copyIndex(
 		ctx,
 		root.String(),
 		privateEnvironment,
-		[]string{"update-index", "-z", "--index-info"},
+		[]string{gitUpdateIndex, "-z", gitIndexInfo},
 		entries.Stdout,
 		nil,
 		64<<10,
@@ -444,7 +489,7 @@ func (service *Service) resolveTree(
 		ctx,
 		root.String(),
 		environment,
-		[]string{"rev-parse", "--verify", "--end-of-options", ref.String() + "^{tree}"},
+		[]string{gitRevParse, gitVerify, gitEndOfOptions, ref.String() + "^{tree}"},
 		nil,
 		64<<10,
 	)
@@ -483,9 +528,7 @@ func (service *Service) runGitWithInput(
 	stdoutLimit int64,
 ) (subprocess.Result, error) {
 	merged := baseGitEnvironment()
-	for key, value := range environment {
-		merged[key] = value
-	}
+	maps.Copy(merged, environment)
 	return service.runner.Run(ctx, subprocess.Request{
 		Name:            "git",
 		Args:            arguments,
@@ -500,8 +543,8 @@ func (service *Service) runGitWithInput(
 
 func baseGitEnvironment() map[string]string {
 	return map[string]string{
-		"LC_ALL":              "C",
-		"LANG":                "C",
+		localeAllKey:          "C",
+		localeLanguageKey:     "C",
 		"GIT_CONFIG_NOSYSTEM": "1",
 		"GIT_TERMINAL_PROMPT": "0",
 		"GIT_OPTIONAL_LOCKS":  "0",
@@ -510,9 +553,7 @@ func baseGitEnvironment() map[string]string {
 
 func cloneEnvironment(environment map[string]string) map[string]string {
 	clone := make(map[string]string, len(environment))
-	for key, value := range environment {
-		clone[key] = value
-	}
+	maps.Copy(clone, environment)
 	return clone
 }
 
@@ -533,7 +574,7 @@ func parseCommandScalar(value []byte) (string, error) {
 		return "", errors.New("command scalar must be nonempty and LF-terminated")
 	}
 	value = value[:len(value)-1]
-	if len(value) == 0 || strings.IndexByte(string(value), 0) >= 0 {
+	if len(value) == 0 || bytes.IndexByte(value, 0) >= 0 {
 		return "", errors.New("command scalar is empty or contains NUL")
 	}
 	return string(value), nil

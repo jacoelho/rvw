@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,7 +14,12 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-const maxThemeBytes int64 = 1 << 20
+const (
+	maxThemeBytes          int64 = 1 << 20
+	ansiBlack                    = "black"
+	gruvboxLightForeground       = "#ebdbb2"
+	gruvboxDarkBackground        = "#3c3836"
+)
 
 var curatedThemes = stringSet[ThemeName](
 	ThemeDark, ThemeLight, ThemeANSI16Dark, ThemeTokyoNightStorm, ThemeTokyoNightDay,
@@ -46,7 +52,7 @@ var optionalThemeColors = stringSet[ThemeColor](
 )
 
 var namedColors = stringSet[string](
-	"reset", "black", "red", "green", "yellow", "blue", "magenta", "cyan", "gray", "grey",
+	"reset", ansiBlack, "red", "green", "yellow", "blue", "magenta", "cyan", "gray", "grey",
 	"darkgray", "darkgrey", "lightred", "lightgreen", "lightyellow", "lightblue",
 	"lightmagenta", "lightcyan", "white",
 )
@@ -153,13 +159,13 @@ func bundledPalette(name ThemeName, appearance Appearance) bundledThemePalette {
 		}
 	case ThemeLight:
 		return bundledThemePalette{
-			"#f5f3e8", "black", "#1e1e1e", "#505050",
+			"#f5f3e8", ansiBlack, "#1e1e1e", "#505050",
 			"#d2d2dc", "#e1e1eb", "#005000", "#780000",
-			"#003c8c", "#8c5000", "black",
+			"#003c8c", "#8c5000", ansiBlack,
 		}
 	case ThemeANSI16Dark:
 		return bundledThemePalette{
-			"black", "white", "gray", "darkgray",
+			ansiBlack, "white", "gray", "darkgray",
 			"darkgray", "cyan", "green", "red",
 			"cyan", "yellow", "gray",
 		}
@@ -197,15 +203,15 @@ func bundledPalette(name ThemeName, appearance Appearance) bundledThemePalette {
 			"#f9e2af", "#a6e3a1", "#89b4fa")
 	case ThemeGruvboxDark:
 		return bundledThemePalette{
-			"#282828", "#ebdbb2", "#d5c4a1", "#928374",
-			"#3c3836", "#3c3836", "#b8bb26", "#fb4934",
-			"#8ec07c", "#fabd2f", "#ebdbb2",
+			"#282828", gruvboxLightForeground, "#d5c4a1", "#928374",
+			gruvboxDarkBackground, gruvboxDarkBackground, "#b8bb26", "#fb4934",
+			"#8ec07c", "#fabd2f", gruvboxLightForeground,
 		}
 	case ThemeGruvboxLight:
 		return bundledThemePalette{
-			"#fbf1c7", "#3c3836", "#504945", "#928374",
-			"#ebdbb2", "#ebdbb2", "#79740e", "#9d0006",
-			"#427b58", "#b57614", "#3c3836",
+			"#fbf1c7", gruvboxDarkBackground, "#504945", "#928374",
+			gruvboxLightForeground, gruvboxLightForeground, "#79740e", "#9d0006",
+			"#427b58", "#b57614", gruvboxDarkBackground,
 		}
 	default:
 		if appearance == AppearanceLight {
@@ -353,18 +359,22 @@ func readBoundedRootFile(
 	relative string,
 	limit int64,
 	kind string,
-) ([]byte, string, error) {
+) (contents []byte, path string, returnErr error) {
 	root, err := os.OpenRoot(directory)
 	if err != nil {
 		return nil, "", fmt.Errorf("%w: open themes directory %s: %w", ErrInvalidConfig, directory, err)
 	}
-	defer root.Close()
+	defer func() {
+		returnErr = errors.Join(returnErr, root.Close())
+	}()
 	file, err := root.OpenFile(relative, os.O_RDONLY|syscall.O_NONBLOCK, 0)
-	path := filepath.Join(directory, relative)
+	path = filepath.Join(directory, relative)
 	if err != nil {
 		return nil, "", fmt.Errorf("%w: read %s %s: %w", ErrInvalidConfig, kind, path, err)
 	}
-	defer file.Close()
+	defer func() {
+		returnErr = errors.Join(returnErr, file.Close())
+	}()
 	info, err := file.Stat()
 	if err != nil {
 		return nil, "", fmt.Errorf("%w: inspect %s %s: %w", ErrInvalidConfig, kind, path, err)
@@ -372,7 +382,7 @@ func readBoundedRootFile(
 	if !info.Mode().IsRegular() {
 		return nil, "", fmt.Errorf("%w: %s %s is not a regular file", ErrInvalidConfig, kind, path)
 	}
-	contents, err := io.ReadAll(io.LimitReader(file, limit+1))
+	contents, err = io.ReadAll(io.LimitReader(file, limit+1))
 	if err != nil {
 		return nil, "", fmt.Errorf("%w: read %s %s: %w", ErrInvalidConfig, kind, path, err)
 	}

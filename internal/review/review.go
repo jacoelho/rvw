@@ -7,35 +7,37 @@ import (
 	"strings"
 )
 
+// ErrInvalidReviewTransition identifies an invalid review transition failure.
 var ErrInvalidReviewTransition = errors.New("invalid review transition")
 
+// Review represents review.
 type Review struct {
-	workspace WorkspaceRevision
-	snapshot  Snapshot
-	state     uint64
-
+	operations     map[OperationID]Operation
 	active         *FileID
 	selected       *FileID
-	showHidden     bool
-	fileMarks      fileMarkSet
-	hunkMarks      hunkMarkSet
-	comments       []Comment
 	commentAnchors commentAnchorCounts
-	commentBody    int64
-	nextComment    uint32
-	draft          *Draft
-	operations     map[OperationID]Operation
-	operationIDs   []OperationID
 	patches        map[FileID]PatchState
+	draft          *Draft
+	comments       []Comment
+	operationIDs   []OperationID
+	hunkMarks      hunkMarkSet
+	fileMarks      fileMarkSet
+	snapshot       Snapshot
 	search         searchState
 	publication    publicationState
+	commentBody    int64
+	workspace      WorkspaceRevision
+	state          uint64
+	nextComment    uint32
+	showHidden     bool
 }
 
+// NewReview constructs and validates review.
 func NewReview(snapshot Snapshot) (Review, error) {
 	if snapshot.SourceID() == 0 {
 		return Review{}, fmt.Errorf("%w: snapshot has no source", ErrInvalidReviewTransition)
 	}
-	workspace, _ := NewWorkspaceRevision(1)
+	workspace := WorkspaceRevision(1)
 	review := Review{
 		workspace:   workspace,
 		snapshot:    snapshot,
@@ -62,18 +64,22 @@ func NewReview(snapshot Snapshot) (Review, error) {
 	return review, nil
 }
 
+// WorkspaceRevision returns the receiver's workspace revision value.
 func (review Review) WorkspaceRevision() WorkspaceRevision {
 	return review.workspace
 }
 
+// StateRevision returns the receiver's state revision value.
 func (review Review) StateRevision() uint64 {
 	return review.state
 }
 
+// Snapshot returns the receiver's snapshot value.
 func (review Review) Snapshot() Snapshot {
 	return review.snapshot
 }
 
+// ActiveFile returns the receiver's active file value.
 func (review Review) ActiveFile() (FileID, bool) {
 	if review.active == nil {
 		return 0, false
@@ -81,6 +87,7 @@ func (review Review) ActiveFile() (FileID, bool) {
 	return *review.active, true
 }
 
+// ActivateFile performs the activate file operation.
 func (review Review) ActivateFile(id FileID) (Review, error) {
 	if _, ok := review.file(id); !ok {
 		return review, ErrInvalidReviewTransition
@@ -91,6 +98,7 @@ func (review Review) ActivateFile(id FileID) (Review, error) {
 	return next, nil
 }
 
+// SelectedFile returns the receiver's selected file value.
 func (review Review) SelectedFile() (FileID, bool) {
 	if review.selected == nil {
 		return 0, false
@@ -98,6 +106,7 @@ func (review Review) SelectedFile() (FileID, bool) {
 	return *review.selected, true
 }
 
+// SelectFile performs the select file operation.
 func (review Review) SelectFile(id FileID) (Review, error) {
 	file, ok := review.file(id)
 	if !ok || file.Flags().Hidden() && !review.showHidden {
@@ -108,13 +117,16 @@ func (review Review) SelectFile(id FileID) (Review, error) {
 	return next, nil
 }
 
+// NavigationDirection describes navigation direction.
 type NavigationDirection int8
 
+// NavigatePrevious identifies a supported navigate previous value.
 const (
 	NavigatePrevious NavigationDirection = -1
 	NavigateNext     NavigationDirection = 1
 )
 
+// ActivateSelectedFile returns the receiver's activate selected file value.
 func (review Review) ActivateSelectedFile() (Review, error) {
 	if review.selected == nil {
 		return review, ErrInvalidReviewTransition
@@ -122,6 +134,7 @@ func (review Review) ActivateSelectedFile() (Review, error) {
 	return review.ActivateFile(*review.selected)
 }
 
+// ToggleFileReviewed performs the toggle file reviewed operation.
 func (review Review) ToggleFileReviewed(id FileID) (Review, error) {
 	if _, ok := review.file(id); !ok {
 		return review, ErrInvalidReviewTransition
@@ -131,6 +144,7 @@ func (review Review) ToggleFileReviewed(id FileID) (Review, error) {
 	return next, nil
 }
 
+// ToggleHunkReviewed performs the toggle hunk reviewed operation.
 func (review Review) ToggleHunkReviewed(id HunkID) (Review, error) {
 	if _, ok := review.file(id.FileID()); !ok {
 		return review, ErrInvalidReviewTransition
@@ -144,18 +158,21 @@ func (review Review) ToggleHunkReviewed(id HunkID) (Review, error) {
 	return next, nil
 }
 
+// ShowHiddenFiles returns the receiver's show hidden files value.
 func (review Review) ShowHiddenFiles() Review {
 	next := review.clone()
 	next.showHidden = true
 	return next
 }
 
+// HideHiddenFiles returns the receiver's hide hidden files value.
 func (review Review) HideHiddenFiles() Review {
 	next := review.clone()
 	next.showHidden = false
 	return next
 }
 
+// BeginDraft performs the begin draft operation.
 func (review Review) BeginDraft(target CommentTarget) (Review, error) {
 	if review.draft != nil || !review.validTarget(target) {
 		return review, ErrInvalidReviewTransition
@@ -169,6 +186,7 @@ func (review Review) BeginDraft(target CommentTarget) (Review, error) {
 	return next, nil
 }
 
+// UpdateDraft performs the update draft operation.
 func (review Review) UpdateDraft(body string) (Review, error) {
 	if review.draft == nil || int64(len(body)) > MaxCommentBodyBytes {
 		return review, ErrInvalidReviewTransition
@@ -180,6 +198,7 @@ func (review Review) UpdateDraft(body string) (Review, error) {
 	return next, nil
 }
 
+// SaveDraft returns the receiver's save draft value.
 func (review Review) SaveDraft() (Review, CommentID, error) {
 	if review.draft == nil {
 		return review, 0, ErrInvalidReviewTransition
@@ -216,7 +235,7 @@ func (review Review) SaveDraft() (Review, CommentID, error) {
 			review.commentBody+int64(len(body)) > MaxCommentBodyTotal {
 			return review, 0, ErrInvalidReviewTransition
 		}
-		id, _ = NewCommentID(review.nextComment)
+		id = CommentID(review.nextComment)
 		comment := Comment{
 			id:     id,
 			target: review.draft.target,
@@ -231,6 +250,7 @@ func (review Review) SaveDraft() (Review, CommentID, error) {
 	return next, id, nil
 }
 
+// BeginEditComment performs the begin edit comment operation.
 func (review Review) BeginEditComment(id CommentID) (Review, error) {
 	if review.draft != nil {
 		return review, ErrInvalidReviewTransition
@@ -250,6 +270,8 @@ func (review Review) BeginEditComment(id CommentID) (Review, error) {
 	}
 	return next, nil
 }
+
+// CancelDraft returns the receiver's cancel draft value.
 func (review Review) CancelDraft() (Review, error) {
 	if review.draft == nil {
 		return review, ErrInvalidReviewTransition
@@ -259,6 +281,7 @@ func (review Review) CancelDraft() (Review, error) {
 	return next, nil
 }
 
+// DeleteComment performs the delete comment operation.
 func (review Review) DeleteComment(id CommentID) (Review, error) {
 	index := slices.IndexFunc(review.comments, func(comment Comment) bool {
 		return comment.id == id
@@ -275,14 +298,17 @@ func (review Review) DeleteComment(id CommentID) (Review, error) {
 	return next, nil
 }
 
+// Comments returns the receiver's comments value.
 func (review Review) Comments() []Comment {
 	return slices.Clone(review.comments)
 }
 
+// CommentCount returns the receiver's comment count value.
 func (review Review) CommentCount() int {
 	return len(review.comments)
 }
 
+// CommentAt performs the comment at operation.
 func (review Review) CommentAt(index int) (Comment, bool) {
 	if index < 0 || index >= len(review.comments) {
 		return Comment{}, false
@@ -290,6 +316,7 @@ func (review Review) CommentAt(index int) (Comment, bool) {
 	return review.comments[index], true
 }
 
+// CommentRange performs the comment range operation.
 func (review Review) CommentRange(start, count int) []Comment {
 	if start < 0 || start >= len(review.comments) || count <= 0 {
 		return nil
@@ -301,10 +328,12 @@ func (review Review) CommentRange(start, count int) []Comment {
 	return slices.Clone(review.comments[start:end])
 }
 
+// RetainedCommentBytes returns the receiver's retained comment bytes value.
 func (review Review) RetainedCommentBytes() int64 {
 	return review.commentBody
 }
 
+// Draft returns the receiver's draft value.
 func (review Review) Draft() (Draft, bool) {
 	if review.draft == nil {
 		return Draft{}, false
@@ -345,7 +374,7 @@ func (review Review) clone() Review {
 
 func (review Review) file(id FileID) (File, bool) {
 	files := review.snapshot.files
-	if uint32(id) >= uint32(len(files)) {
+	if id.Uint32() >= uint32FromInt(len(files)) {
 		return File{}, false
 	}
 	file := files[id]
@@ -365,18 +394,22 @@ func (review Review) validTarget(target CommentTarget) bool {
 	}
 }
 
+// FileReviewed performs the file reviewed operation.
 func (review Review) FileReviewed(id FileID) bool {
 	return review.fileMarks.has(id)
 }
 
+// HunkReviewed performs the hunk reviewed operation.
 func (review Review) HunkReviewed(id HunkID) bool {
 	return review.hunkMarks.has(id)
 }
 
+// ShowHidden reports the receiver's show hidden state.
 func (review Review) ShowHidden() bool {
 	return review.showHidden
 }
 
+// HasLocalChanges reports the receiver's has local changes state.
 func (review Review) HasLocalChanges() bool {
 	return len(review.comments) != 0 || review.draft != nil ||
 		review.fileMarks.count != 0 || review.hunkMarks.count != 0

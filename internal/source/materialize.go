@@ -10,6 +10,7 @@ import (
 	"github.com/jacoelho/rvw/internal/subprocess"
 )
 
+// LoadPatch loads patch.
 func (service *Service) LoadPatch(
 	ctx context.Context,
 	document *Document,
@@ -61,8 +62,8 @@ func (service *Service) LoadPatch(
 	arguments := []string{"--literal-pathspecs"}
 	if document.revision.kind == revisionIndex {
 		arguments = append(arguments,
-			"diff",
-			"--cached",
+			gitDiff,
+			gitCached,
 			"-p",
 		)
 	} else {
@@ -75,8 +76,8 @@ func (service *Service) LoadPatch(
 	}
 	arguments = append(arguments,
 		"--no-color",
-		"--no-ext-diff",
-		"--no-textconv",
+		gitNoExtDiff,
+		gitNoTextconv,
 		"--unified="+strconv.FormatUint(uint64(request.Context.UnifiedLines()), 10),
 		document.revision.base.String(),
 	)
@@ -107,16 +108,13 @@ func (service *Service) LoadPatch(
 			result.Status = review.PatchFailed
 		}
 		result.Detail = review.PatchDetail(boundedText(err.Error(), 16<<10))
-		return result, nil
-	}
-	prepared, err := review.TakePatch(processResult.Stdout)
-	if err != nil {
+	} else if prepared, prepareErr := review.TakePatch(processResult.Stdout); prepareErr != nil {
 		result.Status = review.PatchLimited
-		result.Detail = review.PatchDetail(err.Error())
-		return result, nil
+		result.Detail = review.PatchDetail(prepareErr.Error())
+	} else {
+		result.Status = review.PatchReady
+		result.Prepared = prepared
 	}
-	result.Status = review.PatchReady
-	result.Prepared = prepared
 	return result, nil
 }
 
@@ -126,7 +124,7 @@ func (service *Service) indexPathUnmerged(
 	environment map[string]string,
 	paths []string,
 ) (bool, error) {
-	arguments := []string{"--literal-pathspecs", "ls-files", "--unmerged", "-z", "--"}
+	arguments := []string{"--literal-pathspecs", gitLSFiles, "--unmerged", "-z", "--"}
 	arguments = append(arguments, paths...)
 	result, err := service.runGit(
 		ctx,
@@ -142,6 +140,7 @@ func (service *Service) indexPathUnmerged(
 	return len(result.Stdout) != 0, nil
 }
 
+// LoadSyntax loads syntax.
 func (service *Service) LoadSyntax(
 	ctx context.Context,
 	document *Document,
@@ -214,6 +213,7 @@ func (service *Service) LoadSyntax(
 	return result, nil
 }
 
+// Reload performs the reload operation.
 func (service *Service) Reload(
 	ctx context.Context,
 	document *Document,

@@ -13,18 +13,60 @@ type commentExportJSON struct {
 }
 
 type commentTargetJSON struct {
-	Type  string          `json:"type"`
 	Path  *exportPathJSON `json:"path,omitempty"`
-	Side  string          `json:"side,omitempty"`
 	Line  *uint32         `json:"line,omitempty"`
 	Start *uint32         `json:"start,omitempty"`
 	End   *uint32         `json:"end,omitempty"`
+	Type  string          `json:"type"`
+	Side  string          `json:"side,omitempty"`
+}
+
+// MarshalJSON preserves the v1 target field order independently of the
+// in-memory layout chosen for alignment.
+func (target commentTargetJSON) MarshalJSON() ([]byte, error) {
+	body, err := json.Marshal(target.Type)
+	if err != nil {
+		return nil, err
+	}
+	body = append([]byte(`{"type":`), body...)
+	if target.Path != nil {
+		body, err = appendJSONField(body, "path", target.Path)
+	}
+	if err == nil && target.Side != "" {
+		body, err = appendJSONField(body, "side", target.Side)
+	}
+	if err == nil && target.Line != nil {
+		body, err = appendJSONField(body, "line", target.Line)
+	}
+	if err == nil && target.Start != nil {
+		body, err = appendJSONField(body, "start", target.Start)
+	}
+	if err == nil && target.End != nil {
+		body, err = appendJSONField(body, "end", target.End)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return append(body, '}'), nil
+}
+
+func appendJSONField(body []byte, name string, value any) ([]byte, error) {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	body = append(body, ',')
+	body = append(body, '"')
+	body = append(body, name...)
+	body = append(body, '"', ':')
+	return append(body, encoded...), nil
 }
 
 type exportPathJSON struct {
 	path Path
 }
 
+// MarshalJSON returns the receiver's marshal json value.
 func (path exportPathJSON) MarshalJSON() ([]byte, error) {
 	raw := path.path.Raw()
 	encoded := make([]byte, 0, len(raw)+2)
@@ -52,10 +94,12 @@ func (path exportPathJSON) MarshalJSON() ([]byte, error) {
 	return encoded, nil
 }
 
+// PrepareJSON prepares json.
 func (review Review) PrepareJSON(options ExportOptions) (PreparedExport, error) {
 	return review.ExportInput().PrepareJSONCancellable(nil, options)
 }
 
+// PrepareJSONCancellable prepares json cancellable.
 func (review Review) PrepareJSONCancellable(
 	cancelled func() error,
 	options ExportOptions,
@@ -63,6 +107,7 @@ func (review Review) PrepareJSONCancellable(
 	return review.ExportInput().PrepareJSONCancellable(cancelled, options)
 }
 
+// PrepareJSONCancellable prepares json cancellable.
 func (input ExportInput) PrepareJSONCancellable(
 	cancelled func() error,
 	options ExportOptions,

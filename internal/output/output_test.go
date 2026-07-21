@@ -139,7 +139,7 @@ func nonUTF8StagedDocument(t *testing.T, path []byte) *source.Document {
 	t.Helper()
 	root := t.TempDir()
 	runGit(t, root, "init")
-	hash := exec.Command("git", "hash-object", "-w", "--stdin")
+	hash := exec.CommandContext(t.Context(), "git", "hash-object", "-w", "--stdin")
 	hash.Dir = root
 	hash.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "LC_ALL=C")
 	hash.Stdin = strings.NewReader("unsafe name\n")
@@ -148,7 +148,7 @@ func nonUTF8StagedDocument(t *testing.T, path []byte) *source.Document {
 		t.Fatal(err)
 	}
 	objectID := strings.TrimSpace(string(output))
-	index := exec.Command("git", "update-index", "-z", "--index-info")
+	index := exec.CommandContext(t.Context(), "git", "update-index", "-z", "--index-info")
 	index.Dir = root
 	index.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "LC_ALL=C")
 	index.Stdin = bytes.NewReader(append(
@@ -232,7 +232,7 @@ func localDocument(t *testing.T, files map[string]string) *source.Document {
 
 func runGit(t *testing.T, directory string, arguments ...string) {
 	t.Helper()
-	command := exec.Command("git", arguments...)
+	command := exec.CommandContext(t.Context(), "git", arguments...)
 	command.Dir = directory
 	command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "LC_ALL=C")
 	if output, err := command.CombinedOutput(); err != nil {

@@ -1,3 +1,4 @@
+// Package output serializes completed reviews for non-interactive use.
 package output
 
 import (
@@ -15,10 +16,12 @@ import (
 	"github.com/jacoelho/rvw/internal/source"
 )
 
+// Options describes options.
 type Options struct {
 	Terminal bool
 }
 
+// WriteHuman writes human.
 func WriteHuman(writer io.Writer, document *source.Document, _ Options) error {
 	if document == nil {
 		return errors.New("write human output: document is nil")
@@ -49,6 +52,7 @@ func WriteHuman(writer io.Writer, document *source.Document, _ Options) error {
 	return buffer.Flush()
 }
 
+// WriteJSON writes json.
 func WriteJSON(writer io.Writer, document *source.Document, options Options) error {
 	if document == nil {
 		return errors.New("write JSON output: document is nil")
@@ -129,60 +133,60 @@ func WriteJSON(writer io.Writer, document *source.Document, options Options) err
 }
 
 type localDetailsJSON struct {
-	Kind source.SourceKind `json:"kind"`
 	Repo *string           `json:"repo"`
 	Base *string           `json:"base"`
 	Head *string           `json:"head"`
+	Kind source.SourceKind `json:"kind"`
 }
 
 type pullDetailsJSON struct {
 	Kind               source.SourceKind       `json:"kind"`
 	Owner              source.GitHubOwner      `json:"owner"`
 	Repo               source.GitHubRepository `json:"repo"`
-	Number             uint64                  `json:"number"`
 	Title              source.Title            `json:"title"`
 	Base               review.ObjectID         `json:"base"`
 	Head               review.ObjectID         `json:"head"`
 	BaseRef            source.GitReference     `json:"base_ref"`
 	HeadRef            source.GitReference     `json:"head_ref"`
+	Number             uint64                  `json:"number"`
 	FilesAPICapReached bool                    `json:"files_api_cap_reached"`
 }
 
 type githubJSON struct {
+	Author             *string             `json:"author"`
 	OwnerRepo          string              `json:"owner_repo"`
-	Number             uint64              `json:"number"`
 	Title              source.Title        `json:"title"`
 	URL                source.GitHubURL    `json:"url"`
 	State              source.GitHubState  `json:"state"`
-	IsDraft            bool                `json:"is_draft"`
-	Author             *string             `json:"author"`
 	BaseRef            source.GitReference `json:"base_ref"`
 	BaseOID            review.ObjectID     `json:"base_oid"`
 	HeadRef            source.GitReference `json:"head_ref"`
 	HeadOID            review.ObjectID     `json:"head_oid"`
+	Number             uint64              `json:"number"`
+	IsDraft            bool                `json:"is_draft"`
 	FilesAPICapReached bool                `json:"files_api_cap_reached"`
 }
 
 type fileJSON struct {
-	ID                 uint32          `json:"id"`
+	Change             any             `json:"change"`
 	OldPath            *string         `json:"old_path"`
 	NewPath            *string         `json:"new_path"`
 	OldPathDisplay     *string         `json:"old_path_display"`
 	NewPathDisplay     *string         `json:"new_path_display"`
 	OldPathBytesBase64 *string         `json:"old_path_bytes_base64"`
 	NewPathBytesBase64 *string         `json:"new_path_bytes_base64"`
-	Change             any             `json:"change"`
 	Flags              flagsJSON       `json:"flags"`
 	PatchHandle        patchHandleJSON `json:"patch_handle"`
+	ID                 uint32          `json:"id"`
 }
 
 type flagsJSON struct {
+	HiddenReasons []review.HiddenReason `json:"hidden_reasons"`
 	Generated     bool                  `json:"generated"`
 	Vendored      bool                  `json:"vendored"`
 	LockFile      bool                  `json:"lock_file"`
 	Minified      bool                  `json:"minified"`
 	TooLarge      bool                  `json:"too_large"`
-	HiddenReasons []review.HiddenReason `json:"hidden_reasons"`
 }
 
 type patchHandleJSON struct {
@@ -199,31 +203,31 @@ type unclassifiedChangeJSON struct {
 }
 
 type classifiedChangeJSON struct {
+	Mode      *modeJSON         `json:"mode"`
 	Kind      review.ChangeKind `json:"kind"`
 	Additions uint32            `json:"additions"`
 	Deletions uint32            `json:"deletions"`
 	Hunks     uint32            `json:"hunks"`
-	Mode      *modeJSON         `json:"mode"`
 }
 
 type simpleChangeJSON struct {
-	Kind review.ChangeKind `json:"kind"`
 	Mode *modeJSON         `json:"mode"`
+	Kind review.ChangeKind `json:"kind"`
 }
 
 type submoduleChangeJSON struct {
-	Kind      review.ChangeKind `json:"kind"`
 	OldCommit *string           `json:"old_commit"`
 	NewCommit *string           `json:"new_commit"`
+	Kind      review.ChangeKind `json:"kind"`
 }
 
 type objectTypeChangeJSON struct {
+	Old       objectJSON        `json:"old"`
+	New       objectJSON        `json:"new"`
 	Kind      review.ChangeKind `json:"kind"`
 	Additions uint32            `json:"additions"`
 	Deletions uint32            `json:"deletions"`
 	Hunks     uint32            `json:"hunks"`
-	Old       objectJSON        `json:"old"`
-	New       objectJSON        `json:"new"`
 }
 
 type modeJSON struct {

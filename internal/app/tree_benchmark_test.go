@@ -16,7 +16,7 @@ const (
 var benchmarkFileTree fileTree
 
 func BenchmarkBuildFileTreeContext1000Files(b *testing.B) {
-	snapshot, files := largeTreeFixture(b, largeTreeFileCount)
+	snapshot, files := largeTreeFixture(b)
 	b.ReportAllocs()
 	b.ResetTimer()
 
@@ -30,7 +30,7 @@ func BenchmarkBuildFileTreeContext1000Files(b *testing.B) {
 }
 
 func TestFileTreeWindowMaterializationIsViewportBounded(t *testing.T) {
-	snapshot, files := largeTreeFixture(t, largeTreeFileCount)
+	snapshot, files := largeTreeFixture(t)
 	tree, err := buildFileTreeContext(t.Context(), snapshot, files)
 	if err != nil {
 		t.Fatal(err)
@@ -59,8 +59,9 @@ func TestFileTreeWindowMaterializationIsViewportBounded(t *testing.T) {
 	}
 }
 
-func largeTreeFixture(tb testing.TB, fileCount int) (review.Snapshot, []review.FileID) {
+func largeTreeFixture(tb testing.TB) (review.Snapshot, []review.FileID) {
 	tb.Helper()
+	fileCount := largeTreeFileCount
 
 	sourceID, err := review.NewSourceID(1)
 	if err != nil {
@@ -85,11 +86,11 @@ func largeTreeFixture(tb testing.TB, fileCount int) (review.Snapshot, []review.F
 
 	files := make([]review.FileID, 0, fileCount)
 	for index := range fileCount {
-		path, err := review.NewPath([]byte(fmt.Sprintf(
+		path, err := review.NewPath(fmt.Appendf(nil,
 			"pkg/%03d/file-%04d.go",
 			index/32,
 			index,
-		)))
+		))
 		if err != nil {
 			tb.Fatal(err)
 		}

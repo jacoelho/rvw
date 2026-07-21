@@ -1,6 +1,7 @@
 package review
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -9,29 +10,34 @@ import (
 	"unicode/utf8"
 )
 
+// ErrInvalidPath identifies an invalid path failure.
 var ErrInvalidPath = errors.New("invalid review path")
 
+// Path represents path.
 type Path struct {
 	raw string
 }
 
+// NewPath constructs and validates path.
 func NewPath(raw []byte) (Path, error) {
 	switch {
 	case len(raw) == 0:
 		return Path{}, fmt.Errorf("%w: path is empty", ErrInvalidPath)
 	case int64(len(raw)) > MaxPathBytes:
 		return Path{}, fmt.Errorf("%w: path uses %d bytes; limit is %d", ErrInvalidPath, len(raw), MaxPathBytes)
-	case strings.IndexByte(string(raw), 0) >= 0:
+	case bytes.IndexByte(raw, 0) >= 0:
 		return Path{}, fmt.Errorf("%w: path contains NUL", ErrInvalidPath)
 	}
 
 	return Path{raw: string(raw)}, nil
 }
 
+// Raw returns the receiver's raw value.
 func (path Path) Raw() []byte {
 	return []byte(path.raw)
 }
 
+// UTF8 returns the receiver's utf8 value.
 func (path Path) UTF8() (string, bool) {
 	if !utf8.ValidString(path.raw) {
 		return "", false
@@ -39,14 +45,17 @@ func (path Path) UTF8() (string, bool) {
 	return path.raw, true
 }
 
+// Display returns the receiver's display value.
 func (path Path) Display() string {
 	return escapePath(path.raw)
 }
 
+// Base64 returns the receiver's base64 value.
 func (path Path) Base64() string {
 	return base64.StdEncoding.EncodeToString([]byte(path.raw))
 }
 
+// Equal performs the equal operation.
 func (path Path) Equal(other Path) bool {
 	return path.raw == other.raw
 }
@@ -54,7 +63,7 @@ func (path Path) Equal(other Path) bool {
 func escapePath(raw string) string {
 	var escaped strings.Builder
 	escaped.Grow(len(raw))
-	for len(raw) > 0 {
+	for raw != "" {
 		r, size := utf8.DecodeRuneInString(raw)
 		switch {
 		case r == utf8.RuneError && size == 1:

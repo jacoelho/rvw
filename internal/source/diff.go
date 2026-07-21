@@ -1,3 +1,4 @@
+// Package source acquires and materializes Git review sources.
 package source
 
 import (
@@ -12,15 +13,15 @@ import (
 )
 
 type diffRecord struct {
-	oldMode   review.FileMode
-	newMode   review.FileMode
 	oldOID    *review.ObjectID
 	newOID    *review.ObjectID
-	status    byte
+	oldMode   review.FileMode
+	newMode   review.FileMode
 	oldPath   []byte
 	newPath   []byte
 	additions uint32
 	deletions uint32
+	status    byte
 	binary    bool
 }
 
@@ -46,8 +47,8 @@ func (service *Service) diffMetadata(
 		"--no-commit-id",
 		"-r",
 		"-z",
-		"--no-ext-diff",
-		"--no-textconv",
+		gitNoExtDiff,
+		gitNoTextconv,
 		"--find-renames=50%",
 		"--find-copies=50%",
 		"-l1000",
@@ -55,7 +56,7 @@ func (service *Service) diffMetadata(
 		head.String(),
 	}
 	rawArguments := append([]string{}, common...)
-	rawArguments = append(rawArguments[:8], append([]string{"--raw"}, rawArguments[8:]...)...)
+	rawArguments = append(rawArguments[:8], append([]string{gitRaw}, rawArguments[8:]...)...)
 	numstatArguments := append([]string{}, common...)
 	numstatArguments = append(numstatArguments[:8], append([]string{"--numstat"}, numstatArguments[8:]...)...)
 	return service.readDiffMetadata(ctx, repository, environment, rawArguments, numstatArguments)
@@ -71,19 +72,19 @@ func (service *Service) diffIndexMetadata(
 		return nil, err
 	}
 	common := []string{
-		"diff",
-		"--cached",
-		"--no-abbrev",
+		gitDiff,
+		gitCached,
+		gitNoAbbrev,
 		"-z",
-		"--no-ext-diff",
-		"--no-textconv",
+		gitNoExtDiff,
+		gitNoTextconv,
 		"--find-renames=50%",
 		"--find-copies=50%",
 		"-l1000",
 		base.String(),
 	}
-	rawArguments := append([]string{"diff", "--cached", "--raw"}, common[2:]...)
-	numstatArguments := append([]string{"diff", "--cached", "--numstat"}, common[2:]...)
+	rawArguments := append([]string{gitDiff, gitCached, gitRaw}, common[2:]...)
+	numstatArguments := append([]string{gitDiff, gitCached, "--numstat"}, common[2:]...)
 	return service.readDiffMetadata(ctx, repository, environment, rawArguments, numstatArguments)
 }
 
@@ -125,11 +126,11 @@ func (service *Service) readDiffMetadata(
 		return nil, err
 	}
 	if len(raw) != len(numstat) {
-		return nil, fmt.Errorf("Git metadata streams disagree: raw=%d numstat=%d", len(raw), len(numstat))
+		return nil, fmt.Errorf("git metadata streams disagree: raw=%d numstat=%d", len(raw), len(numstat))
 	}
 	for index := range raw {
 		if !matchingNumstatPath(raw[index], numstat[index]) {
-			return nil, fmt.Errorf("Git metadata streams disagree at file %d", index)
+			return nil, fmt.Errorf("git metadata streams disagree at file %d", index)
 		}
 		raw[index].additions = numstat[index].additions
 		raw[index].deletions = numstat[index].deletions
@@ -149,8 +150,8 @@ func (service *Service) checkRenameCandidates(
 		repository.String(),
 		environment,
 		[]string{
-			"diff-tree", "--no-commit-id", "-r", "-z", "--raw",
-			"--no-renames", "--no-ext-diff", "--no-textconv",
+			"diff-tree", "--no-commit-id", "-r", "-z", gitRaw,
+			gitNoRenames, gitNoExtDiff, gitNoTextconv,
 			base.String(), head.String(),
 		},
 		nil,
@@ -186,8 +187,8 @@ func (service *Service) checkIndexRenameCandidates(
 		repository.String(),
 		environment,
 		[]string{
-			"diff", "--cached", "--raw", "--no-abbrev", "-z",
-			"--no-renames", "--no-ext-diff", "--no-textconv",
+			gitDiff, gitCached, gitRaw, gitNoAbbrev, "-z",
+			gitNoRenames, gitNoExtDiff, gitNoTextconv,
 			base.String(),
 		},
 		nil,
@@ -221,7 +222,7 @@ func parseRawDiff(value []byte) ([]diffRecord, error) {
 	for len(value) > 0 {
 		header, remaining, ok := nextNULTerminated(value)
 		if !ok {
-			return nil, errors.New("Git raw diff has an unterminated header")
+			return nil, errors.New("git raw diff has an unterminated header")
 		}
 		value = remaining
 		fields := bytes.Fields(header)
@@ -237,15 +238,22 @@ func parseRawDiff(value []byte) ([]diffRecord, error) {
 			return nil, err
 		}
 		if len(fields[2]) != len(fields[3]) {
-			return nil, errors.New("Git raw diff mixes object ID formats")
+			return nil, errors.New("git raw diff mixes object ID formats")
 		}
-		oldOID, err := optionalRawObjectID(fields[2])
+		oldOIDValue, hasOldOID, err := rawObjectID(fields[2])
 		if err != nil {
 			return nil, err
 		}
-		newOID, err := optionalRawObjectID(fields[3])
+		newOIDValue, hasNewOID, err := rawObjectID(fields[3])
 		if err != nil {
 			return nil, err
+		}
+		var oldOID, newOID *review.ObjectID
+		if hasOldOID {
+			oldOID = new(oldOIDValue)
+		}
+		if hasNewOID {
+			newOID = new(newOIDValue)
 		}
 		if !validRawStatus(fields[4]) {
 			return nil, fmt.Errorf("unsupported Git path status %q", fields[4])
@@ -253,7 +261,7 @@ func parseRawDiff(value []byte) ([]diffRecord, error) {
 		status := fields[4][0]
 		path, remaining, ok := nextNULTerminated(value)
 		if !ok {
-			return nil, errors.New("Git raw diff has an unterminated path")
+			return nil, errors.New("git raw diff has an unterminated path")
 		}
 		value = remaining
 		if err := validateRawPath(path); err != nil {
@@ -275,7 +283,7 @@ func parseRawDiff(value []byte) ([]diffRecord, error) {
 		case 'R', 'C':
 			newPath, rest, ok := nextNULTerminated(value)
 			if !ok {
-				return nil, errors.New("Git raw rename/copy has an unterminated new path")
+				return nil, errors.New("git raw rename/copy has an unterminated new path")
 			}
 			value = rest
 			if err := validateRawPath(newPath); err != nil {
@@ -311,7 +319,7 @@ func parseNumstat(value []byte) ([]numstatRecord, error) {
 	for len(value) > 0 {
 		token, remaining, ok := nextNULTerminated(value)
 		if !ok {
-			return nil, errors.New("Git numstat has an unterminated record")
+			return nil, errors.New("git numstat has an unterminated record")
 		}
 		value = remaining
 		firstTab := bytes.IndexByte(token, '\t')
@@ -334,7 +342,7 @@ func parseNumstat(value []byte) ([]numstatRecord, error) {
 			return nil, err
 		}
 		if binaryA != binaryD {
-			return nil, errors.New("Git numstat has inconsistent binary counts")
+			return nil, errors.New("git numstat has inconsistent binary counts")
 		}
 
 		record := numstatRecord{additions: additions, deletions: deletions, binary: binaryA}
@@ -342,11 +350,11 @@ func parseNumstat(value []byte) ([]numstatRecord, error) {
 		if len(path) == 0 {
 			oldPath, rest, ok := nextNULTerminated(value)
 			if !ok {
-				return nil, errors.New("Git numstat rename has an unterminated old path")
+				return nil, errors.New("git numstat rename has an unterminated old path")
 			}
 			newPath, rest, ok := nextNULTerminated(rest)
 			if !ok {
-				return nil, errors.New("Git numstat rename has an unterminated new path")
+				return nil, errors.New("git numstat rename has an unterminated new path")
 			}
 			value = rest
 			if err := validateRawPath(oldPath); err != nil {
@@ -398,13 +406,20 @@ func (service *Service) snapshot(
 	}
 
 	for index, record := range records {
-		oldPath, err := optionalReviewPath(record.oldPath)
+		oldPathValue, hasOldPath, err := reviewPath(record.oldPath)
 		if err != nil {
 			return review.Snapshot{}, fmt.Errorf("file %d old path: %w", index, err)
 		}
-		newPath, err := optionalReviewPath(record.newPath)
+		newPathValue, hasNewPath, err := reviewPath(record.newPath)
 		if err != nil {
 			return review.Snapshot{}, fmt.Errorf("file %d new path: %w", index, err)
+		}
+		var oldPath, newPath *review.Path
+		if hasOldPath {
+			oldPath = new(oldPathValue)
+		}
+		if hasNewPath {
+			newPath = new(newPathValue)
 		}
 		change, err := changeFromDiff(record)
 		if err != nil {
@@ -504,15 +519,15 @@ func pathKind(status byte) (review.ChangeKind, error) {
 	}
 }
 
-func optionalReviewPath(raw []byte) (*review.Path, error) {
+func reviewPath(raw []byte) (review.Path, bool, error) {
 	if raw == nil {
-		return nil, nil
+		return review.Path{}, false, nil
 	}
 	path, err := review.NewPath(raw)
 	if err != nil {
-		return nil, err
+		return review.Path{}, false, err
 	}
-	return new(path), nil
+	return path, true, nil
 }
 
 func optionalMode(oldMode, newMode review.FileMode) *review.Mode {
@@ -533,16 +548,16 @@ func objectKind(mode review.FileMode) review.ObjectKind {
 	return review.ObjectBlob
 }
 
-func optionalRawObjectID(raw []byte) (*review.ObjectID, error) {
+func rawObjectID(raw []byte) (review.ObjectID, bool, error) {
 	if (len(raw) == 40 || len(raw) == 64) &&
 		bytes.Count(raw, []byte{'0'}) == len(raw) {
-		return nil, nil
+		return "", false, nil
 	}
 	id, err := review.NewObjectID(string(raw))
 	if err != nil {
-		return nil, err
+		return "", false, err
 	}
-	return new(id), nil
+	return id, true, nil
 }
 
 func parseCount(value []byte, maximum int) (uint32, bool, error) {
@@ -551,32 +566,35 @@ func parseCount(value []byte, maximum int) (uint32, bool, error) {
 	}
 	for _, digit := range value {
 		if digit < '0' || digit > '9' {
-			return 0, false, fmt.Errorf("invalid Git count %q", value)
+			return 0, false, fmt.Errorf("invalid git count %q", value)
 		}
+	}
+	if maximum < 0 {
+		return 0, false, errors.New("git count maximum is negative")
 	}
 	count, err := strconv.ParseUint(string(value), 10, 32)
 	if err != nil || count > uint64(maximum) {
-		return 0, false, fmt.Errorf("Git count %q exceeds %d", value, maximum)
+		return 0, false, fmt.Errorf("git count %q exceeds %d", value, maximum)
 	}
 	return uint32(count), false, nil
 }
 
 func nextNULTerminated(value []byte) ([]byte, []byte, bool) {
-	index := bytes.IndexByte(value, 0)
-	if index < 0 {
+	before, after, ok := bytes.Cut(value, []byte{0})
+	if !ok {
 		return nil, value, false
 	}
-	return value[:index], value[index+1:], true
+	return before, after, true
 }
 
 func validateRawPath(path []byte) error {
 	switch {
 	case len(path) == 0:
-		return errors.New("Git path is empty")
+		return errors.New("git path is empty")
 	case int64(len(path)) > review.MaxPathBytes:
-		return fmt.Errorf("Git path exceeds %d bytes", review.MaxPathBytes)
+		return fmt.Errorf("git path exceeds %d bytes", review.MaxPathBytes)
 	case bytes.IndexByte(path, 0) >= 0:
-		return errors.New("Git path contains NUL")
+		return errors.New("git path contains NUL")
 	default:
 		return nil
 	}

@@ -34,7 +34,7 @@ func (set fileMarkSet) toggle(id FileID) fileMarkSet {
 	return next
 }
 
-func (set *fileMarkSet) add(id FileID) {
+func addFileMark(set *fileMarkSet, id FileID) {
 	word := int(id.Uint32() / 64)
 	if word >= len(set.words) {
 		set.words = append(set.words, make([]uint64, word-len(set.words)+1)...)
@@ -50,7 +50,7 @@ func (set fileMarkSet) each(yield func(FileID) bool) {
 	for wordIndex, word := range set.words {
 		for word != 0 {
 			bit := bits.TrailingZeros64(word)
-			if !yield(FileID(wordIndex*64 + bit)) {
+			if !yield(FileID(uint32FromInt(wordIndex*64 + bit))) {
 				return
 			}
 			word &^= uint64(1) << bit
@@ -120,7 +120,7 @@ func (set hunkMarkSet) toggle(id HunkID) hunkMarkSet {
 	return next
 }
 
-func (set *hunkMarkSet) add(id HunkID) {
+func addHunkMark(set *hunkMarkSet, id HunkID) {
 	chunkIndex := int(id.FileID().Uint32()) / hunkMarkFileChunk
 	if chunkIndex >= len(set.chunks) {
 		set.chunks = append(
@@ -168,7 +168,7 @@ func (set hunkMarkSet) each(yield func(HunkID) bool) {
 			for wordIndex, word := range file.words {
 				for word != 0 {
 					bit := bits.TrailingZeros64(word)
-					index := HunkIndex(wordIndex*64 + bit)
+					index := HunkIndex(uint32FromInt(wordIndex*64 + bit))
 					if !yield(HunkID{file: fileID, index: index}) {
 						return
 					}

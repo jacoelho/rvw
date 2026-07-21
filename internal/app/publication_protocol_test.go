@@ -26,7 +26,11 @@ func TestMain(m *testing.M) {
 }
 
 func runPublicationCommitHelper() int {
-	connection, err := net.Dial("tcp", os.Getenv(publicationHelperAddr))
+	connection, err := new(net.Dialer).DialContext(
+		context.Background(),
+		"tcp",
+		os.Getenv(publicationHelperAddr),
+	)
 	if err != nil {
 		return 2
 	}
@@ -421,7 +425,7 @@ func newControlledPublicationCoordinator(
 
 func configurePublicationCommitHelper(t *testing.T) net.Listener {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := new(net.ListenConfig).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}

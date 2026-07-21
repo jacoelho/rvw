@@ -1,6 +1,8 @@
 package app
 
 import (
+	"math"
+
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/jacoelho/rvw/internal/review"
@@ -212,7 +214,7 @@ func (model *Model) activateLocalComment(comment review.Comment) {
 	file, mapped := target.FileID()
 	if !mapped || comment.Unmappable() {
 		model.foreground.clearPendingDiffTarget()
-		model.notice = &Notice{Kind: NoticeWarning, Text: "comment file is not in this review"}
+		model.notice = &Notice{Kind: NoticeWarning, Text: commentFileOutsideReview}
 		return
 	}
 	if target.Kind() == review.TargetFile {
@@ -268,7 +270,7 @@ func (model *Model) activateCommentFile(
 ) {
 	model.foreground.clearPendingDiffTarget()
 	if !model.activateFile(file) {
-		model.notice = &Notice{Kind: NoticeWarning, Text: "comment file is not in this review"}
+		model.notice = &Notice{Kind: NoticeWarning, Text: commentFileOutsideReview}
 		return
 	}
 	model.focusReturn = 0
@@ -289,7 +291,7 @@ func (model *Model) activateCommentLine(
 	file, exists := model.review.Snapshot().File(fileID)
 	if !exists {
 		model.foreground.clearPendingDiffTarget()
-		model.notice = &Notice{Kind: NoticeWarning, Text: "comment file is not in this review"}
+		model.notice = &Notice{Kind: NoticeWarning, Text: commentFileOutsideReview}
 		return
 	}
 	target := newSourceLineTarget(
@@ -300,7 +302,7 @@ func (model *Model) activateCommentLine(
 	)
 	model.foreground.clearPendingDiffTarget()
 	if !model.activateFile(fileID) {
-		model.notice = &Notice{Kind: NoticeWarning, Text: "comment file is not in this review"}
+		model.notice = &Notice{Kind: NoticeWarning, Text: commentFileOutsideReview}
 		return
 	}
 	model.focusReturn = 0
@@ -372,13 +374,17 @@ func (model *Model) moveHunk(delta int) {
 	direction := review.NavigateNext
 	if delta < 0 {
 		direction = review.NavigatePrevious
-		delta = -delta
+		if delta == math.MinInt {
+			delta = math.MaxInt
+		} else {
+			delta = -delta
+		}
 	}
 	if line, exists := model.review.AdjacentHunkLine(
 		active,
 		model.diffCursor,
 		direction,
-		uint16(min(delta, 9_999)),
+		uint16FromInt(min(delta, 9_999)),
 	); exists {
 		model.diffCursor = line
 		model.moveDiff(0)

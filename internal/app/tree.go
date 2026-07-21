@@ -18,6 +18,7 @@ const (
 	fileTreeNodeCharge       = 192
 )
 
+// ErrFileTreeLimited identifies an file tree limited failure.
 var ErrFileTreeLimited = errors.New("file tree exceeds retained limits")
 
 type treeNodeIdentity struct {
@@ -27,17 +28,17 @@ type treeNodeIdentity struct {
 }
 
 type treeNode struct {
-	identity   treeNodeIdentity
 	label      string
+	identity   treeNodeIdentity
 	depth      int
 	parent     int
 	subtreeEnd int
 }
 
 type fileTree struct {
-	nodes     []treeNode
 	positions map[treeNodeIdentity]int
 	files     map[review.FileID]int
+	nodes     []treeNode
 }
 
 type treeBuildNode struct {
@@ -45,9 +46,9 @@ type treeBuildNode struct {
 }
 
 type treeBuildEntry struct {
+	directory *treeBuildNode
 	name      string
 	path      string
-	directory *treeBuildNode
 	file      review.FileID
 }
 
@@ -142,14 +143,15 @@ func buildFileTreeContext(
 		positions: make(map[treeNodeIdentity]int, len(files)),
 		files:     make(map[review.FileID]int, len(files)),
 	}
-	if err := tree.flatten(ctx, root); err != nil {
+	if err := flattenTree(ctx, &tree, root); err != nil {
 		return fileTree{}, err
 	}
 	return tree, nil
 }
 
-func (tree *fileTree) flatten(
+func flattenTree(
 	ctx context.Context,
+	tree *fileTree,
 	build *treeBuildNode,
 ) error {
 	type frame struct {
@@ -309,7 +311,7 @@ func (tree fileTree) window(
 	if !ok {
 		return nil
 	}
-	_, index, _ := tree.node(cursor)
+	index := tree.positions[cursor]
 	start := index
 	for range height / 2 {
 		previous, exists := tree.previousVisible(start, collapsed)
@@ -375,7 +377,7 @@ func (model *Model) moveTree(delta int) {
 	if !ok {
 		return
 	}
-	_, index, _ := tree.node(cursor)
+	index := tree.positions[cursor]
 	direction := 1
 	if delta < 0 {
 		direction = -1
@@ -420,13 +422,12 @@ func (model *Model) toggleTreeDirectory(action treeDirectoryAction) {
 		return
 	}
 	tree := model.currentFileTree()
-	node, index, ok := tree.node(model.treeCursor)
+	node, _, ok := tree.node(model.treeCursor)
 	if !ok {
 		return
 	}
 	if !node.identity.directory && action == treeDirectoryCollapse && node.parent >= 0 {
-		index = node.parent
-		node = tree.nodes[index]
+		node = tree.nodes[node.parent]
 		model.treeCursor = node.identity
 	}
 	if !node.identity.directory {

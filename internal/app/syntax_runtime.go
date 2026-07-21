@@ -8,23 +8,26 @@ import (
 	"github.com/jacoelho/rvw/internal/source"
 )
 
+// SyntaxWork represents syntax work.
 type SyntaxWork struct {
-	ID       review.OperationID
 	Document *source.Document
 	Request  review.SyntaxRequest
+	ID       review.OperationID
 }
 
+// SyntaxOutcome describes syntax outcome.
 type SyntaxOutcome struct {
-	ID     review.OperationID
-	Result review.SyntaxResult
 	Err    error
+	Result review.SyntaxResult
+	ID     review.OperationID
 }
 
 type syntaxJob struct {
-	work SyntaxWork
 	ctx  context.Context
+	work SyntaxWork
 }
 
+// SubmitSyntax performs the submit syntax operation.
 func (coordinator *Coordinator) SubmitSyntax(work SyntaxWork) error {
 	if work.ID == 0 || work.Document == nil ||
 		work.Request.Operation != work.ID ||
@@ -54,7 +57,7 @@ func (coordinator *Coordinator) SubmitSyntax(work SyntaxWork) error {
 func (coordinator *Coordinator) runSyntaxWorker() {
 	for job := range coordinator.syntaxJobs {
 		coordinator.required.wait(job.work.ID)
-		_ = coordinator.ReportProgress(Progress{
+		coordinator.reportProgress(Progress{
 			ID:     job.work.ID,
 			Total:  1,
 			Detail: boundedOperationDetail("loading and preparing syntax"),

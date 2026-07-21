@@ -15,6 +15,7 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+// LoadRequest describes load request.
 type LoadRequest struct {
 	CWD         string
 	ProjectRoot string
@@ -82,15 +83,17 @@ type rawExport struct {
 
 type decodedLayer struct {
 	raw      rawConfig
-	metadata toml.MetaData
 	path     string
+	metadata toml.MetaData
 	project  bool
 }
 
+// Load performs the load operation.
 func Load(request LoadRequest) (Config, error) {
 	return load(request, loadProjectConfiguration)
 }
 
+// LoadGlobal loads global.
 func LoadGlobal(request LoadRequest) (Config, error) {
 	return load(request, loadGlobalConfiguration)
 }
@@ -116,10 +119,7 @@ func load(request LoadRequest, scope loadScope) (Config, error) {
 	if projectRoot == "" {
 		projectRoot = absoluteCWD
 	}
-	paths, err := configurationPaths(projectRoot, environment)
-	if err != nil {
-		return Config{}, err
-	}
+	paths := configurationPaths(projectRoot, environment)
 	config := Defaults()
 	projectLoaded := false
 	for _, candidate := range paths {
@@ -158,7 +158,7 @@ type configPath struct {
 	project  bool
 }
 
-func configurationPaths(projectRoot string, environment map[string]string) ([]configPath, error) {
+func configurationPaths(projectRoot string, environment map[string]string) []configPath {
 	var paths []configPath
 	if xdg := environment["XDG_CONFIG_HOME"]; xdg != "" {
 		paths = append(paths, configPath{path: filepath.Join(xdg, "rvw", "config.toml")})
@@ -174,10 +174,14 @@ func configurationPaths(projectRoot string, environment map[string]string) ([]co
 			project:  true,
 		})
 	}
-	return paths, nil
+	return paths
 }
 
-func decodeFile(candidate configPath) (decodedLayer, bool, error) {
+func decodeFile(candidate configPath) (
+	result decodedLayer,
+	exists bool,
+	returnErr error,
+) {
 	var (
 		file *os.File
 		err  error
@@ -191,7 +195,9 @@ func decodeFile(candidate configPath) (decodedLayer, bool, error) {
 				openErr,
 			)
 		}
-		defer root.Close()
+		defer func() {
+			returnErr = errors.Join(returnErr, root.Close())
+		}()
 		file, err = root.OpenFile(candidate.relative, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	} else {
 		file, err = os.OpenFile(candidate.path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
@@ -202,7 +208,9 @@ func decodeFile(candidate configPath) (decodedLayer, bool, error) {
 	if err != nil {
 		return decodedLayer{}, false, fmt.Errorf("read configuration %s: %w", candidate.path, err)
 	}
-	defer file.Close()
+	defer func() {
+		returnErr = errors.Join(returnErr, file.Close())
+	}()
 	info, err := file.Stat()
 	if err != nil {
 		return decodedLayer{}, false, fmt.Errorf("inspect configuration %s: %w", candidate.path, err)

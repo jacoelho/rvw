@@ -10,15 +10,19 @@ import (
 	"github.com/jacoelho/rvw/internal/review"
 )
 
+// DiffView represents diff view.
 type DiffView uint8
 
+// DiffViewUnified identifies a supported diff view unified value.
 const (
 	DiffViewUnified DiffView = iota + 1
 	DiffViewSideBySide
 )
 
+// KeyContext represents key context.
 type KeyContext string
 
+// KeyContextNormal identifies a supported key context normal value.
 const (
 	KeyContextNormal        KeyContext = "normal"
 	KeyContextVisual        KeyContext = "visual"
@@ -33,6 +37,7 @@ const (
 	KeyContextMinimumSize   KeyContext = "minimum-size"
 )
 
+// NewKeyContext constructs and validates key context.
 func NewKeyContext(value string) (KeyContext, error) {
 	context := KeyContext(value)
 	switch context {
@@ -46,12 +51,15 @@ func NewKeyContext(value string) (KeyContext, error) {
 	}
 }
 
+// String returns the receiver's string value.
 func (context KeyContext) String() string {
 	return string(context)
 }
 
+// KeyFocus represents key focus.
 type KeyFocus string
 
+// KeyFocusNone identifies a supported key focus none value.
 const (
 	KeyFocusNone     KeyFocus = ""
 	KeyFocusFileTree KeyFocus = "file-tree"
@@ -59,6 +67,7 @@ const (
 	KeyFocusComments KeyFocus = "comments"
 )
 
+// NewKeyFocus constructs and validates key focus.
 func NewKeyFocus(value string) (KeyFocus, error) {
 	focus := KeyFocus(value)
 	switch focus {
@@ -69,12 +78,15 @@ func NewKeyFocus(value string) (KeyFocus, error) {
 	}
 }
 
+// String returns the receiver's string value.
 func (focus KeyFocus) String() string {
 	return string(focus)
 }
 
+// KeyAction represents key action.
 type KeyAction string
 
+// KeyActionNone identifies a supported key action none value.
 const (
 	KeyActionNone                KeyAction = ""
 	KeyActionQuit                KeyAction = "quit"
@@ -261,6 +273,7 @@ func actionSet(values ...KeyAction) map[KeyAction]struct{} {
 	return result
 }
 
+// NewKeyAction constructs and validates key action.
 func NewKeyAction(value string) (KeyAction, error) {
 	action := KeyAction(value)
 	if _, ok := validKeyActions[action]; !ok {
@@ -269,12 +282,15 @@ func NewKeyAction(value string) (KeyAction, error) {
 	return action, nil
 }
 
+// String returns the receiver's string value.
 func (action KeyAction) String() string {
 	return string(action)
 }
 
+// KeyChord represents key chord.
 type KeyChord string
 
+// NewKeyChord constructs and validates key chord.
 func NewKeyChord(value string) (KeyChord, error) {
 	if strings.TrimSpace(value) == "" {
 		return "", errors.New("key chord must not be empty")
@@ -282,10 +298,12 @@ func NewKeyChord(value string) (KeyChord, error) {
 	return KeyChord(value), nil
 }
 
+// String returns the receiver's string value.
 func (chord KeyChord) String() string {
 	return string(chord)
 }
 
+// Keybinding represents keybinding.
 type Keybinding struct {
 	Context KeyContext
 	Focus   KeyFocus
@@ -293,21 +311,24 @@ type Keybinding struct {
 	Action  KeyAction
 }
 
+// Settings describes settings.
 type Settings struct {
+	palette         Palette
+	syntaxSelector  review.SyntaxSelector
+	publication     review.PublicationOptions
+	keybindings     []Keybinding
+	exportTemplates review.ExportTemplates
+	patchContext    review.PatchContext
 	mouse           bool
 	colorEnabled    bool
 	wrap            bool
 	diffView        DiffView
-	patchContext    review.PatchContext
-	syntaxSelector  review.SyntaxSelector
-	exportTemplates review.ExportTemplates
-	publication     review.PublicationOptions
-	keybindings     []Keybinding
-	palette         Palette
 }
 
+// PaletteRole describes palette role.
 type PaletteRole uint8
 
+// PalettePanelBackground identifies a supported palette panel background value.
 const (
 	PalettePanelBackground PaletteRole = iota + 1
 	PalettePrimary
@@ -331,10 +352,12 @@ const (
 	PaletteWarningBackground
 )
 
+// Palette represents palette.
 type Palette struct {
 	colors map[PaletteRole]string
 }
 
+// NewPalette constructs and validates palette.
 func NewPalette(values map[PaletteRole]string) (Palette, error) {
 	colors := make(map[PaletteRole]string, len(values))
 	for role, value := range values {
@@ -383,18 +406,22 @@ func normalizePaletteColor(value string) (string, error) {
 	return color, nil
 }
 
+// SettingFeature represents setting feature.
 type SettingFeature uint8
 
+// FeatureMouse identifies a supported feature mouse value.
 const (
 	FeatureMouse SettingFeature = iota + 1
 	FeatureColor
 	FeatureWrap
 )
 
+// SettingFeatures represents setting features.
 type SettingFeatures struct {
 	bits uint8
 }
 
+// NewSettingFeatures constructs and validates setting features.
 func NewSettingFeatures(values ...SettingFeature) (SettingFeatures, error) {
 	var features SettingFeatures
 	for _, value := range values {
@@ -406,6 +433,7 @@ func NewSettingFeatures(values ...SettingFeature) (SettingFeatures, error) {
 	return features, nil
 }
 
+// Has performs the has operation.
 func (features SettingFeatures) Has(value SettingFeature) bool {
 	return value >= FeatureMouse && value <= FeatureWrap &&
 		features.bits&(1<<(value-1)) != 0
@@ -416,17 +444,19 @@ func (features SettingFeatures) valid() bool {
 	return features.bits&^validBits == 0
 }
 
+// SettingsRequest describes settings request.
 type SettingsRequest struct {
-	Features        SettingFeatures
-	DiffView        DiffView
-	ContextLines    review.ContextLines
+	Palette         Palette
 	SyntaxSelector  review.SyntaxSelector
-	ExportTemplates review.ExportTemplates
 	Publication     review.PublicationOptions
 	Keybindings     []Keybinding
-	Palette         Palette
+	ExportTemplates review.ExportTemplates
+	ContextLines    review.ContextLines
+	Features        SettingFeatures
+	DiffView        DiffView
 }
 
+// NewSettings constructs and validates settings.
 func NewSettings(request SettingsRequest) (Settings, error) {
 	features := request.Features
 	diffView := request.DiffView
@@ -535,11 +565,15 @@ func NewSettings(request SettingsRequest) (Settings, error) {
 	}, nil
 }
 
-func (settings Settings) clone() Settings {
+func (settings Settings) clone() (Settings, error) {
 	settings.keybindings = slices.Clone(settings.keybindings)
-	settings.publication, _ = settings.publication.WithExcludedComments(
+	publication, err := settings.publication.WithExcludedComments(
 		settings.publication.ExcludedComments(),
 	)
+	if err != nil {
+		return Settings{}, err
+	}
+	settings.publication = publication
 	settings.palette.colors = maps.Clone(settings.palette.colors)
-	return settings
+	return settings, nil
 }

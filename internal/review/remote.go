@@ -8,16 +8,20 @@ import (
 	"unicode/utf8"
 )
 
+// MaxRemoteThreads defines the supported remote threads limit.
 const (
 	MaxRemoteThreads           = 100_000
 	MaxRemoteComments          = 100_000
 	MaxRemoteThreadBytes int64 = 64 << 20
 )
 
+// ErrInvalidRemoteThread identifies an invalid remote thread failure.
 var ErrInvalidRemoteThread = errors.New("invalid remote review thread")
 
+// RemoteThreadStatus describes remote thread status.
 type RemoteThreadStatus uint8
 
+// RemoteThreadsNotRequested identifies a supported remote threads not requested value.
 const (
 	RemoteThreadsNotRequested RemoteThreadStatus = iota + 1
 	RemoteThreadsReady
@@ -25,6 +29,7 @@ const (
 	RemoteThreadsLimited
 )
 
+// String returns the receiver's string value.
 func (status RemoteThreadStatus) String() string {
 	switch status {
 	case RemoteThreadsNotRequested:
@@ -36,16 +41,18 @@ func (status RemoteThreadStatus) String() string {
 	case RemoteThreadsLimited:
 		return "limited"
 	default:
-		return "invalid"
+		return invalidValue
 	}
 }
 
+// RemoteThreadSummary describes remote thread summary.
 type RemoteThreadSummary struct {
-	Status RemoteThreadStatus
-	Count  int
 	Detail OperationDetail
+	Count  int
+	Status RemoteThreadStatus
 }
 
+// RemoteComment represents remote comment.
 type RemoteComment struct {
 	id        string
 	author    string
@@ -54,6 +61,7 @@ type RemoteComment struct {
 	url       string
 }
 
+// RemoteCommentDescriptor describes remote comment descriptor.
 type RemoteCommentDescriptor struct {
 	ID        string
 	Author    string
@@ -62,6 +70,7 @@ type RemoteCommentDescriptor struct {
 	URL       string
 }
 
+// NewRemoteComment constructs and validates remote comment.
 func NewRemoteComment(descriptor RemoteCommentDescriptor) (RemoteComment, error) {
 	if descriptor.ID == "" || int64(len(descriptor.ID)) > MaxPathBytes ||
 		int64(len(descriptor.Author)) > MaxPathBytes ||
@@ -84,11 +93,20 @@ func NewRemoteComment(descriptor RemoteCommentDescriptor) (RemoteComment, error)
 	}, nil
 }
 
-func (comment RemoteComment) ID() string        { return comment.id }
-func (comment RemoteComment) Author() string    { return comment.author }
-func (comment RemoteComment) Body() string      { return comment.body }
+// ID returns the receiver's id value.
+func (comment RemoteComment) ID() string { return comment.id }
+
+// Author returns the receiver's author value.
+func (comment RemoteComment) Author() string { return comment.author }
+
+// Body returns the receiver's body value.
+func (comment RemoteComment) Body() string { return comment.body }
+
+// CreatedAt returns the receiver's created at value.
 func (comment RemoteComment) CreatedAt() string { return comment.createdAt }
-func (comment RemoteComment) URL() string       { return comment.url }
+
+// URL returns the receiver's url value.
+func (comment RemoteComment) URL() string { return comment.url }
 
 func (comment RemoteComment) retainedBytes() int64 {
 	return int64(
@@ -100,36 +118,41 @@ func (comment RemoteComment) retainedBytes() int64 {
 	)
 }
 
+// RemoteThread represents remote thread.
 type RemoteThread struct {
+	line     *LineNumber
 	id       string
+	path     Path
+	comments []RemoteComment
+	file     FileID
 	resolved bool
 	outdated bool
-	path     Path
-	line     *LineNumber
 	side     LineSide
-	comments []RemoteComment
 	mapping  RemoteMappingStatus
-	file     FileID
 }
 
+// RemoteMappingStatus describes remote mapping status.
 type RemoteMappingStatus uint8
 
+// RemoteMappingMissing identifies a supported remote mapping missing value.
 const (
 	RemoteMappingMissing RemoteMappingStatus = iota + 1
 	RemoteMappingMapped
 	RemoteMappingAmbiguous
 )
 
+// RemoteThreadDescriptor describes remote thread descriptor.
 type RemoteThreadDescriptor struct {
+	Line     *LineNumber
 	ID       string
+	Path     Path
+	Comments []RemoteComment
 	Resolved bool
 	Outdated bool
-	Path     Path
-	Line     *LineNumber
 	Side     LineSide
-	Comments []RemoteComment
 }
 
+// NewRemoteThread constructs and validates remote thread.
 func NewRemoteThread(descriptor RemoteThreadDescriptor) (RemoteThread, error) {
 	if descriptor.ID == "" || int64(len(descriptor.ID)) > MaxPathBytes ||
 		!utf8.ValidString(descriptor.ID) ||
@@ -138,7 +161,7 @@ func NewRemoteThread(descriptor RemoteThreadDescriptor) (RemoteThread, error) {
 		return RemoteThread{}, ErrInvalidRemoteThread
 	}
 	path, err := NewPath(descriptor.Path.Raw())
-	if err != nil || len(path.raw) == 0 {
+	if err != nil || path.raw == "" {
 		return RemoteThread{}, ErrInvalidRemoteThread
 	}
 	if descriptor.Line != nil && *descriptor.Line == 0 {
@@ -174,13 +197,25 @@ func NewRemoteThread(descriptor RemoteThreadDescriptor) (RemoteThread, error) {
 	}, nil
 }
 
-func (thread RemoteThread) ID() string        { return thread.id }
-func (thread RemoteThread) Resolved() bool    { return thread.resolved }
-func (thread RemoteThread) Outdated() bool    { return thread.outdated }
-func (thread RemoteThread) Path() Path        { return thread.path }
-func (thread RemoteThread) Side() LineSide    { return thread.side }
+// ID returns the receiver's id value.
+func (thread RemoteThread) ID() string { return thread.id }
+
+// Resolved reports the receiver's resolved state.
+func (thread RemoteThread) Resolved() bool { return thread.resolved }
+
+// Outdated reports the receiver's outdated state.
+func (thread RemoteThread) Outdated() bool { return thread.outdated }
+
+// Path returns the receiver's path value.
+func (thread RemoteThread) Path() Path { return thread.path }
+
+// Side returns the receiver's side value.
+func (thread RemoteThread) Side() LineSide { return thread.side }
+
+// CommentCount returns the receiver's comment count value.
 func (thread RemoteThread) CommentCount() int { return len(thread.comments) }
 
+// FileMapping returns the receiver's file mapping value.
 func (thread RemoteThread) FileMapping() (FileID, RemoteMappingStatus) {
 	if thread.mapping == 0 {
 		return 0, RemoteMappingMissing
@@ -188,6 +223,7 @@ func (thread RemoteThread) FileMapping() (FileID, RemoteMappingStatus) {
 	return thread.file, thread.mapping
 }
 
+// Line returns the receiver's line value.
 func (thread RemoteThread) Line() (LineNumber, bool) {
 	if thread.line == nil {
 		return 0, false
@@ -195,6 +231,7 @@ func (thread RemoteThread) Line() (LineNumber, bool) {
 	return *thread.line, true
 }
 
+// Comments performs the comments operation.
 func (thread RemoteThread) Comments(start, count int) []RemoteComment {
 	if start < 0 || count <= 0 || start >= len(thread.comments) {
 		return nil
@@ -210,6 +247,7 @@ func (thread RemoteThread) retainedBytes() int64 {
 	return total
 }
 
+// WithRemoteThreads performs the with remote threads operation.
 func (snapshot Snapshot) WithRemoteThreads(threads []RemoteThread) (Snapshot, error) {
 	if len(threads) > MaxRemoteThreads {
 		return Snapshot{}, fmt.Errorf(
@@ -285,6 +323,7 @@ func (snapshot Snapshot) WithRemoteThreads(threads []RemoteThread) (Snapshot, er
 	return snapshot, nil
 }
 
+// WithRemoteThreadFailure performs the with remote thread failure operation.
 func (snapshot Snapshot) WithRemoteThreadFailure(
 	status RemoteThreadStatus,
 	detail OperationDetail,
@@ -324,6 +363,7 @@ func (snapshot Snapshot) remotePathMappings() map[string]remotePathMapping {
 	return mappings
 }
 
+// RemoteThreadSummary returns the receiver's remote thread summary value.
 func (snapshot Snapshot) RemoteThreadSummary() RemoteThreadSummary {
 	status := snapshot.remoteThreadStatus
 	if status == 0 {
@@ -336,10 +376,12 @@ func (snapshot Snapshot) RemoteThreadSummary() RemoteThreadSummary {
 	}
 }
 
+// RemoteThreadCount returns the receiver's remote thread count value.
 func (snapshot Snapshot) RemoteThreadCount() int {
 	return len(snapshot.remoteThreads)
 }
 
+// RemoteThreads performs the remote threads operation.
 func (snapshot Snapshot) RemoteThreads(start, count int) []RemoteThread {
 	if start < 0 || count <= 0 || start >= len(snapshot.remoteThreads) {
 		return nil

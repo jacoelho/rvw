@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 )
 
+// MaxBlobBytes defines the supported blob bytes limit.
 const (
 	MaxBlobBytes       int64 = 16 << 20
 	MaxSyntaxLines           = 1_000
@@ -19,11 +20,16 @@ const (
 	MaxSyntaxLineBytes       = 256 << 10
 )
 
+// ErrInvalidSyntax identifies an invalid syntax failure.
 var ErrInvalidSyntax = errors.New("invalid syntax preparation")
+
+// ErrSyntaxLimited identifies an syntax limited failure.
 var ErrSyntaxLimited = errors.New("syntax preparation exceeded its limit")
 
+// SyntaxSelector represents syntax selector.
 type SyntaxSelector string
 
+// NewSyntaxSelector constructs and validates syntax selector.
 func NewSyntaxSelector(value string) (SyntaxSelector, error) {
 	if value == "" || len(value) > 4_096 || !utf8.ValidString(value) {
 		return "", fmt.Errorf("%w: selector is invalid", ErrInvalidSyntax)
@@ -36,15 +42,18 @@ func NewSyntaxSelector(value string) (SyntaxSelector, error) {
 	return SyntaxSelector(value), nil
 }
 
+// String returns the receiver's string value.
 func (selector SyntaxSelector) String() string {
 	return string(selector)
 }
 
+// SyntaxIdentity represents syntax identity.
 type SyntaxIdentity struct {
 	content  ObjectID
 	selector SyntaxSelector
 }
 
+// NewSyntaxIdentity constructs and validates syntax identity.
 func NewSyntaxIdentity(
 	content ObjectID,
 	selector SyntaxSelector,
@@ -57,28 +66,33 @@ func NewSyntaxIdentity(
 	return SyntaxIdentity{content: validatedContent, selector: validatedSelector}, nil
 }
 
+// Content returns the receiver's content value.
 func (identity SyntaxIdentity) Content() ObjectID {
 	return identity.content
 }
 
+// Selector returns the receiver's selector value.
 func (identity SyntaxIdentity) Selector() SyntaxSelector {
 	return identity.selector
 }
 
+// SyntaxDemand represents syntax demand.
 type SyntaxDemand struct {
-	Side     LineSide
 	Identity SyntaxIdentity
 	Lines    []LineNumber
+	Side     LineSide
 }
 
+// SyntaxRequest describes syntax request.
 type SyntaxRequest struct {
+	Demands   []SyntaxDemand
 	Operation OperationID
 	Workspace WorkspaceRevision
 	Source    SourceID
 	File      FileID
-	Demands   []SyntaxDemand
 }
 
+// RequestSyntax performs the request syntax operation.
 func (review Review) RequestSyntax(
 	id OperationID,
 	fileID FileID,
@@ -91,8 +105,8 @@ func (review Review) RequestSyntax(
 	}
 	demands := make([]SyntaxDemand, 0, 2)
 	for _, sideLines := range []struct {
-		side  LineSide
 		lines []LineNumber
+		side  LineSide
 	}{
 		{side: LineOld, lines: oldLines},
 		{side: LineNew, lines: newLines},
@@ -145,8 +159,10 @@ func validatedSyntaxLines(values []LineNumber) ([]LineNumber, error) {
 	return lines, nil
 }
 
+// SyntaxKind describes syntax kind.
 type SyntaxKind uint8
 
+// SyntaxKeyword identifies a supported syntax keyword value.
 const (
 	SyntaxKeyword SyntaxKind = iota + 1
 	SyntaxString
@@ -154,18 +170,21 @@ const (
 	SyntaxNumber
 )
 
+// SyntaxSpan represents syntax span.
 type SyntaxSpan struct {
 	Start uint32
 	End   uint32
 	Kind  SyntaxKind
 }
 
+// PreparedSyntax represents prepared syntax.
 type PreparedSyntax struct {
-	identity SyntaxIdentity
 	lines    map[LineNumber][]SyntaxSpan
+	identity SyntaxIdentity
 	bytes    int64
 }
 
+// Identity returns the receiver's identity value.
 func (prepared *PreparedSyntax) Identity() SyntaxIdentity {
 	if prepared == nil {
 		return SyntaxIdentity{}
@@ -173,6 +192,7 @@ func (prepared *PreparedSyntax) Identity() SyntaxIdentity {
 	return prepared.identity
 }
 
+// Spans performs the spans operation.
 func (prepared *PreparedSyntax) Spans(line LineNumber) iter.Seq[SyntaxSpan] {
 	if prepared == nil || len(prepared.lines[line]) == 0 {
 		return nil
@@ -187,6 +207,7 @@ func (prepared *PreparedSyntax) Spans(line LineNumber) iter.Seq[SyntaxSpan] {
 	}
 }
 
+// Covers performs the covers operation.
 func (prepared *PreparedSyntax) Covers(line LineNumber) bool {
 	if prepared == nil {
 		return false
@@ -195,6 +216,7 @@ func (prepared *PreparedSyntax) Covers(line LineNumber) bool {
 	return exists
 }
 
+// RetainedBytes returns the receiver's retained bytes value.
 func (prepared *PreparedSyntax) RetainedBytes() int64 {
 	if prepared == nil {
 		return 0
@@ -202,6 +224,7 @@ func (prepared *PreparedSyntax) RetainedBytes() int64 {
 	return prepared.bytes
 }
 
+// PrepareSyntax prepares syntax.
 func PrepareSyntax(
 	identity SyntaxIdentity,
 	lines []LineNumber,
@@ -210,6 +233,7 @@ func PrepareSyntax(
 	return PrepareSyntaxCancellable(nil, identity, lines, blob)
 }
 
+// PrepareSyntaxCancellable prepares syntax cancellable.
 func PrepareSyntaxCancellable(
 	cancelled func() error,
 	identity SyntaxIdentity,
@@ -294,7 +318,7 @@ func syntaxSpans(line []byte) []SyntaxSpan {
 		case index+1 < len(line) && line[index] == '/' && line[index+1] == '/':
 			spans = append(spans, SyntaxSpan{
 				Start: uint32(index),
-				End:   uint32(len(line)),
+				End:   uint32FromInt(len(line)),
 				Kind:  SyntaxComment,
 			})
 			return spans
@@ -370,8 +394,10 @@ var syntaxKeywords = map[string]bool{
 	"use": true, "var": true,
 }
 
+// SyntaxStatus describes syntax status.
 type SyntaxStatus uint8
 
+// SyntaxReady identifies a supported syntax ready value.
 const (
 	SyntaxReady SyntaxStatus = iota + 1
 	SyntaxUnavailable
@@ -380,13 +406,14 @@ const (
 	SyntaxCancelled
 )
 
+// SyntaxResult describes syntax result.
 type SyntaxResult struct {
+	Old       *PreparedSyntax
+	New       *PreparedSyntax
+	Detail    OperationDetail
 	Operation OperationID
 	Workspace WorkspaceRevision
 	Source    SourceID
 	File      FileID
 	Status    SyntaxStatus
-	Old       *PreparedSyntax
-	New       *PreparedSyntax
-	Detail    OperationDetail
 }

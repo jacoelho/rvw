@@ -19,18 +19,18 @@ const remoteThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$end
 const remoteThreadCommentsQuery = `query($owner:String!,$name:String!,$number:Int!,$id:ID!,$endCursor:String){repository(owner:$owner,name:$name){nameWithOwner pullRequest(number:$number){number baseRefOid headRefOid}}node(id:$id){... on PullRequestReviewThread{id comments(first:100,after:$endCursor){pageInfo{hasNextPage endCursor}nodes{id body createdAt url author{login}}}}}}`
 
 type remoteThreadPage struct {
-	Errors []json.RawMessage `json:"errors"`
-	Data   struct {
+	Data struct {
 		Repository *struct {
-			NameWithOwner string `json:"nameWithOwner"`
-			PullRequest   *struct {
-				Number        uint64                  `json:"number"`
+			PullRequest *struct {
+				ReviewThreads *remoteThreadConnection `json:"reviewThreads"`
 				BaseRefOID    string                  `json:"baseRefOid"`
 				HeadRefOID    string                  `json:"headRefOid"`
-				ReviewThreads *remoteThreadConnection `json:"reviewThreads"`
+				Number        uint64                  `json:"number"`
 			} `json:"pullRequest"`
+			NameWithOwner string `json:"nameWithOwner"`
 		} `json:"repository"`
 	} `json:"data"`
+	Errors []json.RawMessage `json:"errors"`
 }
 
 type remoteThreadConnection struct {
@@ -44,14 +44,14 @@ type remotePageInfo struct {
 }
 
 type remoteThreadNode struct {
-	ID         string                   `json:"id"`
 	IsResolved *bool                    `json:"isResolved"`
 	IsOutdated *bool                    `json:"isOutdated"`
-	Path       string                   `json:"path"`
 	Line       *uint32                  `json:"line"`
 	StartLine  *uint32                  `json:"startLine"`
-	DiffSide   string                   `json:"diffSide"`
 	Comments   *remoteCommentConnection `json:"comments"`
+	ID         string                   `json:"id"`
+	Path       string                   `json:"path"`
+	DiffSide   string                   `json:"diffSide"`
 }
 
 type remoteCommentConnection struct {
@@ -60,31 +60,31 @@ type remoteCommentConnection struct {
 }
 
 type remoteCommentNode struct {
-	ID        string  `json:"id"`
-	Body      *string `json:"body"`
-	CreatedAt string  `json:"createdAt"`
-	URL       string  `json:"url"`
-	Author    *struct {
+	Body   *string `json:"body"`
+	Author *struct {
 		Login string `json:"login"`
 	} `json:"author"`
+	ID        string `json:"id"`
+	CreatedAt string `json:"createdAt"`
+	URL       string `json:"url"`
 }
 
 type remoteCommentPage struct {
-	Errors []json.RawMessage `json:"errors"`
-	Data   struct {
+	Data struct {
 		Repository *struct {
-			NameWithOwner string `json:"nameWithOwner"`
-			PullRequest   *struct {
-				Number     uint64 `json:"number"`
+			PullRequest *struct {
 				BaseRefOID string `json:"baseRefOid"`
 				HeadRefOID string `json:"headRefOid"`
+				Number     uint64 `json:"number"`
 			} `json:"pullRequest"`
+			NameWithOwner string `json:"nameWithOwner"`
 		} `json:"repository"`
 		Node *struct {
-			ID       string                   `json:"id"`
 			Comments *remoteCommentConnection `json:"comments"`
+			ID       string                   `json:"id"`
 		} `json:"node"`
 	} `json:"data"`
+	Errors []json.RawMessage `json:"errors"`
 }
 
 func (service *Service) loadRemoteThreads(
@@ -96,7 +96,7 @@ func (service *Service) loadRemoteThreads(
 		return nil, errors.New("validated GitHub repository cannot be split")
 	}
 	result, err := service.runGH(ctx, []string{
-		"api", "graphql", "--paginate", "--slurp",
+		ghAPI, "graphql", ghPaginate, ghSlurp,
 		"-f", "query=" + remoteThreadsQuery,
 		"-F", "owner=" + owner,
 		"-F", "name=" + repository,
@@ -198,7 +198,7 @@ func (service *Service) loadRemainingRemoteComments(
 		return nil, 0, errors.New("validated GitHub repository cannot be split")
 	}
 	result, err := service.runGH(ctx, []string{
-		"api", "graphql", "--paginate", "--slurp",
+		ghAPI, "graphql", ghPaginate, ghSlurp,
 		"-f", "query=" + remoteThreadCommentsQuery,
 		"-F", "owner=" + owner,
 		"-F", "name=" + repository,

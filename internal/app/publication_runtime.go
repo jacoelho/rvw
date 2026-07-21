@@ -10,21 +10,24 @@ import (
 	"github.com/jacoelho/rvw/internal/source"
 )
 
+// PublicationCheckWork represents publication check work.
 type PublicationCheckWork struct {
-	ID       review.OperationID
 	Document *source.Document
-	Review   review.Review
 	Request  review.PublicationCheckRequest
+	Review   review.Review
+	ID       review.OperationID
 }
 
+// PublicationWork represents publication work.
 type PublicationWork struct {
-	ID      review.OperationID
 	Request review.PublicationRequest
+	ID      review.OperationID
 }
 
+// ReconciliationWork represents reconciliation work.
 type ReconciliationWork struct {
-	ID      review.OperationID
 	Request review.ReconciliationRequest
+	ID      review.OperationID
 }
 
 type publicationJobKind uint8
@@ -36,12 +39,12 @@ const (
 )
 
 type publicationJob struct {
-	kind           publicationJobKind
-	check          PublicationCheckWork
 	publication    PublicationWork
-	reconciliation ReconciliationWork
-	permit         *publicationCommitPermit
 	ctx            context.Context
+	permit         *publicationCommitPermit
+	reconciliation ReconciliationWork
+	check          PublicationCheckWork
+	kind           publicationJobKind
 }
 
 type publicationCommitPermit struct {
@@ -62,6 +65,7 @@ func (permit *publicationCommitPermit) claim() bool {
 	return permit.state.CompareAndSwap(publicationPermitOpen, publicationPermitClaimed)
 }
 
+// SubmitPublicationCheck performs the submit publication check operation.
 func (coordinator *Coordinator) SubmitPublicationCheck(work PublicationCheckWork) error {
 	if work.ID == 0 || work.Document == nil ||
 		work.Request.Operation != work.ID ||
@@ -89,6 +93,7 @@ func (coordinator *Coordinator) SubmitPublicationCheck(work PublicationCheckWork
 	)
 }
 
+// SubmitPublication performs the submit publication operation.
 func (coordinator *Coordinator) SubmitPublication(work PublicationWork) error {
 	if work.ID == 0 || work.Request.Operation != work.ID ||
 		work.Request.Checked == nil {
@@ -120,6 +125,7 @@ func (coordinator *Coordinator) SubmitPublication(work PublicationWork) error {
 	)
 }
 
+// SubmitReconciliation performs the submit reconciliation operation.
 func (coordinator *Coordinator) SubmitReconciliation(work ReconciliationWork) error {
 	if work.ID == 0 || work.Request.Operation != work.ID ||
 		work.Request.Marker == "" {
@@ -225,14 +231,14 @@ func (coordinator *Coordinator) runPublicationWorker() {
 }
 
 func (coordinator *Coordinator) runPublicationCheck(job publicationJob) {
-	_ = coordinator.ReportProgress(Progress{
+	coordinator.reportProgress(Progress{
 		ID:     job.check.ID,
 		Total:  2,
 		Detail: boundedOperationDetail("preparing publication"),
 	})
 	prepared, err := job.check.Review.PreparePublication(job.check.Request.Options)
 	if err == nil {
-		_ = coordinator.ReportProgress(Progress{
+		coordinator.reportProgress(Progress{
 			ID:        job.check.ID,
 			Completed: 1,
 			Total:     2,
@@ -273,7 +279,7 @@ func (coordinator *Coordinator) runPublicationCommit(job publicationJob) {
 		result.Disposition = review.PublicationDispositionCancelledBeforeCommit
 		result.Detail = boundedOperationDetail("publication cancelled before remote commit")
 	} else {
-		_ = coordinator.ReportProgress(Progress{
+		coordinator.reportProgress(Progress{
 			ID:     job.publication.ID,
 			Total:  1,
 			Detail: boundedOperationDetail("committing GitHub review"),
@@ -293,7 +299,7 @@ func (coordinator *Coordinator) runPublicationCommit(job publicationJob) {
 }
 
 func (coordinator *Coordinator) runPublicationReconciliation(job publicationJob) {
-	_ = coordinator.ReportProgress(Progress{
+	coordinator.reportProgress(Progress{
 		ID:     job.reconciliation.ID,
 		Total:  1,
 		Detail: boundedOperationDetail("enumerating GitHub review history"),

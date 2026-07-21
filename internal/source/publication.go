@@ -16,6 +16,7 @@ import (
 	"github.com/jacoelho/rvw/internal/subprocess"
 )
 
+// CheckPublication performs the check publication operation.
 func (service *Service) CheckPublication(
 	ctx context.Context,
 	document *Document,
@@ -96,12 +97,14 @@ func newPublicationMarker() (review.PublicationMarker, error) {
 	)
 }
 
+// PublicationCommit represents publication commit.
 type PublicationCommit struct {
-	Disposition  review.PublicationDisposition
-	RemoteReview uint64
 	Detail       review.OperationDetail
+	RemoteReview uint64
+	Disposition  review.PublicationDisposition
 }
 
+// Publish performs the publish operation.
 func (service *Service) Publish(
 	ctx context.Context,
 	checked *review.CheckedPublication,
@@ -118,13 +121,13 @@ func (service *Service) Publish(
 	result, err := service.runner.Run(ctx, subprocess.Request{
 		Name: "gh",
 		Args: []string{
-			"api",
+			ghAPI,
 			"--method", "POST",
 			endpoint,
 			"--input", "-",
 		},
 		Dir:             service.cwd.String(),
-		Env:             map[string]string{"LC_ALL": "C", "LANG": "C", "GH_PROMPT_DISABLED": "1"},
+		Env:             map[string]string{localeAllKey: "C", localeLanguageKey: "C", "GH_PROMPT_DISABLED": "1"},
 		Stdin:           []byte(checked.Payload()),
 		StdoutLimit:     1 << 20,
 		StderrLimit:     1 << 20,
@@ -165,6 +168,7 @@ func (service *Service) Publish(
 	}
 }
 
+// ReconcilePublication performs the reconcile publication operation.
 func (service *Service) ReconcilePublication(
 	ctx context.Context,
 	request review.ReconciliationRequest,
@@ -180,7 +184,7 @@ func (service *Service) ReconcilePublication(
 		strconv.FormatUint(target.PullRequest(), 10) + "/reviews"
 	command, err := service.runGH(
 		ctx,
-		[]string{"api", endpoint, "--paginate", "--slurp"},
+		[]string{ghAPI, endpoint, ghPaginate, ghSlurp},
 		review.MaxPublicationBytes,
 	)
 	if err != nil {
@@ -286,6 +290,7 @@ type reviewHistoryItem struct {
 	body json.RawMessage
 }
 
+// UnmarshalJSON performs the unmarshal json operation.
 func (item *reviewHistoryItem) UnmarshalJSON(value []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(value))
 	token, err := decoder.Token()
@@ -298,11 +303,11 @@ func (item *reviewHistoryItem) UnmarshalJSON(value []byte) error {
 	}
 	seen := make(map[string]struct{})
 	for decoder.More() {
-		token, err := decoder.Token()
-		if err != nil {
-			return err
+		fieldToken, tokenErr := decoder.Token()
+		if tokenErr != nil {
+			return tokenErr
 		}
-		name, ok := token.(string)
+		name, ok := fieldToken.(string)
 		if !ok {
 			return errors.New("GitHub review history item key is not a string")
 		}
@@ -311,8 +316,8 @@ func (item *reviewHistoryItem) UnmarshalJSON(value []byte) error {
 		}
 		seen[name] = struct{}{}
 		var raw json.RawMessage
-		if err := decoder.Decode(&raw); err != nil {
-			return err
+		if decodeErr := decoder.Decode(&raw); decodeErr != nil {
+			return decodeErr
 		}
 		switch name {
 		case "id":

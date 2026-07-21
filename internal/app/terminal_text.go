@@ -33,7 +33,7 @@ func (renderer *terminalTextRenderer) render(value string) string {
 	for offset := 0; offset < len(value); {
 		character, size := utf8.DecodeRuneInString(value[offset:])
 		if character != '\t' &&
-			!(character == utf8.RuneError && size == 1) &&
+			(character != utf8.RuneError || size != 1) &&
 			!unicode.IsControl(character) &&
 			!isBidiControl(character) {
 			offset += size
@@ -49,7 +49,7 @@ func (renderer *terminalTextRenderer) render(value string) string {
 		case character == utf8.RuneError && size == 1:
 			writeByteEscape(&safe, value[offset])
 			renderer.column += 4
-		case character <= unicode.MaxASCII:
+		case character >= 0 && character <= unicode.MaxASCII:
 			writeByteEscape(&safe, byte(character))
 			renderer.column += 4
 		default:

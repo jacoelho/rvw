@@ -8,10 +8,13 @@ import (
 	"unicode/utf8"
 )
 
+// ErrInvalidTarget identifies an invalid target failure.
 var ErrInvalidTarget = errors.New("invalid review target")
 
+// TargetKind describes target kind.
 type TargetKind uint8
 
+// TargetWorktree identifies a supported target worktree value.
 const (
 	TargetWorktree TargetKind = iota + 1
 	TargetStaged
@@ -19,35 +22,45 @@ const (
 	TargetPullRequest
 )
 
+// RevisionRef represents revision ref.
 type RevisionRef string
 
+// String returns the receiver's string value.
 func (ref RevisionRef) String() string {
 	return string(ref)
 }
 
+// PullRequestNumber represents pull request number.
 type PullRequestNumber uint64
 
+// Uint64 returns the receiver's uint64 value.
 func (number PullRequestNumber) Uint64() uint64 {
 	return uint64(number)
 }
 
+// GitHubOwner represents git hub owner.
 type GitHubOwner string
 
+// String returns the receiver's string value.
 func (owner GitHubOwner) String() string {
 	return string(owner)
 }
 
+// GitHubRepository represents git hub repository.
 type GitHubRepository string
 
+// String returns the receiver's string value.
 func (repository GitHubRepository) String() string {
 	return string(repository)
 }
 
+// OwnerRepository represents owner repository.
 type OwnerRepository struct {
 	owner      GitHubOwner
 	repository GitHubRepository
 }
 
+// NewOwnerRepository constructs and validates owner repository.
 func NewOwnerRepository(value string) (OwnerRepository, error) {
 	ownerText, repositoryText, ok := strings.Cut(value, "/")
 	if !ok || strings.Contains(repositoryText, "/") {
@@ -64,23 +77,28 @@ func NewOwnerRepository(value string) (OwnerRepository, error) {
 	return OwnerRepository{owner: owner, repository: repository}, nil
 }
 
+// Owner returns the receiver's owner value.
 func (repository OwnerRepository) Owner() GitHubOwner {
 	return repository.owner
 }
 
+// Repository returns the receiver's repository value.
 func (repository OwnerRepository) Repository() GitHubRepository {
 	return repository.repository
 }
 
+// String returns the receiver's string value.
 func (repository OwnerRepository) String() string {
 	return repository.owner.String() + "/" + repository.repository.String()
 }
 
+// PullRequestSelector represents pull request selector.
 type PullRequestSelector struct {
-	number     PullRequestNumber
 	repository *OwnerRepository
+	number     PullRequestNumber
 }
 
+// NewPullRequestSelector constructs and validates pull request selector.
 func NewPullRequestSelector(selector string, repository *OwnerRepository) (PullRequestSelector, error) {
 	if !utf8.ValidString(selector) {
 		return PullRequestSelector{}, fmt.Errorf("%w: pull-request selector is not valid UTF-8", ErrInvalidTarget)
@@ -102,10 +120,12 @@ func NewPullRequestSelector(selector string, repository *OwnerRepository) (PullR
 	return PullRequestSelector{number: number, repository: cloneOwnerRepository(repository)}, nil
 }
 
+// Number returns the receiver's number value.
 func (selector PullRequestSelector) Number() PullRequestNumber {
 	return selector.number
 }
 
+// Repository returns the receiver's repository value.
 func (selector PullRequestSelector) Repository() (OwnerRepository, bool) {
 	if selector.repository == nil {
 		return OwnerRepository{}, false
@@ -113,23 +133,27 @@ func (selector PullRequestSelector) Repository() (OwnerRepository, bool) {
 	return *selector.repository, true
 }
 
+// Target represents target.
 type Target struct {
-	kind      TargetKind
+	pull      PullRequestSelector
 	base      RevisionRef
 	head      RevisionRef
-	pull      PullRequestSelector
-	hasPull   bool
 	rangeText string
+	kind      TargetKind
+	hasPull   bool
 }
 
+// WorktreeTarget performs the worktree target operation.
 func WorktreeTarget() Target {
 	return Target{kind: TargetWorktree}
 }
 
+// StagedTarget performs the staged target operation.
 func StagedTarget() Target {
 	return Target{kind: TargetStaged}
 }
 
+// NewRangeTarget constructs and validates range target.
 func NewRangeTarget(value string) (Target, error) {
 	if !utf8.ValidString(value) {
 		return Target{}, fmt.Errorf("%w: range is not valid UTF-8", ErrInvalidTarget)
@@ -153,6 +177,7 @@ func NewRangeTarget(value string) (Target, error) {
 	}, nil
 }
 
+// NewPullRequestTarget constructs and validates pull request target.
 func NewPullRequestTarget(selector PullRequestSelector) (Target, error) {
 	if selector.number == 0 {
 		return Target{}, fmt.Errorf("%w: pull-request selector is invalid", ErrInvalidTarget)
@@ -167,10 +192,12 @@ func NewPullRequestTarget(selector PullRequestSelector) (Target, error) {
 	return Target{kind: TargetPullRequest, pull: selector, hasPull: true}, nil
 }
 
+// Kind returns the receiver's kind value.
 func (target Target) Kind() TargetKind {
 	return target.kind
 }
 
+// Range returns the receiver's range value.
 func (target Target) Range() (base, head RevisionRef, ok bool) {
 	if target.kind != TargetRange {
 		return "", "", false
@@ -178,6 +205,7 @@ func (target Target) Range() (base, head RevisionRef, ok bool) {
 	return target.base, target.head, true
 }
 
+// PullRequest returns the receiver's pull request value.
 func (target Target) PullRequest() (PullRequestSelector, bool) {
 	return target.pull, target.kind == TargetPullRequest && target.hasPull
 }
@@ -213,7 +241,7 @@ func parsePullRequestNumber(value string) (PullRequestNumber, error) {
 	}
 	number, err := strconv.ParseUint(value, 10, 64)
 	if err != nil || number == 0 {
-		return 0, fmt.Errorf("%w: pull-request number must be from 1 through %d", ErrInvalidTarget, uint64(^uint64(0)))
+		return 0, fmt.Errorf("%w: pull-request number must be from 1 through %d", ErrInvalidTarget, ^uint64(0))
 	}
 	return PullRequestNumber(number), nil
 }

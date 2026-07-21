@@ -13,42 +13,46 @@ import (
 const maxFileRecordsPerUpdate = 2_048
 
 type fileFilterBuild struct {
-	generation uint64
 	query      string
 	source     []review.FileID
 	result     []review.FileID
+	generation uint64
 	position   int
 }
 
+// FileTreeWork represents file tree work.
 type FileTreeWork struct {
+	Files      []review.FileID
+	Snapshot   review.Snapshot
 	ID         review.OperationID
 	Generation uint64
-	Snapshot   review.Snapshot
-	Files      []review.FileID
 }
 
+// FileTreeOutcome describes file tree outcome.
 type FileTreeOutcome struct {
-	ID         review.OperationID
-	Generation uint64
-	Files      []review.FileID
 	Tree       fileTree
 	Err        error
+	Files      []review.FileID
+	ID         review.OperationID
+	Generation uint64
 }
 
+// WorkspaceIndexWork represents workspace index work.
 type WorkspaceIndexWork struct {
-	ID       review.OperationID
 	Snapshot review.Snapshot
+	ID       review.OperationID
 }
 
+// WorkspaceIndexOutcome describes workspace index outcome.
 type WorkspaceIndexOutcome struct {
-	ID              review.OperationID
-	AllFiles        []review.FileID
-	VisibleFiles    []review.FileID
 	AllFileTree     fileTree
 	VisibleFileTree fileTree
+	Err             error
 	PathFiles       map[string]review.FileID
 	AmbiguousPaths  map[string]struct{}
-	Err             error
+	AllFiles        []review.FileID
+	VisibleFiles    []review.FileID
+	ID              review.OperationID
 }
 
 func buildWorkspaceIndex(
@@ -158,8 +162,8 @@ func (model *Model) moveDiff(delta int) {
 		model.diffCursor = 0
 		return
 	}
-	model.diffCursor = uint32(min(max(int(model.diffCursor)+delta, 0), int(lines)-1))
-	height := uint32(max(model.diffHeight(), 1))
+	model.diffCursor = uint32FromInt(min(max(int(model.diffCursor)+delta, 0), int(lines)-1))
+	height := uint32FromInt(max(model.diffHeight(), 1))
 	if model.diffCursor < model.diffTop {
 		model.diffTop = model.diffCursor
 	} else if model.diffCursor >= model.diffTop+height {
@@ -264,22 +268,22 @@ func (model *Model) activateFile(file review.FileID) bool {
 	return true
 }
 
-func (model *Model) applyDiffTarget(target pendingDiffTarget) bool {
+func (model *Model) applyDiffTarget(target pendingDiffTarget) {
 	if !target.valid() || target.workspace != model.review.WorkspaceRevision() {
-		return false
+		return
 	}
 	fileID := target.handle.FileID()
 	file, exists := model.review.Snapshot().File(fileID)
 	if !exists || file.PatchHandle() != target.handle ||
 		model.review.Patch(fileID).Status != review.PatchReady {
-		return false
+		return
 	}
 	var row uint32
 	switch target.kind {
 	case diffTargetPatchRow:
 		if target.patchRow >= model.review.Patch(fileID).Lines {
 			model.notice = &Notice{Kind: NoticeWarning, Text: "search result is not in the active patch"}
-			return false
+			return
 		}
 		row = target.patchRow
 	case diffTargetSourceLine:
@@ -287,14 +291,13 @@ func (model *Model) applyDiffTarget(target pendingDiffTarget) bool {
 		row, found = model.review.PatchLineForSource(fileID, target.side, target.line)
 		if !found {
 			model.notice = &Notice{Kind: NoticeWarning, Text: "comment line is not in the active patch"}
-			return false
+			return
 		}
 	default:
-		return false
+		return
 	}
 	model.diffCursor = row
 	model.moveDiff(0)
-	return true
 }
 
 func (model *Model) cycleFocus(delta int) {
@@ -368,7 +371,7 @@ func (model *Model) configFocus() KeyFocus {
 func (model *Model) requestWorkspaceIndex() {
 	operationID, err := review.NewOperationID(model.nextOperation)
 	if err != nil {
-		model.notice = &Notice{Kind: NoticeError, Text: "operation identity exhausted"}
+		model.notice = &Notice{Kind: NoticeError, Text: operationIdentityExhausted}
 		return
 	}
 	model.nextOperation++
@@ -407,16 +410,6 @@ func (model *Model) applyWorkspaceIndex(outcome WorkspaceIndexOutcome) {
 	model.selectFileOrder()
 	model.notice = nil
 	model.requestActivePatch()
-}
-
-func buildFileIndexes(
-	snapshot review.Snapshot,
-) ([]review.FileID, []review.FileID, map[string]review.FileID, map[string]struct{}) {
-	all, visible, paths, ambiguous, _ := buildFileIndexesContext(
-		context.Background(),
-		snapshot,
-	)
-	return all, visible, paths, ambiguous
 }
 
 func buildFileIndexesContext(
@@ -603,7 +596,7 @@ func (model *Model) startFileFilterTree() tea.Cmd {
 	if err != nil {
 		model.filterTreeGeneration = 0
 		model.filterTreeFiles = nil
-		model.notice = &Notice{Kind: NoticeError, Text: "operation identity exhausted"}
+		model.notice = &Notice{Kind: NoticeError, Text: operationIdentityExhausted}
 		return nil
 	}
 	model.nextOperation++

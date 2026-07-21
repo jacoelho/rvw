@@ -219,7 +219,7 @@ func TestObjectIDRejectsZeroAndSnapshotBuilderRejectsMixedFormats(t *testing.T) 
 	flags, _ := NewFlags(FileTraits{}, HiddenReasons{})
 	change, _ := NewUnclassifiedChange(ChangeAdded, 1, 0)
 	for index, width := range []int{40, 64} {
-		path, _ := NewPath([]byte(fmt.Sprintf("file-%d.go", index)))
+		path, _ := NewPath(fmt.Appendf(nil, "file-%d.go", index))
 		objectID, _ := NewObjectID(strings.Repeat(strconv.Itoa(index+1), width))
 		contents, err := NewFileContents(NewFileContent(objectID))
 		if err != nil {

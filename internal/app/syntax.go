@@ -17,7 +17,7 @@ func (model *Model) requestSyntax() {
 	if !ok || model.review.Patch(fileID).Status != review.PatchReady {
 		return
 	}
-	count := uint32(max(model.diffHeight()+viewportOverscan, 1))
+	count := uint32FromInt(max(model.diffHeight()+viewportOverscan, 1))
 	lines := model.review.PatchLines(fileID, model.diffTop, count, 4_096)
 	oldLines := make([]review.LineNumber, 0, len(lines))
 	newLines := make([]review.LineNumber, 0, len(lines))

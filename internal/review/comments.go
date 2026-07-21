@@ -8,23 +8,29 @@ import (
 	"unicode/utf8"
 )
 
+// MaxComments defines the supported comments limit.
 const (
 	MaxComments               = 4_096
 	MaxCommentBodyBytes int64 = 64 << 10
 	MaxCommentBodyTotal int64 = 4 << 20
 )
 
+// ErrInvalidComment identifies an invalid comment failure.
 var ErrInvalidComment = errors.New("invalid comment")
 
+// LineSide represents line side.
 type LineSide uint8
 
+// LineOld identifies a supported line old value.
 const (
 	LineOld LineSide = iota + 1
 	LineNew
 )
 
+// LineNumber represents line number.
 type LineNumber uint32
 
+// NewLineNumber constructs and validates line number.
 func NewLineNumber(value uint32) (LineNumber, error) {
 	if value == 0 {
 		return 0, fmt.Errorf("%w: line number must be positive", ErrInvalidComment)
@@ -32,6 +38,7 @@ func NewLineNumber(value uint32) (LineNumber, error) {
 	return LineNumber(value), nil
 }
 
+// Uint32 returns the receiver's uint32 value.
 func (line LineNumber) Uint32() uint32 {
 	return uint32(line)
 }
@@ -107,28 +114,33 @@ func indexCommentAnchors(comments []Comment) commentAnchorCounts {
 	return anchors
 }
 
+// TargetKind describes target kind.
 type TargetKind uint8
 
+// TargetReview identifies a supported target review value.
 const (
 	TargetReview TargetKind = iota + 1
 	TargetFile
 	TargetLine
 )
 
+// CommentTarget represents comment target.
 type CommentTarget struct {
-	kind   TargetKind
+	path   *Path
 	file   FileID
-	mapped bool
-	side   LineSide
 	start  LineNumber
 	end    LineNumber
-	path   *Path
+	kind   TargetKind
+	mapped bool
+	side   LineSide
 }
 
+// ReviewCommentTarget performs the review comment target operation.
 func ReviewCommentTarget() CommentTarget {
 	return CommentTarget{kind: TargetReview}
 }
 
+// FileCommentTarget performs the file comment target operation.
 func FileCommentTarget(file FileID) (CommentTarget, error) {
 	if uint32(file) >= MaxFiles {
 		return CommentTarget{}, ErrInvalidComment
@@ -136,6 +148,7 @@ func FileCommentTarget(file FileID) (CommentTarget, error) {
 	return CommentTarget{kind: TargetFile, file: file, mapped: true}, nil
 }
 
+// LineCommentTarget performs the line comment target operation.
 func LineCommentTarget(
 	file FileID,
 	side LineSide,
@@ -151,19 +164,23 @@ func LineCommentTarget(
 	}, nil
 }
 
+// Kind returns the receiver's kind value.
 func (target CommentTarget) Kind() TargetKind {
 	return target.kind
 }
 
+// FileID returns the receiver's file id value.
 func (target CommentTarget) FileID() (FileID, bool) {
 	return target.file, target.mapped &&
 		(target.kind == TargetFile || target.kind == TargetLine)
 }
 
+// Lines returns the receiver's lines value.
 func (target CommentTarget) Lines() (LineSide, LineNumber, LineNumber, bool) {
 	return target.side, target.start, target.end, target.kind == TargetLine
 }
 
+// AnchoredPath returns the receiver's anchored path value.
 func (target CommentTarget) AnchoredPath() (Path, bool) {
 	if target.path == nil {
 		return Path{}, false
@@ -188,8 +205,10 @@ func (target CommentTarget) withoutFileMapping() CommentTarget {
 	return target
 }
 
+// CommentBody represents comment body.
 type CommentBody string
 
+// NewCommentBody constructs and validates comment body.
 func NewCommentBody(value string) (CommentBody, error) {
 	if !utf8.ValidString(value) || int64(len(value)) > MaxCommentBodyBytes ||
 		strings.TrimSpace(value) == "" {
@@ -198,52 +217,63 @@ func NewCommentBody(value string) (CommentBody, error) {
 	return CommentBody(strings.Clone(value)), nil
 }
 
+// String returns the receiver's string value.
 func (body CommentBody) String() string {
 	return string(body)
 }
 
+// Comment represents comment.
 type Comment struct {
-	id         CommentID
-	target     CommentTarget
 	body       CommentBody
+	target     CommentTarget
+	id         CommentID
 	stale      bool
 	unmappable bool
 }
 
+// ID returns the receiver's id value.
 func (comment Comment) ID() CommentID {
 	return comment.id
 }
 
+// Target returns the receiver's target value.
 func (comment Comment) Target() CommentTarget {
 	return comment.target
 }
 
+// Body returns the receiver's body value.
 func (comment Comment) Body() CommentBody {
 	return comment.body
 }
 
+// Stale reports the receiver's stale state.
 func (comment Comment) Stale() bool {
 	return comment.stale
 }
 
+// Unmappable reports the receiver's unmappable state.
 func (comment Comment) Unmappable() bool {
 	return comment.unmappable
 }
 
+// Draft represents draft.
 type Draft struct {
-	target  CommentTarget
-	body    string
 	editing *CommentID
+	body    string
+	target  CommentTarget
 }
 
+// Target returns the receiver's target value.
 func (draft Draft) Target() CommentTarget {
 	return draft.target
 }
 
+// Body returns the receiver's body value.
 func (draft Draft) Body() string {
 	return draft.body
 }
 
+// EditingComment returns the receiver's editing comment value.
 func (draft Draft) EditingComment() (CommentID, bool) {
 	if draft.editing == nil {
 		return 0, false

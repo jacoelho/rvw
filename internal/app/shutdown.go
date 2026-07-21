@@ -9,6 +9,7 @@ import (
 	"github.com/jacoelho/rvw/internal/source"
 )
 
+// StopAdmissionAndCancel performs the stop admission and cancel operation.
 func (coordinator *Coordinator) StopAdmissionAndCancel() {
 	coordinator.mu.Lock()
 	defer coordinator.mu.Unlock()
@@ -41,19 +42,22 @@ func (coordinator *Coordinator) StopAdmissionAndCancel() {
 	coordinator.closeReadyIfFinishedLocked()
 }
 
+// Escalate performs the escalate operation.
 func (coordinator *Coordinator) Escalate() {
 	coordinator.service.Escalate()
 	coordinator.delivery.Escalate()
 }
 
+// PublicationShutdownFact represents publication shutdown fact.
 type PublicationShutdownFact struct {
-	Target         review.PublicationTarget
 	Marker         review.PublicationMarker
+	Detail         review.OperationDetail
+	Target         review.PublicationTarget
 	Disposition    review.PublicationDisposition
 	Reconciliation review.ReconciliationDisposition
-	Detail         review.OperationDetail
 }
 
+// ShutdownSettlement represents shutdown settlement.
 type ShutdownSettlement struct {
 	Publications []PublicationShutdownFact
 }
@@ -65,11 +69,13 @@ const (
 	settleActivePublicationAsUnknown
 )
 
+// Shutdown performs the shutdown operation.
 func (coordinator *Coordinator) Shutdown(ctx context.Context) error {
 	_, err := coordinator.ShutdownWithSettlement(ctx)
 	return err
 }
 
+// ShutdownWithSettlement performs the shutdown with settlement operation.
 func (coordinator *Coordinator) ShutdownWithSettlement(
 	ctx context.Context,
 ) (ShutdownSettlement, error) {
@@ -157,13 +163,13 @@ func (coordinator *Coordinator) shutdownSettlementLocked(
 		default:
 			continue
 		}
-		reservation, accepted := coordinator.accepted[id]
-		if !accepted || reservation.publication == nil {
+		acceptedReservation, accepted := coordinator.accepted[id]
+		if !accepted || acceptedReservation.publication == nil {
 			continue
 		}
 		fact := PublicationShutdownFact{
-			Target:         reservation.publication.target,
-			Marker:         reservation.publication.marker,
+			Target:         acceptedReservation.publication.target,
+			Marker:         acceptedReservation.publication.marker,
 			Disposition:    disposition,
 			Reconciliation: reconciliation,
 			Detail:         detail,
@@ -194,6 +200,7 @@ func (coordinator *Coordinator) shutdownSettlementLocked(
 	return settlement
 }
 
+// PublicationShutdownSettlement returns the receiver's publication shutdown settlement value.
 func (model *Model) PublicationShutdownSettlement() ShutdownSettlement {
 	summary := model.review.PublicationSummary()
 	if summary.Target.Repository() == "" || summary.Marker == "" {

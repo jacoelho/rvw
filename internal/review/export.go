@@ -8,12 +8,16 @@ import (
 	"strings"
 )
 
+// MaxPreparedExportBytes defines the supported prepared export bytes limit.
 const MaxPreparedExportBytes int64 = 16 << 20
 
+// ErrInvalidExport identifies an invalid export failure.
 var ErrInvalidExport = errors.New("invalid review export")
 
+// ExportFormat describes export format.
 type ExportFormat uint8
 
+// ExportMarkdown identifies a supported export markdown value.
 const (
 	ExportMarkdown ExportFormat = iota + 1
 	ExportJSON
@@ -29,19 +33,19 @@ type ExportInput struct {
 }
 
 type exportComment struct {
-	target     exportCommentTarget
 	body       CommentBody
+	target     exportCommentTarget
 	stale      bool
 	unmappable bool
 }
 
 type exportCommentTarget struct {
-	kind    TargetKind
 	path    Path
-	hasPath bool
-	side    LineSide
 	start   LineNumber
 	end     LineNumber
+	kind    TargetKind
+	hasPath bool
+	side    LineSide
 }
 
 const (
@@ -50,6 +54,7 @@ const (
 	exportCommentMetadataBytes int64 = 64
 )
 
+// ExportInput returns the receiver's export input value.
 func (review Review) ExportInput() ExportInput {
 	comments := make([]exportComment, len(review.comments))
 	retained := int64(len(comments)) * exportCommentMetadataBytes
@@ -77,6 +82,7 @@ func (review Review) ExportInput() ExportInput {
 	}
 }
 
+// RetainedBytes returns the receiver's retained bytes value.
 func (input ExportInput) RetainedBytes() int64 {
 	if !input.ready {
 		return 0
@@ -84,20 +90,25 @@ func (input ExportInput) RetainedBytes() int64 {
 	return input.retainedBytes
 }
 
+// Ready reports the receiver's ready state.
 func (input ExportInput) Ready() bool {
 	return input.ready
 }
 
+// ExportOption represents export option.
 type ExportOption uint8
 
+// ExportUnmappable identifies a supported export unmappable value.
 const (
 	ExportUnmappable ExportOption = iota + 1
 )
 
+// ExportOptions describes export options.
 type ExportOptions struct {
 	bits uint8
 }
 
+// NewExportOptions constructs and validates export options.
 func NewExportOptions(values ...ExportOption) (ExportOptions, error) {
 	var options ExportOptions
 	for _, value := range values {
@@ -109,11 +120,13 @@ func NewExportOptions(values ...ExportOption) (ExportOptions, error) {
 	return options, nil
 }
 
+// Has performs the has operation.
 func (options ExportOptions) Has(value ExportOption) bool {
 	return value == ExportUnmappable &&
 		options.bits&(1<<(value-1)) != 0
 }
 
+// Toggle performs the toggle operation.
 func (options ExportOptions) Toggle(value ExportOption) (ExportOptions, error) {
 	if !options.valid() || value != ExportUnmappable {
 		return options, fmt.Errorf("%w: unknown option %d", ErrInvalidExport, value)
@@ -127,8 +140,10 @@ func (options ExportOptions) valid() bool {
 	return options.bits&^validBits == 0
 }
 
+// ExportTemplateName represents export template name.
 type ExportTemplateName uint8
 
+// TemplateComments identifies a supported template comments value.
 const (
 	TemplateComments ExportTemplateName = iota + 1
 	TemplateCommentCount
@@ -144,6 +159,7 @@ type exportToken struct {
 	name    ExportTemplateName
 }
 
+// ExportTemplates represents export templates.
 type ExportTemplates struct {
 	markdown      []exportToken
 	comment       []exportToken
@@ -153,10 +169,12 @@ type ExportTemplates struct {
 
 const exportTokenMetadataBytes int64 = 24
 
+// Ready reports the receiver's ready state.
 func (templates ExportTemplates) Ready() bool {
 	return templates.ready
 }
 
+// RetainedBytes returns the receiver's retained bytes value.
 func (templates ExportTemplates) RetainedBytes() int64 {
 	if !templates.ready {
 		return 0
@@ -164,6 +182,7 @@ func (templates ExportTemplates) RetainedBytes() int64 {
 	return templates.retainedBytes
 }
 
+// CompileExportTemplates compiles export templates.
 func CompileExportTemplates(markdown, comment string) (ExportTemplates, error) {
 	// Each compiled template owns source backing with exactly the submitted
 	// length. Literal tokens may then safely reference it without retaining a
@@ -181,11 +200,11 @@ func CompileExportTemplates(markdown, comment string) (ExportTemplates, error) {
 		return ExportTemplates{}, fmt.Errorf("compile Markdown export template: %w: template is empty", ErrInvalidExport)
 	}
 	commentTokens, err := compileTemplate(comment, map[string]ExportTemplateName{
-		"index":         TemplateIndex,
-		"target":        TemplateTarget,
-		"path":          TemplatePath,
-		"line_or_range": TemplateLineOrRange,
-		"comment":       TemplateComment,
+		"index":                 TemplateIndex,
+		"target":                TemplateTarget,
+		"path":                  TemplatePath,
+		"line_or_range":         TemplateLineOrRange,
+		publicationCommentValue: TemplateComment,
 	})
 	if err != nil {
 		return ExportTemplates{}, fmt.Errorf("compile comment export template: %w", err)
@@ -202,23 +221,28 @@ func CompileExportTemplates(markdown, comment string) (ExportTemplates, error) {
 	}, nil
 }
 
+// PreparedExport represents prepared export.
 type PreparedExport struct {
-	format ExportFormat
 	body   string
+	format ExportFormat
 }
 
+// Format returns the receiver's format value.
 func (prepared PreparedExport) Format() ExportFormat {
 	return prepared.format
 }
 
+// Body returns the receiver's body value.
 func (prepared PreparedExport) Body() string {
 	return prepared.body
 }
 
+// Bytes returns the receiver's bytes value.
 func (prepared PreparedExport) Bytes() int64 {
 	return int64(len(prepared.body))
 }
 
+// PrepareMarkdown prepares markdown.
 func (review Review) PrepareMarkdown(
 	templates ExportTemplates,
 	options ExportOptions,
@@ -226,6 +250,7 @@ func (review Review) PrepareMarkdown(
 	return review.ExportInput().PrepareMarkdownCancellable(nil, templates, options)
 }
 
+// PrepareMarkdownCancellable prepares markdown cancellable.
 func (review Review) PrepareMarkdownCancellable(
 	cancelled func() error,
 	templates ExportTemplates,
@@ -234,6 +259,7 @@ func (review Review) PrepareMarkdownCancellable(
 	return review.ExportInput().PrepareMarkdownCancellable(cancelled, templates, options)
 }
 
+// PrepareMarkdownCancellable prepares markdown cancellable.
 func (input ExportInput) PrepareMarkdownCancellable(
 	cancelled func() error,
 	templates ExportTemplates,
@@ -421,7 +447,7 @@ func compileTemplate(
 	allowed map[string]ExportTemplateName,
 ) ([]exportToken, error) {
 	var tokens []exportToken
-	for len(value) > 0 {
+	for value != "" {
 		open := strings.Index(value, "{{")
 		if open < 0 {
 			tokens = append(tokens, exportToken{literal: value})
@@ -450,31 +476,6 @@ func compileTemplate(
 		return nil, fmt.Errorf("%w: template exceeds 4096 tokens", ErrInvalidExport)
 	}
 	return slices.Clip(tokens), nil
-}
-
-func renderTemplate(
-	tokens []exportToken,
-	values map[ExportTemplateName]string,
-	limit int64,
-) (string, error) {
-	var size int64
-	for _, token := range tokens {
-		size += int64(len(token.literal))
-		size += int64(len(values[token.name]))
-		if size > limit {
-			return "", fmt.Errorf("%w: prepared body exceeds %d bytes", ErrInvalidExport, limit)
-		}
-	}
-	var body strings.Builder
-	body.Grow(int(size))
-	for _, token := range tokens {
-		if token.name == 0 {
-			body.WriteString(token.literal)
-		} else {
-			body.WriteString(values[token.name])
-		}
-	}
-	return body.String(), nil
 }
 
 func commentTemplateValues(comment exportComment, index int) map[ExportTemplateName]string {

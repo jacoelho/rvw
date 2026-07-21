@@ -347,7 +347,7 @@ func testRepository(t *testing.T) string {
 
 func runTestGit(t *testing.T, directory string, arguments ...string) string {
 	t.Helper()
-	command := exec.Command("git", arguments...)
+	command := exec.CommandContext(t.Context(), "git", arguments...)
 	command.Dir = directory
 	command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "LC_ALL=C")
 	output, err := command.CombinedOutput()

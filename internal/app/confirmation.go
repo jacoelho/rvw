@@ -83,6 +83,8 @@ func (model *Model) applyConfirmationAction(action KeyAction) tea.Cmd {
 		model.confirmation = confirmation{}
 		model.overlay = OverlayNone
 		switch pending.kind {
+		case confirmationNone:
+			return nil
 		case confirmationQuit:
 			return model.quit()
 		case confirmationDeleteComment:
@@ -90,6 +92,7 @@ func (model *Model) applyConfirmationAction(action KeyAction) tea.Cmd {
 		case confirmationReload:
 			model.startReload()
 		}
+	default:
 	}
 	return nil
 }
@@ -97,6 +100,7 @@ func (model *Model) applyConfirmationAction(action KeyAction) tea.Cmd {
 func (model *Model) confirmationView(width, height int) string {
 	prompt := "Confirm action?"
 	switch model.confirmation.kind {
+	case confirmationNone:
 	case confirmationQuit:
 		prompt = "Discard local review changes and quit?"
 	case confirmationDeleteComment:

@@ -1,3 +1,4 @@
+// Package subprocess runs bounded, cancellable external commands.
 package subprocess
 
 import (
@@ -6,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"slices"
@@ -15,6 +17,7 @@ import (
 	"time"
 )
 
+// DefaultStdoutLimit identifies a supported default stdout limit value.
 const (
 	DefaultStdoutLimit int64 = 64 << 20
 	DefaultStderrLimit int64 = 1 << 20
@@ -25,25 +28,28 @@ const (
 	DefaultConcurrency       = 4
 )
 
+// ErrClosed identifies an closed failure.
 var (
 	ErrClosed      = errors.New("subprocess runner is closed")
 	ErrLimited     = errors.New("subprocess output exceeded its limit")
 	ErrNonGraceful = errors.New("subprocess group did not quiesce")
 )
 
+// Request describes request.
 type Request struct {
-	Name            string
-	Args            []string
-	Dir             string
 	Env             map[string]string
+	Name            string
+	Dir             string
+	OperationDetail string
+	Args            []string
 	Stdin           []byte
+	AcceptedExits   []int
 	StdoutLimit     int64
 	StderrLimit     int64
 	Timeout         time.Duration
-	AcceptedExits   []int
-	OperationDetail string
 }
 
+// Result describes result.
 type Result struct {
 	Stdout      []byte
 	Stderr      []byte
@@ -54,38 +60,46 @@ type Result struct {
 	NonGraceful bool
 }
 
+// LimitError describes limit error.
 type LimitError struct {
 	Stream Stream
 	Limit  int64
 }
 
+// Error returns the receiver's error value.
 func (err *LimitError) Error() string {
 	return fmt.Sprintf("%s: %s exceeded %d bytes", ErrLimited, err.Stream, err.Limit)
 }
 
+// Unwrap returns the receiver's unwrap value.
 func (err *LimitError) Unwrap() error {
 	return ErrLimited
 }
 
+// ExitError describes exit error.
 type ExitError struct {
 	Name     string
-	ExitCode int
 	Stderr   string
+	ExitCode int
 }
 
+// StartError describes start error.
 type StartError struct {
-	Name  string
 	cause error
+	Name  string
 }
 
+// Error returns the receiver's error value.
 func (err *StartError) Error() string {
 	return fmt.Sprintf("%s start: %v", err.Name, err.cause)
 }
 
+// Unwrap returns the receiver's unwrap value.
 func (err *StartError) Unwrap() error {
 	return err.cause
 }
 
+// Error returns the receiver's error value.
 func (err *ExitError) Error() string {
 	if err.Stderr == "" {
 		return fmt.Sprintf("%s exited with status %d", err.Name, err.ExitCode)
@@ -93,35 +107,42 @@ func (err *ExitError) Error() string {
 	return fmt.Sprintf("%s exited with status %d: %s", err.Name, err.ExitCode, err.Stderr)
 }
 
+// NonGracefulError describes non graceful error.
 type NonGracefulError struct {
 	PID int
 }
 
+// Error returns the receiver's error value.
 func (err *NonGracefulError) Error() string {
 	return fmt.Sprintf("%s: process tree rooted at %d did not quiesce", ErrNonGraceful, err.PID)
 }
 
+// Unwrap returns the receiver's unwrap value.
 func (err *NonGracefulError) Unwrap() error {
 	return ErrNonGraceful
 }
 
+// Runner represents runner.
 type Runner struct {
-	limits chan struct{}
-
-	mu     sync.Mutex
-	closed bool
-	live   map[int]*os.Process
-	runs   sync.WaitGroup
+	limits     chan struct{}
+	live       map[int]*os.Process
+	controlErr error
+	runs       sync.WaitGroup
+	mu         sync.Mutex
+	closed     bool
 }
 
+// Stream represents stream.
 type Stream string
 
+// StreamStdin identifies a supported stream stdin value.
 const (
 	StreamStdin  Stream = "stdin"
 	StreamStdout Stream = "stdout"
 	StreamStderr Stream = "stderr"
 )
 
+// NewRunner constructs and validates runner.
 func NewRunner(concurrency int) (*Runner, error) {
 	if concurrency <= 0 || concurrency > DefaultConcurrency {
 		return nil, fmt.Errorf("subprocess concurrency must be from 1 through %d", DefaultConcurrency)
@@ -132,13 +153,17 @@ func NewRunner(concurrency int) (*Runner, error) {
 	}, nil
 }
 
-func (runner *Runner) Run(ctx context.Context, request Request) (Result, error) {
+// Run performs the run operation.
+func (runner *Runner) Run(ctx context.Context, request Request) (
+	result Result,
+	returnErr error,
+) {
 	request, err := validatedRequest(request)
 	if err != nil {
 		return Result{}, err
 	}
-	if err := context.Cause(ctx); err != nil {
-		return Result{}, err
+	if contextErr := context.Cause(ctx); contextErr != nil {
+		return Result{}, contextErr
 	}
 
 	select {
@@ -147,7 +172,7 @@ func (runner *Runner) Run(ctx context.Context, request Request) (Result, error) 
 		return Result{}, context.Cause(ctx)
 	}
 
-	if err := runner.admit(); err != nil {
+	if admitErr := runner.admit(); admitErr != nil {
 		<-runner.limits
 		return Result{}, ErrClosed
 	}
@@ -167,7 +192,14 @@ func (runner *Runner) Run(ctx context.Context, request Request) (Result, error) 
 	)
 	defer cancel()
 
-	command := exec.Command(request.Name, request.Args...)
+	executable, err := exec.LookPath(request.Name)
+	if err != nil {
+		return Result{}, &StartError{Name: operationName(request), cause: err}
+	}
+	arguments := make([]string, 1, len(request.Args)+1)
+	arguments[0] = request.Name
+	arguments = append(arguments, request.Args...)
+	command := &exec.Cmd{Path: executable, Args: arguments}
 	command.Dir = request.Dir
 	command.Env = mergedEnvironment(request.Env)
 	command.Stdin = bytes.NewReader(request.Stdin)
@@ -177,7 +209,9 @@ func (runner *Runner) Run(ctx context.Context, request Request) (Result, error) 
 	if err != nil {
 		return Result{}, fmt.Errorf("create subprocess lifetime witness: %w", err)
 	}
-	defer lifetime.Close()
+	defer func() {
+		returnErr = errors.Join(returnErr, lifetime.Close())
+	}()
 	command.ExtraFiles = []*os.File{inheritedLifetime}
 	command.Env = append(command.Env, "RVW_PROCESS_LIFETIME_FD=3")
 	limited := make(chan *LimitError, 1)
@@ -187,15 +221,20 @@ func (runner *Runner) Run(ctx context.Context, request Request) (Result, error) 
 	command.Stderr = stderr
 
 	if err := command.Start(); err != nil {
-		_ = inheritedLifetime.Close()
-		return Result{}, &StartError{Name: operationName(request), cause: err}
+		return Result{}, errors.Join(
+			&StartError{Name: operationName(request), cause: err},
+			inheritedLifetime.Close(),
+		)
 	}
-	_ = inheritedLifetime.Close()
 	pid := command.Process.Pid
+	if err := inheritedLifetime.Close(); err != nil {
+		return Result{Started: true}, errors.Join(
+			fmt.Errorf("close inherited subprocess lifetime witness: %w", err),
+			terminateStartedCommand(command, pid),
+		)
+	}
 	if err := runner.register(pid, command.Process); err != nil {
-		_ = signalProcessGroup(pid, syscall.SIGKILL)
-		_ = command.Wait()
-		return Result{Started: true}, err
+		return Result{Started: true}, errors.Join(err, terminateStartedCommand(command, pid))
 	}
 
 	waited := newWaitState()
@@ -210,13 +249,24 @@ func (runner *Runner) Run(ctx context.Context, request Request) (Result, error) 
 
 	result, waitErr, runErr := runner.await(
 		runContext,
-		request,
 		pid,
 		waited,
 		lifetime,
 		limited,
 	)
 	result.Started = true
+	return finishResult(request, result, waitErr, runErr, waited, stdout, stderr)
+}
+
+func finishResult(
+	request Request,
+	result Result,
+	waitErr error,
+	runErr error,
+	waited *waitState,
+	stdout *capture,
+	stderr *capture,
+) (Result, error) {
 	if completed := waited.completed(); completed {
 		result.Stdout = stdout.TakeBytes()
 		result.Stderr = stderr.TakeBytes()
@@ -240,25 +290,26 @@ func (runner *Runner) Run(ctx context.Context, request Request) (Result, error) 
 	return result, nil
 }
 
+// StopAdmission performs the stop admission operation.
 func (runner *Runner) StopAdmission() {
 	runner.mu.Lock()
 	runner.closed = true
 	runner.mu.Unlock()
 }
 
+// Escalate performs the escalate operation.
 func (runner *Runner) Escalate() {
 	runner.mu.Lock()
 	processes := make(map[int]*os.Process, len(runner.live))
-	for pid, process := range runner.live {
-		processes[pid] = process
-	}
+	maps.Copy(processes, runner.live)
 	runner.mu.Unlock()
 
 	for pid := range processes {
-		_ = signalProcessGroup(pid, syscall.SIGKILL)
+		runner.recordControlError(signalProcessGroup(pid, syscall.SIGKILL))
 	}
 }
 
+// Shutdown performs the shutdown operation.
 func (runner *Runner) Shutdown(ctx context.Context) error {
 	runner.StopAdmission()
 	runner.signalAll(syscall.SIGTERM)
@@ -273,26 +324,31 @@ func (runner *Runner) Shutdown(ctx context.Context) error {
 	defer grace.Stop()
 	select {
 	case <-done:
-		return nil
+		return runner.controlError()
 	case <-grace.C:
 		runner.Escalate()
 	case <-ctx.Done():
 		runner.Escalate()
-		return fmt.Errorf("shutdown subprocesses: %w", context.Cause(ctx))
+		return errors.Join(
+			fmt.Errorf("shutdown subprocesses: %w", context.Cause(ctx)),
+			runner.controlError(),
+		)
 	}
 
 	select {
 	case <-done:
-		return nil
+		return runner.controlError()
 	case <-ctx.Done():
 		runner.Escalate()
-		return fmt.Errorf("shutdown subprocesses: %w", context.Cause(ctx))
+		return errors.Join(
+			fmt.Errorf("shutdown subprocesses: %w", context.Cause(ctx)),
+			runner.controlError(),
+		)
 	}
 }
 
 func (runner *Runner) await(
 	ctx context.Context,
-	request Request,
 	pid int,
 	waited *waitState,
 	lifetime *processLifetime,
@@ -305,15 +361,17 @@ func (runner *Runner) await(
 		if errors.Is(waitErr, exec.ErrWaitDelay) {
 			result.NonGraceful = true
 			result.Killed = true
-			_ = signalProcessGroup(pid, syscall.SIGKILL)
-			_ = waitForQuiescence(pid, lifetime, DefaultReapBound)
-			return result, waitErr, &NonGracefulError{PID: pid}
+			killErr := signalProcessGroup(pid, syscall.SIGKILL)
+			waitForQuiescence(pid, lifetime, DefaultReapBound)
+			return result, waitErr, errors.Join(&NonGracefulError{PID: pid}, killErr)
 		}
 		if processTreeQuiescent(pid, lifetime) {
 			return result, waitErr, nil
 		}
 		result.Terminated = true
-		_ = signalProcessGroup(pid, syscall.SIGTERM)
+		if err := signalProcessGroup(pid, syscall.SIGTERM); err != nil {
+			return result, waitErr, fmt.Errorf("terminate process group %d: %w", pid, err)
+		}
 		if waitForQuiescence(pid, lifetime, DefaultTermGrace) {
 			return result, waitErr, nil
 		}
@@ -327,8 +385,8 @@ func (runner *Runner) await(
 		)
 	case limitErr := <-limited:
 		result := Result{ExitCode: -1, Terminated: true}
-		_ = signalProcessGroup(pid, syscall.SIGTERM)
-		waitErr, completed := waitForProcessTree(
+		termErr := signalProcessGroup(pid, syscall.SIGTERM)
+		completed, waitErr := waitForProcessTree(
 			pid,
 			waited,
 			lifetime,
@@ -337,7 +395,7 @@ func (runner *Runner) await(
 		if completed {
 			result = resultFromWait(waitErr)
 			result.Terminated = true
-			return result, waitErr, limitErr
+			return result, waitErr, errors.Join(limitErr, termErr)
 		}
 		return runner.escalate(
 			pid,
@@ -347,11 +405,12 @@ func (runner *Runner) await(
 			waitErr,
 			processWaitPending,
 			limitErr,
+			termErr,
 		)
 	case <-ctx.Done():
 		result := Result{ExitCode: -1, Terminated: true}
-		_ = signalProcessGroup(pid, syscall.SIGTERM)
-		waitErr, completed := waitForProcessTree(
+		termErr := signalProcessGroup(pid, syscall.SIGTERM)
+		completed, waitErr := waitForProcessTree(
 			pid,
 			waited,
 			lifetime,
@@ -360,7 +419,7 @@ func (runner *Runner) await(
 		if completed {
 			result = resultFromWait(waitErr)
 			result.Terminated = true
-			return result, waitErr, context.Cause(ctx)
+			return result, waitErr, errors.Join(context.Cause(ctx), termErr)
 		}
 		return runner.escalate(
 			pid,
@@ -370,6 +429,7 @@ func (runner *Runner) await(
 			waitErr,
 			processWaitPending,
 			context.Cause(ctx),
+			termErr,
 		)
 	}
 }
@@ -391,10 +451,12 @@ func (runner *Runner) escalate(
 	causes ...error,
 ) (Result, error, error) {
 	result.Killed = true
-	_ = signalProcessGroup(pid, syscall.SIGKILL)
+	if err := signalProcessGroup(pid, syscall.SIGKILL); err != nil {
+		causes = append(causes, fmt.Errorf("kill process group %d: %w", pid, err))
+	}
 	if waitState != processAlreadyWaited {
 		var completed bool
-		waitErr, completed = waitForProcessTree(
+		completed, waitErr = waitForProcessTree(
 			pid,
 			waited,
 			lifetime,
@@ -449,10 +511,10 @@ func (runner *Runner) unregister(pid int) {
 }
 
 type capture struct {
-	limit    int64
-	stream   Stream
 	limited  chan<- *LimitError
+	stream   Stream
 	buffer   bytes.Buffer
+	limit    int64
 	exceeded bool
 }
 
@@ -462,8 +524,9 @@ type waitState struct {
 }
 
 type processLifetime struct {
-	reader *os.File
-	done   chan struct{}
+	reader  *os.File
+	done    chan struct{}
+	copyErr error
 }
 
 func newProcessLifetime() (*processLifetime, *os.File, error) {
@@ -473,7 +536,7 @@ func newProcessLifetime() (*processLifetime, *os.File, error) {
 	}
 	lifetime := &processLifetime{reader: reader, done: make(chan struct{})}
 	go func() {
-		_, _ = io.Copy(io.Discard, reader)
+		_, lifetime.copyErr = io.Copy(io.Discard, reader)
 		close(lifetime.done)
 	}()
 	return lifetime, writer, nil
@@ -488,10 +551,20 @@ func (lifetime *processLifetime) completed() bool {
 	}
 }
 
-func (lifetime *processLifetime) Close() {
-	if lifetime != nil && lifetime.reader != nil {
-		_ = lifetime.reader.Close()
+// Close returns the receiver's close value.
+func (lifetime *processLifetime) Close() error {
+	if lifetime == nil || lifetime.reader == nil {
+		return nil
 	}
+	closeErr := lifetime.reader.Close()
+	<-lifetime.done
+	if errors.Is(closeErr, os.ErrClosed) {
+		closeErr = nil
+	}
+	if errors.Is(lifetime.copyErr, os.ErrClosed) {
+		lifetime.copyErr = nil
+	}
+	return errors.Join(closeErr, lifetime.copyErr)
 }
 
 func newWaitState() *waitState {
@@ -521,6 +594,7 @@ func newCapture(limit int64, stream Stream, limited chan<- *LimitError) *capture
 	return &capture{limit: limit, stream: stream, limited: limited}
 }
 
+// Write performs the write operation.
 func (capture *capture) Write(value []byte) (int, error) {
 	original := len(value)
 	remaining := capture.limit - int64(capture.buffer.Len())
@@ -540,12 +614,14 @@ func (capture *capture) Write(value []byte) (int, error) {
 	return original, nil
 }
 
+// TakeBytes takes ownership of bytes.
 func (capture *capture) TakeBytes() []byte {
 	value := capture.buffer.Bytes()
 	capture.buffer = bytes.Buffer{}
 	return value
 }
 
+// Exceeded reports the receiver's exceeded state.
 func (capture *capture) Exceeded() bool {
 	return capture.exceeded
 }
@@ -634,7 +710,7 @@ func waitForProcessTree(
 	waited *waitState,
 	lifetime *processLifetime,
 	bound time.Duration,
-) (error, bool) {
+) (bool, error) {
 	deadline := time.NewTimer(bound)
 	defer deadline.Stop()
 	ticker := time.NewTicker(10 * time.Millisecond)
@@ -651,7 +727,7 @@ func waitForProcessTree(
 	}
 	for {
 		if waitedOK && processTreeQuiescent(pid, lifetime) {
-			return waitErr, true
+			return true, waitErr
 		}
 		select {
 		case <-waitDone:
@@ -660,7 +736,7 @@ func waitForProcessTree(
 			waitDone = nil
 		case <-ticker.C:
 		case <-deadline.C:
-			return waitErr, false
+			return false, waitErr
 		}
 	}
 }
@@ -717,6 +793,30 @@ func (runner *Runner) signalAll(signal syscall.Signal) {
 	}
 	runner.mu.Unlock()
 	for _, pid := range pids {
-		_ = signalProcessGroup(pid, signal)
+		runner.recordControlError(signalProcessGroup(pid, signal))
 	}
+}
+
+func (runner *Runner) recordControlError(err error) {
+	if err == nil {
+		return
+	}
+	runner.mu.Lock()
+	runner.controlErr = errors.Join(runner.controlErr, err)
+	runner.mu.Unlock()
+}
+
+func (runner *Runner) controlError() error {
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	return runner.controlErr
+}
+
+func terminateStartedCommand(command *exec.Cmd, pid int) error {
+	signalErr := signalProcessGroup(pid, syscall.SIGKILL)
+	waitErr := command.Wait()
+	if exitErr, ok := errors.AsType[*exec.ExitError](waitErr); ok && exitErr != nil {
+		waitErr = nil
+	}
+	return errors.Join(signalErr, waitErr)
 }

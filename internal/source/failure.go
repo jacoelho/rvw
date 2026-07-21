@@ -8,13 +8,16 @@ import (
 	"github.com/jacoelho/rvw/internal/subprocess"
 )
 
+// ErrSourceLimited identifies an source limited failure.
 var (
 	ErrSourceLimited = errors.New("source operation exceeded its limit")
 	ErrSourceStale   = errors.New("source revision became stale")
 )
 
+// FailureKind describes failure kind.
 type FailureKind uint8
 
+// FailureUnavailable identifies a supported failure unavailable value.
 const (
 	FailureUnavailable FailureKind = iota + 1
 	FailureStale
@@ -24,46 +27,56 @@ const (
 	FailureNonGraceful
 )
 
+// FailureOperation represents failure operation.
 type FailureOperation string
 
+// OperationDiscoverRepository identifies a supported operation discover repository value.
 const (
 	OperationDiscoverRepository FailureOperation = "discover-repository"
 	OperationOpenSource         FailureOperation = "open-source"
 	OperationCheckPublication   FailureOperation = "check-publication"
 )
 
-type Failure struct {
-	Kind      FailureKind
-	Operation FailureOperation
+// FailureError describes failure error.
+type FailureError struct {
 	cause     error
+	Operation FailureOperation
+	Kind      FailureKind
 }
 
+// LimitResource represents limit resource.
 type LimitResource string
 
+// LimitRenameCandidates identifies a supported limit rename candidates value.
 const (
 	LimitRenameCandidates LimitResource = "rename-candidates"
 	LimitPullRequestDepth LimitResource = "pull-request-fetch-depth"
 	LimitRemoteThreads    LimitResource = "remote-review-thread-identities"
 )
 
+// LimitError describes limit error.
 type LimitError struct {
 	Resource LimitResource
 	Limit    uint32
 }
 
+// Error returns the receiver's error value.
 func (failure *LimitError) Error() string {
 	return fmt.Sprintf("%s: %s exceed %d", ErrSourceLimited, failure.Resource, failure.Limit)
 }
 
+// Unwrap returns the receiver's unwrap value.
 func (failure *LimitError) Unwrap() error {
 	return ErrSourceLimited
 }
 
-func (failure *Failure) Error() string {
+// Error returns the receiver's error value.
+func (failure *FailureError) Error() string {
 	return fmt.Sprintf("%s: %v", failure.Operation, failure.cause)
 }
 
-func (failure *Failure) Unwrap() error {
+// Unwrap returns the receiver's unwrap value.
+func (failure *FailureError) Unwrap() error {
 	return failure.cause
 }
 
@@ -71,7 +84,7 @@ func sourceFailure(operation FailureOperation, err error) error {
 	if err == nil {
 		return nil
 	}
-	var existing *Failure
+	var existing *FailureError
 	if errors.As(err, &existing) {
 		return err
 	}
@@ -88,7 +101,7 @@ func sourceFailure(operation FailureOperation, err error) error {
 	case isStartFailure(err):
 		kind = FailureUnavailable
 	}
-	return &Failure{Kind: kind, Operation: operation, cause: err}
+	return &FailureError{Kind: kind, Operation: operation, cause: err}
 }
 
 func isStartFailure(err error) bool {

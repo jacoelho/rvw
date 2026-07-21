@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 )
 
+// MaxSearchQueryBytes defines the supported search query bytes limit.
 const (
 	MaxSearchQueryBytes          = 64 << 10
 	MaxSearchHits                = 100_000
@@ -17,10 +18,13 @@ const (
 	searchHitRetainedBytes       = 32
 )
 
+// ErrInvalidSearch identifies an invalid search failure.
 var ErrInvalidSearch = errors.New("invalid search transition")
 
+// SearchQuery represents search query.
 type SearchQuery string
 
+// NewSearchQuery constructs and validates search query.
 func NewSearchQuery(value string) (SearchQuery, error) {
 	if value == "" {
 		return "", fmt.Errorf("%w: query must not be empty", ErrInvalidSearch)
@@ -39,19 +43,24 @@ func NewSearchQuery(value string) (SearchQuery, error) {
 	return SearchQuery(value), nil
 }
 
+// String returns the receiver's string value.
 func (query SearchQuery) String() string {
 	return string(query)
 }
 
+// SearchScope describes search scope.
 type SearchScope uint8
 
+// SearchCurrentFile identifies a supported search current file value.
 const (
 	SearchCurrentFile SearchScope = iota + 1
 	SearchAllFiles
 )
 
+// SearchStatus describes search status.
 type SearchStatus uint8
 
+// SearchIdle identifies a supported search idle value.
 const (
 	SearchIdle SearchStatus = iota + 1
 	SearchActive
@@ -63,6 +72,7 @@ const (
 	SearchSuperseded
 )
 
+// SearchHit represents search hit.
 type SearchHit struct {
 	fileID    FileID
 	patchLine uint32
@@ -73,14 +83,17 @@ type SearchHit struct {
 	byteEnd   uint32
 }
 
+// FileID returns the receiver's file id value.
 func (hit SearchHit) FileID() FileID {
 	return hit.fileID
 }
 
+// PatchLine returns the receiver's patch line value.
 func (hit SearchHit) PatchLine() uint32 {
 	return hit.patchLine
 }
 
+// Hunk returns the receiver's hunk value.
 func (hit SearchHit) Hunk() (HunkID, bool) {
 	if hit.hunk == noPatchHunk {
 		return HunkID{}, false
@@ -93,6 +106,7 @@ func (hit SearchHit) Hunk() (HunkID, bool) {
 	return id, err == nil
 }
 
+// OldLine returns the receiver's old line value.
 func (hit SearchHit) OldLine() (LineNumber, bool) {
 	if hit.oldLine == 0 {
 		return 0, false
@@ -100,6 +114,7 @@ func (hit SearchHit) OldLine() (LineNumber, bool) {
 	return LineNumber(hit.oldLine), true
 }
 
+// NewLine constructs and validates line.
 func (hit SearchHit) NewLine() (LineNumber, bool) {
 	if hit.newLine == 0 {
 		return 0, false
@@ -107,58 +122,63 @@ func (hit SearchHit) NewLine() (LineNumber, bool) {
 	return LineNumber(hit.newLine), true
 }
 
+// ByteRange returns the receiver's byte range value.
 func (hit SearchHit) ByteRange() (uint32, uint32) {
 	return hit.byteStart, hit.byteEnd
 }
 
+// SearchSummary describes search summary.
 type SearchSummary struct {
-	Status           SearchStatus
-	Operation        OperationID
 	Query            SearchQuery
+	Detail           OperationDetail
+	Operation        OperationID
 	HitCount         int
 	UnavailableFiles uint32
-	Detail           OperationDetail
+	Status           SearchStatus
 }
 
 type searchState struct {
-	status           SearchStatus
-	operation        OperationID
 	query            SearchQuery
-	hits             []SearchHit
-	unavailableFiles uint32
 	detail           OperationDetail
+	hits             []SearchHit
+	operation        OperationID
+	unavailableFiles uint32
+	status           SearchStatus
 }
 
+// SearchRequest describes search request.
 type SearchRequest struct {
+	Query     SearchQuery
 	Operation OperationID
 	Workspace WorkspaceRevision
 	Source    SourceID
-	Query     SearchQuery
+	File      FileID
 	Context   PatchContext
 	Scope     SearchScope
-	File      FileID
 }
 
+// SearchResult describes search result.
 type SearchResult struct {
-	Operation OperationID
-	Workspace WorkspaceRevision
-	Source    SourceID
-	Status    SearchStatus
-
-	hits             []SearchHit
-	unavailableFiles uint32
 	detail           OperationDetail
-}
-
-type SearchResultDescriptor struct {
+	hits             []SearchHit
 	Operation        OperationID
 	Workspace        WorkspaceRevision
 	Source           SourceID
+	unavailableFiles uint32
 	Status           SearchStatus
-	UnavailableFiles uint32
-	Detail           OperationDetail
 }
 
+// SearchResultDescriptor describes search result descriptor.
+type SearchResultDescriptor struct {
+	Detail           OperationDetail
+	Operation        OperationID
+	Workspace        WorkspaceRevision
+	Source           SourceID
+	UnavailableFiles uint32
+	Status           SearchStatus
+}
+
+// TakeSearchResult takes ownership of search result.
 func TakeSearchResult(
 	descriptor SearchResultDescriptor,
 	hits []SearchHit,
@@ -186,18 +206,22 @@ func TakeSearchResult(
 	}, nil
 }
 
+// HitCount returns the receiver's hit count value.
 func (result SearchResult) HitCount() int {
 	return len(result.hits)
 }
 
+// UnavailableFiles returns the receiver's unavailable files value.
 func (result SearchResult) UnavailableFiles() uint32 {
 	return result.unavailableFiles
 }
 
+// Detail returns the receiver's detail value.
 func (result SearchResult) Detail() OperationDetail {
 	return result.detail
 }
 
+// StartSearch performs the start search operation.
 func (review Review) StartSearch(
 	id OperationID,
 	query SearchQuery,
@@ -236,6 +260,7 @@ func (review Review) StartSearch(
 	}, nil
 }
 
+// ApplySearch performs the apply search operation.
 func (review Review) ApplySearch(result SearchResult) (Review, error) {
 	if review.search.status != SearchActive ||
 		review.search.operation != result.Operation ||
@@ -260,6 +285,7 @@ func (review Review) ApplySearch(result SearchResult) (Review, error) {
 	return next, nil
 }
 
+// SupersedeSearch returns the receiver's supersede search value.
 func (review Review) SupersedeSearch() Review {
 	if review.search.status != SearchActive {
 		return review
@@ -271,6 +297,7 @@ func (review Review) SupersedeSearch() Review {
 	return next
 }
 
+// ClearSearch returns the receiver's clear search value.
 func (review Review) ClearSearch() Review {
 	if review.search.status == SearchIdle {
 		return review
@@ -280,6 +307,7 @@ func (review Review) ClearSearch() Review {
 	return next
 }
 
+// SearchSummary returns the receiver's search summary value.
 func (review Review) SearchSummary() SearchSummary {
 	return SearchSummary{
 		Status:           review.search.status,
@@ -291,6 +319,7 @@ func (review Review) SearchSummary() SearchSummary {
 	}
 }
 
+// SearchHit performs the search hit operation.
 func (review Review) SearchHit(index int) (SearchHit, bool) {
 	if index < 0 || index >= len(review.search.hits) {
 		return SearchHit{}, false
@@ -298,6 +327,7 @@ func (review Review) SearchHit(index int) (SearchHit, bool) {
 	return review.search.hits[index], true
 }
 
+// SearchHits performs the search hits operation.
 func (review Review) SearchHits(start, count int) []SearchHit {
 	if start < 0 || start >= len(review.search.hits) || count <= 0 {
 		return nil
@@ -310,11 +340,13 @@ func terminalSearchStatus(status SearchStatus) bool {
 	return status >= SearchComplete && status <= SearchCancelled
 }
 
+// PreparedSearchQuery represents prepared search query.
 type PreparedSearchQuery struct {
 	bytes  []byte
 	prefix []uint32
 }
 
+// PrepareSearchQuery prepares search query.
 func PrepareSearchQuery(query SearchQuery) PreparedSearchQuery {
 	bytes := []byte(query)
 	prepared := PreparedSearchQuery{
@@ -334,18 +366,21 @@ func PrepareSearchQuery(query SearchQuery) PreparedSearchQuery {
 	return prepared
 }
 
+// SearchCursor represents search cursor.
 type SearchCursor struct {
 	line    uint32
 	offset  uint32
 	matched uint32
 }
 
+// SearchBatch represents search batch.
 type SearchBatch struct {
-	Cursor SearchCursor
 	Hits   []SearchHit
+	Cursor SearchCursor
 	Done   bool
 }
 
+// ScanSearchBatch scans search batch.
 func ScanSearchBatch(
 	patch *PreparedPatch,
 	fileID FileID,
@@ -405,7 +440,7 @@ func ScanSearchBatch(
 					hunk:      patch.lineHunks[lineIndex],
 					oldLine:   patch.oldLines[lineIndex],
 					newLine:   patch.newLines[lineIndex],
-					byteStart: end - uint32(len(query.bytes)),
+					byteStart: end - uint32FromInt(len(query.bytes)),
 					byteEnd:   end,
 				})
 				result.Cursor.line++
@@ -422,7 +457,7 @@ func ScanSearchBatch(
 
 func (patch *PreparedPatch) lineBytes(line uint32) []byte {
 	start := patch.lineOffsets[line].Uint32()
-	end := uint32(len(patch.text))
+	end := uint32FromInt(len(patch.text))
 	if int(line)+1 < len(patch.lineOffsets) {
 		end = patch.lineOffsets[line+1].Uint32()
 	}

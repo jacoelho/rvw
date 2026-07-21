@@ -1,3 +1,4 @@
+// Package delivery writes review output to local destinations.
 package delivery
 
 import (
@@ -12,39 +13,51 @@ import (
 	"github.com/jacoelho/rvw/internal/subprocess"
 )
 
-const MaxPayloadBytes int64 = 16 << 20
+// MaxPayloadBytes defines the supported payload bytes limit.
+const (
+	MaxPayloadBytes int64 = 16 << 20
+	osLinux               = "linux"
+)
 
+// ErrUnavailable identifies an unavailable failure.
 var (
 	ErrUnavailable = errors.New("delivery destination is unavailable")
 	ErrBusy        = errors.New("delivery destination already has an active write")
 	ErrUnknown     = errors.New("delivery may have committed and is fenced")
 )
 
+// Destination describes destination.
 type Destination uint8
 
+// DestinationClipboard identifies a supported destination clipboard value.
 const (
 	DestinationClipboard Destination = iota + 1
 	DestinationStdout
 )
 
+// CommitState describes commit state.
 type CommitState uint8
 
+// CommitFailedBeforeWrite identifies a supported commit failed before write value.
 const (
 	CommitFailedBeforeWrite CommitState = iota + 1
 	CommitSucceeded
 	CommitUnknown
 )
 
+// Outcome describes outcome.
 type Outcome struct {
 	Destination Destination
 	State       CommitState
 	Bytes       int64
 }
 
+// Payload represents payload.
 type Payload struct {
 	body string
 }
 
+// NewPayload constructs and validates payload.
 func NewPayload(body string) (Payload, error) {
 	if int64(len(body)) > MaxPayloadBytes {
 		return Payload{}, fmt.Errorf("delivery payload exceeds %d bytes", MaxPayloadBytes)
@@ -52,6 +65,7 @@ func NewPayload(body string) (Payload, error) {
 	return Payload{body: body}, nil
 }
 
+// Bytes returns the receiver's bytes value.
 func (payload Payload) Bytes() int64 {
 	return int64(len(payload.body))
 }
@@ -61,13 +75,14 @@ type destinationState struct {
 	unknown bool
 }
 
+// Manager represents manager.
 type Manager struct {
-	runner *subprocess.Runner
-
-	mu           sync.Mutex
+	runner       *subprocess.Runner
 	destinations map[Destination]destinationState
+	mu           sync.Mutex
 }
 
+// NewManager constructs and validates manager.
 func NewManager() (*Manager, error) {
 	runner, err := subprocess.NewRunner(subprocess.DefaultConcurrency)
 	if err != nil {
@@ -79,6 +94,7 @@ func NewManager() (*Manager, error) {
 	}, nil
 }
 
+// Deliver performs the deliver operation.
 func (manager *Manager) Deliver(
 	ctx context.Context,
 	destination Destination,
@@ -139,10 +155,12 @@ func (manager *Manager) Deliver(
 	}, nil
 }
 
+// Escalate performs the escalate operation.
 func (manager *Manager) Escalate() {
 	manager.runner.Escalate()
 }
 
+// Close performs the close operation.
 func (manager *Manager) Close(ctx context.Context) error {
 	return manager.runner.Shutdown(ctx)
 }
@@ -176,7 +194,7 @@ func clipboardCommand() (string, []string, error) {
 	switch runtime.GOOS {
 	case "darwin":
 		return "pbcopy", nil, nil
-	case "linux":
+	case osLinux:
 		if os.Getenv("WAYLAND_DISPLAY") != "" {
 			return "wl-copy", nil, nil
 		}

@@ -24,16 +24,16 @@ const (
 )
 
 type rawWorktreeEntry struct {
-	path []byte
+	oid  *review.ObjectID
 	mode review.FileMode
 	file string
-	oid  *review.ObjectID
+	path []byte
 }
 
 type indexUpdate struct {
-	path   []byte
 	mode   review.FileMode
 	object review.ObjectID
+	path   []byte
 	remove bool
 }
 
@@ -49,17 +49,17 @@ func (service *Service) synthesizeRawWorktree(
 		ctx,
 		root,
 		environment,
-		[]string{"ls-files", "--stage", "-z"},
+		[]string{gitLSFiles, gitStage, "-z"},
 	)
 	if err != nil {
 		return "", fmt.Errorf("read live Git index: %w", err)
 	}
-	if err := service.rejectWorktreeIndexFlags(ctx, root, environment); err != nil {
-		return "", err
+	if indexFlagErr := service.rejectWorktreeIndexFlags(ctx, root, environment); indexFlagErr != nil {
+		return "", indexFlagErr
 	}
 	privateEnvironment, err := initializePrivateIndex(
-		service,
 		ctx,
+		service,
 		root,
 		environment,
 		workspace,
@@ -79,7 +79,7 @@ func (service *Service) synthesizeRawWorktree(
 			ctx,
 			root,
 			environment,
-			[]string{"ls-files", "--others", "-z", "--"},
+			[]string{gitLSFiles, "--others", "-z", "--"},
 		)
 		if err != nil {
 			return "", fmt.Errorf("read untracked files: %w", err)
@@ -90,8 +90,8 @@ func (service *Service) synthesizeRawWorktree(
 	if err != nil {
 		return "", err
 	}
-	if err := service.rejectWorktreeFilterDrivers(ctx, root, environment, paths); err != nil {
-		return "", err
+	if filterErr := service.rejectWorktreeFilterDrivers(ctx, root, environment, paths); filterErr != nil {
+		return "", filterErr
 	}
 	raw, err = stageRawWorktreeEntries(ctx, root, workspace, raw)
 	if err != nil {
@@ -101,35 +101,19 @@ func (service *Service) synthesizeRawWorktree(
 	if err != nil {
 		return "", err
 	}
-	if err := service.rejectWorktreeFilterDrivers(ctx, root, environment, paths); err != nil {
-		return "", err
+	if filterErr := service.rejectWorktreeFilterDrivers(ctx, root, environment, paths); filterErr != nil {
+		return "", filterErr
 	}
 
-	currentIndex, err := service.worktreeInventory(
+	if verifyErr := service.verifyWorktreeInventories(
 		ctx,
 		root,
 		environment,
-		[]string{"ls-files", "--stage", "-z"},
-	)
-	if err != nil {
-		return "", fmt.Errorf("verify live Git index: %w", err)
-	}
-	if !bytes.Equal(liveIndex, currentIndex) {
-		return "", errors.New("live Git index changed while snapshotting worktree")
-	}
-	if contents == worktreeWithUntracked {
-		currentUntracked, err := service.worktreeInventory(
-			ctx,
-			root,
-			environment,
-			[]string{"ls-files", "--others", "-z", "--"},
-		)
-		if err != nil {
-			return "", fmt.Errorf("verify untracked files: %w", err)
-		}
-		if !bytes.Equal(untracked, currentUntracked) {
-			return "", errors.New("untracked file inventory changed while snapshotting worktree")
-		}
+		contents,
+		liveIndex,
+		untracked,
+	); verifyErr != nil {
+		return "", verifyErr
 	}
 
 	updates, err := service.hashRawWorktreeEntries(
@@ -145,14 +129,14 @@ func (service *Service) synthesizeRawWorktree(
 	slices.SortFunc(updates, func(left, right indexUpdate) int {
 		return bytes.Compare(left.path, right.path)
 	})
-	if err := service.applyIndexUpdates(
+	if applyErr := service.applyIndexUpdates(
 		ctx,
 		root,
 		privateEnvironment,
 		base,
 		updates,
-	); err != nil {
-		return "", err
+	); applyErr != nil {
+		return "", applyErr
 	}
 	tree, err := service.writeIndexTree(ctx, root, privateEnvironment)
 	if err != nil {
@@ -164,6 +148,44 @@ func (service *Service) synthesizeRawWorktree(
 	return tree, nil
 }
 
+func (service *Service) verifyWorktreeInventories(
+	ctx context.Context,
+	root RepositoryPath,
+	environment map[string]string,
+	contents worktreeContents,
+	liveIndex []byte,
+	untracked []byte,
+) error {
+	currentIndex, err := service.worktreeInventory(
+		ctx,
+		root,
+		environment,
+		[]string{gitLSFiles, gitStage, "-z"},
+	)
+	if err != nil {
+		return fmt.Errorf("verify live Git index: %w", err)
+	}
+	if !bytes.Equal(liveIndex, currentIndex) {
+		return errors.New("live Git index changed while snapshotting worktree")
+	}
+	if contents != worktreeWithUntracked {
+		return nil
+	}
+	currentUntracked, err := service.worktreeInventory(
+		ctx,
+		root,
+		environment,
+		[]string{gitLSFiles, "--others", "-z", "--"},
+	)
+	if err != nil {
+		return fmt.Errorf("verify untracked files: %w", err)
+	}
+	if !bytes.Equal(untracked, currentUntracked) {
+		return errors.New("untracked file inventory changed while snapshotting worktree")
+	}
+	return nil
+}
+
 func (service *Service) rejectWorktreeIndexFlags(
 	ctx context.Context,
 	root RepositoryPath,
@@ -173,7 +195,7 @@ func (service *Service) rejectWorktreeIndexFlags(
 		ctx,
 		root,
 		environment,
-		[]string{"ls-files", "-v", "-z", "--"},
+		[]string{gitLSFiles, "-v", "-z", "--"},
 	)
 	if err != nil {
 		return fmt.Errorf("inspect worktree index flags: %w", err)
@@ -198,8 +220,8 @@ func (service *Service) rejectWorktreeIndexFlags(
 }
 
 func initializePrivateIndex(
-	service *Service,
 	ctx context.Context,
+	service *Service,
 	root RepositoryPath,
 	environment map[string]string,
 	workspace string,
@@ -215,7 +237,7 @@ func initializePrivateIndex(
 		ctx,
 		root.String(),
 		privateEnvironment,
-		[]string{"update-index", "-z", "--index-info"},
+		[]string{gitUpdateIndex, "-z", gitIndexInfo},
 		liveIndex,
 		nil,
 		64<<10,
@@ -255,8 +277,8 @@ func (service *Service) worktreeChanges(
 		root.String(),
 		environment,
 		[]string{
-			"diff-files", "--raw", "--no-abbrev", "-z", "--no-renames",
-			"--no-ext-diff", "--no-textconv",
+			"diff-files", gitRaw, gitNoAbbrev, "-z", gitNoRenames,
+			gitNoExtDiff, gitNoTextconv,
 		},
 		nil,
 		maxWorktreeInventoryBytes,
@@ -331,12 +353,12 @@ func validateRepositoryRelativePath(path []byte) error {
 		return err
 	}
 	if path[0] == '/' {
-		return errors.New("Git path is absolute")
+		return errors.New("git path is absolute")
 	}
 	for component := range bytes.SplitSeq(path, []byte{'/'}) {
 		if len(component) == 0 || bytes.Equal(component, []byte(".")) ||
 			bytes.Equal(component, []byte("..")) {
-			return errors.New("Git path contains an invalid component")
+			return errors.New("git path contains an invalid component")
 		}
 	}
 	return nil
@@ -364,7 +386,7 @@ func (service *Service) rejectWorktreeFilterDrivers(
 			ctx,
 			root.String(),
 			environment,
-			[]string{"check-attr", "-z", "--stdin", "filter"},
+			[]string{"check-attr", "-z", gitStdin, "filter"},
 			input,
 			nil,
 			int64(len(input))*3+64,
@@ -384,19 +406,19 @@ func validateFilterAttributeOutput(output []byte, paths [][]byte) error {
 	for index, path := range paths {
 		actualPath, rest, ok := nextNULTerminated(output)
 		if !ok {
-			return errors.New("Git filter attribute output omits a path")
+			return errors.New("git filter attribute output omits a path")
 		}
 		attribute, rest, ok := nextNULTerminated(rest)
 		if !ok {
-			return errors.New("Git filter attribute output omits an attribute")
+			return errors.New("git filter attribute output omits an attribute")
 		}
 		value, rest, ok := nextNULTerminated(rest)
 		if !ok {
-			return errors.New("Git filter attribute output omits a value")
+			return errors.New("git filter attribute output omits a value")
 		}
 		output = rest
 		if !bytes.Equal(actualPath, path) || !bytes.Equal(attribute, []byte("filter")) {
-			return fmt.Errorf("Git returned an unexpected filter attribute at path %d", index+1)
+			return fmt.Errorf("git returned an unexpected filter attribute at path %d", index+1)
 		}
 		if !bytes.Equal(value, []byte("unspecified")) &&
 			!bytes.Equal(value, []byte("unset")) {
@@ -406,7 +428,7 @@ func validateFilterAttributeOutput(output []byte, paths [][]byte) error {
 		}
 	}
 	if len(output) != 0 {
-		return errors.New("Git filter attribute output contains extra records")
+		return errors.New("git filter attribute output contains extra records")
 	}
 	return nil
 }
@@ -416,7 +438,7 @@ func stageRawWorktreeEntries(
 	root RepositoryPath,
 	workspace string,
 	entries []rawWorktreeEntry,
-) ([]rawWorktreeEntry, error) {
+) (result []rawWorktreeEntry, returnErr error) {
 	staging := filepath.Join(workspace, "raw-blobs")
 	if strings.ContainsAny(staging, "\r\n") {
 		return nil, errors.New("raw blob staging path contains a line break")
@@ -424,6 +446,13 @@ func stageRawWorktreeEntries(
 	if err := os.Mkdir(staging, 0o700); err != nil {
 		return nil, fmt.Errorf("create raw blob staging directory: %w", err)
 	}
+	stagingRoot, err := os.OpenRoot(staging)
+	if err != nil {
+		return nil, fmt.Errorf("open raw blob staging directory: %w", err)
+	}
+	defer func() {
+		returnErr = errors.Join(returnErr, stagingRoot.Close())
+	}()
 	var total int64
 	for index := range entries {
 		if err := context.Cause(ctx); err != nil {
@@ -448,8 +477,8 @@ func stageRawWorktreeEntries(
 			)
 		}
 		name := "blob-" + strconv.Itoa(index)
-		file, err := os.OpenFile(
-			filepath.Join(staging, name),
+		file, err := stagingRoot.OpenFile(
+			name,
 			os.O_WRONLY|os.O_CREATE|os.O_EXCL,
 			0o600,
 		)
@@ -457,8 +486,10 @@ func stageRawWorktreeEntries(
 			return nil, fmt.Errorf("create raw blob staging file: %w", err)
 		}
 		if _, err := file.Write(body); err != nil {
-			_ = file.Close()
-			return nil, fmt.Errorf("write raw blob staging file: %w", err)
+			return nil, errors.Join(
+				fmt.Errorf("write raw blob staging file: %w", err),
+				file.Close(),
+			)
 		}
 		if err := file.Close(); err != nil {
 			return nil, fmt.Errorf("close raw blob staging file: %w", err)
@@ -472,7 +503,7 @@ func stageRawWorktreeEntries(
 func readRawWorktreePath(
 	path string,
 	indexMode review.FileMode,
-) ([]byte, review.FileMode, error) {
+) (result []byte, resultMode review.FileMode, returnErr error) {
 	before, err := os.Lstat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -491,7 +522,9 @@ func readRawWorktreePath(
 			return nil, review.FileMode(""), err
 		}
 		file := os.NewFile(uintptr(descriptor), path)
-		defer file.Close()
+		defer func() {
+			returnErr = errors.Join(returnErr, file.Close())
+		}()
 		opened, err := file.Stat()
 		if err != nil {
 			return nil, review.FileMode(""), err
@@ -546,7 +579,7 @@ func sameWorktreeFile(left, right os.FileInfo) bool {
 	return right != nil && os.SameFile(left, right) &&
 		left.Mode() == right.Mode() &&
 		left.Size() == right.Size() &&
-		left.ModTime() == right.ModTime()
+		left.ModTime().Equal(right.ModTime())
 }
 
 func (service *Service) hashRawWorktreeEntries(
@@ -582,7 +615,7 @@ func (service *Service) hashRawWorktreeEntries(
 		lines = strings.Split(strings.TrimSuffix(string(result.Stdout), "\n"), "\n")
 		if len(lines) != count {
 			return nil, fmt.Errorf(
-				"Git returned %d raw blob identities, want %d",
+				"git returned %d raw blob identities, want %d",
 				len(lines),
 				count,
 			)
@@ -676,7 +709,7 @@ func (service *Service) worktreeGitlinkHead(
 		ctx,
 		directory,
 		gitlinkEnvironment,
-		[]string{"rev-parse", "--verify", "HEAD^{commit}"},
+		[]string{gitRevParse, gitVerify, "HEAD^{commit}"},
 		nil,
 		128,
 	)
@@ -729,7 +762,7 @@ func (service *Service) applyIndexUpdates(
 			ctx,
 			root.String(),
 			environment,
-			[]string{"update-index", "-z", "--index-info"},
+			[]string{gitUpdateIndex, "-z", gitIndexInfo},
 			input,
 			nil,
 			64<<10,

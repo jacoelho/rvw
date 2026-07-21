@@ -42,24 +42,28 @@ func main() {
 
 type runRequest struct {
 	ctx            context.Context
-	args           []string
-	environment    []string
-	cwd            string
 	stdin          io.Reader
 	stdout         io.Writer
 	stderr         io.Writer
+	cwd            string
+	args           []string
+	environment    []string
 	stdoutTerminal bool
 }
 
 func run(request runRequest) int {
 	invocation, err := parseArgs(request.args)
 	if err != nil {
-		writeStartupError(request.stderr, err)
+		if writeErr := writeStartupError(request.stderr, err); writeErr != nil {
+			return 1
+		}
 		return 1
 	}
 	if invocation.Help {
-		if _, err := io.WriteString(request.stdout, helpText(invocation.HelpTopic)); err != nil {
-			writeStartupError(request.stderr, err)
+		if _, writeErr := io.WriteString(request.stdout, helpText(invocation.HelpTopic)); writeErr != nil {
+			if reportErr := writeStartupError(request.stderr, writeErr); reportErr != nil {
+				return 1
+			}
 			return 1
 		}
 		return 0
@@ -79,7 +83,9 @@ func run(request runRequest) int {
 		termination:    termination,
 	})
 	if err != nil {
-		writeStartupError(request.stderr, err)
+		if writeErr := writeStartupError(request.stderr, err); writeErr != nil {
+			return 1
+		}
 		return 1
 	}
 	return 0
@@ -87,13 +93,13 @@ func run(request runRequest) int {
 
 type executeRequest struct {
 	ctx            context.Context
-	invocation     Invocation
-	environment    []string
-	cwd            string
 	stdin          io.Reader
 	stdout         io.Writer
-	stdoutTerminal bool
 	termination    *terminationOwner
+	cwd            string
+	environment    []string
+	invocation     Invocation
+	stdoutTerminal bool
 }
 
 func execute(request executeRequest) (returnErr error) {
@@ -124,9 +130,9 @@ func execute(request executeRequest) (returnErr error) {
 
 	projectRoot := request.cwd
 	if request.invocation.Target.Kind() != source.TargetPullRequest {
-		root, err := service.RepositoryRoot(request.ctx)
-		if err != nil {
-			return err
+		root, rootErr := service.RepositoryRoot(request.ctx)
+		if rootErr != nil {
+			return rootErr
 		}
 		projectRoot = root.String()
 	}
@@ -190,10 +196,10 @@ type terminationOwner struct {
 }
 
 type terminationCommand struct {
-	id       uint64
 	escalate func()
-	remove   bool
 	ready    chan struct{}
+	id       uint64
+	remove   bool
 }
 
 func newTerminationOwner(cancel context.CancelFunc) *terminationOwner {
@@ -239,6 +245,7 @@ func (owner *terminationOwner) run() {
 	}
 }
 
+// RegisterEscalator performs the register escalator operation.
 func (owner *terminationOwner) RegisterEscalator(escalate func()) func() {
 	if owner == nil || escalate == nil {
 		return func() {}
@@ -255,6 +262,7 @@ func (owner *terminationOwner) RegisterEscalator(escalate func()) func() {
 	}
 }
 
+// Received reports the receiver's received state.
 func (owner *terminationOwner) Received() bool {
 	if owner == nil {
 		return false
@@ -267,6 +275,7 @@ func (owner *terminationOwner) Received() bool {
 	}
 }
 
+// Close performs the close operation.
 func (owner *terminationOwner) Close() {
 	if owner == nil {
 		return
@@ -307,8 +316,9 @@ func sourceOptions(resolved config.Config) (source.OpenOptions, error) {
 	return options, nil
 }
 
-func writeStartupError(writer io.Writer, err error) {
-	_, _ = fmt.Fprintf(writer, "rvw: %s\n", terminalSafeError(err))
+func writeStartupError(writer io.Writer, err error) error {
+	_, writeErr := fmt.Fprintf(writer, "rvw: %s\n", terminalSafeError(err))
+	return writeErr
 }
 
 func terminalSafeError(err error) string {
@@ -318,7 +328,7 @@ func terminalSafeError(err error) string {
 	value := err.Error()
 	var safe []byte
 	safe = make([]byte, 0, min(len(value), int(maxErrorBytes)))
-	for len(value) > 0 && int64(len(safe)) < maxErrorBytes {
+	for value != "" && int64(len(safe)) < maxErrorBytes {
 		character, size := utf8.DecodeRuneInString(value)
 		if character == utf8.RuneError && size == 1 {
 			safe = appendBounded(safe, []byte(`\x`+hexByte(value[0])))
@@ -342,7 +352,7 @@ func terminalSafeError(err error) string {
 
 func terminalSafePayload(value string) (string, error) {
 	safe := make([]byte, 0, min(len(value), int(maxInteractiveStdoutSafeBytes)))
-	for len(value) > 0 {
+	for value != "" {
 		character, size := utf8.DecodeRuneInString(value)
 		var encoded string
 		switch {

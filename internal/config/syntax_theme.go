@@ -56,7 +56,10 @@ func parseTextMateTheme(contents []byte) (map[SyntaxColor]Color, error) {
 		if !ok {
 			return nil, errors.New("TextMate theme setting is not a dictionary")
 		}
-		scope, _ := entry["scope"].(string)
+		scope, ok := entry["scope"].(string)
+		if !ok {
+			continue
+		}
 		settings, ok := entry["settings"].(map[string]any)
 		if !ok {
 			continue
@@ -69,7 +72,7 @@ func parseTextMateTheme(contents []byte) (map[SyntaxColor]Color, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid TextMate foreground: %w", err)
 		}
-		for _, selector := range strings.Split(scope, ",") {
+		for selector := range strings.SplitSeq(scope, ",") {
 			selector = strings.TrimSpace(selector)
 			switch {
 			case strings.HasPrefix(selector, "comment"):
@@ -99,69 +102,83 @@ func decodePlistValue(
 	}
 	switch start.Name.Local {
 	case "dict":
-		result := make(map[string]any)
-		for {
-			token, err := nextXMLContent(decoder)
-			if err != nil {
-				return nil, err
-			}
-			if end, ok := token.(xml.EndElement); ok {
-				if end.Name.Local != "dict" {
-					return nil, errors.New("TextMate dictionary ended unexpectedly")
-				}
-				return result, nil
-			}
-			keyStart, ok := token.(xml.StartElement)
-			if !ok || keyStart.Name.Local != "key" {
-				return nil, errors.New("TextMate dictionary expected a key")
-			}
-			key, err := decodeXMLText(decoder, keyStart)
-			if err != nil {
-				return nil, err
-			}
-			if _, duplicate := result[key]; duplicate {
-				return nil, fmt.Errorf("TextMate dictionary repeats key %q", key)
-			}
-			valueStart, err := nextXMLStart(decoder)
-			if err != nil {
-				return nil, err
-			}
-			result[key], err = decodePlistValue(decoder, valueStart, depth+1, nodes)
-			if err != nil {
-				return nil, err
-			}
-		}
+		return decodePlistDictionary(decoder, depth, nodes)
 	case "array":
-		var result []any
-		for {
-			token, err := nextXMLContent(decoder)
-			if err != nil {
-				return nil, err
-			}
-			if end, ok := token.(xml.EndElement); ok {
-				if end.Name.Local != "array" {
-					return nil, errors.New("TextMate array ended unexpectedly")
-				}
-				return result, nil
-			}
-			valueStart, ok := token.(xml.StartElement)
-			if !ok {
-				return nil, errors.New("TextMate array value is malformed")
-			}
-			value, err := decodePlistValue(decoder, valueStart, depth+1, nodes)
-			if err != nil {
-				return nil, err
-			}
-			result = append(result, value)
-		}
+		return decodePlistArray(decoder, depth, nodes)
 	case "string", "key", "integer", "real", "date", "data":
 		return decodeXMLText(decoder, start)
 	case "true":
-		return true, requireXMLEnd(decoder, "true")
+		if err := requireXMLEnd(decoder, "true"); err != nil {
+			return nil, err
+		}
+		return true, nil
 	case "false":
-		return false, requireXMLEnd(decoder, "false")
+		if err := requireXMLEnd(decoder, "false"); err != nil {
+			return nil, err
+		}
+		return false, nil
 	default:
 		return nil, fmt.Errorf("unsupported TextMate plist element %q", start.Name.Local)
+	}
+}
+
+func decodePlistDictionary(decoder *xml.Decoder, depth int, nodes *int) (map[string]any, error) {
+	result := make(map[string]any)
+	for {
+		token, err := nextXMLContent(decoder)
+		if err != nil {
+			return nil, err
+		}
+		if end, ok := token.(xml.EndElement); ok {
+			if end.Name.Local != "dict" {
+				return nil, errors.New("TextMate dictionary ended unexpectedly")
+			}
+			return result, nil
+		}
+		keyStart, ok := token.(xml.StartElement)
+		if !ok || keyStart.Name.Local != "key" {
+			return nil, errors.New("TextMate dictionary expected a key")
+		}
+		key, err := decodeXMLText(decoder, keyStart)
+		if err != nil {
+			return nil, err
+		}
+		if _, duplicate := result[key]; duplicate {
+			return nil, fmt.Errorf("TextMate dictionary repeats key %q", key)
+		}
+		valueStart, err := nextXMLStart(decoder)
+		if err != nil {
+			return nil, err
+		}
+		result[key], err = decodePlistValue(decoder, valueStart, depth+1, nodes)
+		if err != nil {
+			return nil, err
+		}
+	}
+}
+
+func decodePlistArray(decoder *xml.Decoder, depth int, nodes *int) ([]any, error) {
+	var result []any
+	for {
+		token, err := nextXMLContent(decoder)
+		if err != nil {
+			return nil, err
+		}
+		if end, ok := token.(xml.EndElement); ok {
+			if end.Name.Local != "array" {
+				return nil, errors.New("TextMate array ended unexpectedly")
+			}
+			return result, nil
+		}
+		valueStart, ok := token.(xml.StartElement)
+		if !ok {
+			return nil, errors.New("TextMate array value is malformed")
+		}
+		value, err := decodePlistValue(decoder, valueStart, depth+1, nodes)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, value)
 	}
 }
 

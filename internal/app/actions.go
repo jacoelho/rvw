@@ -1,3 +1,4 @@
+// Package app implements rvw's interactive terminal application.
 package app
 
 import (
@@ -13,18 +14,50 @@ const (
 )
 
 func (model *Model) applyAction(action KeyAction, repeat int) tea.Cmd {
-	if model.belowMinimum() {
-		switch action {
-		case KeyActionQuit, KeyActionInterrupt:
-			if model.overlay == OverlayConfirm {
-				return nil
-			}
-			return model.requestQuit()
+	if command, handled := model.applyRestrictedAction(action, repeat); handled {
+		return command
+	}
+	if model.foreground.reloadActive() && !actionAllowedDuringReload(action) {
+		model.notice = &Notice{
+			Kind: NoticeInformation,
+			Text: "reload is active; this action is temporarily unavailable",
 		}
 		return nil
 	}
+	if actionSupersedesDiffTarget(action) {
+		model.foreground.clearPendingDiffTarget()
+	}
+	if command, handled := model.applyNavigationAction(action, repeat); handled {
+		return command
+	}
+	if command, handled := model.applyReviewAction(action); handled {
+		return command
+	}
+	if command, handled := model.applyViewAction(action); handled {
+		return command
+	}
+	if command, handled := model.applyCommandAction(action); handled {
+		return command
+	}
+	model.notice = &Notice{
+		Kind: NoticeWarning,
+		Text: NoticeText("unsupported action: " + action.String()),
+	}
+	return nil
+}
+
+func (model *Model) applyRestrictedAction(action KeyAction, repeat int) (tea.Cmd, bool) {
+	if model.belowMinimum() {
+		if action == KeyActionQuit || action == KeyActionInterrupt {
+			if model.overlay == OverlayConfirm {
+				return nil, true
+			}
+			return model.requestQuit(), true
+		}
+		return nil, true
+	}
 	if model.overlay == OverlayConfirm {
-		return model.applyConfirmationAction(action)
+		return model.applyConfirmationAction(action), true
 	}
 	if model.mode == ModeCommentEdit {
 		switch action {
@@ -32,8 +65,9 @@ func (model *Model) applyAction(action KeyAction, repeat int) tea.Cmd {
 			model.cancelCommentEdit()
 		case KeyActionSaveComment:
 			model.saveComment()
+		default:
 		}
-		return nil
+		return nil, true
 	}
 	if model.mode == ModeVisual {
 		if actionSupersedesDiffTarget(action) {
@@ -51,68 +85,53 @@ func (model *Model) applyAction(action KeyAction, repeat int) tea.Cmd {
 		case KeyActionPageDown:
 			model.moveDiff(max(model.diffHeight(), 1) * repeat)
 		case KeyActionCommentSelection:
-			return model.beginSelectionComment()
+			return model.beginSelectionComment(), true
+		default:
 		}
-		return nil
+		return nil, true
 	}
-	if model.overlay != OverlayNone {
-		if model.overlay == OverlayExport {
-			return model.applyExportPickerAction(action)
-		}
-		if model.overlay == OverlaySubmit {
-			return model.applyPublicationAction(action)
-		}
-		if model.overlay == OverlayHelp {
-			model.applyHelpAction(action, repeat)
-			return nil
-		}
-		if model.overlay == OverlayStatus {
-			model.applyStatusAction(action, repeat)
-			return nil
-		}
+	switch model.overlay {
+	case OverlayNone:
+		return nil, false
+	case OverlayExport:
+		model.applyExportPickerAction(action)
+		return nil, true
+	case OverlaySubmit:
+		model.applyPublicationAction(action)
+		return nil, true
+	case OverlayHelp:
+		model.applyHelpAction(action, repeat)
+		return nil, true
+	case OverlayStatus:
+		model.applyStatusAction(action, repeat)
+		return nil, true
+	default:
 		if action == KeyActionCancel || action == KeyActionQuit ||
 			action == KeyActionInterrupt {
 			model.overlay = OverlayNone
 		}
-		return nil
+		return nil, true
 	}
-	if model.foreground.reloadActive() && !actionAllowedDuringReload(action) {
-		model.notice = &Notice{
-			Kind: NoticeInformation,
-			Text: "reload is active; this action is temporarily unavailable",
-		}
-		return nil
-	}
-	if actionSupersedesDiffTarget(action) {
-		model.foreground.clearPendingDiffTarget()
-	}
+}
+
+func (model *Model) applyNavigationAction(action KeyAction, repeat int) (tea.Cmd, bool) {
 	switch action {
-	case KeyActionQuit, KeyActionInterrupt:
-		return model.requestQuit()
-	case KeyActionCancel:
-		if operationID := model.foreground.reloadOperation(); operationID != 0 {
-			model.coordinator.Cancel(operationID)
-			model.notice = &Notice{
-				Kind: NoticeInformation,
-				Text: "cancelling reload; the current source remains active",
-			}
-		}
 	case KeyActionFocusNextPane:
 		model.cycleFocus(repeat)
 	case KeyActionFocusPreviousPane:
 		model.cycleFocus(-repeat)
 	case KeyActionMoveUp:
-		return model.move(-repeat)
+		return model.move(-repeat), true
 	case KeyActionMoveDown:
-		return model.move(repeat)
+		return model.move(repeat), true
 	case KeyActionScrollLeft:
 		model.scrollDiffHorizontally(-repeat)
 	case KeyActionScrollRight:
 		model.scrollDiffHorizontally(repeat)
 	case KeyActionPageUp:
-		return model.movePage(-repeat)
+		return model.movePage(-repeat), true
 	case KeyActionPageDown:
-		return model.movePage(repeat)
+		return model.movePage(repeat), true
 	case KeyActionHalfPageUp:
 		model.moveDiff(-max(model.diffHeight()/2, 1) * repeat)
 	case KeyActionHalfPageDown:
@@ -121,16 +140,40 @@ func (model *Model) applyAction(action KeyAction, repeat int) tea.Cmd {
 		model.moveFirst()
 	case KeyActionLast:
 		model.moveLast()
+	case KeyActionNextFile:
+		model.moveAndActivateFile(repeat)
+	case KeyActionPreviousFile:
+		model.moveAndActivateFile(-repeat)
+	case KeyActionNextHunk:
+		model.moveHunk(repeat)
+	case KeyActionPreviousHunk:
+		model.moveHunk(-repeat)
+	case KeyActionNextComment:
+		model.moveAndActivateComment(repeat)
+	case KeyActionPreviousComment:
+		model.moveAndActivateComment(-repeat)
+	case KeyActionNextSearchHit:
+		model.moveSearchHit(repeat)
+	case KeyActionPreviousSearchHit:
+		model.moveSearchHit(-repeat)
+	default:
+		return nil, false
+	}
+	return nil, true
+}
+
+func (model *Model) applyReviewAction(action KeyAction) (tea.Cmd, bool) {
+	switch action {
 	case KeyActionActivate, KeyActionAccept:
 		model.activateSelection()
 	case KeyActionCommentAtCursor:
-		return model.beginCursorComment()
+		return model.beginCursorComment(), true
 	case KeyActionFileComment:
-		return model.beginFileComment()
+		return model.beginFileComment(), true
 	case KeyActionSummaryComment:
-		return model.beginSummaryComment()
+		return model.beginSummaryComment(), true
 	case KeyActionEditComment:
-		return model.beginEditComment()
+		return model.beginEditComment(), true
 	case KeyActionDeleteComment:
 		model.requestCommentDelete()
 	case KeyActionExpandContext:
@@ -148,6 +191,14 @@ func (model *Model) applyAction(action KeyAction, repeat int) tea.Cmd {
 		}
 	case KeyActionToggleHunkReviewed:
 		model.toggleCurrentHunkReviewed()
+	default:
+		return nil, false
+	}
+	return nil, true
+}
+
+func (model *Model) applyViewAction(action KeyAction) (tea.Cmd, bool) {
+	switch action {
 	case KeyActionToggleWrap:
 		model.settings.wrap = !model.settings.wrap
 	case KeyActionToggleView:
@@ -175,7 +226,7 @@ func (model *Model) applyAction(action KeyAction, repeat int) tea.Cmd {
 			model.review = model.review.ShowHiddenFiles()
 		}
 		if model.filterQuery != "" {
-			return model.startFileFilter(model.filterQuery)
+			return model.startFileFilter(model.filterQuery), true
 		}
 		model.selectFileOrder()
 	case KeyActionToggleComments:
@@ -184,38 +235,38 @@ func (model *Model) applyAction(action KeyAction, repeat int) tea.Cmd {
 	case KeyActionToggleFilePanel:
 		model.fileTreeVisible = !model.fileTreeVisible
 		model.clampFocus()
-	case KeyActionNextFile:
-		model.moveAndActivateFile(repeat)
-	case KeyActionPreviousFile:
-		model.moveAndActivateFile(-repeat)
-	case KeyActionNextHunk:
-		model.moveHunk(repeat)
-	case KeyActionPreviousHunk:
-		model.moveHunk(-repeat)
-	case KeyActionNextComment:
-		model.moveAndActivateComment(repeat)
-	case KeyActionPreviousComment:
-		model.moveAndActivateComment(-repeat)
-	case KeyActionNextSearchHit:
-		model.moveSearchHit(repeat)
-	case KeyActionPreviousSearchHit:
-		model.moveSearchHit(-repeat)
 	case KeyActionHelp:
 		model.overlay = OverlayHelp
 	case KeyActionStatusDetails:
 		model.overlay = OverlayStatus
+	default:
+		return nil, false
+	}
+	return nil, true
+}
+
+func (model *Model) applyCommandAction(action KeyAction) (tea.Cmd, bool) {
+	switch action {
+	case KeyActionQuit, KeyActionInterrupt:
+		return model.requestQuit(), true
+	case KeyActionCancel:
+		if operationID := model.foreground.reloadOperation(); operationID != 0 {
+			model.coordinator.Cancel(operationID)
+			model.notice = &Notice{
+				Kind: NoticeInformation,
+				Text: "cancelling reload; the current source remains active",
+			}
+		}
 	case KeyActionReload:
 		model.requestReload()
-	case KeyActionSearch, KeyActionCommand, KeyActionFilter:
-		if action == KeyActionSearch {
-			return model.beginPrompt(ModeSearch)
-		}
-		if action == KeyActionFilter {
-			command := model.beginPrompt(ModeCommand)
-			model.commandInput.SetValue("filter ")
-			return command
-		}
-		return model.beginPrompt(ModeCommand)
+	case KeyActionSearch:
+		return model.beginPrompt(ModeSearch), true
+	case KeyActionFilter:
+		command := model.beginPrompt(ModeCommand)
+		model.commandInput.SetValue("filter ")
+		return command, true
+	case KeyActionCommand:
+		return model.beginPrompt(ModeCommand), true
 	case KeyActionCopyMarkdown:
 		model.openExportPicker(exportSelection{
 			format:      review.ExportMarkdown,
@@ -234,12 +285,9 @@ func (model *Model) applyAction(action KeyAction, repeat int) tea.Cmd {
 	case KeyActionOpenSubmit:
 		model.startPublicationCheck()
 	default:
-		model.notice = &Notice{
-			Kind: NoticeWarning,
-			Text: NoticeText("unsupported action: " + action.String()),
-		}
+		return nil, false
 	}
-	return nil
+	return nil, true
 }
 
 func actionSupersedesDiffTarget(action KeyAction) bool {
@@ -310,7 +358,7 @@ func (model *Model) alignDiff(alignment diffAlignment) {
 		model.diffTop = 0
 		return
 	}
-	height := uint32(max(model.diffHeight(), 1))
+	height := uint32FromInt(max(model.diffHeight(), 1))
 	switch alignment {
 	case alignTop:
 		model.diffTop = model.diffCursor
@@ -383,6 +431,7 @@ func (model *Model) applyHelpAction(action KeyAction, repeat int) {
 		model.helpTop = 0
 	case KeyActionHelpEnd:
 		model.helpTop = limit
+	default:
 	}
 	model.helpTop = min(max(model.helpTop, 0), max(limit-page, 0))
 }
@@ -401,6 +450,7 @@ func (model *Model) applyStatusAction(action KeyAction, repeat int) {
 		model.statusTop += page * repeat
 	case KeyActionPageUp:
 		model.statusTop -= page * repeat
+	default:
 	}
 	model.statusTop = min(
 		max(model.statusTop, 0),

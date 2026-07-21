@@ -9,8 +9,10 @@ import (
 	"unicode/utf8"
 )
 
+// ErrInvalidConfig identifies an invalid config failure.
 var ErrInvalidConfig = errors.New("invalid configuration")
 
+// ParseAppearance parses and validates appearance.
 func ParseAppearance(value string) (Appearance, error) {
 	appearance := Appearance(value)
 	if appearance != AppearanceDark && appearance != AppearanceLight && appearance != AppearanceSystem {
@@ -19,11 +21,12 @@ func ParseAppearance(value string) (Appearance, error) {
 	return appearance, nil
 }
 
+// NewThemeName constructs and validates theme name.
 func NewThemeName(value string) (ThemeName, error) {
 	if !utf8.ValidString(value) {
 		return "", fmt.Errorf("%w: theme name is not valid UTF-8", ErrInvalidConfig)
 	}
-	if len(value) == 0 || int64(len(value)) > 255 {
+	if value == "" || int64(len(value)) > 255 {
 		return "", fmt.Errorf("%w: theme name must use 1 through 255 bytes", ErrInvalidConfig)
 	}
 	if value == "." || value == ".." || strings.ContainsAny(value, "\x00/\\") {
@@ -32,11 +35,12 @@ func NewThemeName(value string) (ThemeName, error) {
 	return ThemeName(value), nil
 }
 
+// NewPattern constructs and validates pattern.
 func NewPattern(value string) (Pattern, error) {
 	if !utf8.ValidString(value) {
 		return "", fmt.Errorf("%w: filter pattern is not valid UTF-8", ErrInvalidConfig)
 	}
-	if len(value) == 0 || int64(len(value)) > MaxPatternBytes {
+	if value == "" || int64(len(value)) > MaxPatternBytes {
 		return "", fmt.Errorf("%w: filter pattern must use 1 through %d bytes", ErrInvalidConfig, MaxPatternBytes)
 	}
 	if strings.IndexByte(value, 0) >= 0 {
@@ -55,9 +59,9 @@ func validate(config *Config, environment map[string]string) error {
 		if *name == "" {
 			continue
 		}
-		validated, err := NewThemeName(name.String())
-		if err != nil {
-			return err
+		validated, validationErr := NewThemeName(name.String())
+		if validationErr != nil {
+			return validationErr
 		}
 		*name = validated
 	}
@@ -70,8 +74,8 @@ func validate(config *Config, environment map[string]string) error {
 		return fmt.Errorf("%w: diff.context_lines must be from 0 through 10000", ErrInvalidConfig)
 	}
 
-	if err := validateFilters(&config.filter); err != nil {
-		return err
+	if filterErr := validateFilters(&config.filter); filterErr != nil {
+		return filterErr
 	}
 	if config.github.SubmitDefault != SubmitComment &&
 		config.github.SubmitDefault != SubmitDraft &&
@@ -82,22 +86,22 @@ func validate(config *Config, environment map[string]string) error {
 			ErrInvalidConfig,
 		)
 	}
-	if err := validateTemplate(
+	if templateErr := validateTemplate(
 		config.export.MarkdownTemplate,
 		"export.markdown_template",
 		map[string]bool{"comments": true, "comment_count": true},
-	); err != nil {
-		return err
+	); templateErr != nil {
+		return templateErr
 	}
-	if err := validateTemplate(
+	if templateErr := validateTemplate(
 		config.export.CommentTemplate,
 		"export.comment_template",
 		map[string]bool{
 			"index": true, "target": true,
 			"path": true, "line_or_range": true, "comment": true,
 		},
-	); err != nil {
-		return err
+	); templateErr != nil {
+		return templateErr
 	}
 	effective, err := resolveKeybindings(config.ui.Keybindings)
 	if err != nil {
@@ -133,7 +137,7 @@ func validateTemplate(template Template, field string, allowed map[string]bool) 
 		return fmt.Errorf("%w: %s exceeds %d bytes", ErrInvalidConfig, field, MaxTemplateBytes)
 	}
 	tokens := 0
-	for len(value) > 0 {
+	for value != "" {
 		open := strings.Index(value, "{{")
 		closeBeforeOpen := strings.Index(value, "}}")
 		if closeBeforeOpen >= 0 && (open < 0 || closeBeforeOpen < open) {
@@ -184,19 +188,20 @@ func resolveKeybindings(bindings []Keybinding) ([]Keybinding, error) {
 	}
 	userKeys := make(map[bindingKey]bool, len(bindings))
 	for index, binding := range bindings {
-		binding, err := normalizeBinding(binding)
+		normalizedBinding, err := normalizeBinding(binding)
 		if err != nil {
 			return nil, fmt.Errorf("ui.keybindings[%d]: %w", index, err)
 		}
-		hasAction := binding.Action != ""
-		if hasAction == binding.Unbind {
+		binding = normalizedBinding
+		hasAction := normalizedBinding.Action != ""
+		if hasAction == normalizedBinding.Unbind {
 			return nil, fmt.Errorf(
 				"%w: ui.keybindings[%d] requires exactly one of action or unbind",
 				ErrInvalidConfig,
 				index,
 			)
 		}
-		if hasAction && !keyActions[binding.Action] {
+		if hasAction && !keyActions[normalizedBinding.Action] {
 			return nil, fmt.Errorf(
 				"%w: ui.keybindings[%d] has unknown action %q",
 				ErrInvalidConfig,
@@ -245,6 +250,17 @@ func resolveKeybindings(bindings []Keybinding) ([]Keybinding, error) {
 
 func normalizeBinding(binding Keybinding) (Keybinding, error) {
 	switch binding.Context {
+	case KeyContextNormal,
+		KeyContextVisual,
+		KeyContextCommentEdit,
+		KeyContextSearch,
+		KeyContextCommand,
+		KeyContextHelp,
+		KeyContextStatusDetails,
+		KeyContextConfirm,
+		KeyContextExportPicker,
+		KeyContextSubmit,
+		KeyContextMinimumSize:
 	case KeyContext("normal.tree"):
 		if binding.Focus != "" {
 			return Keybinding{}, fmt.Errorf("%w: inline normal context cannot also set focus", ErrInvalidConfig)
@@ -273,7 +289,7 @@ func normalizeBinding(binding Keybinding) (Keybinding, error) {
 	}
 	chord := strings.Join(strings.Fields(string(binding.Chord)), " ")
 	strokes := strings.Fields(chord)
-	if len(chord) == 0 || int64(len(chord)) > 128 || len(strokes) == 0 || len(strokes) > 4 {
+	if chord == "" || int64(len(chord)) > 128 || len(strokes) == 0 || len(strokes) > 4 {
 		return Keybinding{}, fmt.Errorf("%w: chord must have 1..4 strokes and at most 128 bytes", ErrInvalidConfig)
 	}
 	for _, stroke := range strokes {
@@ -367,17 +383,17 @@ var keyContexts = stringSet[KeyContext](
 )
 
 var requiredActions = map[KeyContext][]KeyAction{
-	"normal":           {"quit", "interrupt"},
-	"visual":           {"cancel", "interrupt"},
-	"comment-edit":     {"cancel", "interrupt", "save-comment"},
-	"search":           {"cancel", "interrupt"},
-	"command":          {"cancel", "interrupt"},
-	"help":             {"cancel", "interrupt"},
-	"status-details":   {"cancel", "interrupt"},
-	"confirm":          {"cancel", "interrupt", "confirm-yes", "confirm-no"},
-	"export-picker":    {"cancel", "interrupt", "export-selected"},
-	"submit-preflight": {"cancel", "interrupt", "submit-review"},
-	"minimum-size":     {"quit", "interrupt"},
+	"normal":           {"quit", KeyActionInterrupt},
+	"visual":           {KeyActionCancel, KeyActionInterrupt},
+	"comment-edit":     {KeyActionCancel, KeyActionInterrupt, "save-comment"},
+	"search":           {KeyActionCancel, KeyActionInterrupt},
+	"command":          {KeyActionCancel, KeyActionInterrupt},
+	"help":             {KeyActionCancel, KeyActionInterrupt},
+	"status-details":   {KeyActionCancel, KeyActionInterrupt},
+	"confirm":          {KeyActionCancel, KeyActionInterrupt, "confirm-yes", "confirm-no"},
+	"export-picker":    {KeyActionCancel, KeyActionInterrupt, "export-selected"},
+	"submit-preflight": {KeyActionCancel, KeyActionInterrupt, "submit-review"},
+	"minimum-size":     {"quit", KeyActionInterrupt},
 }
 
 func defaultKeybindings() []Keybinding {
@@ -506,7 +522,7 @@ var keyActions = stringSet[KeyAction](
 	"align-top", "align-center", "align-bottom", "toggle-directory", "expand-directory",
 	"collapse-directory", "visual-line", "visual-lines", "visual-hunk",
 	"comment-selection", "command", "filter", "help", "status-details", "search",
-	"open-submit", "cancel", "interrupt", "delete-backward", "confirm-yes", "confirm-no",
+	"open-submit", KeyActionCancel, KeyActionInterrupt, "delete-backward", "confirm-yes", "confirm-no",
 	"save-comment", "insert-newline",
 	"extend-up", "extend-down", "next-help-page", "previous-help-page", "help-line-up",
 	"help-line-down", "help-page-up", "help-page-down", "help-home", "help-end",
@@ -519,7 +535,7 @@ var keyActions = stringSet[KeyAction](
 
 var contextActions = map[KeyContext]map[KeyAction]bool{
 	"normal": stringSet[KeyAction](
-		"quit", "interrupt", "focus-next-pane", "focus-previous-pane",
+		"quit", KeyActionInterrupt, "focus-next-pane", "focus-previous-pane",
 		"move-up", "move-down", "scroll-left", "scroll-right", "first", "last",
 		"page-up", "page-down", "half-page-up", "half-page-down",
 		"next-file", "previous-file", "next-hunk", "previous-hunk",
@@ -534,37 +550,37 @@ var contextActions = map[KeyContext]map[KeyAction]bool{
 		"toggle-hidden-files",
 	),
 	"visual": stringSet[KeyAction](
-		"cancel", "interrupt", "move-up", "move-down", "page-up", "page-down",
+		KeyActionCancel, KeyActionInterrupt, "move-up", "move-down", "page-up", "page-down",
 		"extend-up", "extend-down", "comment-selection",
 	),
 	"comment-edit": stringSet[KeyAction](
-		"cancel", "interrupt", "delete-backward", "save-comment", "insert-newline",
+		KeyActionCancel, KeyActionInterrupt, "delete-backward", "save-comment", "insert-newline",
 	),
 	"search": stringSet[KeyAction](
-		"cancel", "interrupt", "accept", "delete-backward",
+		KeyActionCancel, KeyActionInterrupt, "accept", "delete-backward",
 	),
 	"command": stringSet[KeyAction](
-		"cancel", "interrupt", "accept", "delete-backward",
+		KeyActionCancel, KeyActionInterrupt, "accept", "delete-backward",
 	),
 	"help": stringSet[KeyAction](
-		"cancel", "interrupt", "next-help-page", "previous-help-page", "help-line-up",
+		KeyActionCancel, KeyActionInterrupt, "next-help-page", "previous-help-page", "help-line-up",
 		"help-line-down", "help-page-up", "help-page-down", "help-home", "help-end",
 	),
 	"status-details": stringSet[KeyAction](
-		"cancel", "interrupt", "move-up", "move-down", "page-up", "page-down",
+		KeyActionCancel, KeyActionInterrupt, "move-up", "move-down", "page-up", "page-down",
 	),
 	"confirm": stringSet[KeyAction](
-		"cancel", "interrupt", "confirm-yes", "confirm-no",
+		KeyActionCancel, KeyActionInterrupt, "confirm-yes", "confirm-no",
 	),
 	"export-picker": stringSet[KeyAction](
-		"cancel", "interrupt", "toggle-export-unmappable", "export-selected",
+		KeyActionCancel, KeyActionInterrupt, "toggle-export-unmappable", "export-selected",
 	),
 	"submit-preflight": stringSet[KeyAction](
-		"cancel", "interrupt", "submit-recheck", "toggle-stale-head-override",
+		KeyActionCancel, KeyActionInterrupt, "submit-recheck", "toggle-stale-head-override",
 		"toggle-submit-exclusion", "toggle-submit-summary", "submit-review",
 		"move-up", "move-down", "page-up", "page-down",
 	),
-	"minimum-size": stringSet[KeyAction]("quit", "interrupt"),
+	"minimum-size": stringSet[KeyAction]("quit", KeyActionInterrupt),
 }
 
 func stringSet[T ~string](values ...T) map[T]bool {

@@ -8,10 +8,12 @@ type effectiveHelpKeyMap struct {
 	offset   int
 }
 
+// ShortHelp returns the receiver's short help value.
 func (keyMap effectiveHelpKeyMap) ShortHelp() []key.Binding {
 	return keyMap.bindingsFor(min(keyMap.maxItems, 6))
 }
 
+// FullHelp returns the receiver's full help value.
 func (keyMap effectiveHelpKeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{keyMap.bindingsFor(keyMap.maxItems)}
 }

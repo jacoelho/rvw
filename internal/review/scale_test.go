@@ -372,11 +372,11 @@ func scaleReviewWithFiles(tb testing.TB, fileCount int) Review {
 		tb.Fatal(err)
 	}
 	for index := range fileCount {
-		path, err := NewPath([]byte(fmt.Sprintf(
+		path, err := NewPath(fmt.Appendf(nil,
 			"pkg/%03d/file-%04d.go",
 			index/32,
 			index,
-		)))
+		))
 		if err != nil {
 			tb.Fatal(err)
 		}

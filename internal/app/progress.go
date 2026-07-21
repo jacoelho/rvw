@@ -7,18 +7,21 @@ import (
 	"github.com/jacoelho/rvw/internal/review"
 )
 
+// MaxProgressBytes defines the supported progress bytes limit.
 const (
 	MaxProgressBytes          int64 = 256 << 10
 	MaxOperationProgressBytes int64 = 8 << 10
 )
 
+// Progress represents progress.
 type Progress struct {
+	Detail    review.OperationDetail
 	ID        review.OperationID
 	Completed uint64
 	Total     uint64
-	Detail    review.OperationDetail
 }
 
+// ReportProgress performs the report progress operation.
 func (coordinator *Coordinator) ReportProgress(progress Progress) error {
 	if progress.ID == 0 ||
 		progress.Total != 0 && progress.Completed > progress.Total ||
@@ -27,8 +30,8 @@ func (coordinator *Coordinator) ReportProgress(progress Progress) error {
 	}
 	coordinator.mu.Lock()
 	defer coordinator.mu.Unlock()
-	reservation, accepted := coordinator.accepted[progress.ID]
-	if coordinator.closed || !accepted || reservation.completed {
+	acceptedReservation, accepted := coordinator.accepted[progress.ID]
+	if coordinator.closed || !accepted || acceptedReservation.completed {
 		return ErrCoordinatorClosed
 	}
 	nextBytes := coordinator.progressBytes + progressRetainedBytes(progress)
@@ -48,6 +51,16 @@ func (coordinator *Coordinator) ReportProgress(progress Progress) error {
 	coordinator.progressBytes = nextBytes
 	coordinator.progressDirty = true
 	return nil
+}
+
+func (coordinator *Coordinator) reportProgress(progress Progress) {
+	err := coordinator.ReportProgress(progress)
+	if err == nil ||
+		errors.Is(err, ErrCoordinatorClosed) ||
+		errors.Is(err, ErrCoordinatorSaturated) {
+		return
+	}
+	panic(err)
 }
 
 func progressRetainedBytes(progress Progress) int64 {

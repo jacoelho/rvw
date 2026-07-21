@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -34,10 +35,10 @@ type ignoreRule struct {
 }
 
 type filterSet struct {
-	options OpenOptions
 	include []*regexp.Regexp
 	exclude []*regexp.Regexp
 	rvw     []ignoreRule
+	options OpenOptions
 }
 
 func newFilterSet(repository RepositoryPath, options OpenOptions) (filterSet, error) {
@@ -90,7 +91,7 @@ func (service *Service) gitignored(
 		result, err := service.runner.Run(ctx, subprocessRequest(
 			repository,
 			environment,
-			[]string{"check-ignore", "--no-index", "-z", "--stdin"},
+			[]string{"check-ignore", "--no-index", "-z", gitStdin},
 			input.Bytes(),
 			[]int{0, 1},
 		))
@@ -124,9 +125,7 @@ func subprocessRequest(
 	acceptedExits []int,
 ) subprocess.Request {
 	merged := baseGitEnvironment()
-	for key, value := range environment {
-		merged[key] = value
-	}
+	maps.Copy(merged, environment)
 	return subprocess.Request{
 		Name:            "git",
 		Args:            arguments,
@@ -204,12 +203,17 @@ func (set filterSet) flagsFor(record diffRecord, ignored gitignoreMatch) (review
 	return review.NewFlags(traits, hidden)
 }
 
-func readIgnoreRules(repository RepositoryPath, name IgnoreFile) ([]ignoreRule, error) {
+func readIgnoreRules(
+	repository RepositoryPath,
+	name IgnoreFile,
+) (rules []ignoreRule, returnErr error) {
 	root, err := os.OpenRoot(repository.String())
 	if err != nil {
 		return nil, fmt.Errorf("open repository root: %w", err)
 	}
-	defer root.Close()
+	defer func() {
+		returnErr = errors.Join(returnErr, root.Close())
+	}()
 	file, err := root.Open(name.String())
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -217,7 +221,9 @@ func readIgnoreRules(repository RepositoryPath, name IgnoreFile) ([]ignoreRule, 
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", name, err)
 	}
-	defer file.Close()
+	defer func() {
+		returnErr = errors.Join(returnErr, file.Close())
+	}()
 	contents, err := io.ReadAll(io.LimitReader(file, maxFilterFileBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", name, err)
@@ -229,7 +235,6 @@ func readIgnoreRules(repository RepositoryPath, name IgnoreFile) ([]ignoreRule, 
 		return nil, fmt.Errorf("%s is not valid UTF-8", name)
 	}
 
-	var rules []ignoreRule
 	for line := range strings.Lines(string(contents)) {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -279,11 +284,12 @@ func compileGlob(pattern string) (*regexp.Regexp, error) {
 	}
 
 	var expression strings.Builder
-	if anchored {
+	switch {
+	case anchored:
 		expression.WriteByte('^')
-	} else if !strings.Contains(pattern, "/") {
+	case !strings.Contains(pattern, "/"):
 		expression.WriteString(`(?:^|.*/)`)
-	} else {
+	default:
 		expression.WriteString(`^(?:.*/)?`)
 	}
 	for index := 0; index < len(pattern); {

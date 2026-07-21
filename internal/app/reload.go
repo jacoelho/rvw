@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"slices"
 	"strconv"
 
 	"github.com/jacoelho/rvw/internal/review"
@@ -25,35 +26,39 @@ const (
 
 const maxReloadPreparationTries = 8
 
+// ReloadWork represents reload work.
 type ReloadWork struct {
-	ID       review.OperationID
 	Document *source.Document
 	Options  source.OpenOptions
+	ID       review.OperationID
 }
 
+// ReloadPreparationWork represents reload preparation work.
 type ReloadPreparationWork struct {
-	ID       review.OperationID
+	Document *source.Document
 	Review   review.Review
-	Document *source.Document
-}
-
-type ReloadAcquiredOutcome struct {
 	ID       review.OperationID
-	Document *source.Document
-	Err      error
 }
 
+// ReloadAcquiredOutcome describes reload acquired outcome.
+type ReloadAcquiredOutcome struct {
+	Err      error
+	Document *source.Document
+	ID       review.OperationID
+}
+
+// ReloadPreparedOutcome describes reload prepared outcome.
 type ReloadPreparedOutcome struct {
-	ID              review.OperationID
-	Document        *source.Document
-	Replacement     review.PreparedReplacement
-	AllFiles        []review.FileID
-	VisibleFiles    []review.FileID
 	AllFileTree     fileTree
 	VisibleFileTree fileTree
+	Err             error
+	Document        *source.Document
 	PathFiles       map[string]review.FileID
 	AmbiguousPaths  map[string]struct{}
-	Err             error
+	AllFiles        []review.FileID
+	VisibleFiles    []review.FileID
+	Replacement     review.PreparedReplacement
+	ID              review.OperationID
 }
 
 func (model *Model) startReload() {
@@ -96,7 +101,7 @@ func (model *Model) beginReload(start foregroundStart) {
 	}
 	operationID, err := review.NewOperationID(model.nextOperation)
 	if err != nil {
-		model.notice = &Notice{Kind: NoticeError, Text: "operation identity exhausted"}
+		model.notice = &Notice{Kind: NoticeError, Text: operationIdentityExhausted}
 		model.rejectReloadStart(start)
 		return
 	}
@@ -194,39 +199,11 @@ func (model *Model) applyReloadPrepared(outcome ReloadPreparedOutcome) {
 		)
 		return
 	}
-	committed, report, err := model.review.CommitReplacement(outcome.Replacement)
-	if err != nil {
-		if errors.Is(err, review.ErrStaleReloadPreparation) &&
-			model.foreground.reloadPreparationAttempts() < maxReloadPreparationTries {
-			if submitErr := model.coordinator.SubmitReloadPreparation(
-				ReloadPreparationWork{
-					ID:       outcome.ID,
-					Review:   model.review,
-					Document: outcome.Document,
-				},
-			); submitErr == nil {
-				if !model.foreground.reloadPreparationRetryAdmitted(outcome.ID) {
-					model.coordinator.Cancel(outcome.ID)
-					model.failReload(
-						outcome.ID,
-						outcome.Document,
-						errors.New("foreground reload retry invariant violated"),
-					)
-					return
-				}
-				model.notice = &Notice{
-					Kind: NoticeInformation,
-					Text: "review changed during reload; reconciling latest state",
-				}
-				return
-			} else {
-				err = submitErr
-			}
-		}
-		model.failReload(outcome.ID, outcome.Document, err)
+	committed, report, ok := model.commitReloadReplacement(outcome)
+	if !ok {
 		return
 	}
-	committed, err = committed.ResolveOperation(
+	committed, err := committed.ResolveOperation(
 		outcome.ID,
 		review.OperationSucceeded,
 		review.EmptyOperationDetail(),
@@ -235,21 +212,8 @@ func (model *Model) applyReloadPrepared(outcome ReloadPreparedOutcome) {
 		model.failReload(outcome.ID, outcome.Document, err)
 		return
 	}
-	var viewport *diffViewport
-	oldActive, hadOldActive := model.review.ActiveFile()
-	newActive, hadNewActive := committed.ActiveFile()
-	if report.ActivePreserved && hadOldActive && hadNewActive {
-		oldFile, oldExists := model.review.Snapshot().File(oldActive)
-		newFile, newExists := committed.Snapshot().File(newActive)
-		if oldExists && newExists && sameFileContentIdentity(oldFile, newFile) {
-			viewport = &diffViewport{
-				file:         newActive,
-				top:          model.diffTop,
-				cursor:       model.diffCursor,
-				visualAnchor: model.visualAnchor,
-			}
-		}
-	}
+	viewport := model.preservedReloadViewport(committed, report)
+	_, hadNewActive := committed.ActiveFile()
 	requirement := reloadNoPatch
 	if hadNewActive {
 		requirement = reloadNeedsPatch
@@ -268,6 +232,78 @@ func (model *Model) applyReloadPrepared(outcome ReloadPreparedOutcome) {
 		return
 	}
 
+	oldDocument := model.installReloadState(outcome, committed, viewport)
+	model.finishReloadDocument(oldDocument, report)
+	if requirement == reloadNeedsPatch {
+		model.requestActivePatch()
+	} else {
+		model.applyForegroundEffect(effect)
+	}
+}
+
+func (model *Model) commitReloadReplacement(
+	outcome ReloadPreparedOutcome,
+) (review.Review, review.ReloadReport, bool) {
+	committed, report, err := model.review.CommitReplacement(outcome.Replacement)
+	if err == nil {
+		return committed, report, true
+	}
+	if errors.Is(err, review.ErrStaleReloadPreparation) &&
+		model.foreground.reloadPreparationAttempts() < maxReloadPreparationTries {
+		submitErr := model.coordinator.SubmitReloadPreparation(ReloadPreparationWork{
+			ID:       outcome.ID,
+			Review:   model.review,
+			Document: outcome.Document,
+		})
+		if submitErr == nil {
+			if !model.foreground.reloadPreparationRetryAdmitted(outcome.ID) {
+				model.coordinator.Cancel(outcome.ID)
+				model.failReload(
+					outcome.ID,
+					outcome.Document,
+					errors.New("foreground reload retry invariant violated"),
+				)
+				return review.Review{}, review.ReloadReport{}, false
+			}
+			model.notice = &Notice{
+				Kind: NoticeInformation,
+				Text: "review changed during reload; reconciling latest state",
+			}
+			return review.Review{}, review.ReloadReport{}, false
+		}
+		err = submitErr
+	}
+	model.failReload(outcome.ID, outcome.Document, err)
+	return review.Review{}, review.ReloadReport{}, false
+}
+
+func (model *Model) preservedReloadViewport(
+	committed review.Review,
+	report review.ReloadReport,
+) *diffViewport {
+	oldActive, hadOldActive := model.review.ActiveFile()
+	newActive, hadNewActive := committed.ActiveFile()
+	if !report.ActivePreserved || !hadOldActive || !hadNewActive {
+		return nil
+	}
+	oldFile, oldExists := model.review.Snapshot().File(oldActive)
+	newFile, newExists := committed.Snapshot().File(newActive)
+	if !oldExists || !newExists || !sameFileContentIdentity(oldFile, newFile) {
+		return nil
+	}
+	return &diffViewport{
+		file:         newActive,
+		top:          model.diffTop,
+		cursor:       model.diffCursor,
+		visualAnchor: model.visualAnchor,
+	}
+}
+
+func (model *Model) installReloadState(
+	outcome ReloadPreparedOutcome,
+	committed review.Review,
+	viewport *diffViewport,
+) *source.Document {
 	oldDocument := model.document
 	model.document = outcome.Document
 	model.review = committed
@@ -301,29 +337,30 @@ func (model *Model) applyReloadPrepared(outcome ReloadPreparedOutcome) {
 		model.visualAnchor = 0
 	}
 	model.commentCursor = min(model.commentCursor, max(model.commentRowCount()-1, 0))
+	return oldDocument
+}
 
+func (model *Model) finishReloadDocument(
+	oldDocument *source.Document,
+	report review.ReloadReport,
+) {
 	if err := model.coordinator.ReleaseDocument(oldDocument); err != nil {
 		model.retainDocumentForCleanup(oldDocument)
 		model.notice = &Notice{
 			Kind: NoticeError,
 			Text: NoticeText("reload committed but old source cleanup was not admitted: " + err.Error()),
 		}
-	} else {
-		model.notice = &Notice{
-			Kind: NoticeInformation,
-			Text: NoticeText(
-				"reload complete: " +
-					strconv.FormatUint(uint64(report.FilesPreserved), 10) +
-					" files preserved, " +
-					strconv.FormatUint(uint64(report.FilesRemoved), 10) +
-					" removed",
-			),
-		}
+		return
 	}
-	if requirement == reloadNeedsPatch {
-		model.requestActivePatch()
-	} else {
-		model.applyForegroundEffect(effect)
+	model.notice = &Notice{
+		Kind: NoticeInformation,
+		Text: NoticeText(
+			"reload complete: " +
+				strconv.FormatUint(uint64(report.FilesPreserved), 10) +
+				" files preserved, " +
+				strconv.FormatUint(uint64(report.FilesRemoved), 10) +
+				" removed",
+		),
 	}
 }
 
@@ -398,10 +435,8 @@ func (model *Model) retainDocumentForCleanup(document *source.Document) {
 	if document == nil {
 		return
 	}
-	for _, existing := range model.cleanupDocuments {
-		if existing == document {
-			return
-		}
+	if slices.Contains(model.cleanupDocuments, document) {
+		return
 	}
 	model.cleanupDocuments = append(model.cleanupDocuments, document)
 }
@@ -429,9 +464,13 @@ func operationStatusForWorkError(err error) review.OperationStatus {
 	case errors.Is(err, ErrCoordinatorSaturated), errors.Is(err, source.ErrSourceLimited):
 		return review.OperationLimited
 	default:
-		var failure *source.Failure
+		var failure *source.FailureError
 		if errors.As(err, &failure) {
 			switch failure.Kind {
+			case source.FailureUnavailable,
+				source.FailureStale,
+				source.FailureFailed,
+				source.FailureNonGraceful:
 			case source.FailureCancelled:
 				return review.OperationCancelled
 			case source.FailureLimited:

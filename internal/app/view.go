@@ -68,12 +68,12 @@ type commentEditorLayout struct {
 }
 
 type mouseHitMap struct {
-	reviewState uint64
-	bodyHeight  int
-	layout      workspaceLayout
 	treeRows    []treeNodeIdentity
 	diffRows    []uint32
 	commentRows []int
+	layout      workspaceLayout
+	reviewState uint64
+	bodyHeight  int
 }
 
 type mouseTarget uint8
@@ -90,6 +90,7 @@ type diffLineNumberWidths struct {
 	new int
 }
 
+// View returns the receiver's view value.
 func (model *Model) View() tea.View {
 	width, height := model.renderSize()
 	var content string
@@ -163,7 +164,11 @@ func (model *Model) workspaceView(
 	}
 	title := styles.panel.Render(model.titleLine(width, styles))
 	status := styles.status.Render(model.statusLine(width, styles))
-	return strings.Join(append([]string{title}, append(body, status)...), "\n"), mouseHitMap{
+	lines := make([]string, 0, len(body)+2)
+	lines = append(lines, title)
+	lines = append(lines, body...)
+	lines = append(lines, status)
+	return strings.Join(lines, "\n"), mouseHitMap{
 		reviewState: model.review.StateRevision(),
 		bodyHeight:  bodyHeight,
 		layout:      layout,
@@ -301,7 +306,7 @@ func (model *Model) diffLines(
 	default:
 		return []string{styles.failure.Render("Invalid patch state.")}, nil
 	}
-	count := uint32(height + viewportOverscan)
+	count := uint32FromInt(height + viewportOverscan)
 	lineBytes := max(int64(width)*8, 4_096)
 	if model.settings.wrap {
 		lineBytes = max(
@@ -381,6 +386,7 @@ func stylePatchLine(text string, kind review.PatchLineKind, styles semanticStyle
 		if strings.HasPrefix(text, "+++") || strings.HasPrefix(text, "---") {
 			return styles.heading.Render(text)
 		}
+	case review.PatchLineNoNewline:
 	}
 	return text
 }
@@ -417,12 +423,16 @@ func (model *Model) renderUnifiedPatchLine(
 	content := raw
 	if kind == review.PatchLineContext || kind == review.PatchLineAddition ||
 		kind == review.PatchLineDeletion {
-		if len(raw) != 0 {
+		if raw != "" {
 			marker, content = raw[:1], raw[1:]
 		}
 	}
 	styledMarker := marker
 	switch kind {
+	case review.PatchLineMetadata,
+		review.PatchLineHunkHeader,
+		review.PatchLineContext,
+		review.PatchLineNoNewline:
 	case review.PatchLineAddition:
 		styledMarker = styles.added.Render(marker)
 	case review.PatchLineDeletion:
@@ -683,12 +693,12 @@ func (model *Model) syntaxSpansForSide(
 }
 
 type syntaxContent struct {
-	raw       string
+	styles    semanticStyles
 	spans     iter.Seq[review.SyntaxSpan]
+	raw       string
 	width     int
 	truncated bool
 	wrap      bool
-	styles    semanticStyles
 }
 
 func (model *Model) renderSyntaxContent(content syntaxContent) string {
@@ -712,79 +722,12 @@ func (model *Model) renderSyntaxContent(content syntaxContent) string {
 	var rendered strings.Builder
 	rendered.Grow(len(raw))
 	sanitizer := terminalTextRenderer{}
-	spans := content.spans
-	if spans == nil {
+	if content.spans == nil {
 		rendered.WriteString(sanitizer.render(raw))
 	} else {
-		nextSpan, stopSpans := iter.Pull(spans)
-		defer stopSpans()
-		var span review.SyntaxSpan
-		hasSpan := false
-		spanEnd := 0
-		advanceSpan := func() {
-			hasSpan = false
-			for {
-				candidate, ok := nextSpan()
-				if !ok {
-					return
-				}
-				start, end := int(candidate.Start), int(candidate.End)
-				if start < spanEnd || start > len(raw) || end <= start {
-					continue
-				}
-				if end > len(raw) {
-					limited = true
-					return
-				}
-				span = candidate
-				spanEnd = end
-				hasSpan = true
-				return
-			}
-		}
-		advanceSpan()
-		if !hasSpan {
-			rendered.WriteString(sanitizer.render(raw))
-		} else {
-			var runKind review.SyntaxKind
-			runStart, runEnd := 0, 0
-			hasRun := false
-			flushRun := func() {
-				if !hasRun || runStart == runEnd {
-					return
-				}
-				value := sanitizer.render(raw[runStart:runEnd])
-				if runKind != 0 {
-					value = syntaxStyle(runKind, content.styles).Render(value)
-				}
-				rendered.WriteString(value)
-			}
-			graphemes := uniseg.NewGraphemes(raw)
-			for graphemes.Next() {
-				start, end := graphemes.Positions()
-				for hasSpan && int(span.End) <= start {
-					advanceSpan()
-				}
-				kind := review.SyntaxKind(0)
-				if hasSpan && int(span.Start) <= start && start < int(span.End) {
-					kind = span.Kind
-				}
-				if hasRun && kind != runKind {
-					flushRun()
-					hasRun = false
-				}
-				if !hasRun {
-					runStart = start
-				}
-				runEnd = end
-				runKind = kind
-				hasRun = true
-			}
-			flushRun()
-			for hasSpan {
-				advanceSpan()
-			}
-		}
+		styled, spansLimited := renderSyntaxSpans(raw, content.spans, content.styles)
+		rendered.WriteString(styled)
+		limited = limited || spansLimited
 	}
 	value := rendered.String()
 	if content.wrap {
@@ -802,6 +745,86 @@ func (model *Model) renderSyntaxContent(content syntaxContent) string {
 		return lipgloss.NewStyle().MaxWidth(content.width-1).Render(value) + "…"
 	}
 	return value
+}
+
+func renderSyntaxSpans(
+	raw string,
+	spans iter.Seq[review.SyntaxSpan],
+	styles semanticStyles,
+) (string, bool) {
+	nextSpan, stopSpans := iter.Pull(spans)
+	defer stopSpans()
+	var span review.SyntaxSpan
+	hasSpan := false
+	spanEnd := 0
+	limited := false
+	advanceSpan := func() {
+		hasSpan = false
+		for {
+			candidate, ok := nextSpan()
+			if !ok {
+				return
+			}
+			start, end := int(candidate.Start), int(candidate.End)
+			if start < spanEnd || start > len(raw) || end <= start {
+				continue
+			}
+			if end > len(raw) {
+				limited = true
+				return
+			}
+			span = candidate
+			spanEnd = end
+			hasSpan = true
+			return
+		}
+	}
+	advanceSpan()
+	sanitizer := terminalTextRenderer{}
+	if !hasSpan {
+		return sanitizer.render(raw), limited
+	}
+	var rendered strings.Builder
+	rendered.Grow(len(raw))
+	var runKind review.SyntaxKind
+	runStart, runEnd := 0, 0
+	hasRun := false
+	flushRun := func() {
+		if !hasRun || runStart == runEnd {
+			return
+		}
+		value := sanitizer.render(raw[runStart:runEnd])
+		if runKind != 0 {
+			value = syntaxStyle(runKind, styles).Render(value)
+		}
+		rendered.WriteString(value)
+	}
+	graphemes := uniseg.NewGraphemes(raw)
+	for graphemes.Next() {
+		start, end := graphemes.Positions()
+		for hasSpan && int(span.End) <= start {
+			advanceSpan()
+		}
+		kind := review.SyntaxKind(0)
+		if hasSpan && int(span.Start) <= start && start < int(span.End) {
+			kind = span.Kind
+		}
+		if hasRun && kind != runKind {
+			flushRun()
+			hasRun = false
+		}
+		if !hasRun {
+			runStart = start
+		}
+		runEnd = end
+		runKind = kind
+		hasRun = true
+	}
+	flushRun()
+	for hasSpan {
+		advanceSpan()
+	}
+	return rendered.String(), limited
 }
 
 func clipStyled(value string, left, width int) string {
@@ -967,7 +990,7 @@ func commentTargetText(target review.CommentTarget) string {
 		}
 		return fmt.Sprintf("%s:%s%d-%d", path, prefix, start.Uint32(), end.Uint32())
 	default:
-		return "unknown"
+		return unknownValue
 	}
 }
 
@@ -1042,11 +1065,12 @@ func (model *Model) titleLine(width int, styles semanticStyles) string {
 		}
 	}
 	focus := "diff"
-	if model.mode == ModeCommentEdit {
+	switch {
+	case model.mode == ModeCommentEdit:
 		focus = "comment"
-	} else if model.focus == FocusFileTree {
+	case model.focus == FocusFileTree:
 		focus = "files"
-	} else if model.focus == FocusComments {
+	case model.focus == FocusComments:
 		focus = "comments"
 	}
 	title := fmt.Sprintf(
@@ -1087,6 +1111,7 @@ func (model *Model) statusLine(width int, styles semanticStyles) string {
 	if model.notice != nil {
 		status = string(model.notice.Text) + "  " + status
 		switch model.notice.Kind {
+		case NoticeInformation:
 		case NoticeWarning:
 			return fitCellWidth(styles.warning.Render(safeAndClip(status, width)), width)
 		case NoticeError:

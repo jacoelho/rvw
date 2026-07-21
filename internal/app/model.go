@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -17,18 +18,54 @@ import (
 	"github.com/jacoelho/rvw/internal/source"
 )
 
-const chordTimeout = 750 * time.Millisecond
+const (
+	chordTimeout               = 750 * time.Millisecond
+	commentFileOutsideReview   = "comment file is not in this review"
+	operationIdentityExhausted = "operation identity exhausted"
+	keyEnter                   = "enter"
+	keyEscape                  = "esc"
+	unknownValue               = "unknown"
+)
 
+func uint16FromInt(value int) uint16 {
+	if value < 0 || value > math.MaxUint16 {
+		panic("value cannot be represented as uint16")
+	}
+	return uint16(value)
+}
+
+func uint32FromInt(value int) uint32 {
+	if value < 0 {
+		panic("negative value cannot be represented as uint32")
+	}
+	converted := uint64(value)
+	if converted > math.MaxUint32 {
+		panic("value exceeds uint32")
+	}
+	return uint32(converted)
+}
+
+func uint64FromInt(value int) uint64 {
+	if value < 0 {
+		panic("negative value cannot be represented as uint64")
+	}
+	return uint64(value)
+}
+
+// FocusOwner represents focus owner.
 type FocusOwner uint8
 
+// FocusFileTree identifies a supported focus file tree value.
 const (
 	FocusFileTree FocusOwner = iota + 1
 	FocusDiff
 	FocusComments
 )
 
+// Overlay represents overlay.
 type Overlay uint8
 
+// OverlayNone identifies a supported overlay none value.
 const (
 	OverlayNone Overlay = iota
 	OverlayHelp
@@ -38,8 +75,10 @@ const (
 	OverlaySubmit
 )
 
+// InteractionMode describes interaction mode.
 type InteractionMode uint8
 
+// ModeNormal identifies a supported mode normal value.
 const (
 	ModeNormal InteractionMode = iota + 1
 	ModeVisual
@@ -48,21 +87,26 @@ const (
 	ModeCommand
 )
 
+// NoticeKind describes notice kind.
 type NoticeKind uint8
 
+// NoticeInformation identifies a supported notice information value.
 const (
 	NoticeInformation NoticeKind = iota + 1
 	NoticeWarning
 	NoticeError
 )
 
+// NoticeText represents notice text.
 type NoticeText string
 
+// Notice represents notice.
 type Notice struct {
-	Kind NoticeKind
 	Text NoticeText
+	Kind NoticeKind
 }
 
+// TerminalSize represents terminal size.
 type TerminalSize struct {
 	Width  int
 	Height int
@@ -76,13 +120,13 @@ type chordTimeoutMsg struct {
 type initializeMsg struct{}
 
 type mouseActionMsg struct {
-	reviewState  uint64
-	focus        FocusOwner
-	delta        int
-	target       mouseTarget
 	tree         treeNodeIdentity
-	diffLine     uint32
+	reviewState  uint64
+	delta        int
 	commentIndex int
+	diffLine     uint32
+	focus        FocusOwner
+	target       mouseTarget
 }
 
 type fileFilterChunkMsg struct {
@@ -109,94 +153,92 @@ type pendingSearch struct {
 	scope review.SearchScope
 }
 
+// Model represents model.
 type Model struct {
-	commandContext   context.Context
-	document         *source.Document
-	cleanupDocuments []*source.Document
-	coordinator      *Coordinator
-	receiver         *ReadyReceiver
-	settings         Settings
-	help             help.Model
-	commentEditor    textarea.Model
-	searchInput      textinput.Model
-	commandInput     textinput.Model
-	review           review.Review
-
-	size              TerminalSize
-	focus             FocusOwner
-	focusReturn       FocusOwner
-	overlay           Overlay
-	mode              InteractionMode
-	notice            *Notice
-	initialized       bool
-	quitting          bool
-	coordinatorClosed bool
-	coordinatorStats  CoordinatorStats
-	workspaceIndex    review.OperationID
-
-	fileOrder            []review.FileID
-	allFileOrder         []review.FileID
-	visibleFileOrder     []review.FileID
-	allFileTree          fileTree
-	visibleFileTree      fileTree
-	filteredFileTree     *fileTree
-	treeCursor           treeNodeIdentity
-	collapsedTrees       map[string]struct{}
-	pathFiles            map[string]review.FileID
-	ambiguousPaths       map[string]struct{}
-	filterQuery          string
-	filterGeneration     uint64
-	filterBuild          *fileFilterBuild
-	filterTreeBuilding   bool
-	filterTreeOperation  review.OperationID
-	filterTreeGeneration uint64
-	filterTreeFiles      []review.FileID
-	diffTop              uint32
-	diffCursor           uint32
-	diffLeft             int
-	visualAnchor         uint32
-	commentCursor        int
-	commentsVisible      bool
-	fileTreeVisible      bool
-	helpTop              int
-	statusTop            int
-
-	nextOperation          uint64
-	foreground             foregroundState
-	operationProgress      map[review.OperationID]Progress
-	exportOperations       map[review.OperationID]exportRequest
+	commentEditor          textarea.Model
+	commandContext         context.Context
 	deliveryOperations     map[review.OperationID]delivery.Destination
-	pendingStdout          *review.PreparedExport
-	searchCursor           int
-	syntaxOperation        review.OperationID
-	syntaxFile             review.FileID
-	syntaxOld              *review.PreparedSyntax
-	syntaxNew              *review.PreparedSyntax
-	syntaxDeferred         bool
-	syntaxSuppressed       map[review.SyntaxIdentity]review.SyntaxStatus
-	publicationOperation   review.OperationID
-	publicationCancel      bool
-	publicationAllowStale  bool
-	publicationMoveSummary bool
+	filteredFileTree       *fileTree
+	receiver               *ReadyReceiver
+	operationProgress      map[review.OperationID]Progress
+	filterBuild            *fileFilterBuild
+	collapsedTrees         map[string]struct{}
+	exportOperations       map[review.OperationID]exportRequest
+	pathFiles              map[string]review.FileID
 	publicationExcluded    map[review.CommentID]struct{}
-	publicationCursor      int
+	syntaxSuppressed       map[review.SyntaxIdentity]review.SyntaxStatus
+	syntaxNew              *review.PreparedSyntax
+	document               *source.Document
+	syntaxOld              *review.PreparedSyntax
+	coordinator            *Coordinator
+	pendingStdout          *review.PreparedExport
+	ambiguousPaths         map[string]struct{}
+	notice                 *Notice
+	help                   help.Model
+	filterQuery            string
+	visibleFileTree        fileTree
+	allFileTree            fileTree
+	filterTreeFiles        []review.FileID
+	cleanupDocuments       []*source.Document
+	treeCursor             treeNodeIdentity
+	visibleFileOrder       []review.FileID
+	allFileOrder           []review.FileID
+	fileOrder              []review.FileID
+	searchInput            textinput.Model
+	commandInput           textinput.Model
+	chord                  pendingKeyChord
+	foreground             foregroundState
+	settings               Settings
+	review                 review.Review
+	coordinatorStats       CoordinatorStats
+	size                   TerminalSize
+	searchCursor           int
+	publicationOperation   review.OperationID
+	treeMoveGeneration     uint64
+	treeMovePending        int
+	diffLeft               int
+	filterTreeGeneration   uint64
+	commentCursor          int
 	publicationDetailTop   int
+	publicationCursor      int
+	helpTop                int
+	statusTop              int
+	nextOperation          uint64
+	filterTreeOperation    review.OperationID
+	syntaxOperation        review.OperationID
+	filterGeneration       uint64
+	workspaceIndex         review.OperationID
 	confirmation           confirmation
+	syntaxFile             review.FileID
+	visualAnchor           uint32
+	diffTop                uint32
+	diffCursor             uint32
+	repeat                 uint16
 	exportPicker           exportSelection
-
-	chord              pendingKeyChord
-	repeat             uint16
-	treeMovePending    int
-	treeMoveGeneration uint64
+	publicationAllowStale  bool
+	commentsVisible        bool
+	publicationCancel      bool
+	quitting               bool
+	publicationMoveSummary bool
+	focusReturn            FocusOwner
+	fileTreeVisible        bool
+	filterTreeBuilding     bool
+	overlay                Overlay
+	syntaxDeferred         bool
+	focus                  FocusOwner
+	mode                   InteractionMode
+	initialized            bool
+	coordinatorClosed      bool
 }
 
 type pendingKeyChord struct {
-	strokes    []string
 	context    KeyContext
 	focus      KeyFocus
+	strokes    []string
 	generation uint64
 }
 
+// NewModel constructs and validates model.
 func NewModel(
 	ctx context.Context,
 	document *source.Document,
@@ -207,7 +249,10 @@ func NewModel(
 	if ctx == nil || document == nil || coordinator == nil || receiver == nil {
 		return nil, errors.New("interactive model requires context, document, coordinator, and receiver")
 	}
-	settings = settings.clone()
+	settings, err := settings.clone()
+	if err != nil {
+		return nil, err
+	}
 	current, err := review.NewReview(document.Snapshot())
 	if err != nil {
 		return nil, err
@@ -255,6 +300,7 @@ func NewModel(
 	return model, nil
 }
 
+// Init returns the receiver's init value.
 func (model *Model) Init() tea.Cmd {
 	return tea.Batch(
 		func() tea.Msg { return initializeMsg{} },
@@ -262,109 +308,125 @@ func (model *Model) Init() tea.Cmd {
 	)
 }
 
+// Update performs the update operation.
 func (model *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
-	var helpCommand tea.Cmd
-	var childCommand tea.Cmd
-	if model.overlay == OverlayHelp {
-		if _, isKey := message.(tea.KeyPressMsg); !isKey {
-			model.help, helpCommand = model.help.Update(message)
-		}
-	}
-	if _, isKey := message.(tea.KeyPressMsg); !isKey {
-		switch model.mode {
-		case ModeCommentEdit:
-			model.commentEditor, childCommand = model.commentEditor.Update(message)
-		case ModeSearch:
-			model.searchInput, childCommand = model.searchInput.Update(message)
-		case ModeCommand:
-			model.commandInput, childCommand = model.commandInput.Update(message)
-		}
-	}
+	helpCommand, childCommand := model.updateChildren(message)
 	switch message := message.(type) {
 	case tea.WindowSizeMsg:
-		wasBelowMinimum := model.belowMinimum()
-		if message.Width > 0 && message.Height > 0 {
-			model.size = TerminalSize{Width: message.Width, Height: message.Height, Known: true}
-			model.help.SetWidth(message.Width)
-			model.resizeCommentEditor()
-			model.resizePrompts()
-			model.clampFocus()
-			model.clampDiffTop()
-		}
-		if wasBelowMinimum != model.belowMinimum() {
-			model.abandonChord()
-		}
+		model.applyWindowSize(message)
 	case initializeMsg:
 		if !model.initialized {
 			model.initialized = true
 			model.requestWorkspaceIndex()
 		}
 	case mouseActionMsg:
-		var mouseCommand tea.Cmd
-		if message.reviewState == model.review.StateRevision() &&
-			model.mode == ModeNormal && model.overlay == OverlayNone && !model.belowMinimum() &&
-			model.focusVisible(message.focus) {
-			model.setFocus(message.focus)
-			model.focusReturn = 0
-			if message.delta != 0 || message.target != mouseTargetNone {
-				model.foreground.clearPendingDiffTarget()
-			}
-			if message.delta != 0 {
-				mouseCommand = model.move(message.delta)
-			}
-			switch message.target {
-			case mouseTargetTree:
-				model.selectTreeNode(message.tree)
-			case mouseTargetDiff:
-				model.diffCursor = message.diffLine
-				model.moveDiff(0)
-			case mouseTargetComment:
-				model.commentCursor = message.commentIndex
-			}
-		}
-		if mouseCommand != nil {
-			model.refreshCoordinatorStats()
-			return model, tea.Batch(helpCommand, childCommand, mouseCommand)
+		if mouseCommand := model.applyMouseAction(message); mouseCommand != nil {
+			return model.finishUpdate(helpCommand, childCommand, mouseCommand)
 		}
 	case fileFilterChunkMsg:
-		command := tea.Batch(helpCommand, childCommand, model.advanceFileFilter(message))
-		model.refreshCoordinatorStats()
-		return model, command
+		return model.finishUpdate(helpCommand, childCommand, model.advanceFileFilter(message))
 	case treeMoveChunkMsg:
-		command := tea.Batch(helpCommand, childCommand, model.advanceTreeMove(message))
-		model.refreshCoordinatorStats()
-		return model, command
+		return model.finishUpdate(helpCommand, childCommand, model.advanceTreeMove(message))
 	case tea.KeyPressMsg:
-		var command tea.Cmd
-		if model.belowMinimum() {
-			command = model.handleKey(message)
-		} else if model.mode == ModeCommentEdit {
-			command = model.handleCommentEditorKey(message)
-		} else if model.mode == ModeSearch || model.mode == ModeCommand {
-			command = model.handlePromptKey(message)
-		} else {
-			command = model.handleKey(message)
-		}
-		command = tea.Batch(helpCommand, childCommand, command)
-		model.refreshCoordinatorStats()
-		return model, command
+		return model.finishUpdate(helpCommand, childCommand, model.applyKeyPress(message))
 	case outcomeReadyMsg:
-		command := tea.Batch(helpCommand, childCommand, model.handleReady(message))
-		model.refreshCoordinatorStats()
-		return model, command
+		return model.finishUpdate(helpCommand, childCommand, model.handleReady(message))
 	case chordTimeoutMsg:
 		if message.generation == model.chord.generation && len(model.chord.strokes) != 0 {
 			model.abandonChord()
 		}
 	}
-	model.refreshCoordinatorStats()
-	return model, tea.Batch(helpCommand, childCommand)
+	return model.finishUpdate(helpCommand, childCommand)
 }
 
+func (model *Model) updateChildren(message tea.Msg) (tea.Cmd, tea.Cmd) {
+	if _, isKey := message.(tea.KeyPressMsg); isKey {
+		return nil, nil
+	}
+	var helpCommand tea.Cmd
+	if model.overlay == OverlayHelp {
+		model.help, helpCommand = model.help.Update(message)
+	}
+	var childCommand tea.Cmd
+	switch model.mode {
+	case ModeNormal, ModeVisual:
+	case ModeCommentEdit:
+		model.commentEditor, childCommand = model.commentEditor.Update(message)
+	case ModeSearch:
+		model.searchInput, childCommand = model.searchInput.Update(message)
+	case ModeCommand:
+		model.commandInput, childCommand = model.commandInput.Update(message)
+	}
+	return helpCommand, childCommand
+}
+
+func (model *Model) applyWindowSize(message tea.WindowSizeMsg) {
+	wasBelowMinimum := model.belowMinimum()
+	if message.Width > 0 && message.Height > 0 {
+		model.size = TerminalSize{Width: message.Width, Height: message.Height, Known: true}
+		model.help.SetWidth(message.Width)
+		model.resizeCommentEditor()
+		model.resizePrompts()
+		model.clampFocus()
+		model.clampDiffTop()
+	}
+	if wasBelowMinimum != model.belowMinimum() {
+		model.abandonChord()
+	}
+}
+
+func (model *Model) applyMouseAction(message mouseActionMsg) tea.Cmd {
+	if message.reviewState != model.review.StateRevision() ||
+		model.mode != ModeNormal || model.overlay != OverlayNone || model.belowMinimum() ||
+		!model.focusVisible(message.focus) {
+		return nil
+	}
+	model.setFocus(message.focus)
+	model.focusReturn = 0
+	if message.delta != 0 || message.target != mouseTargetNone {
+		model.foreground.clearPendingDiffTarget()
+	}
+	var command tea.Cmd
+	if message.delta != 0 {
+		command = model.move(message.delta)
+	}
+	switch message.target {
+	case mouseTargetNone:
+	case mouseTargetTree:
+		model.selectTreeNode(message.tree)
+	case mouseTargetDiff:
+		model.diffCursor = message.diffLine
+		model.moveDiff(0)
+	case mouseTargetComment:
+		model.commentCursor = message.commentIndex
+	}
+	return command
+}
+
+func (model *Model) applyKeyPress(message tea.KeyPressMsg) tea.Cmd {
+	switch {
+	case model.belowMinimum():
+		return model.handleKey(message)
+	case model.mode == ModeCommentEdit:
+		return model.handleCommentEditorKey(message)
+	case model.mode == ModeSearch || model.mode == ModeCommand:
+		return model.handlePromptKey(message)
+	default:
+		return model.handleKey(message)
+	}
+}
+
+func (model *Model) finishUpdate(commands ...tea.Cmd) (tea.Model, tea.Cmd) {
+	model.refreshCoordinatorStats()
+	return model, tea.Batch(commands...)
+}
+
+// Review returns the receiver's review value.
 func (model *Model) Review() review.Review {
 	return model.review
 }
 
+// TerminalSize returns the receiver's terminal size value.
 func (model *Model) TerminalSize() TerminalSize {
 	return model.size
 }
@@ -387,6 +449,7 @@ func (model *Model) CloseSourceDocument() error {
 	return errors.Join(closeErrors...)
 }
 
+// MaterializedRows returns the receiver's materialized rows value.
 func (model *Model) MaterializedRows() int {
 	if !model.size.Known || model.belowMinimum() || model.overlay != OverlayNone {
 		_, height := model.renderSize()
@@ -578,17 +641,18 @@ func patchStatusForWorkError(err error) review.PatchStatus {
 
 func operationStatusForPatch(status review.PatchStatus) review.OperationStatus {
 	switch status {
+	case review.PatchPending:
+		panic("pending patch cannot resolve an operation")
 	case review.PatchReady:
 		return review.OperationSucceeded
 	case review.PatchCancelled:
 		return review.OperationCancelled
 	case review.PatchLimited:
 		return review.OperationLimited
-	case review.PatchUnavailable:
-		return review.OperationFailed
-	default:
+	case review.PatchUnavailable, review.PatchFailed:
 		return review.OperationFailed
 	}
+	panic("invalid patch status")
 }
 
 func (model *Model) requestActivePatch() {
@@ -614,7 +678,7 @@ func (model *Model) beginPatch(start foregroundStart) {
 	}
 	operationID, err := review.NewOperationID(model.nextOperation)
 	if err != nil {
-		model.notice = &Notice{Kind: NoticeError, Text: "operation identity exhausted"}
+		model.notice = &Notice{Kind: NoticeError, Text: operationIdentityExhausted}
 		model.rejectAndApplyForegroundStart(start)
 		return
 	}
@@ -640,14 +704,14 @@ func (model *Model) beginPatch(start foregroundStart) {
 			Status:    status,
 			Detail:    review.PatchDetail(err.Error()),
 		}
-		if next, applyErr := next.ApplyPatch(failed); applyErr == nil {
-			model.review = next
-			if next, resolveErr := model.review.ResolveOperation(
+		if failedReview, applyErr := next.ApplyPatch(failed); applyErr == nil {
+			model.review = failedReview
+			if resolvedReview, resolveErr := model.review.ResolveOperation(
 				operationID,
 				operationStatus,
 				boundedOperationDetail(err.Error()),
 			); resolveErr == nil {
-				model.review = next
+				model.review = resolvedReview
 			}
 		}
 		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
@@ -1014,9 +1078,9 @@ func normalizeStroke(value string) string {
 	}
 	switch strings.ToLower(value) {
 	case "return":
-		return "enter"
+		return keyEnter
 	case "escape":
-		return "esc"
+		return keyEscape
 	default:
 		return strings.ToLower(value)
 	}

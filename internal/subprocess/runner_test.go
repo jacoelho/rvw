@@ -186,7 +186,8 @@ func TestSubprocessHelper(t *testing.T) {
 		signal.Ignore(syscall.SIGTERM)
 		time.Sleep(10 * time.Second)
 	case "parent-exits-child-ignores-term":
-		command := exec.Command(
+		command := exec.CommandContext(
+			context.Background(),
 			os.Args[0],
 			"-test.run=TestSubprocessHelper",
 			"--",
@@ -197,16 +198,18 @@ func TestSubprocessHelper(t *testing.T) {
 		if err != nil {
 			os.Exit(3)
 		}
-		defer null.Close()
 		command.Stdin = null
 		command.Stdout = null
 		command.Stderr = null
 		if err := command.Start(); err != nil {
+			closeHelperFiles(null)
 			os.Exit(4)
 		}
+		closeHelperFiles(null)
 		time.Sleep(10 * time.Second)
 	case "parent-exits-escaped-child":
-		command := exec.Command(
+		command := exec.CommandContext(
+			context.Background(),
 			os.Args[0],
 			"-test.run=TestSubprocessHelper",
 			"--",
@@ -217,7 +220,6 @@ func TestSubprocessHelper(t *testing.T) {
 		if err != nil {
 			os.Exit(3)
 		}
-		defer null.Close()
 		command.Stdin = null
 		command.Stdout = null
 		command.Stderr = null
@@ -228,8 +230,10 @@ func TestSubprocessHelper(t *testing.T) {
 		}
 		command.ExtraFiles = []*os.File{lifetime}
 		if err := command.Start(); err != nil {
+			closeHelperFiles(null, lifetime)
 			os.Exit(4)
 		}
+		closeHelperFiles(null, lifetime)
 	case "escaped-child":
 		pidFile := os.Getenv("RVW_ESCAPED_PID_FILE")
 		if err := os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
@@ -241,6 +245,14 @@ func TestSubprocessHelper(t *testing.T) {
 		os.Exit(2)
 	}
 	os.Exit(0)
+}
+
+func closeHelperFiles(files ...*os.File) {
+	for _, file := range files {
+		if err := file.Close(); err != nil {
+			os.Exit(7)
+		}
+	}
 }
 
 func helperRequest(mode string) Request {

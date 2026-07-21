@@ -5,18 +5,21 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 )
 
+// MaxPublicationBytes defines the supported publication bytes limit.
 const MaxPublicationBytes = 16 << 20
 
+// ErrInvalidPublication identifies an invalid publication failure.
 var ErrInvalidPublication = errors.New("invalid publication transition")
 
+// PublicationEvent describes publication event.
 type PublicationEvent uint8
 
+// PublicationEventComment identifies a supported publication event comment value.
 const (
 	PublicationEventComment PublicationEvent = iota + 1
 	PublicationEventDraft
@@ -24,10 +27,11 @@ const (
 	PublicationEventRequestChanges
 )
 
+// String returns the receiver's string value.
 func (event PublicationEvent) String() string {
 	switch event {
 	case PublicationEventComment:
-		return "comment"
+		return publicationCommentValue
 	case PublicationEventDraft:
 		return "draft"
 	case PublicationEventApprove:
@@ -35,10 +39,11 @@ func (event PublicationEvent) String() string {
 	case PublicationEventRequestChanges:
 		return "request changes"
 	default:
-		return "invalid"
+		return invalidValue
 	}
 }
 
+// GitHubValue returns the receiver's git hub value value.
 func (event PublicationEvent) GitHubValue() string {
 	switch event {
 	case PublicationEventComment:
@@ -49,22 +54,25 @@ func (event PublicationEvent) GitHubValue() string {
 		return "APPROVE"
 	case PublicationEventRequestChanges:
 		return "REQUEST_CHANGES"
-	default:
-		return ""
 	}
+	return ""
 }
 
+// PublicationPolicy represents publication policy.
 type PublicationPolicy uint8
 
+// PublicationMoveUnmappableToSummary identifies a supported publication move unmappable to summary value.
 const (
 	PublicationMoveUnmappableToSummary PublicationPolicy = iota + 1
 	PublicationAllowStaleHead
 )
 
+// PublicationPolicies represents publication policies.
 type PublicationPolicies struct {
 	bits uint8
 }
 
+// NewPublicationPolicies constructs and validates publication policies.
 func NewPublicationPolicies(values ...PublicationPolicy) (PublicationPolicies, error) {
 	var policies PublicationPolicies
 	for _, value := range values {
@@ -80,6 +88,7 @@ func NewPublicationPolicies(values ...PublicationPolicy) (PublicationPolicies, e
 	return policies, nil
 }
 
+// Has performs the has operation.
 func (policies PublicationPolicies) Has(value PublicationPolicy) bool {
 	return value >= PublicationMoveUnmappableToSummary && value <= PublicationAllowStaleHead &&
 		policies.bits&(1<<(value-1)) != 0
@@ -90,12 +99,14 @@ func (policies PublicationPolicies) valid() bool {
 	return policies.bits&^validBits == 0
 }
 
+// PublicationOptions describes publication options.
 type PublicationOptions struct {
+	excluded []CommentID
 	event    PublicationEvent
 	policies PublicationPolicies
-	excluded []CommentID
 }
 
+// NewPublicationOptions constructs and validates publication options.
 func NewPublicationOptions(
 	event PublicationEvent,
 	policies PublicationPolicies,
@@ -107,6 +118,7 @@ func NewPublicationOptions(
 	return options, nil
 }
 
+// WithExcludedComments performs the with excluded comments operation.
 func (options PublicationOptions) WithExcludedComments(
 	comments []CommentID,
 ) (PublicationOptions, error) {
@@ -140,14 +152,17 @@ func (options PublicationOptions) WithExcludedComments(
 	return options, nil
 }
 
+// ExcludedComments returns the receiver's excluded comments value.
 func (options PublicationOptions) ExcludedComments() []CommentID {
 	return slices.Clone(options.excluded)
 }
 
+// Event returns the receiver's event value.
 func (options PublicationOptions) Event() PublicationEvent {
 	return options.event
 }
 
+// Policies returns the receiver's policies value.
 func (options PublicationOptions) Policies() PublicationPolicies {
 	return options.policies
 }
@@ -158,20 +173,23 @@ func (options PublicationOptions) valid() bool {
 		options.policies.valid()
 }
 
+// PublicationTarget represents publication target.
 type PublicationTarget struct {
 	repository  string
-	pullRequest uint64
 	base        ObjectID
 	head        ObjectID
+	pullRequest uint64
 }
 
+// PublicationTargetDescriptor describes publication target descriptor.
 type PublicationTargetDescriptor struct {
 	Repository  string
-	PullRequest uint64
 	Base        ObjectID
 	Head        ObjectID
+	PullRequest uint64
 }
 
+// NewPublicationTarget constructs and validates publication target.
 func NewPublicationTarget(descriptor PublicationTargetDescriptor) (PublicationTarget, error) {
 	base, baseErr := NewObjectID(descriptor.Base.String())
 	head, headErr := NewObjectID(descriptor.Head.String())
@@ -225,22 +243,27 @@ func asciiLetterOrDigit(value rune) bool {
 		value >= '0' && value <= '9'
 }
 
+// Repository returns the receiver's repository value.
 func (target PublicationTarget) Repository() string {
 	return target.repository
 }
 
+// PullRequest returns the receiver's pull request value.
 func (target PublicationTarget) PullRequest() uint64 {
 	return target.pullRequest
 }
 
+// Base returns the receiver's base value.
 func (target PublicationTarget) Base() ObjectID {
 	return target.base
 }
 
+// Head returns the receiver's head value.
 func (target PublicationTarget) Head() ObjectID {
 	return target.head
 }
 
+// PublicationComment represents publication comment.
 type PublicationComment struct {
 	path      string
 	body      string
@@ -249,24 +272,30 @@ type PublicationComment struct {
 	endLine   LineNumber
 }
 
+// Path returns the receiver's path value.
 func (comment PublicationComment) Path() string {
 	return comment.path
 }
 
+// Body returns the receiver's body value.
 func (comment PublicationComment) Body() string {
 	return comment.body
 }
 
+// Side returns the receiver's side value.
 func (comment PublicationComment) Side() LineSide {
 	return comment.side
 }
 
+// Lines returns the receiver's lines value.
 func (comment PublicationComment) Lines() (LineNumber, LineNumber) {
 	return comment.startLine, comment.endLine
 }
 
+// PublicationDecision represents publication decision.
 type PublicationDecision uint8
 
+// PublicationIncludedInline identifies a supported publication included inline value.
 const (
 	PublicationIncludedInline PublicationDecision = iota + 1
 	PublicationIncludedSummary
@@ -276,6 +305,7 @@ const (
 	PublicationExcludedInvalid
 )
 
+// String returns the receiver's string value.
 func (decision PublicationDecision) String() string {
 	switch decision {
 	case PublicationIncludedInline:
@@ -291,34 +321,39 @@ func (decision PublicationDecision) String() string {
 	case PublicationExcludedInvalid:
 		return "excluded invalid"
 	default:
-		return "invalid"
+		return invalidValue
 	}
 }
 
+// PublicationCommentDecision represents publication comment decision.
 type PublicationCommentDecision struct {
 	id       CommentID
 	decision PublicationDecision
 }
 
+// CommentID returns the receiver's comment id value.
 func (decision PublicationCommentDecision) CommentID() CommentID {
 	return decision.id
 }
 
+// Decision returns the receiver's decision value.
 func (decision PublicationCommentDecision) Decision() PublicationDecision {
 	return decision.decision
 }
 
+// PreparedPublication represents prepared publication.
 type PreparedPublication struct {
-	workspace WorkspaceRevision
-	source    SourceID
-	options   PublicationOptions
 	summary   string
 	comments  []PublicationComment
 	decisions []PublicationCommentDecision
+	options   PublicationOptions
+	workspace WorkspaceRevision
+	source    SourceID
 	included  uint32
 	excluded  uint32
 }
 
+// PreparePublication prepares publication.
 func (review Review) PreparePublication(options PublicationOptions) (PreparedPublication, error) {
 	if !options.valid() {
 		return PreparedPublication{}, ErrInvalidPublication
@@ -398,7 +433,7 @@ func (review Review) PreparePublication(options PublicationOptions) (PreparedPub
 			)
 		}
 	}
-	var retained int64 = int64(len(prepared.summary))
+	var retained = int64(len(prepared.summary))
 	for _, comment := range prepared.comments {
 		retained += int64(len(comment.path) + len(comment.body) + 32)
 	}
@@ -412,26 +447,32 @@ func (review Review) PreparePublication(options PublicationOptions) (PreparedPub
 	return prepared, nil
 }
 
+// Workspace returns the receiver's workspace value.
 func (prepared PreparedPublication) Workspace() WorkspaceRevision {
 	return prepared.workspace
 }
 
+// Source returns the receiver's source value.
 func (prepared PreparedPublication) Source() SourceID {
 	return prepared.source
 }
 
+// Options returns the receiver's options value.
 func (prepared PreparedPublication) Options() PublicationOptions {
 	return prepared.options
 }
 
+// SummaryBody returns the receiver's summary body value.
 func (prepared PreparedPublication) SummaryBody() string {
 	return prepared.summary
 }
 
+// CommentCount returns the receiver's comment count value.
 func (prepared PreparedPublication) CommentCount() int {
 	return len(prepared.comments)
 }
 
+// Comments performs the comments operation.
 func (prepared PreparedPublication) Comments(start, count int) []PublicationComment {
 	if start < 0 || start >= len(prepared.comments) || count <= 0 || count > 256 {
 		return nil
@@ -439,14 +480,17 @@ func (prepared PreparedPublication) Comments(start, count int) []PublicationComm
 	return slices.Clone(prepared.comments[start:min(start+count, len(prepared.comments))])
 }
 
+// IncludedCount returns the receiver's included count value.
 func (prepared PreparedPublication) IncludedCount() uint32 {
 	return prepared.included
 }
 
+// ExcludedCount returns the receiver's excluded count value.
 func (prepared PreparedPublication) ExcludedCount() uint32 {
 	return prepared.excluded
 }
 
+// DecisionAt performs the decision at operation.
 func (prepared PreparedPublication) DecisionAt(
 	index int,
 ) (PublicationCommentDecision, bool) {
@@ -456,8 +500,10 @@ func (prepared PreparedPublication) DecisionAt(
 	return prepared.decisions[index], true
 }
 
+// PublicationMarker represents publication marker.
 type PublicationMarker string
 
+// NewPublicationMarker constructs and validates publication marker.
 func NewPublicationMarker(value string) (PublicationMarker, error) {
 	const prefix = "<!-- rvw-publication:v1:"
 	const suffix = " -->"
@@ -474,10 +520,12 @@ func NewPublicationMarker(value string) (PublicationMarker, error) {
 	return PublicationMarker(value), nil
 }
 
+// String returns the receiver's string value.
 func (marker PublicationMarker) String() string {
 	return string(marker)
 }
 
+// CheckedPublication represents checked publication.
 type CheckedPublication struct {
 	target    PublicationTarget
 	marker    PublicationMarker
@@ -486,12 +534,14 @@ type CheckedPublication struct {
 	staleHead bool
 }
 
+// CheckedPublicationDescriptor describes checked publication descriptor.
 type CheckedPublicationDescriptor struct {
-	Target    PublicationTarget
 	Marker    PublicationMarker
+	Target    PublicationTarget
 	StaleHead bool
 }
 
+// TakeCheckedPublication takes ownership of checked publication.
 func TakeCheckedPublication(
 	descriptor CheckedPublicationDescriptor,
 	prepared PreparedPublication,
@@ -511,7 +561,7 @@ func TakeCheckedPublication(
 	payload, err := encodePublicationPayload(target, marker, prepared)
 	if err != nil {
 		return nil, fmt.Errorf(
-			"%w: encode checked publication: %v",
+			"%w: encode checked publication: %w",
 			ErrInvalidPublication,
 			err,
 		)
@@ -535,10 +585,10 @@ type publicationPayload struct {
 type publicationComment struct {
 	Path      string `json:"path"`
 	Body      string `json:"body"`
-	Line      uint32 `json:"line"`
 	Side      string `json:"side"`
-	StartLine uint32 `json:"start_line,omitempty"`
 	StartSide string `json:"start_side,omitempty"`
+	Line      uint32 `json:"line"`
+	StartLine uint32 `json:"start_line,omitempty"`
 }
 
 func encodePublicationPayload(
@@ -584,6 +634,7 @@ func encodePublicationPayload(
 	return string(encoded), nil
 }
 
+// Target returns the receiver's target value.
 func (checked *CheckedPublication) Target() PublicationTarget {
 	if checked == nil {
 		return PublicationTarget{}
@@ -591,6 +642,7 @@ func (checked *CheckedPublication) Target() PublicationTarget {
 	return checked.target
 }
 
+// Marker returns the receiver's marker value.
 func (checked *CheckedPublication) Marker() PublicationMarker {
 	if checked == nil {
 		return ""
@@ -598,6 +650,7 @@ func (checked *CheckedPublication) Marker() PublicationMarker {
 	return checked.marker
 }
 
+// Payload returns the receiver's payload value.
 func (checked *CheckedPublication) Payload() string {
 	if checked == nil {
 		return ""
@@ -605,6 +658,7 @@ func (checked *CheckedPublication) Payload() string {
 	return checked.payload
 }
 
+// PayloadSize returns the receiver's payload size value.
 func (checked *CheckedPublication) PayloadSize() int64 {
 	if checked == nil {
 		return 0
@@ -612,6 +666,7 @@ func (checked *CheckedPublication) PayloadSize() int64 {
 	return int64(len(checked.payload))
 }
 
+// Prepared prepares d.
 func (checked *CheckedPublication) Prepared() PreparedPublication {
 	if checked == nil {
 		return PreparedPublication{}
@@ -619,12 +674,15 @@ func (checked *CheckedPublication) Prepared() PreparedPublication {
 	return checked.prepared
 }
 
+// StaleHead reports the receiver's stale head state.
 func (checked *CheckedPublication) StaleHead() bool {
 	return checked != nil && checked.staleHead
 }
 
+// PublicationStatus describes publication status.
 type PublicationStatus uint8
 
+// PublicationIdle identifies a supported publication idle value.
 const (
 	PublicationIdle PublicationStatus = iota + 1
 	PublicationChecking
@@ -637,6 +695,7 @@ const (
 	PublicationConfirmedAbsent
 )
 
+// String returns the receiver's string value.
 func (status PublicationStatus) String() string {
 	switch status {
 	case PublicationIdle:
@@ -658,51 +717,55 @@ func (status PublicationStatus) String() string {
 	case PublicationConfirmedAbsent:
 		return "confirmed-absent"
 	default:
-		return "invalid"
+		return invalidValue
 	}
 }
 
 type publicationState struct {
-	status       PublicationStatus
+	checked      *CheckedPublication
+	marker       PublicationMarker
+	detail       OperationDetail
+	target       PublicationTarget
 	operation    OperationID
 	attempt      OperationID
-	checked      *CheckedPublication
-	target       PublicationTarget
-	marker       PublicationMarker
 	remoteReview uint64
-	detail       OperationDetail
+	status       PublicationStatus
 	acknowledged bool
 }
 
+// PublicationSummary describes publication summary.
 type PublicationSummary struct {
-	Status       PublicationStatus
+	Marker       PublicationMarker
+	Detail       OperationDetail
+	Target       PublicationTarget
 	Operation    OperationID
-	Event        PublicationEvent
+	RemoteReview uint64
 	Included     uint32
 	Excluded     uint32
+	Status       PublicationStatus
+	Event        PublicationEvent
 	StaleHead    bool
-	Target       PublicationTarget
-	Marker       PublicationMarker
-	RemoteReview uint64
-	Detail       OperationDetail
 	Acknowledged bool
 }
 
+// PublicationCheckRequest describes publication check request.
 type PublicationCheckRequest struct {
+	Options   PublicationOptions
 	Operation OperationID
 	Workspace WorkspaceRevision
 	Source    SourceID
-	Options   PublicationOptions
 }
 
+// PublicationCheckResult describes publication check result.
 type PublicationCheckResult struct {
-	Operation OperationID
-	Workspace WorkspaceRevision
-	Source    SourceID
 	Checked   *CheckedPublication
 	Detail    OperationDetail
+	Operation OperationID
+	Workspace WorkspaceRevision
+	Source    SourceID
 }
 
+// StartPublicationCheck performs the start publication check operation.
 func (review Review) StartPublicationCheck(
 	id OperationID,
 	options PublicationOptions,
@@ -730,6 +793,7 @@ func (review Review) StartPublicationCheck(
 	}, nil
 }
 
+// ApplyPublicationCheck performs the apply publication check operation.
 func (review Review) ApplyPublicationCheck(result PublicationCheckResult) (Review, error) {
 	if review.publication.status != PublicationChecking ||
 		review.publication.operation != result.Operation ||
@@ -763,13 +827,15 @@ func (review Review) ApplyPublicationCheck(result PublicationCheckResult) (Revie
 	return next, nil
 }
 
+// PublicationRequest describes publication request.
 type PublicationRequest struct {
+	Checked   *CheckedPublication
 	Operation OperationID
 	Workspace WorkspaceRevision
 	Source    SourceID
-	Checked   *CheckedPublication
 }
 
+// StartPublication performs the start publication operation.
 func (review Review) StartPublication(
 	id OperationID,
 ) (Review, PublicationRequest, error) {
@@ -792,8 +858,10 @@ func (review Review) StartPublication(
 	}, nil
 }
 
+// PublicationDisposition represents publication disposition.
 type PublicationDisposition uint8
 
+// PublicationDispositionCommitted identifies a supported publication disposition committed value.
 const (
 	PublicationDispositionCommitted PublicationDisposition = iota + 1
 	PublicationDispositionFailedBeforeCommit
@@ -801,15 +869,17 @@ const (
 	PublicationDispositionCancelledBeforeCommit
 )
 
+// PublicationResult describes publication result.
 type PublicationResult struct {
+	Detail       OperationDetail
 	Operation    OperationID
 	Workspace    WorkspaceRevision
 	Source       SourceID
-	Disposition  PublicationDisposition
 	RemoteReview uint64
-	Detail       OperationDetail
+	Disposition  PublicationDisposition
 }
 
+// ApplyPublication performs the apply publication operation.
 func (review Review) ApplyPublication(result PublicationResult) (Review, error) {
 	if review.publication.status != PublicationPublishing ||
 		review.publication.operation != result.Operation ||
@@ -839,14 +909,16 @@ func (review Review) ApplyPublication(result PublicationResult) (Review, error) 
 	return next, nil
 }
 
+// ReconciliationRequest describes reconciliation request.
 type ReconciliationRequest struct {
+	Marker    PublicationMarker
+	Target    PublicationTarget
 	Operation OperationID
 	Workspace WorkspaceRevision
 	Source    SourceID
-	Target    PublicationTarget
-	Marker    PublicationMarker
 }
 
+// StartReconciliation performs the start reconciliation operation.
 func (review Review) StartReconciliation(
 	id OperationID,
 ) (Review, ReconciliationRequest, error) {
@@ -870,22 +942,26 @@ func (review Review) StartReconciliation(
 	}, nil
 }
 
+// ReconciliationDisposition represents reconciliation disposition.
 type ReconciliationDisposition uint8
 
+// ReconciliationCommitted identifies a supported reconciliation committed value.
 const (
 	ReconciliationCommitted ReconciliationDisposition = iota + 1
 	ReconciliationNotCommitted
 	ReconciliationStillUnknown
 )
 
+// ReconciliationResult describes reconciliation result.
 type ReconciliationResult struct {
+	Detail      OperationDetail
 	Operation   OperationID
 	Workspace   WorkspaceRevision
 	Source      SourceID
 	Disposition ReconciliationDisposition
-	Detail      OperationDetail
 }
 
+// ApplyReconciliation performs the apply reconciliation operation.
 func (review Review) ApplyReconciliation(result ReconciliationResult) (Review, error) {
 	if review.publication.status != PublicationReconciling ||
 		review.publication.operation != result.Operation ||
@@ -909,6 +985,7 @@ func (review Review) ApplyReconciliation(result ReconciliationResult) (Review, e
 	return next, nil
 }
 
+// CancelPublicationCheck returns the receiver's cancel publication check value.
 func (review Review) CancelPublicationCheck() (Review, error) {
 	if review.publication.status != PublicationChecked {
 		return review, ErrInvalidPublication
@@ -918,6 +995,7 @@ func (review Review) CancelPublicationCheck() (Review, error) {
 	return next, nil
 }
 
+// AcknowledgePublication returns the receiver's acknowledge publication value.
 func (review Review) AcknowledgePublication() (Review, error) {
 	if review.publication.status == PublicationUnknown ||
 		review.publication.status == PublicationReconciling ||
@@ -929,6 +1007,7 @@ func (review Review) AcknowledgePublication() (Review, error) {
 	return next, nil
 }
 
+// PublicationSummary returns the receiver's publication summary value.
 func (review Review) PublicationSummary() PublicationSummary {
 	summary := PublicationSummary{
 		Status:       review.publication.status,
@@ -949,6 +1028,7 @@ func (review Review) PublicationSummary() PublicationSummary {
 	return summary
 }
 
+// UnknownPublicationOperation returns the receiver's unknown publication operation value.
 func (review Review) UnknownPublicationOperation() (OperationID, bool) {
 	return review.publication.attempt,
 		review.publication.attempt != 0 &&
@@ -956,6 +1036,7 @@ func (review Review) UnknownPublicationOperation() (OperationID, bool) {
 				review.publication.status == PublicationReconciling)
 }
 
+// PublicationPreflightBody returns the receiver's publication preflight body value.
 func (review Review) PublicationPreflightBody() string {
 	if review.publication.checked == nil {
 		return ""
@@ -963,6 +1044,7 @@ func (review Review) PublicationPreflightBody() string {
 	return review.publication.checked.prepared.summary
 }
 
+// PublicationPreflightPayload returns the receiver's publication preflight payload value.
 func (review Review) PublicationPreflightPayload() string {
 	if review.publication.checked == nil {
 		return ""
@@ -970,6 +1052,7 @@ func (review Review) PublicationPreflightPayload() string {
 	return review.publication.checked.payload
 }
 
+// PublicationDecisionAt performs the publication decision at operation.
 func (review Review) PublicationDecisionAt(
 	index int,
 ) (PublicationCommentDecision, bool) {
@@ -977,11 +1060,4 @@ func (review Review) PublicationDecisionAt(
 		return PublicationCommentDecision{}, false
 	}
 	return review.publication.checked.prepared.DecisionAt(index)
-}
-
-func publicationTargetText(target PublicationTarget) string {
-	if target.repository == "" {
-		return ""
-	}
-	return target.repository + "#" + strconv.FormatUint(target.pullRequest, 10)
 }

@@ -7,7 +7,6 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/jacoelho/rvw/internal/review"
@@ -97,7 +96,7 @@ func (model *Model) publicationOptions() (review.PublicationOptions, error) {
 func (model *Model) nextOperationID() (review.OperationID, error) {
 	operationID, err := review.NewOperationID(model.nextOperation)
 	if err != nil {
-		return 0, errors.New("operation identity exhausted")
+		return 0, errors.New(operationIdentityExhausted)
 	}
 	model.nextOperation++
 	return operationID, nil
@@ -178,7 +177,9 @@ func (model *Model) applyPublicationCheckOutcome(outcome PublicationCheckOutcome
 	if model.publicationCancel {
 		model.publicationCancel = false
 		if result.Checked != nil {
-			model.review, _ = model.review.CancelPublicationCheck()
+			if !model.cancelPublicationCheck() {
+				return
+			}
 		}
 		model.overlay = OverlayNone
 		model.notice = &Notice{Kind: NoticeInformation, Text: "publication preflight cancelled"}
@@ -213,9 +214,9 @@ func (model *Model) startPublication() {
 			Disposition: review.PublicationDispositionFailedBeforeCommit,
 			Detail:      boundedOperationDetail(err.Error()),
 		}
-		if next, applyErr := next.ApplyPublication(result); applyErr == nil {
+		if failedReview, applyErr := next.ApplyPublication(result); applyErr == nil {
 			model.review = resolvePublicationOperation(
-				next,
+				failedReview,
 				operationID,
 				review.OperationFailed,
 				result.Detail,
@@ -252,6 +253,7 @@ func (model *Model) applyPublicationCommitOutcome(outcome PublicationCommitOutco
 	}
 	status := review.OperationSucceeded
 	switch result.Disposition {
+	case review.PublicationDispositionCommitted:
 	case review.PublicationDispositionUnknown:
 		status = review.OperationUnknown
 	case review.PublicationDispositionFailedBeforeCommit,
@@ -390,7 +392,7 @@ func resolvePublicationOperation(
 	return next
 }
 
-func (model *Model) applyPublicationAction(action KeyAction) tea.Cmd {
+func (model *Model) applyPublicationAction(action KeyAction) {
 	summary := model.review.PublicationSummary()
 	switch action {
 	case KeyActionCancel, KeyActionInterrupt, KeyActionQuit:
@@ -403,7 +405,9 @@ func (model *Model) applyPublicationAction(action KeyAction) tea.Cmd {
 				Text: "cancelling publication; a claimed remote commit will remain fenced",
 			}
 		case review.PublicationChecked:
-			model.review, _ = model.review.CancelPublicationCheck()
+			if !model.cancelPublicationCheck() {
+				return
+			}
 			model.overlay = OverlayNone
 		default:
 			model.overlay = OverlayNone
@@ -452,15 +456,27 @@ func (model *Model) applyPublicationAction(action KeyAction) tea.Cmd {
 			model.publicationDetailTop+model.publicationDetailStep(),
 			review.MaxPublicationBytes,
 		)
+	default:
 	}
-	return nil
 }
 
 func (model *Model) restartPublicationCheck() {
 	if model.review.PublicationSummary().Status == review.PublicationChecked {
-		model.review, _ = model.review.CancelPublicationCheck()
+		if !model.cancelPublicationCheck() {
+			return
+		}
 	}
 	model.startPublicationCheck()
+}
+
+func (model *Model) cancelPublicationCheck() bool {
+	next, err := model.review.CancelPublicationCheck()
+	if err != nil {
+		model.notice = &Notice{Kind: NoticeError, Text: NoticeText(err.Error())}
+		return false
+	}
+	model.review = next
+	return true
 }
 
 func (model *Model) togglePublicationExclusion() {

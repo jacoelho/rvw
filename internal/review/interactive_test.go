@@ -143,7 +143,7 @@ func TestReplaceSnapshotPreservesOnlyProvablyIdenticalHunkMarks(t *testing.T) {
 	newObject, _ := NewObjectID(strings.Repeat("2", 40))
 	current := testReview(
 		t,
-		testContentSnapshot(t, 1, "a.go", oldObject, newObject),
+		testContentSnapshot(t, 1, oldObject, newObject),
 	)
 	contextLines, _ := NewContextLines(3)
 	patchContext, _ := ContextAround(contextLines)
@@ -176,7 +176,7 @@ func TestReplaceSnapshotPreservesOnlyProvablyIdenticalHunkMarks(t *testing.T) {
 	}
 
 	identical, report, err := current.ReplaceSnapshot(
-		testContentSnapshot(t, 2, "a.go", oldObject, newObject),
+		testContentSnapshot(t, 2, oldObject, newObject),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -188,7 +188,7 @@ func TestReplaceSnapshotPreservesOnlyProvablyIdenticalHunkMarks(t *testing.T) {
 
 	changedObject, _ := NewObjectID(strings.Repeat("3", 40))
 	changed, report, err := current.ReplaceSnapshot(
-		testContentSnapshot(t, 3, "a.go", oldObject, changedObject),
+		testContentSnapshot(t, 3, oldObject, changedObject),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -240,14 +240,14 @@ func TestReplaceSnapshotPreservesLineCommentWhenItsSideIsIdentical(t *testing.T)
 	newObject, _ := NewObjectID(strings.Repeat("2", 40))
 	current := testReview(
 		t,
-		testContentSnapshot(t, 1, "a.go", oldObject, newObject),
+		testContentSnapshot(t, 1, oldObject, newObject),
 	)
 	line, _ := NewLineNumber(7)
 	target, _ := LineCommentTarget(0, LineNew, line, line)
 	current = saveTestComment(t, current, target, "line")
 
 	identical, report, err := current.ReplaceSnapshot(
-		testContentSnapshot(t, 2, "a.go", oldObject, newObject),
+		testContentSnapshot(t, 2, oldObject, newObject),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -261,7 +261,7 @@ func TestReplaceSnapshotPreservesLineCommentWhenItsSideIsIdentical(t *testing.T)
 
 	changedObject, _ := NewObjectID(strings.Repeat("3", 40))
 	changed, report, err := current.ReplaceSnapshot(
-		testContentSnapshot(t, 3, "a.go", oldObject, changedObject),
+		testContentSnapshot(t, 3, oldObject, changedObject),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -279,7 +279,7 @@ func TestReplaceSnapshotRequiresIdenticalLineDraftContentAndSupersedesCPUWork(t 
 	newObject, _ := NewObjectID(strings.Repeat("2", 40))
 	current := testReview(
 		t,
-		testContentSnapshot(t, 1, "a.go", oldObject, newObject),
+		testContentSnapshot(t, 1, oldObject, newObject),
 	)
 	line, _ := NewLineNumber(7)
 	target, _ := LineCommentTarget(0, LineNew, line, line)
@@ -299,7 +299,7 @@ func TestReplaceSnapshotRequiresIdenticalLineDraftContentAndSupersedesCPUWork(t 
 	}
 
 	identical, report, err := current.ReplaceSnapshot(
-		testContentSnapshot(t, 2, "a.go", oldObject, newObject),
+		testContentSnapshot(t, 2, oldObject, newObject),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -316,7 +316,7 @@ func TestReplaceSnapshotRequiresIdenticalLineDraftContentAndSupersedesCPUWork(t 
 
 	changedObject, _ := NewObjectID(strings.Repeat("3", 40))
 	if _, _, err := current.ReplaceSnapshot(
-		testContentSnapshot(t, 3, "a.go", oldObject, changedObject),
+		testContentSnapshot(t, 3, oldObject, changedObject),
 	); !errors.Is(err, ErrInvalidReload) {
 		t.Fatalf("changed line draft replacement error = %v, want ErrInvalidReload", err)
 	}
@@ -400,7 +400,6 @@ func TestOperationsAreCapacityAndDetailBounded(t *testing.T) {
 	if _, exists := current.Operations()[oldest]; exists {
 		t.Fatal("oldest settled status was not retired")
 	}
-
 }
 
 func saveTestComment(
@@ -492,7 +491,6 @@ func testRenamedSnapshot(t *testing.T, source uint64, oldName, newName string) S
 func testContentSnapshot(
 	t *testing.T,
 	source uint64,
-	pathValue string,
 	oldObject ObjectID,
 	newObject ObjectID,
 ) Snapshot {
@@ -505,7 +503,7 @@ func testContentSnapshot(
 	if err != nil {
 		t.Fatal(err)
 	}
-	path, _ := NewPath([]byte(pathValue))
+	path, _ := NewPath([]byte("a.go"))
 	change, _ := NewUnclassifiedChange(ChangeModified, 1, 1)
 	flags, _ := NewFlags(FileTraits{}, HiddenReasons{})
 	contents, err := NewFileContents(

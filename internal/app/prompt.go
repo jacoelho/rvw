@@ -37,9 +37,9 @@ const (
 )
 
 type commandIntent struct {
-	kind    commandKind
 	text    string
 	number  uint32
+	kind    commandKind
 	enabled bool
 	toggle  bool
 	whole   bool
@@ -68,11 +68,11 @@ func (model *Model) handlePromptKey(message tea.KeyPressMsg) tea.Cmd {
 		if action == KeyActionNone {
 			return command
 		}
-		switch action {
-		case KeyActionCancel, KeyActionInterrupt:
+		if action == KeyActionCancel || action == KeyActionInterrupt {
 			model.cancelPrompt()
 			return nil
-		case KeyActionAccept:
+		}
+		if action == KeyActionAccept {
 			if model.mode == ModeSearch {
 				query := model.searchInput.Value()
 				model.cancelPrompt()
@@ -82,7 +82,8 @@ func (model *Model) handlePromptKey(message tea.KeyPressMsg) tea.Cmd {
 			command := model.commandInput.Value()
 			model.cancelPrompt()
 			return model.executeCommand(command)
-		case KeyActionDeleteBackward:
+		}
+		if action == KeyActionDeleteBackward {
 			message = tea.KeyPressMsg(tea.Key{Code: tea.KeyBackspace})
 		}
 	}
@@ -205,7 +206,7 @@ func parseCommand(value string) (commandIntent, error) {
 		case "wrap!":
 			return commandIntent{kind: commandWrap, toggle: true}, nil
 		default:
-			return commandIntent{}, errors.New("set accepts wrap, nowrap, or wrap!")
+			return commandIntent{}, errors.New("set accepts wrap, nowrap, or wrap")
 		}
 	default:
 		number, err := parsePositiveLine(value)

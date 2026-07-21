@@ -9,8 +9,15 @@ import (
 	"unicode/utf8"
 )
 
+const (
+	invalidValue            = "invalid"
+	publicationCommentValue = "comment"
+)
+
+// ErrInvalidOperation identifies an invalid operation failure.
 var ErrInvalidOperation = errors.New("invalid operation transition")
 
+// MaxPendingOperations defines the supported pending operations limit.
 const (
 	MaxPendingOperations       = 64
 	MaxStatusRecords           = 256
@@ -18,8 +25,10 @@ const (
 	MaxOperationDetail   int64 = 8 << 10
 )
 
+// OperationKind describes operation kind.
 type OperationKind uint8
 
+// OperationPatch identifies a supported operation patch value.
 const (
 	OperationPatch OperationKind = iota + 1
 	OperationReload
@@ -31,8 +40,10 @@ const (
 	OperationReconciliation
 )
 
+// OperationStatus describes operation status.
 type OperationStatus uint8
 
+// OperationPending identifies a supported operation pending value.
 const (
 	OperationPending OperationStatus = iota + 1
 	OperationSucceeded
@@ -43,21 +54,25 @@ const (
 	OperationUnknown
 )
 
+// Operation represents operation.
 type Operation struct {
+	Detail OperationDetail
 	ID     OperationID
 	Kind   OperationKind
 	Status OperationStatus
-	Detail OperationDetail
 }
 
+// OperationDetail represents operation detail.
 type OperationDetail struct {
 	value string
 }
 
+// EmptyOperationDetail performs the empty operation detail operation.
 func EmptyOperationDetail() OperationDetail {
 	return OperationDetail{}
 }
 
+// NewOperationDetail constructs and validates operation detail.
 func NewOperationDetail(value string) (OperationDetail, error) {
 	if int64(len(value)) > MaxOperationDetail || !utf8.ValidString(value) {
 		return OperationDetail{}, fmt.Errorf(
@@ -97,14 +112,17 @@ func boundedOperationDetailText(value string) string {
 	return value
 }
 
+// String returns the receiver's string value.
 func (detail OperationDetail) String() string {
 	return detail.value
 }
 
+// Bytes returns the receiver's bytes value.
 func (detail OperationDetail) Bytes() int64 {
 	return int64(len(detail.value))
 }
 
+// IsEmpty reports the receiver's is empty state.
 func (detail OperationDetail) IsEmpty() bool {
 	return detail.value == ""
 }
@@ -117,6 +135,7 @@ func mustOperationDetail(value string) OperationDetail {
 	return detail
 }
 
+// String returns the receiver's string value.
 func (kind OperationKind) String() string {
 	switch kind {
 	case OperationPatch:
@@ -136,10 +155,11 @@ func (kind OperationKind) String() string {
 	case OperationReconciliation:
 		return "reconciliation"
 	default:
-		return "invalid"
+		return invalidValue
 	}
 }
 
+// String returns the receiver's string value.
 func (status OperationStatus) String() string {
 	switch status {
 	case OperationPending:
@@ -157,10 +177,11 @@ func (status OperationStatus) String() string {
 	case OperationUnknown:
 		return "unknown"
 	default:
-		return "invalid"
+		return invalidValue
 	}
 }
 
+// BeginOperation performs the begin operation operation.
 func (review Review) BeginOperation(id OperationID, kind OperationKind) (Review, error) {
 	if id == 0 || !validOperationKind(kind) {
 		return review, ErrInvalidOperation
@@ -188,6 +209,7 @@ func (review Review) BeginOperation(id OperationID, kind OperationKind) (Review,
 	return next, nil
 }
 
+// ResolveOperation performs the resolve operation operation.
 func (review Review) ResolveOperation(
 	id OperationID,
 	status OperationStatus,
@@ -211,6 +233,7 @@ func (review Review) ResolveOperation(
 	return next, nil
 }
 
+// SettleUnknownOperation performs the settle unknown operation operation.
 func (review Review) SettleUnknownOperation(
 	id OperationID,
 	status OperationStatus,
@@ -229,14 +252,17 @@ func (review Review) SettleUnknownOperation(
 	return next, nil
 }
 
+// Operations returns the receiver's operations value.
 func (review Review) Operations() map[OperationID]Operation {
 	return maps.Clone(review.operations)
 }
 
+// OperationCount returns the receiver's operation count value.
 func (review Review) OperationCount() int {
 	return len(review.operationIDs)
 }
 
+// NewestOperations constructs and validates est operations.
 func (review Review) NewestOperations(offset, count int) []Operation {
 	if offset < 0 || count <= 0 || offset >= len(review.operationIDs) {
 		return nil

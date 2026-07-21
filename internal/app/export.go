@@ -25,7 +25,7 @@ func (model *Model) openExportPicker(selection exportSelection) {
 	model.overlay = OverlayExport
 }
 
-func (model *Model) applyExportPickerAction(action KeyAction) tea.Cmd {
+func (model *Model) applyExportPickerAction(action KeyAction) {
 	switch action {
 	case KeyActionCancel, KeyActionInterrupt, KeyActionQuit:
 		model.overlay = OverlayNone
@@ -35,8 +35,8 @@ func (model *Model) applyExportPickerAction(action KeyAction) tea.Cmd {
 		selection := model.exportPicker
 		model.overlay = OverlayNone
 		model.startExport(selection)
+	default:
 	}
-	return nil
 }
 
 func (model *Model) toggleExportOption(option review.ExportOption) {
@@ -51,7 +51,7 @@ func (model *Model) toggleExportOption(option review.ExportOption) {
 func (model *Model) startExport(selection exportSelection) {
 	operationID, err := review.NewOperationID(model.nextOperation)
 	if err != nil {
-		model.notice = &Notice{Kind: NoticeError, Text: "operation identity exhausted"}
+		model.notice = &Notice{Kind: NoticeError, Text: operationIdentityExhausted}
 		return
 	}
 	model.nextOperation++
@@ -173,7 +173,7 @@ func (model *Model) startDelivery(
 ) {
 	operationID, err := review.NewOperationID(model.nextOperation)
 	if err != nil {
-		model.notice = &Notice{Kind: NoticeError, Text: "operation identity exhausted"}
+		model.notice = &Notice{Kind: NoticeError, Text: operationIdentityExhausted}
 		return
 	}
 	model.nextOperation++
@@ -256,6 +256,7 @@ func operationTransitionNotice(err error) *Notice {
 	return &Notice{Kind: NoticeError, Text: NoticeText(err.Error())}
 }
 
+// PendingStdout returns the receiver's pending stdout value.
 func (model *Model) PendingStdout() (string, bool) {
 	if model.pendingStdout == nil || !model.quitting {
 		return "", false

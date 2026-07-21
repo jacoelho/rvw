@@ -20,14 +20,8 @@ import (
 const githubFilesAPICap = 3_000
 
 type pullRequestPayload struct {
-	Number       uint64  `json:"number"`
-	Title        string  `json:"title"`
-	HTMLURL      string  `json:"html_url"`
-	State        string  `json:"state"`
-	MergedAt     *string `json:"merged_at"`
-	Draft        bool    `json:"draft"`
-	ChangedFiles uint64  `json:"changed_files"`
-	User         *struct {
+	MergedAt *string `json:"-"`
+	User     *struct {
 		Login string `json:"login"`
 	} `json:"user"`
 	Base struct {
@@ -38,6 +32,58 @@ type pullRequestPayload struct {
 		Ref string `json:"ref"`
 		SHA string `json:"sha"`
 	} `json:"head"`
+	Title        string `json:"title"`
+	HTMLURL      string `json:"-"`
+	State        string `json:"state"`
+	Number       uint64 `json:"number"`
+	ChangedFiles uint64 `json:"-"`
+	Draft        bool   `json:"draft"`
+}
+
+func (payload *pullRequestPayload) UnmarshalJSON(value []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(value, &fields); err != nil {
+		return err
+	}
+	if err := decodePullRequestField(fields, "merged_at", &payload.MergedAt); err != nil {
+		return err
+	}
+	if err := decodePullRequestField(fields, "user", &payload.User); err != nil {
+		return err
+	}
+	if err := decodePullRequestField(fields, "base", &payload.Base); err != nil {
+		return err
+	}
+	if err := decodePullRequestField(fields, "head", &payload.Head); err != nil {
+		return err
+	}
+	if err := decodePullRequestField(fields, "title", &payload.Title); err != nil {
+		return err
+	}
+	if err := decodePullRequestField(fields, "html_url", &payload.HTMLURL); err != nil {
+		return err
+	}
+	if err := decodePullRequestField(fields, "state", &payload.State); err != nil {
+		return err
+	}
+	if err := decodePullRequestField(fields, "number", &payload.Number); err != nil {
+		return err
+	}
+	if err := decodePullRequestField(fields, "changed_files", &payload.ChangedFiles); err != nil {
+		return err
+	}
+	return decodePullRequestField(fields, "draft", &payload.Draft)
+}
+
+func decodePullRequestField(fields map[string]json.RawMessage, name string, target any) error {
+	encoded, exists := fields[name]
+	if !exists {
+		return nil
+	}
+	if err := json.Unmarshal(encoded, target); err != nil {
+		return fmt.Errorf("decode GitHub pull-request field %q: %w", name, err)
+	}
+	return nil
 }
 
 func (service *Service) openPullRequest(
@@ -83,54 +129,13 @@ func (service *Service) openPullRequest(
 	if err != nil {
 		return nil, err
 	}
-
-	baseCommit, err := service.resolveCommit(ctx, bare, RevisionRef("refs/rvw/base"))
-	if err != nil {
-		return nil, fmt.Errorf("validate fetched base: %w", err)
-	}
-	if baseCommit != details.BaseOID {
-		return nil, fmt.Errorf("%w: pull-request base changed while opening; retry explicitly", ErrSourceStale)
-	}
-	headCommit, err := service.resolveCommit(ctx, bare, RevisionRef("refs/rvw/head"))
-	if err != nil {
-		return nil, fmt.Errorf("validate fetched head: %w", err)
-	}
-	if headCommit != details.HeadOID {
-		return nil, fmt.Errorf("%w: pull-request head changed while opening; retry explicitly", ErrSourceStale)
-	}
-	mergeBase, err := service.mergeBase(ctx, bare, baseCommit, headCommit)
-	if err != nil {
-		return nil, err
-	}
-	baseTree, err := service.resolveTree(ctx, bare, nil, RevisionRef(mergeBase.String()))
-	if err != nil {
-		return nil, fmt.Errorf("resolve pull-request base tree: %w", err)
-	}
-	headTree, err := service.resolveTree(ctx, bare, nil, RevisionRef(headCommit.String()))
-	if err != nil {
-		return nil, fmt.Errorf("resolve pull-request head tree: %w", err)
-	}
-	files, err := service.diffMetadata(ctx, bare, nil, baseTree, headTree)
-	if err != nil {
-		return nil, err
-	}
-	if uint64(len(files)) != payload.ChangedFiles {
-		return nil, fmt.Errorf(
-			"%w: pull-request metadata changed while opening: API reports %d files, Git reports %d",
-			ErrSourceStale,
-			payload.ChangedFiles,
-			len(files),
-		)
-	}
-
-	prOptions := options
-	prOptions.Gitignore = false
-	prOptions.RVWIgnore = false
-	sourceID, err := service.newSourceID()
-	if err != nil {
-		return nil, err
-	}
-	snapshot, err := service.snapshot(ctx, sourceID, bare, nil, files, prOptions)
+	snapshot, preparedRevision, err := service.preparePullRequestSnapshot(
+		ctx,
+		bare,
+		details,
+		payload,
+		options,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -156,13 +161,77 @@ func (service *Service) openPullRequest(
 			return nil, fmt.Errorf("retain GitHub review thread status: %w", err)
 		}
 	}
-	return newPullRequestDocument(snapshot, target, options, details, revision{
-		kind:        revisionTree,
-		repository:  bare,
-		base:        baseTree,
-		head:        headTree,
-		cleanupPath: workspace,
-	}), nil
+	preparedRevision.cleanupPath = workspace
+	return newPullRequestDocument(snapshot, target, options, details, preparedRevision), nil
+}
+
+func (service *Service) preparePullRequestSnapshot(
+	ctx context.Context,
+	bare RepositoryPath,
+	details PullRequestDetails,
+	payload pullRequestPayload,
+	options OpenOptions,
+) (review.Snapshot, revision, error) {
+	baseCommit, err := service.resolveCommit(ctx, bare, RevisionRef("refs/rvw/base"))
+	if err != nil {
+		return review.Snapshot{}, revision{}, fmt.Errorf("validate fetched base: %w", err)
+	}
+	if baseCommit != details.BaseOID {
+		return review.Snapshot{}, revision{}, fmt.Errorf(
+			"%w: pull-request base changed while opening; retry explicitly",
+			ErrSourceStale,
+		)
+	}
+	headCommit, err := service.resolveCommit(ctx, bare, RevisionRef("refs/rvw/head"))
+	if err != nil {
+		return review.Snapshot{}, revision{}, fmt.Errorf("validate fetched head: %w", err)
+	}
+	if headCommit != details.HeadOID {
+		return review.Snapshot{}, revision{}, fmt.Errorf(
+			"%w: pull-request head changed while opening; retry explicitly",
+			ErrSourceStale,
+		)
+	}
+	mergeBase, err := service.mergeBase(ctx, bare, baseCommit, headCommit)
+	if err != nil {
+		return review.Snapshot{}, revision{}, err
+	}
+	baseTree, err := service.resolveTree(ctx, bare, nil, RevisionRef(mergeBase.String()))
+	if err != nil {
+		return review.Snapshot{}, revision{}, fmt.Errorf("resolve pull-request base tree: %w", err)
+	}
+	headTree, err := service.resolveTree(ctx, bare, nil, RevisionRef(headCommit.String()))
+	if err != nil {
+		return review.Snapshot{}, revision{}, fmt.Errorf("resolve pull-request head tree: %w", err)
+	}
+	files, err := service.diffMetadata(ctx, bare, nil, baseTree, headTree)
+	if err != nil {
+		return review.Snapshot{}, revision{}, err
+	}
+	if uint64(len(files)) != payload.ChangedFiles {
+		return review.Snapshot{}, revision{}, fmt.Errorf(
+			"%w: pull-request metadata changed while opening: API reports %d files, Git reports %d",
+			ErrSourceStale,
+			payload.ChangedFiles,
+			len(files),
+		)
+	}
+	options.Gitignore = false
+	options.RVWIgnore = false
+	sourceID, err := service.newSourceID()
+	if err != nil {
+		return review.Snapshot{}, revision{}, err
+	}
+	snapshot, err := service.snapshot(ctx, sourceID, bare, nil, files, options)
+	if err != nil {
+		return review.Snapshot{}, revision{}, err
+	}
+	return snapshot, revision{
+		kind:       revisionTree,
+		repository: bare,
+		base:       baseTree,
+		head:       headTree,
+	}, nil
 }
 
 func (service *Service) currentGitHubRepository(ctx context.Context) (OwnerRepository, error) {
@@ -192,7 +261,7 @@ func (service *Service) pullRequestMetadata(
 	number PullRequestNumber,
 ) (pullRequestPayload, error) {
 	endpoint := "repos/" + repository.String() + "/pulls/" + strconv.FormatUint(number.Uint64(), 10)
-	result, err := service.runGH(ctx, []string{"api", endpoint}, 1<<20)
+	result, err := service.runGH(ctx, []string{ghAPI, endpoint}, 1<<20)
 	if err != nil {
 		return pullRequestPayload{}, fmt.Errorf("read pull-request metadata: %w", err)
 	}
@@ -222,7 +291,7 @@ func (service *Service) fetchPullRequest(
 	); err != nil {
 		return "", fmt.Errorf("initialize pull-request object store: %w", err)
 	}
-	bare, _ := NewRepositoryPath(barePath)
+	bare := RepositoryPath(barePath)
 	baseSpec := "+refs/heads/" + details.BaseRef.String() + ":refs/rvw/base"
 	headSpec := "+" + pullReference(details.Number) + ":refs/rvw/head"
 	cloneURL := "https://github.com/" + details.Repository.String() + ".git"
@@ -251,7 +320,7 @@ func (service *Service) resolveCommit(
 		ctx,
 		repository.String(),
 		nil,
-		[]string{"rev-parse", "--verify", "--end-of-options", ref.String() + "^{commit}"},
+		[]string{gitRevParse, gitVerify, gitEndOfOptions, ref.String() + "^{commit}"},
 		nil,
 		64<<10,
 	)
@@ -292,7 +361,7 @@ func (service *Service) runGH(
 		Name:            "gh",
 		Args:            arguments,
 		Dir:             service.cwd.String(),
-		Env:             map[string]string{"LC_ALL": "C", "LANG": "C", "GH_PROMPT_DISABLED": "1"},
+		Env:             map[string]string{localeAllKey: "C", localeLanguageKey: "C", "GH_PROMPT_DISABLED": "1"},
 		StdoutLimit:     stdoutLimit,
 		OperationDetail: "gh " + strings.Join(arguments[:min(2, len(arguments))], " "),
 	})
@@ -337,7 +406,7 @@ func validatePullRequestPayload(
 				"GitHub returned an invalid merge timestamp",
 			)
 		}
-		if _, err := time.Parse(time.RFC3339, *payload.MergedAt); err != nil {
+		if _, parseErr := time.Parse(time.RFC3339, *payload.MergedAt); parseErr != nil {
 			return PullRequestDetails{}, errors.New(
 				"GitHub returned an invalid merge timestamp",
 			)

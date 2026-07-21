@@ -29,7 +29,7 @@ func BenchmarkConstructReviewAtScale(b *testing.B) {
 	b.ResetTimer()
 
 	for b.Loop() {
-		snapshot, files := largeTreeFixture(b, largeTreeFileCount)
+		snapshot, files := largeTreeFixture(b)
 		current := appScaleReview(b, snapshot, files, patch)
 		index, err := buildWorkspaceIndex(context.Background(), snapshot)
 		if err != nil {
@@ -146,19 +146,19 @@ func BenchmarkConstructReviewStagesAtScale(b *testing.B) {
 	b.Run("snapshot", func(b *testing.B) {
 		b.ReportAllocs()
 		for b.Loop() {
-			snapshot, _ := largeTreeFixture(b, largeTreeFileCount)
+			snapshot, _ := largeTreeFixture(b)
 			_ = snapshot
 		}
 	})
 	b.Run("review-state", func(b *testing.B) {
-		snapshot, files := largeTreeFixture(b, largeTreeFileCount)
+		snapshot, files := largeTreeFixture(b)
 		b.ReportAllocs()
 		for b.Loop() {
 			benchmarkScaleReview = appScaleReview(b, snapshot, files, patch)
 		}
 	})
 	b.Run("workspace-index", func(b *testing.B) {
-		snapshot, _ := largeTreeFixture(b, largeTreeFileCount)
+		snapshot, _ := largeTreeFixture(b)
 		b.ReportAllocs()
 		for b.Loop() {
 			index, err := buildWorkspaceIndex(context.Background(), snapshot)
@@ -212,7 +212,7 @@ func appScaleModel(tb testing.TB) (*Model, *Coordinator) {
 		_, _ = model.Update(outcomeReadyMsg{state: ReadyAvailable})
 	}
 
-	snapshot, files := largeTreeFixture(tb, largeTreeFileCount)
+	snapshot, files := largeTreeFixture(tb)
 	current := appScaleReview(tb, snapshot, files, appScalePatchText())
 	index, err := buildWorkspaceIndex(context.Background(), snapshot)
 	if err != nil {

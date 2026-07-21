@@ -7,10 +7,13 @@ import (
 	"slices"
 )
 
+// ErrInvalidSnapshot identifies an invalid snapshot failure.
 var ErrInvalidSnapshot = errors.New("invalid review snapshot")
 
+// HiddenReason represents hidden reason.
 type HiddenReason string
 
+// HiddenBuiltinDefault identifies a supported hidden builtin default value.
 const (
 	HiddenBuiltinDefault HiddenReason = "builtin-default"
 	HiddenGitignore      HiddenReason = "gitignore"
@@ -19,10 +22,12 @@ const (
 	HiddenExclude        HiddenReason = "exclude"
 )
 
+// HiddenReasons represents hidden reasons.
 type HiddenReasons struct {
 	bits uint8
 }
 
+// NewHiddenReasons constructs and validates hidden reasons.
 func NewHiddenReasons(values ...HiddenReason) (HiddenReasons, error) {
 	var reasons HiddenReasons
 	for _, value := range values {
@@ -39,11 +44,13 @@ func NewHiddenReasons(values ...HiddenReason) (HiddenReasons, error) {
 	return reasons, nil
 }
 
+// Has performs the has operation.
 func (reasons HiddenReasons) Has(value HiddenReason) bool {
 	bit, ok := hiddenReasonBit(value)
 	return ok && reasons.bits&bit != 0
 }
 
+// Values returns the receiver's values value.
 func (reasons HiddenReasons) Values() []HiddenReason {
 	values := make([]HiddenReason, 0, 5)
 	for _, value := range []HiddenReason{
@@ -82,8 +89,10 @@ func hiddenReasonBit(value HiddenReason) (uint8, bool) {
 	}
 }
 
+// FileTrait represents file trait.
 type FileTrait uint8
 
+// TraitGenerated identifies a supported trait generated value.
 const (
 	TraitGenerated FileTrait = iota + 1
 	TraitVendored
@@ -92,10 +101,12 @@ const (
 	TraitTooLarge
 )
 
+// FileTraits represents file traits.
 type FileTraits struct {
 	bits uint8
 }
 
+// NewFileTraits constructs and validates file traits.
 func NewFileTraits(values ...FileTrait) (FileTraits, error) {
 	var traits FileTraits
 	for _, value := range values {
@@ -107,6 +118,7 @@ func NewFileTraits(values ...FileTrait) (FileTraits, error) {
 	return traits, nil
 }
 
+// Has performs the has operation.
 func (traits FileTraits) Has(value FileTrait) bool {
 	return value >= TraitGenerated && value <= TraitTooLarge &&
 		traits.bits&(1<<(value-1)) != 0
@@ -117,11 +129,13 @@ func (traits FileTraits) valid() bool {
 	return traits.bits&^validBits == 0
 }
 
+// Flags represents flags.
 type Flags struct {
 	traits FileTraits
 	hidden HiddenReasons
 }
 
+// NewFlags constructs and validates flags.
 func NewFlags(
 	traits FileTraits,
 	hidden HiddenReasons,
@@ -138,18 +152,22 @@ func NewFlags(
 	return Flags{traits: traits, hidden: hidden}, nil
 }
 
+// Hidden reports the receiver's hidden state.
 func (flags Flags) Hidden() bool {
 	return flags.hidden.bits != 0
 }
 
+// Traits returns the receiver's traits value.
 func (flags Flags) Traits() FileTraits {
 	return flags.traits
 }
 
+// HiddenReasons returns the receiver's hidden reasons value.
 func (flags Flags) HiddenReasons() []HiddenReason {
 	return flags.hidden.Values()
 }
 
+// Clone returns the receiver's clone value.
 func (flags Flags) Clone() Flags {
 	return flags
 }
@@ -159,34 +177,40 @@ func (flags Flags) valid() bool {
 	return err == nil
 }
 
+// File represents file.
 type File struct {
-	id          FileID
+	contents    FileContents
 	oldPath     *Path
 	newPath     *Path
 	change      Change
-	flags       Flags
 	patchHandle PatchHandle
-	contents    FileContents
+	id          FileID
+	flags       Flags
 }
 
+// FileContent represents file content.
 type FileContent struct {
-	side LineSide
 	oid  ObjectID
+	side LineSide
 }
 
+// OldFileContent performs the old file content operation.
 func OldFileContent(oid ObjectID) FileContent {
 	return FileContent{side: LineOld, oid: oid}
 }
 
+// NewFileContent constructs and validates file content.
 func NewFileContent(oid ObjectID) FileContent {
 	return FileContent{side: LineNew, oid: oid}
 }
 
+// FileContents represents file contents.
 type FileContents struct {
 	old *ObjectID
 	new *ObjectID
 }
 
+// NewFileContents constructs and validates file contents.
 func NewFileContents(values ...FileContent) (FileContents, error) {
 	var contents FileContents
 	width := 0
@@ -219,6 +243,7 @@ func NewFileContents(values ...FileContent) (FileContents, error) {
 	return contents, nil
 }
 
+// Object performs the object operation.
 func (contents FileContents) Object(side LineSide) (ObjectID, bool) {
 	if side == LineOld && contents.old != nil {
 		return *contents.old, true
@@ -235,6 +260,7 @@ func (contents FileContents) clone() FileContents {
 	return contents
 }
 
+// NewFile constructs and validates file.
 func NewFile(
 	id FileID,
 	oldPath, newPath *Path,
@@ -267,7 +293,7 @@ func newFileWithContents(
 	if oldPath == nil && newPath == nil {
 		return File{}, fmt.Errorf("%w: file requires an old or new path", ErrInvalidSnapshot)
 	}
-	if oldPath != nil && len(oldPath.raw) == 0 || newPath != nil && len(newPath.raw) == 0 {
+	if oldPath != nil && oldPath.raw == "" || newPath != nil && newPath.raw == "" {
 		return File{}, fmt.Errorf("%w: file path is invalid", ErrInvalidSnapshot)
 	}
 	if !change.valid() {
@@ -331,10 +357,12 @@ func newFileWithContents(
 	}, nil
 }
 
+// ID returns the receiver's id value.
 func (file File) ID() FileID {
 	return file.id
 }
 
+// OldPath returns the receiver's old path value.
 func (file File) OldPath() (Path, bool) {
 	if file.oldPath == nil {
 		return Path{}, false
@@ -342,6 +370,7 @@ func (file File) OldPath() (Path, bool) {
 	return *file.oldPath, true
 }
 
+// NewPath constructs and validates path.
 func (file File) NewPath() (Path, bool) {
 	if file.newPath == nil {
 		return Path{}, false
@@ -349,6 +378,7 @@ func (file File) NewPath() (Path, bool) {
 	return *file.newPath, true
 }
 
+// DisplayPath returns the receiver's display path value.
 func (file File) DisplayPath() string {
 	if file.newPath != nil {
 		return file.newPath.Display()
@@ -356,6 +386,7 @@ func (file File) DisplayPath() string {
 	return file.oldPath.Display()
 }
 
+// IdentityPath returns the receiver's identity path value.
 func (file File) IdentityPath() Path {
 	if file.newPath != nil {
 		return *file.newPath
@@ -363,31 +394,37 @@ func (file File) IdentityPath() Path {
 	return *file.oldPath
 }
 
+// Change returns the receiver's change value.
 func (file File) Change() Change {
 	return file.change
 }
 
+// Flags returns the receiver's flags value.
 func (file File) Flags() Flags {
 	return file.flags.Clone()
 }
 
+// PatchHandle returns the receiver's patch handle value.
 func (file File) PatchHandle() PatchHandle {
 	return file.patchHandle
 }
 
+// Content performs the content operation.
 func (file File) Content(side LineSide) (ObjectID, bool) {
 	return file.contents.Object(side)
 }
 
+// Snapshot represents snapshot.
 type Snapshot struct {
-	sourceID             SourceID
+	remoteCommentAnchors map[commentAnchor]struct{}
+	remoteThreadDetail   OperationDetail
 	files                []File
 	remoteThreads        []RemoteThread
-	remoteCommentAnchors map[commentAnchor]struct{}
+	sourceID             SourceID
 	remoteThreadStatus   RemoteThreadStatus
-	remoteThreadDetail   OperationDetail
 }
 
+// NewSnapshot constructs and validates snapshot.
 func NewSnapshot(sourceID SourceID, files []File) (Snapshot, error) {
 	if sourceID == 0 {
 		return Snapshot{}, fmt.Errorf("%w: source ID must be positive", ErrInvalidSnapshot)
@@ -456,14 +493,17 @@ func fileObjectIDs(file File) []ObjectID {
 	return ids
 }
 
+// SourceID returns the receiver's source id value.
 func (snapshot Snapshot) SourceID() SourceID {
 	return snapshot.sourceID
 }
 
+// FileCount returns the receiver's file count value.
 func (snapshot Snapshot) FileCount() int {
 	return len(snapshot.files)
 }
 
+// File performs the file operation.
 func (snapshot Snapshot) File(id FileID) (File, bool) {
 	if int(id.Uint32()) >= len(snapshot.files) {
 		return File{}, false
@@ -472,6 +512,7 @@ func (snapshot Snapshot) File(id FileID) (File, bool) {
 	return file, file.ID() == id
 }
 
+// AllFiles returns the receiver's all files value.
 func (snapshot Snapshot) AllFiles() iter.Seq[File] {
 	return func(yield func(File) bool) {
 		for _, file := range snapshot.files {
@@ -482,13 +523,15 @@ func (snapshot Snapshot) AllFiles() iter.Seq[File] {
 	}
 }
 
+// SnapshotBuilder represents snapshot builder.
 type SnapshotBuilder struct {
-	sourceID  SourceID
 	files     []File
+	sourceID  SourceID
 	pathBytes int64
 	finished  bool
 }
 
+// NewSnapshotBuilder constructs and validates snapshot builder.
 func NewSnapshotBuilder(sourceID SourceID, capacity int) (*SnapshotBuilder, error) {
 	if sourceID == 0 || capacity < 0 || capacity > MaxFiles {
 		return nil, ErrInvalidSnapshot
@@ -496,6 +539,7 @@ func NewSnapshotBuilder(sourceID SourceID, capacity int) (*SnapshotBuilder, erro
 	return &SnapshotBuilder{sourceID: sourceID, files: make([]File, 0, capacity)}, nil
 }
 
+// AddFile performs the add file operation.
 func (builder *SnapshotBuilder) AddFile(
 	oldPath, newPath *Path,
 	change Change,
@@ -510,6 +554,7 @@ func (builder *SnapshotBuilder) AddFile(
 	)
 }
 
+// AddFileWithContents performs the add file with contents operation.
 func (builder *SnapshotBuilder) AddFileWithContents(
 	oldPath, newPath *Path,
 	change Change,
@@ -529,9 +574,9 @@ func (builder *SnapshotBuilder) AddFileWithContents(
 	if pathBytes > MaxSourcePaths {
 		return PatchHandle{}, fmt.Errorf("%w: raw paths exceed %d bytes", ErrInvalidSnapshot, MaxSourcePaths)
 	}
-	fileID, _ := NewFileID(uint32(len(builder.files)))
-	patchID, _ := NewPatchID(uint64(len(builder.files) + 1))
-	handle, _ := NewPatchHandle(patchID, builder.sourceID, fileID)
+	fileID := FileID(uint32FromInt(len(builder.files)))
+	patchID := PatchID(len(builder.files) + 1)
+	handle := PatchHandle{id: patchID, sourceID: builder.sourceID, fileID: fileID}
 	file, err := newFileWithContents(
 		fileID,
 		oldPath,
@@ -549,6 +594,7 @@ func (builder *SnapshotBuilder) AddFileWithContents(
 	return handle, nil
 }
 
+// Finish returns the receiver's finish value.
 func (builder *SnapshotBuilder) Finish() (Snapshot, error) {
 	if builder == nil || builder.finished {
 		return Snapshot{}, ErrInvalidSnapshot
@@ -557,11 +603,6 @@ func (builder *SnapshotBuilder) Finish() (Snapshot, error) {
 	snapshot, err := NewSnapshot(builder.sourceID, builder.files)
 	builder.files = nil
 	return snapshot, err
-}
-
-func validHiddenReason(reason HiddenReason) bool {
-	return reason == HiddenBuiltinDefault || reason == HiddenGitignore ||
-		reason == HiddenRVWIgnore || reason == HiddenInclude || reason == HiddenExclude
 }
 
 func clonePath(path *Path) *Path {

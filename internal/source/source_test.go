@@ -333,7 +333,7 @@ func TestOpenStagedPreservesUnmergedIndexAsUnavailablePatch(t *testing.T) {
 	writeFile(t, filepath.Join(root, "conflict.txt"), "main\n")
 	runGitTest(t, root, "commit", "-am", "main")
 
-	command := exec.Command("git", "merge", "--no-ff", "--no-edit", "side")
+	command := exec.CommandContext(t.Context(), "git", "merge", "--no-ff", "--no-edit", "side")
 	command.Dir = root
 	command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "LC_ALL=C")
 	if output, err := command.CombinedOutput(); err == nil {
@@ -514,7 +514,7 @@ func TestSourceFailureIsTypedAtPublicBoundary(t *testing.T) {
 	service := newTestService(t, t.TempDir())
 	defer closeTestService(t, service)
 	_, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{})
-	var failure *Failure
+	var failure *FailureError
 	if !errors.As(err, &failure) || failure.Kind != FailureFailed ||
 		failure.Operation != OperationDiscoverRepository {
 		t.Fatalf("Open() error = %v, want typed repository failure", err)
@@ -549,7 +549,7 @@ func TestSourceFailureClassificationPreservesDominantOutcome(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			err := sourceFailure(OperationOpenSource, test.err)
-			var failure *Failure
+			var failure *FailureError
 			if !errors.As(err, &failure) || failure.Kind != test.kind {
 				t.Fatalf("failure = %#v, want kind %d", failure, test.kind)
 			}
@@ -710,7 +710,7 @@ func closeTestService(t *testing.T, service *Service) {
 
 func runGitTest(t *testing.T, directory string, arguments ...string) string {
 	t.Helper()
-	command := exec.Command("git", arguments...)
+	command := exec.CommandContext(t.Context(), "git", arguments...)
 	command.Dir = directory
 	command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "LC_ALL=C")
 	output, err := command.CombinedOutput()

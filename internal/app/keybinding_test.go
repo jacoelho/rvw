@@ -383,6 +383,7 @@ func modelForKeyContext(context KeyContext) *Model {
 		mode:  ModeNormal,
 	}
 	switch context {
+	case KeyContextNormal:
 	case KeyContextVisual:
 		model.mode = ModeVisual
 	case KeyContextCommentEdit:

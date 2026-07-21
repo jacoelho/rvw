@@ -14,11 +14,12 @@ import (
 	"github.com/jacoelho/rvw/internal/source"
 )
 
+// MaxAcceptedOperations defines the supported accepted operations limit.
 const (
 	MaxAcceptedOperations       = 64
 	MaxQueuedRequestBytes int64 = 32 << 20
-	// One search retains one maximum patch plus bounded hits while a
-	// presentation patch may complete concurrently.
+	// MaxRetainedResultBytes allows one search to retain one maximum patch plus
+	// bounded hits while a presentation patch may complete concurrently.
 	MaxRetainedResultBytes    int64 = 256 << 20
 	MaxIOWorkers                    = 8
 	MaxCPUWorkers                   = 8
@@ -32,79 +33,92 @@ const (
 	reloadResultReservation int64 = review.MaxSourcePaths + review.MaxFiles*256
 )
 
+// ErrCoordinatorClosed identifies an coordinator closed failure.
 var (
 	ErrCoordinatorClosed    = errors.New("work coordinator is closed")
 	ErrCoordinatorSaturated = errors.New("work coordinator is saturated")
 )
 
+// PatchWork represents patch work.
 type PatchWork struct {
-	ID       review.OperationID
 	Document *source.Document
 	Request  review.PatchRequest
-}
-
-type PatchOutcome struct {
-	ID     review.OperationID
-	Result review.PatchResult
-	Err    error
-}
-
-type SearchWork struct {
 	ID       review.OperationID
+}
+
+// PatchOutcome describes patch outcome.
+type PatchOutcome struct {
+	Err    error
+	Result review.PatchResult
+	ID     review.OperationID
+}
+
+// SearchWork represents search work.
+type SearchWork struct {
 	Document *source.Document
 	Request  review.SearchRequest
+	ID       review.OperationID
 }
 
+// SearchOutcome describes search outcome.
 type SearchOutcome struct {
-	ID     review.OperationID
-	Result review.SearchResult
 	Err    error
+	Result review.SearchResult
+	ID     review.OperationID
 }
 
+// PublicationCheckOutcome describes publication check outcome.
 type PublicationCheckOutcome struct {
-	ID    review.OperationID
-	Check review.PublicationCheckResult
 	Err   error
+	Check review.PublicationCheckResult
+	ID    review.OperationID
 }
 
+// PublicationCommitOutcome describes publication commit outcome.
 type PublicationCommitOutcome struct {
-	ID          review.OperationID
 	Publication review.PublicationResult
-}
-
-type ReconciliationOutcome struct {
-	ID             review.OperationID
-	Reconciliation review.ReconciliationResult
-}
-
-type ExportWork struct {
 	ID          review.OperationID
-	Input       review.ExportInput
+}
+
+// ReconciliationOutcome describes reconciliation outcome.
+type ReconciliationOutcome struct {
+	Reconciliation review.ReconciliationResult
+	ID             review.OperationID
+}
+
+// ExportWork represents export work.
+type ExportWork struct {
 	Templates   review.ExportTemplates
+	Input       review.ExportInput
+	ID          review.OperationID
 	Options     review.ExportOptions
 	Format      review.ExportFormat
 	Destination delivery.Destination
 }
 
+// ExportOutcome describes export outcome.
 type ExportOutcome struct {
-	ID          review.OperationID
-	Prepared    review.PreparedExport
-	Destination delivery.Destination
 	Err         error
-}
-
-type DeliveryWork struct {
-	ID          review.OperationID
 	Prepared    review.PreparedExport
+	ID          review.OperationID
 	Destination delivery.Destination
 }
 
-type DeliveryOutcome struct {
-	ID      review.OperationID
-	Outcome delivery.Outcome
-	Err     error
+// DeliveryWork represents delivery work.
+type DeliveryWork struct {
+	Prepared    review.PreparedExport
+	ID          review.OperationID
+	Destination delivery.Destination
 }
 
+// DeliveryOutcome describes delivery outcome.
+type DeliveryOutcome struct {
+	Err     error
+	Outcome delivery.Outcome
+	ID      review.OperationID
+}
+
+// Outcome describes outcome.
 type Outcome interface {
 	coordinatorOutcome()
 	operationID() review.OperationID
@@ -137,8 +151,10 @@ func (outcome ExportOutcome) operationID() review.OperationID            { retur
 func (outcome DeliveryOutcome) operationID() review.OperationID          { return outcome.ID }
 func (outcome Progress) operationID() review.OperationID                 { return outcome.ID }
 
+// ReadyState describes ready state.
 type ReadyState uint8
 
+// ReadyAvailable identifies a supported ready available value.
 const (
 	ReadyAvailable ReadyState = iota + 1
 	ReadyClosed
@@ -146,103 +162,102 @@ const (
 )
 
 type reservation struct {
-	requestBytes    int64
-	resultBytes     int64
 	cancel          context.CancelFunc
 	cancelOperation func()
-	completed       bool
 	publication     *publicationReservation
+	requestBytes    int64
+	resultBytes     int64
+	completed       bool
 }
 
 type publicationReservation struct {
-	target review.PublicationTarget
 	marker review.PublicationMarker
+	target review.PublicationTarget
 }
 
 type patchJob struct {
-	work PatchWork
 	ctx  context.Context
+	work PatchWork
 }
 
 type searchJob struct {
-	work SearchWork
 	ctx  context.Context
+	work SearchWork
 }
 
 type reloadJob struct {
-	work ReloadWork
 	ctx  context.Context
+	work ReloadWork
 }
 
 type reloadPreparationJob struct {
-	work ReloadPreparationWork
 	ctx  context.Context
+	work ReloadPreparationWork
 }
 
 type fileTreeJob struct {
-	work FileTreeWork
 	ctx  context.Context
+	work FileTreeWork
 }
 
 type workspaceIndexJob struct {
-	work WorkspaceIndexWork
 	ctx  context.Context
+	work WorkspaceIndexWork
 }
 
 type exportJob struct {
-	work ExportWork
 	ctx  context.Context
+	work ExportWork
 }
 
 type deliveryJob struct {
-	work DeliveryWork
 	ctx  context.Context
+	work DeliveryWork
 }
 
+// Coordinator represents coordinator.
 type Coordinator struct {
-	workContext context.Context
-	service     *source.Service
-	delivery    *delivery.Manager
-
-	mu                sync.Mutex
-	closed            bool
-	workersDone       bool
-	readyClosed       bool
-	accepted          map[review.OperationID]reservation
-	requestBytes      int64
-	reservedResult    int64
-	outcomes          []Outcome
-	progress          map[review.OperationID]Progress
-	progressOrder     []review.OperationID
-	progressBytes     int64
-	progressDirty     bool
-	required          *requiredScheduler
-	cleanupErrors     []error
-	cleanupOmitted    uint64
-	publicationActive review.OperationID
-
+	stats                 atomic.Value
+	workContext           context.Context
+	workspaceIndexJobs    chan workspaceIndexJob
+	progressStop          chan struct{}
+	reloadPreparationJobs chan reloadPreparationJob
+	done                  chan struct{}
+	cpuPermits            chan struct{}
+	accepted              map[review.OperationID]reservation
+	retireDocuments       chan *source.Document
+	service               *source.Service
+	reloadJobs            chan reloadJob
+	progress              map[review.OperationID]Progress
+	delivery              *delivery.Manager
+	publicationJobs       chan publicationJob
+	fileTreeJobs          chan fileTreeJob
+	required              *requiredScheduler
+	syntaxJobs            chan syntaxJob
+	exportJobs            chan exportJob
+	deliveryJobs          chan deliveryJob
 	ready                 chan struct{}
 	patchJobs             chan patchJob
 	searchJobs            chan searchJob
-	syntaxJobs            chan syntaxJob
-	publicationJobs       chan publicationJob
-	reloadJobs            chan reloadJob
-	reloadPreparationJobs chan reloadPreparationJob
-	fileTreeJobs          chan fileTreeJob
-	workspaceIndexJobs    chan workspaceIndexJob
-	exportJobs            chan exportJob
-	deliveryJobs          chan deliveryJob
-	retireDocuments       chan *source.Document
-	progressStop          chan struct{}
-	cpuPermits            chan struct{}
-	done                  chan struct{}
-
-	workers  sync.WaitGroup
-	ioCount  int
-	cpuCount int
-	stats    atomic.Value
+	cleanupErrors         []error
+	progressOrder         []review.OperationID
+	outcomes              []Outcome
+	workers               sync.WaitGroup
+	reservedResult        int64
+	publicationActive     review.OperationID
+	cleanupOmitted        uint64
+	progressBytes         int64
+	requestBytes          int64
+	ioCount               int
+	cpuCount              int
+	mu                    sync.Mutex
+	progressDirty         bool
+	readyClosed           bool
+	workersDone           bool
+	closed                bool
 }
 
+// NewCoordinator constructs and validates coordinator.
 func NewCoordinator(
 	ctx context.Context,
 	service *source.Service,
@@ -295,6 +310,7 @@ func NewCoordinator(
 	return coordinator, nil
 }
 
+// SubmitReload performs the submit reload operation.
 func (coordinator *Coordinator) SubmitReload(work ReloadWork) error {
 	if work.ID == 0 || work.Document == nil {
 		return errors.New("invalid reload work")
@@ -314,6 +330,7 @@ func (coordinator *Coordinator) SubmitReload(work ReloadWork) error {
 	)
 }
 
+// SubmitReloadPreparation performs the submit reload preparation operation.
 func (coordinator *Coordinator) SubmitReloadPreparation(work ReloadPreparationWork) error {
 	if work.ID == 0 || work.Document == nil ||
 		work.Review.Snapshot().SourceID() == 0 {
@@ -338,6 +355,7 @@ func (coordinator *Coordinator) SubmitReloadPreparation(work ReloadPreparationWo
 	)
 }
 
+// SubmitFileTree performs the submit file tree operation.
 func (coordinator *Coordinator) SubmitFileTree(work FileTreeWork) error {
 	if work.ID == 0 || work.Generation == 0 ||
 		work.Snapshot.SourceID() == 0 ||
@@ -360,6 +378,7 @@ func (coordinator *Coordinator) SubmitFileTree(work FileTreeWork) error {
 	)
 }
 
+// SubmitWorkspaceIndex performs the submit workspace index operation.
 func (coordinator *Coordinator) SubmitWorkspaceIndex(work WorkspaceIndexWork) error {
 	if work.ID == 0 || work.Snapshot.SourceID() == 0 {
 		return errors.New("invalid workspace index work")
@@ -379,6 +398,7 @@ func (coordinator *Coordinator) SubmitWorkspaceIndex(work WorkspaceIndexWork) er
 	)
 }
 
+// ReleaseDocument performs the release document operation.
 func (coordinator *Coordinator) ReleaseDocument(document *source.Document) error {
 	if document == nil {
 		return errors.New("cannot release a nil source document")
@@ -396,6 +416,7 @@ func (coordinator *Coordinator) ReleaseDocument(document *source.Document) error
 	}
 }
 
+// SubmitPatch performs the submit patch operation.
 func (coordinator *Coordinator) SubmitPatch(work PatchWork) error {
 	if work.ID == 0 || work.Document == nil || work.Request.Handle.ID() == 0 {
 		return errors.New("invalid patch work")
@@ -416,6 +437,7 @@ func (coordinator *Coordinator) SubmitPatch(work PatchWork) error {
 	)
 }
 
+// SubmitSearch performs the submit search operation.
 func (coordinator *Coordinator) SubmitSearch(work SearchWork) error {
 	if work.ID == 0 || work.Document == nil ||
 		work.Request.Operation != work.ID ||
@@ -439,6 +461,7 @@ func (coordinator *Coordinator) SubmitSearch(work SearchWork) error {
 	)
 }
 
+// SubmitExport performs the submit export operation.
 func (coordinator *Coordinator) SubmitExport(work ExportWork) error {
 	if work.ID == 0 || work.Destination == 0 ||
 		!work.Input.Ready() ||
@@ -465,6 +488,7 @@ func (coordinator *Coordinator) SubmitExport(work ExportWork) error {
 	)
 }
 
+// SubmitDelivery performs the submit delivery operation.
 func (coordinator *Coordinator) SubmitDelivery(work DeliveryWork) error {
 	if work.ID == 0 || work.Destination != delivery.DestinationClipboard ||
 		work.Prepared.Format() == 0 {
@@ -531,20 +555,22 @@ func (coordinator *Coordinator) submit(
 	return ErrCoordinatorSaturated
 }
 
+// Cancel performs the cancel operation.
 func (coordinator *Coordinator) Cancel(id review.OperationID) bool {
 	coordinator.mu.Lock()
 	defer coordinator.mu.Unlock()
-	reservation, exists := coordinator.accepted[id]
+	acceptedReservation, exists := coordinator.accepted[id]
 	if !exists {
 		return false
 	}
-	if reservation.cancelOperation != nil {
-		reservation.cancelOperation()
+	if acceptedReservation.cancelOperation != nil {
+		acceptedReservation.cancelOperation()
 	}
-	reservation.cancel()
+	acceptedReservation.cancel()
 	return true
 }
 
+// WaitReady performs the wait ready operation.
 func (coordinator *Coordinator) WaitReady(ctx context.Context) ReadyState {
 	select {
 	case _, ok := <-coordinator.ready:
@@ -557,6 +583,7 @@ func (coordinator *Coordinator) WaitReady(ctx context.Context) ReadyState {
 	}
 }
 
+// ClaimNext returns the receiver's claim next value.
 func (coordinator *Coordinator) ClaimNext() (Outcome, bool) {
 	coordinator.mu.Lock()
 	defer coordinator.mu.Unlock()
@@ -580,13 +607,13 @@ func (coordinator *Coordinator) ClaimNext() (Outcome, bool) {
 	outcome := coordinator.outcomes[0]
 	coordinator.outcomes = slices.Delete(coordinator.outcomes, 0, 1)
 	id := outcome.operationID()
-	if reservation, exists := coordinator.accepted[id]; exists {
+	if acceptedReservation, exists := coordinator.accepted[id]; exists {
 		if id == coordinator.publicationActive {
 			coordinator.publicationActive = 0
 		}
-		reservation.cancel()
-		coordinator.requestBytes -= reservation.requestBytes
-		coordinator.reservedResult -= reservation.resultBytes
+		acceptedReservation.cancel()
+		coordinator.requestBytes -= acceptedReservation.requestBytes
+		coordinator.reservedResult -= acceptedReservation.resultBytes
 		delete(coordinator.accepted, id)
 	}
 	if len(coordinator.outcomes) != 0 || len(coordinator.progressOrder) != 0 {
@@ -647,10 +674,10 @@ func (coordinator *Coordinator) executeSearch(job searchJob) (review.SearchResul
 	for file := range files {
 		currentIndex := fileIndex
 		fileIndex++
-		_ = coordinator.ReportProgress(Progress{
+		coordinator.reportProgress(Progress{
 			ID:        job.work.ID,
-			Completed: uint64(currentIndex),
-			Total:     uint64(total),
+			Completed: uint64FromInt(currentIndex),
+			Total:     uint64FromInt(total),
 			Detail:    boundedOperationDetail("searching changed files"),
 		})
 		if err := context.Cause(job.ctx); err != nil {
@@ -706,10 +733,10 @@ func (coordinator *Coordinator) executeSearch(job searchJob) (review.SearchResul
 				break
 			}
 			hits = append(hits, batch.Hits...)
-			_ = coordinator.ReportProgress(Progress{
+			coordinator.reportProgress(Progress{
 				ID:        job.work.ID,
-				Completed: uint64(currentIndex),
-				Total:     uint64(total),
+				Completed: uint64FromInt(currentIndex),
+				Total:     uint64FromInt(total),
 				Detail:    boundedOperationDetail(fmt.Sprintf("%d matches retained", len(hits))),
 			})
 			if batch.Done {
@@ -720,12 +747,21 @@ func (coordinator *Coordinator) executeSearch(job searchJob) (review.SearchResul
 			break
 		}
 	}
-	_ = coordinator.ReportProgress(Progress{
+	coordinator.reportProgress(Progress{
 		ID:        job.work.ID,
 		Completed: uint64(total),
 		Total:     uint64(total),
 		Detail:    boundedOperationDetail("search scan complete"),
 	})
+	return finishSearchResult(request, status, unavailable, hits)
+}
+
+func finishSearchResult(
+	request review.SearchRequest,
+	status review.SearchStatus,
+	unavailable uint32,
+	hits []review.SearchHit,
+) (review.SearchResult, error) {
 	var detail review.OperationDetail
 	switch {
 	case status == review.SearchCancelled:
@@ -757,7 +793,7 @@ func (coordinator *Coordinator) runReloadWorker() {
 				continue
 			}
 			coordinator.required.wait(job.work.ID)
-			_ = coordinator.ReportProgress(Progress{
+			coordinator.reportProgress(Progress{
 				ID:     job.work.ID,
 				Total:  2,
 				Detail: boundedOperationDetail("acquiring source revision"),
@@ -797,12 +833,12 @@ func (coordinator *Coordinator) complete(outcome Outcome) {
 	coordinator.mu.Lock()
 	defer coordinator.mu.Unlock()
 	id := outcome.operationID()
-	reservation, exists := coordinator.accepted[id]
-	if !exists || reservation.completed {
+	acceptedReservation, exists := coordinator.accepted[id]
+	if !exists || acceptedReservation.completed {
 		return
 	}
-	reservation.completed = true
-	coordinator.accepted[id] = reservation
+	acceptedReservation.completed = true
+	coordinator.accepted[id] = acceptedReservation
 	if progress, exists := coordinator.progress[id]; exists {
 		delete(coordinator.progress, id)
 		coordinator.progressBytes -= progressRetainedBytes(progress)

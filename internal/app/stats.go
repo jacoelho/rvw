@@ -1,5 +1,6 @@
 package app
 
+// CoordinatorStats represents coordinator stats.
 type CoordinatorStats struct {
 	Accepted       int
 	RequestBytes   int64
@@ -9,8 +10,13 @@ type CoordinatorStats struct {
 	CPUWorkers     int
 }
 
+// Stats returns the receiver's stats value.
 func (coordinator *Coordinator) Stats() CoordinatorStats {
-	return coordinator.stats.Load().(CoordinatorStats)
+	stats, ok := coordinator.stats.Load().(CoordinatorStats)
+	if !ok {
+		panic("coordinator statistics are not initialized")
+	}
+	return stats
 }
 
 func (coordinator *Coordinator) updateStatsLocked() {

@@ -1,3 +1,4 @@
+// Package main provides the rvw command-line application.
 package main
 
 import (
@@ -9,30 +10,58 @@ import (
 	"github.com/jacoelho/rvw/internal/source"
 )
 
+const (
+	commandHelp    = "help"
+	commandDiff    = "diff"
+	flagHelp       = "--help"
+	flagStdout     = "--stdout"
+	flagJSON       = "--json"
+	flagStaged     = "--staged"
+	flagRange      = "--range"
+	flagRepository = "--repo"
+	flagInclude    = "--include"
+	flagExclude    = "--exclude"
+)
+
+// ErrUsage identifies an usage failure.
 var ErrUsage = errors.New("invalid command line")
 
+// OutputMode describes output mode.
 type OutputMode uint8
 
+// OutputInteractive identifies a supported output interactive value.
 const (
 	OutputInteractive OutputMode = iota
 	OutputHuman
 	OutputJSON
 )
 
+// HelpTopic represents help topic.
 type HelpTopic uint8
 
+// HelpGlobal identifies a supported help global value.
 const (
 	HelpGlobal HelpTopic = iota
 	HelpDiff
 	HelpPullRequest
 )
 
+// Invocation represents invocation.
 type Invocation struct {
 	Target    source.Target
-	Output    OutputMode
 	Overrides config.Overrides
+	Output    OutputMode
 	Help      bool
 	HelpTopic HelpTopic
+}
+
+type argumentState struct {
+	repository   *source.OwnerRepository
+	command      string
+	rangeText    string
+	pullSelector string
+	invocation   Invocation
+	staged       bool
 }
 
 func parseArgs(args []string) (Invocation, error) {
@@ -44,163 +73,193 @@ func parseArgs(args []string) (Invocation, error) {
 	if len(args) == 0 {
 		return Invocation{}, fmt.Errorf("%w: expected diff, pr, or help", ErrUsage)
 	}
-	if args[0] == "help" {
-		switch {
-		case len(args) == 1:
-			return Invocation{Help: true, HelpTopic: HelpGlobal}, nil
-		case len(args) == 2 && args[1] == "diff":
-			return Invocation{Help: true, HelpTopic: HelpDiff}, nil
-		case len(args) == 2 && args[1] == "pr":
-			return Invocation{Help: true, HelpTopic: HelpPullRequest}, nil
-		default:
-			return Invocation{}, fmt.Errorf("%w: help accepts only diff or pr", ErrUsage)
+	if args[0] == commandHelp {
+		return parseHelpArgs(args)
+	}
+
+	state := argumentState{
+		invocation: Invocation{Output: OutputInteractive, HelpTopic: HelpGlobal},
+	}
+	consumedThrough := -1
+	for index := range args {
+		if index <= consumedThrough {
+			continue
+		}
+		consumedThrough = index
+		if err := state.consume(args, &consumedThrough); err != nil {
+			return Invocation{}, err
 		}
 	}
+	return state.finish()
+}
 
-	invocation := Invocation{Output: OutputInteractive, HelpTopic: HelpGlobal}
-	var command string
-	var staged bool
-	var rangeText string
-	var pullSelector string
-	var repository *source.OwnerRepository
+func parseHelpArgs(args []string) (Invocation, error) {
+	switch {
+	case len(args) == 1:
+		return Invocation{Help: true, HelpTopic: HelpGlobal}, nil
+	case len(args) == 2 && args[1] == commandDiff:
+		return Invocation{Help: true, HelpTopic: HelpDiff}, nil
+	case len(args) == 2 && args[1] == "pr":
+		return Invocation{Help: true, HelpTopic: HelpPullRequest}, nil
+	default:
+		return Invocation{}, fmt.Errorf("%w: help accepts only diff or pr", ErrUsage)
+	}
+}
 
-	for index := 0; index < len(args); index++ {
-		argument := args[index]
-		switch argument {
-		case "-h", "--help":
-			invocation.Help = true
-			switch command {
-			case "diff":
-				invocation.HelpTopic = HelpDiff
-			case "pr":
-				invocation.HelpTopic = HelpPullRequest
-			}
-		case "--stdout":
-			invocation.Output = OutputHuman
-		case "--json":
-			invocation.Output = OutputJSON
-		case "--no-mouse":
-			invocation.Overrides.DisableMouse()
-		case "--theme":
-			value, next, err := optionValue(args, index, argument)
-			if err != nil {
-				return Invocation{}, err
-			}
-			index = next
-			theme, err := config.NewThemeName(value)
-			if err != nil {
-				return Invocation{}, err
-			}
-			invocation.Overrides.SetTheme(theme)
-		case "--appearance":
-			value, next, err := optionValue(args, index, argument)
-			if err != nil {
-				return Invocation{}, err
-			}
-			index = next
-			appearance, err := config.ParseAppearance(value)
-			if err != nil {
-				return Invocation{}, err
-			}
-			invocation.Overrides.SetAppearance(appearance)
-		case "--include":
-			value, next, err := optionValue(args, index, argument)
-			if err != nil {
-				return Invocation{}, err
-			}
-			index = next
-			pattern, err := config.NewPattern(value)
-			if err != nil {
-				return Invocation{}, err
-			}
-			invocation.Overrides.AddInclude(pattern)
-		case "--exclude":
-			value, next, err := optionValue(args, index, argument)
-			if err != nil {
-				return Invocation{}, err
-			}
-			index = next
-			pattern, err := config.NewPattern(value)
-			if err != nil {
-				return Invocation{}, err
-			}
-			invocation.Overrides.AddExclude(pattern)
-		case "--staged":
-			if command != "diff" {
-				return Invocation{}, fmt.Errorf("%w: --staged is valid only after diff", ErrUsage)
-			}
-			staged = true
-		case "--range":
-			if command != "diff" {
-				return Invocation{}, fmt.Errorf("%w: --range is valid only after diff", ErrUsage)
-			}
-			value, next, err := optionValue(args, index, argument)
-			if err != nil {
-				return Invocation{}, err
-			}
-			index = next
-			rangeText = value
-		case "--repo":
-			if command != "pr" {
-				return Invocation{}, fmt.Errorf("%w: --repo is valid only after pr", ErrUsage)
-			}
-			value, next, err := optionValue(args, index, argument)
-			if err != nil {
-				return Invocation{}, err
-			}
-			index = next
-			parsed, err := source.NewOwnerRepository(value)
-			if err != nil {
-				return Invocation{}, err
-			}
-			repository = new(parsed)
-		default:
-			switch {
-			case argument == "diff" || argument == "pr":
-				if command != "" {
-					return Invocation{}, fmt.Errorf("%w: multiple subcommands", ErrUsage)
-				}
-				command = argument
-				if command == "diff" {
-					invocation.HelpTopic = HelpDiff
-				} else {
-					invocation.HelpTopic = HelpPullRequest
-				}
-			case len(argument) > 0 && argument[0] == '-':
-				return Invocation{}, fmt.Errorf("%w: unknown option %s", ErrUsage, argument)
-			case command == "pr" && pullSelector == "":
-				pullSelector = argument
-			default:
-				return Invocation{}, fmt.Errorf("%w: unexpected argument %q", ErrUsage, argument)
-			}
+func (state *argumentState) consume(args []string, index *int) error {
+	handled, err := state.consumeCommonOption(args, index)
+	if handled || err != nil {
+		return err
+	}
+	return state.consumeTargetArgument(args, index)
+}
+
+func (state *argumentState) consumeCommonOption(args []string, index *int) (bool, error) {
+	argument := args[*index]
+	switch argument {
+	case "-h", flagHelp:
+		state.invocation.Help = true
+		switch state.command {
+		case commandDiff:
+			state.invocation.HelpTopic = HelpDiff
+		case "pr":
+			state.invocation.HelpTopic = HelpPullRequest
 		}
+	case flagStdout:
+		state.invocation.Output = OutputHuman
+	case flagJSON:
+		state.invocation.Output = OutputJSON
+	case "--no-mouse":
+		state.invocation.Overrides.DisableMouse()
+	case "--theme":
+		value, next, err := optionValue(args, *index, argument)
+		if err != nil {
+			return true, err
+		}
+		*index = next
+		theme, err := config.NewThemeName(value)
+		if err != nil {
+			return true, err
+		}
+		state.invocation.Overrides.SetTheme(theme)
+	case "--appearance":
+		value, next, err := optionValue(args, *index, argument)
+		if err != nil {
+			return true, err
+		}
+		*index = next
+		appearance, err := config.ParseAppearance(value)
+		if err != nil {
+			return true, err
+		}
+		state.invocation.Overrides.SetAppearance(appearance)
+	case flagInclude, flagExclude:
+		value, next, err := optionValue(args, *index, argument)
+		if err != nil {
+			return true, err
+		}
+		*index = next
+		pattern, err := config.NewPattern(value)
+		if err != nil {
+			return true, err
+		}
+		if argument == flagInclude {
+			state.invocation.Overrides.AddInclude(pattern)
+		} else {
+			state.invocation.Overrides.AddExclude(pattern)
+		}
+	default:
+		return false, nil
 	}
+	return true, nil
+}
 
-	if invocation.Help {
-		return invocation, nil
+func (state *argumentState) consumeTargetArgument(args []string, index *int) error {
+	argument := args[*index]
+	switch argument {
+	case flagStaged:
+		if state.command != commandDiff {
+			return fmt.Errorf("%w: --staged is valid only after diff", ErrUsage)
+		}
+		state.staged = true
+	case flagRange:
+		if state.command != commandDiff {
+			return fmt.Errorf("%w: --range is valid only after diff", ErrUsage)
+		}
+		value, next, err := optionValue(args, *index, argument)
+		if err != nil {
+			return err
+		}
+		*index = next
+		state.rangeText = value
+	case flagRepository:
+		if state.command != "pr" {
+			return fmt.Errorf("%w: --repo is valid only after pr", ErrUsage)
+		}
+		value, next, err := optionValue(args, *index, argument)
+		if err != nil {
+			return err
+		}
+		*index = next
+		parsed, err := source.NewOwnerRepository(value)
+		if err != nil {
+			return err
+		}
+		state.repository = new(parsed)
+	default:
+		return state.consumePositional(argument)
 	}
-	switch command {
-	case "diff":
-		if staged && rangeText != "" {
+	return nil
+}
+
+func (state *argumentState) consumePositional(argument string) error {
+	switch {
+	case argument == commandDiff || argument == "pr":
+		if state.command != "" {
+			return fmt.Errorf("%w: multiple subcommands", ErrUsage)
+		}
+		state.command = argument
+		if state.command == commandDiff {
+			state.invocation.HelpTopic = HelpDiff
+		} else {
+			state.invocation.HelpTopic = HelpPullRequest
+		}
+	case argument != "" && argument[0] == '-':
+		return fmt.Errorf("%w: unknown option %s", ErrUsage, argument)
+	case state.command == "pr" && state.pullSelector == "":
+		state.pullSelector = argument
+	default:
+		return fmt.Errorf("%w: unexpected argument %q", ErrUsage, argument)
+	}
+	return nil
+}
+
+func (state *argumentState) finish() (Invocation, error) {
+	if state.invocation.Help {
+		return state.invocation, nil
+	}
+	switch state.command {
+	case commandDiff:
+		if state.staged && state.rangeText != "" {
 			return Invocation{}, fmt.Errorf("%w: --staged and --range are mutually exclusive", ErrUsage)
 		}
 		switch {
-		case staged:
-			invocation.Target = source.StagedTarget()
-		case rangeText != "":
-			target, err := source.NewRangeTarget(rangeText)
+		case state.staged:
+			state.invocation.Target = source.StagedTarget()
+		case state.rangeText != "":
+			target, err := source.NewRangeTarget(state.rangeText)
 			if err != nil {
 				return Invocation{}, err
 			}
-			invocation.Target = target
+			state.invocation.Target = target
 		default:
-			invocation.Target = source.WorktreeTarget()
+			state.invocation.Target = source.WorktreeTarget()
 		}
 	case "pr":
-		if pullSelector == "" {
+		if state.pullSelector == "" {
 			return Invocation{}, fmt.Errorf("%w: pr requires a selector", ErrUsage)
 		}
-		selector, err := source.NewPullRequestSelector(pullSelector, repository)
+		selector, err := source.NewPullRequestSelector(state.pullSelector, state.repository)
 		if err != nil {
 			return Invocation{}, err
 		}
@@ -208,11 +267,11 @@ func parseArgs(args []string) (Invocation, error) {
 		if err != nil {
 			return Invocation{}, err
 		}
-		invocation.Target = target
+		state.invocation.Target = target
 	default:
 		return Invocation{}, fmt.Errorf("%w: expected diff or pr", ErrUsage)
 	}
-	return invocation, nil
+	return state.invocation, nil
 }
 
 func optionValue(args []string, index int, option string) (string, int, error) {

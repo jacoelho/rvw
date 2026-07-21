@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -25,11 +26,11 @@ type interactiveRequest struct {
 	ctx            context.Context
 	input          io.Reader
 	output         io.Writer
-	resolved       config.Config
 	service        *source.Service
 	document       *source.Document
-	stdoutTerminal bool
 	termination    *terminationOwner
+	resolved       config.Config
+	stdoutTerminal bool
 }
 
 func runInteractive(request interactiveRequest) (returnErr error) {
@@ -113,7 +114,17 @@ func runInteractive(request interactiveRequest) (returnErr error) {
 	if runErr != nil && !errors.Is(runErr, tea.ErrProgramKilled) {
 		runErr = errors.Join(runErr, program.ReleaseTerminal())
 	}
+	return finishInteractive(request, model, coordinator, receiver, cancelReceiver, runErr)
+}
 
+func finishInteractive(
+	request interactiveRequest,
+	model *app.Model,
+	coordinator *app.Coordinator,
+	receiver *app.ReadyReceiver,
+	cancelReceiver context.CancelFunc,
+	runErr error,
+) error {
 	cancelReceiver()
 	barrierContext, cancelBarrier := context.WithTimeout(
 		context.WithoutCancel(request.ctx),
@@ -228,6 +239,9 @@ func publicationShutdownError(settlement app.ShutdownSettlement) error {
 
 func interactiveSettings(resolved config.Config) (app.Settings, error) {
 	diff := resolved.Diff()
+	if diff.ContextLines < 0 || diff.ContextLines > math.MaxUint16 {
+		return app.Settings{}, errors.New("diff context lines cannot be represented as uint16")
+	}
 	contextLines, err := review.NewContextLines(uint16(diff.ContextLines))
 	if err != nil {
 		return app.Settings{}, err
@@ -272,6 +286,7 @@ func interactiveSettings(resolved config.Config) (app.Settings, error) {
 	githubConfig := resolved.GitHub()
 	publicationEvent := review.PublicationEventComment
 	switch githubConfig.SubmitDefault {
+	case config.SubmitComment:
 	case config.SubmitDraft:
 		publicationEvent = review.PublicationEventDraft
 	case config.SubmitApprove:
@@ -294,44 +309,7 @@ func interactiveSettings(resolved config.Config) (app.Settings, error) {
 	if err != nil {
 		return app.Settings{}, err
 	}
-	paletteValues := make(map[app.PaletteRole]string)
-	if theme, ok := resolved.Theme(activeTheme); ok {
-		roles := map[config.ThemeColor]app.PaletteRole{
-			"panel_bg":           app.PalettePanelBackground,
-			"fg_primary":         app.PalettePrimary,
-			"fg_secondary":       app.PaletteSecondary,
-			"fg_dim":             app.PaletteDim,
-			"diff_add":           app.PaletteDiffAdd,
-			"diff_del":           app.PaletteDiffDelete,
-			"diff_context":       app.PaletteDiffContext,
-			"pending":            app.PalettePending,
-			"border_focused":     app.PaletteFocused,
-			"status_bar_bg":      app.PaletteStatusBackground,
-			"cursor_line_bg":     app.PaletteCursorBackground,
-			"diff_add_bg":        app.PaletteDiffAddBackground,
-			"diff_del_bg":        app.PaletteDiffDeleteBackground,
-			"diff_hunk_header":   app.PaletteDiffHunk,
-			"message_warning_fg": app.PaletteWarningForeground,
-			"message_warning_bg": app.PaletteWarningBackground,
-		}
-		for name, role := range roles {
-			if color := theme.Colors[name].String(); color != "" {
-				paletteValues[role] = color
-			}
-		}
-		syntaxRoles := map[config.SyntaxColor]app.PaletteRole{
-			config.SyntaxKeyword: app.PaletteSyntaxKeyword,
-			config.SyntaxString:  app.PaletteSyntaxString,
-			config.SyntaxComment: app.PaletteSyntaxComment,
-			config.SyntaxNumber:  app.PaletteSyntaxNumber,
-		}
-		for name, role := range syntaxRoles {
-			if color := theme.SyntaxColors[name].String(); color != "" {
-				paletteValues[role] = color
-			}
-		}
-	}
-	palette, err := app.NewPalette(paletteValues)
+	palette, err := interactivePalette(resolved, activeTheme)
 	if err != nil {
 		return app.Settings{}, err
 	}
@@ -345,6 +323,49 @@ func interactiveSettings(resolved config.Config) (app.Settings, error) {
 		Keybindings:     keybindings,
 		Palette:         palette,
 	})
+}
+
+func interactivePalette(resolved config.Config, activeTheme config.ThemeName) (app.Palette, error) {
+	paletteValues := make(map[app.PaletteRole]string)
+	theme, ok := resolved.Theme(activeTheme)
+	if !ok {
+		return app.NewPalette(paletteValues)
+	}
+	roles := map[config.ThemeColor]app.PaletteRole{
+		"panel_bg":           app.PalettePanelBackground,
+		"fg_primary":         app.PalettePrimary,
+		"fg_secondary":       app.PaletteSecondary,
+		"fg_dim":             app.PaletteDim,
+		"diff_add":           app.PaletteDiffAdd,
+		"diff_del":           app.PaletteDiffDelete,
+		"diff_context":       app.PaletteDiffContext,
+		"pending":            app.PalettePending,
+		"border_focused":     app.PaletteFocused,
+		"status_bar_bg":      app.PaletteStatusBackground,
+		"cursor_line_bg":     app.PaletteCursorBackground,
+		"diff_add_bg":        app.PaletteDiffAddBackground,
+		"diff_del_bg":        app.PaletteDiffDeleteBackground,
+		"diff_hunk_header":   app.PaletteDiffHunk,
+		"message_warning_fg": app.PaletteWarningForeground,
+		"message_warning_bg": app.PaletteWarningBackground,
+	}
+	for name, role := range roles {
+		if color := theme.Colors[name].String(); color != "" {
+			paletteValues[role] = color
+		}
+	}
+	syntaxRoles := map[config.SyntaxColor]app.PaletteRole{
+		config.SyntaxKeyword: app.PaletteSyntaxKeyword,
+		config.SyntaxString:  app.PaletteSyntaxString,
+		config.SyntaxComment: app.PaletteSyntaxComment,
+		config.SyntaxNumber:  app.PaletteSyntaxNumber,
+	}
+	for name, role := range syntaxRoles {
+		if color := theme.SyntaxColors[name].String(); color != "" {
+			paletteValues[role] = color
+		}
+	}
+	return app.NewPalette(paletteValues)
 }
 
 func interactiveKeybindings(bindings []config.Keybinding) ([]app.Keybinding, error) {
