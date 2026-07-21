@@ -23,30 +23,35 @@ const (
 	maxRenderHeight  = 300
 	viewportOverscan = 8
 
+	diffCommentAnchorColumns = 2
+	unifiedDiffContentWidth  = 60
+	sideBySideContentWidth   = 100
+
 	commentEditorChromeHeight    = 2
 	commentEditorMaxHeight       = 6
 	commentEditorWorkspaceHeight = 3
 )
 
 type semanticStyles struct {
-	heading  lipgloss.Style
-	muted    lipgloss.Style
-	focused  lipgloss.Style
-	selected lipgloss.Style
-	added    lipgloss.Style
-	deleted  lipgloss.Style
-	context  lipgloss.Style
-	hunk     lipgloss.Style
-	pending  lipgloss.Style
-	reviewed lipgloss.Style
-	keyword  lipgloss.Style
-	literal  lipgloss.Style
-	comment  lipgloss.Style
-	number   lipgloss.Style
-	warning  lipgloss.Style
-	failure  lipgloss.Style
-	status   lipgloss.Style
-	panel    lipgloss.Style
+	heading       lipgloss.Style
+	muted         lipgloss.Style
+	focused       lipgloss.Style
+	selected      lipgloss.Style
+	added         lipgloss.Style
+	deleted       lipgloss.Style
+	context       lipgloss.Style
+	hunk          lipgloss.Style
+	pending       lipgloss.Style
+	reviewed      lipgloss.Style
+	commentAnchor lipgloss.Style
+	keyword       lipgloss.Style
+	literal       lipgloss.Style
+	comment       lipgloss.Style
+	number        lipgloss.Style
+	warning       lipgloss.Style
+	failure       lipgloss.Style
+	status        lipgloss.Style
+	panel         lipgloss.Style
 }
 
 type workspaceLayout struct {
@@ -78,13 +83,6 @@ const (
 	mouseTargetTree
 	mouseTargetDiff
 	mouseTargetComment
-)
-
-type patchLineLayout uint8
-
-const (
-	patchLineClipped patchLineLayout = iota + 1
-	patchLineWrapped
 )
 
 type diffLineNumberWidths struct {
@@ -313,7 +311,8 @@ func (model *Model) diffLines(
 	}
 	lines := model.review.PatchLines(active, model.diffTop, count, lineBytes)
 	numberWidths := newDiffLineNumberWidths(state)
-	if model.settings.diffView == DiffViewSideBySide && width >= 100 {
+	if model.settings.diffView == DiffViewSideBySide &&
+		width >= sideBySideContentWidth+diffCommentAnchorColumns {
 		return model.sideBySideDiffLines(active, lines, width, height, numberWidths, styles)
 	}
 	rendered := make([]string, 0, min(height, len(lines)))
@@ -336,18 +335,14 @@ func (model *Model) diffLines(
 			reviewed = styles.reviewed.Render("✓")
 		}
 		contentWidth := max(width-2, 1)
-		layout := patchLineClipped
-		if model.settings.wrap {
-			layout = patchLineWrapped
-		}
-		text := model.renderUnifiedPatchLine(
+		segments := model.renderUnifiedPatchLine(
+			active,
 			line,
 			contentWidth,
-			layout,
 			numberWidths,
 			styles,
 		)
-		for segmentIndex, segment := range model.wrappedLine(text, contentWidth) {
+		for segmentIndex, segment := range segments {
 			if len(rendered) == height {
 				break
 			}
@@ -391,46 +386,33 @@ func stylePatchLine(text string, kind review.PatchLineKind, styles semanticStyle
 }
 
 func (model *Model) renderUnifiedPatchLine(
+	fileID review.FileID,
 	line review.PatchLine,
 	width int,
-	layout patchLineLayout,
 	numberWidths diffLineNumberWidths,
 	styles semanticStyles,
-) string {
-	wrap := layout == patchLineWrapped
+) []string {
 	raw := line.Text.String()
 	kind := line.Kind()
 	oldNumber, newNumber := "", ""
+	oldAnchor, newAnchor := " ", " "
 	if value, ok := line.OldLine(); ok {
 		oldNumber = fmt.Sprint(value.Uint32())
+		oldAnchor = model.commentAnchorCell(fileID, review.LineOld, value, styles)
 	}
 	if value, ok := line.NewLine(); ok {
 		newNumber = fmt.Sprint(value.Uint32())
+		newAnchor = model.commentAnchorCell(fileID, review.LineNew, value, styles)
 	}
 	numberPrefix := fmt.Sprintf(
-		"%*s %*s ",
+		"%*s%s %*s%s ",
 		numberWidths.old,
 		oldNumber,
+		oldAnchor,
 		numberWidths.new,
 		newNumber,
+		newAnchor,
 	)
-	if width <= len(numberPrefix) {
-		text := safeText(raw)
-		if !wrap {
-			text = safeAndClip(raw, width)
-		}
-		return stylePatchLine(text, kind, styles)
-	}
-	if kind == review.PatchLineMetadata || kind == review.PatchLineHunkHeader ||
-		kind == review.PatchLineNoNewline {
-		text := safeText(raw)
-		if !wrap {
-			contentWidth := max(width-len(numberPrefix), 1)
-			text = clipStyled(text, model.diffLeft, contentWidth)
-		}
-		text = numberPrefix + text
-		return stylePatchLine(text, kind, styles)
-	}
 	marker := ""
 	content := raw
 	if kind == review.PatchLineContext || kind == review.PatchLineAddition ||
@@ -446,23 +428,61 @@ func (model *Model) renderUnifiedPatchLine(
 	case review.PatchLineDeletion:
 		styledMarker = styles.deleted.Render(marker)
 	}
-	contentWidth := max(width-len(numberPrefix)-lipgloss.Width(marker), 1)
-	styledContent := model.renderSyntaxContent(syntaxContent{
-		raw:       content,
-		spans:     model.syntaxSpans(line),
-		width:     contentWidth,
-		truncated: line.Truncated,
-		wrap:      wrap,
-		styles:    styles,
-	})
-	rendered := numberPrefix + styledMarker + styledContent
-	if !wrap {
-		rendered = lipgloss.NewStyle().MaxWidth(width).Render(rendered)
+	prefix := numberPrefix + styledMarker
+	prefixWidth := lipgloss.Width(prefix)
+	if width <= prefixWidth {
+		return []string{stylePatchLine(safeAndClip(raw, width), kind, styles)}
 	}
-	if kind == review.PatchLineContext {
-		return styles.context.Render(rendered)
+	contentWidth := width - prefixWidth
+	var renderedContent string
+	if kind == review.PatchLineMetadata || kind == review.PatchLineHunkHeader ||
+		kind == review.PatchLineNoNewline {
+		renderedContent = safeText(content)
+		if !model.settings.wrap {
+			renderedContent = clipStyled(renderedContent, model.diffLeft, contentWidth)
+		}
+	} else {
+		renderedContent = model.renderSyntaxContent(syntaxContent{
+			raw:       content,
+			spans:     model.syntaxSpans(line),
+			width:     contentWidth,
+			truncated: line.Truncated,
+			wrap:      model.settings.wrap,
+			styles:    styles,
+		})
+	}
+	segments := model.wrappedLine(renderedContent, contentWidth)
+	rendered := make([]string, 0, len(segments))
+	for index, segment := range segments {
+		segmentPrefix := strings.Repeat(" ", prefixWidth)
+		if index == 0 {
+			segmentPrefix = prefix
+		}
+		value := segmentPrefix + fitCellWidth(segment, contentWidth)
+		switch {
+		case kind == review.PatchLineContext:
+			value = styles.context.Render(value)
+		case kind == review.PatchLineHunkHeader:
+			value = styles.hunk.Render(value)
+		case kind == review.PatchLineMetadata &&
+			(strings.HasPrefix(raw, "+++") || strings.HasPrefix(raw, "---")):
+			value = styles.heading.Render(value)
+		}
+		rendered = append(rendered, value)
 	}
 	return rendered
+}
+
+func (model *Model) commentAnchorCell(
+	file review.FileID,
+	side review.LineSide,
+	line review.LineNumber,
+	styles semanticStyles,
+) string {
+	if !model.review.HasCommentAnchor(file, side, line) {
+		return " "
+	}
+	return styles.commentAnchor.Render("●")
 }
 
 func (model *Model) sideBySideDiffLines(
@@ -503,44 +523,24 @@ func (model *Model) sideBySideDiffLines(
 			line.Kind() == review.PatchLineDeletion {
 			text = strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(text, " "), "+"), "-")
 		}
-		left, right := "", ""
-		if oldLine, ok := line.OldLine(); ok {
-			numberPrefix := fmt.Sprintf("%*d ", numberWidths.old, oldLine.Uint32())
-			content := model.renderSyntaxContent(syntaxContent{
-				raw:       text,
-				spans:     model.syntaxSpansForSide(line, review.LineOld),
-				width:     max(leftWidth-2-len(numberPrefix), 1),
-				truncated: line.Truncated,
-				wrap:      model.settings.wrap,
-				styles:    styles,
-			})
-			left = numberPrefix + content
-		}
-		if newLine, ok := line.NewLine(); ok {
-			numberPrefix := fmt.Sprintf("%*d ", numberWidths.new, newLine.Uint32())
-			content := model.renderSyntaxContent(syntaxContent{
-				raw:       text,
-				spans:     model.syntaxSpansForSide(line, review.LineNew),
-				width:     max(rightWidth-len(numberPrefix), 1),
-				truncated: line.Truncated,
-				wrap:      model.settings.wrap,
-				styles:    styles,
-			})
-			right = numberPrefix + content
-		}
-		if line.Kind() == review.PatchLineMetadata || line.Kind() == review.PatchLineHunkHeader {
-			text := safeText(line.Text.String())
-			if !model.settings.wrap {
-				text = safeAndClip(line.Text.String(), max(leftWidth-1, 1))
-			}
-			left = stylePatchLine(text, line.Kind(), styles)
-			right = left
-		} else if !model.settings.wrap {
-			left = lipgloss.NewStyle().MaxWidth(max(leftWidth-1, 1)).Render(left)
-			right = lipgloss.NewStyle().MaxWidth(rightWidth).Render(right)
-		}
-		leftSegments := model.wrappedLine(left, max(leftWidth-2, 1))
-		rightSegments := model.wrappedLine(right, rightWidth)
+		leftSegments := model.renderSidePatchLine(
+			fileID,
+			line,
+			review.LineOld,
+			text,
+			max(leftWidth-2, 1),
+			numberWidths.old,
+			styles,
+		)
+		rightSegments := model.renderSidePatchLine(
+			fileID,
+			line,
+			review.LineNew,
+			text,
+			rightWidth,
+			numberWidths.new,
+			styles,
+		)
 		segments := max(len(leftSegments), len(rightSegments))
 		for segment := range segments {
 			if len(rendered) == height {
@@ -571,6 +571,73 @@ func (model *Model) sideBySideDiffLines(
 		return []string{styles.muted.Render("Empty patch.")}, nil
 	}
 	return rendered, rows
+}
+
+func (model *Model) renderSidePatchLine(
+	fileID review.FileID,
+	line review.PatchLine,
+	side review.LineSide,
+	text string,
+	width, numberWidth int,
+	styles semanticStyles,
+) []string {
+	if line.Kind() == review.PatchLineMetadata || line.Kind() == review.PatchLineHunkHeader {
+		content := safeText(line.Text.String())
+		if !model.settings.wrap {
+			content = safeAndClip(line.Text.String(), width)
+		}
+		segments := model.wrappedLine(content, width)
+		for index, segment := range segments {
+			switch {
+			case line.Kind() == review.PatchLineHunkHeader:
+				segments[index] = styles.hunk.Render(segment)
+			case strings.HasPrefix(line.Text.String(), "+++") ||
+				strings.HasPrefix(line.Text.String(), "---"):
+				segments[index] = styles.heading.Render(segment)
+			}
+		}
+		return segments
+	}
+	number := ""
+	anchor := " "
+	var spans iter.Seq[review.SyntaxSpan]
+	sourceLine, hasSourceLine := line.OldLine()
+	if side == review.LineNew {
+		sourceLine, hasSourceLine = line.NewLine()
+	}
+	if hasSourceLine {
+		number = fmt.Sprint(sourceLine.Uint32())
+		anchor = model.commentAnchorCell(fileID, side, sourceLine, styles)
+		spans = model.syntaxSpansForSide(line, side)
+	}
+	prefix := fmt.Sprintf("%*s%s ", numberWidth, number, anchor)
+	prefixWidth := lipgloss.Width(prefix)
+	if width <= prefixWidth {
+		return []string{safeAndClip(text, width)}
+	}
+	contentWidth := width - prefixWidth
+	content := ""
+	if hasSourceLine {
+		content = model.renderSyntaxContent(syntaxContent{
+			raw:       text,
+			spans:     spans,
+			width:     contentWidth,
+			truncated: line.Truncated,
+			wrap:      model.settings.wrap,
+			styles:    styles,
+		})
+	}
+	segments := model.wrappedLine(content, contentWidth)
+	rendered := make([]string, 0, len(segments))
+	for index, segment := range segments {
+		segmentPrefix := strings.Repeat(" ", prefixWidth)
+		if index == 0 {
+			segmentPrefix = prefix
+		}
+		value := segmentPrefix + fitCellWidth(segment, contentWidth)
+		rendered = append(rendered, value)
+	}
+	return rendered
 }
 
 func newDiffLineNumberWidths(state review.PatchState) diffLineNumberWidths {

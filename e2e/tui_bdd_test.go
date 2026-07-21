@@ -154,8 +154,20 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 		})
 
 		feature.Scenario("a saved comment fences quit and exports exact Markdown", func(scenario *bdd.ScenarioSpec[*world]) {
-			scenario.Given("a stable worktree screen", launchStableWorktree())
+			scenario.Given("a stable wide worktree screen", launchStableWorktreeAt(180, 30))
 			scenario.When("a line comment is saved", saveLineComment("Please keep this deterministic."))
+			scenario.Then("its anchor is visible and both comment navigation paths reveal its line", func(t testing.TB, w *world) {
+				w.pty.send(t, "gg")
+				w.pty.awaitScreen(t, "visible comment anchor away from cursor", unfocusedCommentAnchor)
+				w.pty.send(t, "]c")
+				w.pty.awaitScreen(t, "next-comment line", focusedCommentAnchor)
+				w.pty.send(t, "gg")
+				w.pty.awaitScreen(t, "comment anchor before pane activation", unfocusedCommentAnchor)
+				w.pty.send(t, "\t")
+				w.pty.awaitScreen(t, "comments pane focus", containsScreen("[focus:comments]"))
+				w.pty.send(t, "\r")
+				w.pty.awaitScreen(t, "comments-pane activation line", focusedCommentAnchor)
+			})
 			scenario.When("quit is declined", func(t testing.TB, w *world) {
 				w.pty.send(t, "q")
 				w.pty.awaitScreen(t, "dirty quit confirmation", containsScreen("Discard local review changes and quit?"))
@@ -224,8 +236,12 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 }
 
 func launchStableWorktree() bdd.Step[*world] {
+	return launchStableWorktreeAt(120, 24)
+}
+
+func launchStableWorktreeAt(width, height int) bdd.Step[*world] {
 	return func(t testing.TB, w *world) {
-		w.launchPTY(t, 120, 24, "diff")
+		w.launchPTY(t, width, height, "diff")
 		w.pty.awaitScreen(t, "stable worktree", func(screen string) bool {
 			return strings.Contains(screen, "staged contents") && strings.Contains(screen, "work 0/64")
 		})
@@ -245,6 +261,25 @@ func saveLineComment(body string) bdd.Step[*world] {
 
 func containsScreen(text string) func(string) bool {
 	return func(screen string) bool { return strings.Contains(screen, text) }
+}
+
+func focusedCommentAnchor(screen string) bool {
+	return commentAnchorHasFocus(screen, true)
+}
+
+func unfocusedCommentAnchor(screen string) bool {
+	return commentAnchorHasFocus(screen, false)
+}
+
+func commentAnchorHasFocus(screen string, focused bool) bool {
+	for line := range strings.Lines(screen) {
+		if strings.Contains(line, "staged contents") &&
+			strings.Contains(line, "●") &&
+			strings.Contains(line, "▸") == focused {
+			return true
+		}
+	}
+	return false
 }
 
 func assertTerminalLifecycle(t testing.TB, session *ptySession, wantMouse bool) {

@@ -178,6 +178,144 @@ func (model *Model) moveComment(delta int) {
 	model.commentCursor = min(max(model.commentCursor+delta, 0), count-1)
 }
 
+func (model *Model) moveAndActivateComment(delta int) {
+	model.moveComment(delta)
+	model.activateCommentSelection()
+}
+
+func (model *Model) activateCommentSelection() {
+	localCount := model.review.CommentCount()
+	if model.commentCursor < 0 || model.commentCursor >= model.commentRowCount() {
+		return
+	}
+	if model.commentCursor < localCount {
+		comment, ok := model.review.CommentAt(model.commentCursor)
+		if !ok {
+			return
+		}
+		model.activateLocalComment(comment)
+		return
+	}
+	threads := model.review.Snapshot().RemoteThreads(model.commentCursor-localCount, 1)
+	if len(threads) == 1 {
+		model.activateRemoteThread(threads[0])
+	}
+}
+
+func (model *Model) activateLocalComment(comment review.Comment) {
+	target := comment.Target()
+	if target.Kind() == review.TargetReview {
+		model.foreground.clearPendingDiffTarget()
+		model.notice = &Notice{Kind: NoticeWarning, Text: "review comment has no file or line"}
+		return
+	}
+	file, mapped := target.FileID()
+	if !mapped || comment.Unmappable() {
+		model.foreground.clearPendingDiffTarget()
+		model.notice = &Notice{Kind: NoticeWarning, Text: "comment file is not in this review"}
+		return
+	}
+	if target.Kind() == review.TargetFile {
+		model.activateCommentFile(file, NoticeInformation, "file comment has no line")
+		return
+	}
+	side, _, end, lineTarget := target.Lines()
+	if !lineTarget {
+		model.foreground.clearPendingDiffTarget()
+		model.notice = &Notice{Kind: NoticeWarning, Text: "comment target is invalid"}
+		return
+	}
+	if comment.Stale() {
+		model.activateCommentFile(file, NoticeWarning, "comment line is stale; showing its file")
+		return
+	}
+	model.activateCommentLine(file, side, end)
+}
+
+func (model *Model) activateRemoteThread(thread review.RemoteThread) {
+	file, mapping := thread.FileMapping()
+	switch mapping {
+	case review.RemoteMappingAmbiguous:
+		model.foreground.clearPendingDiffTarget()
+		model.notice = &Notice{Kind: NoticeWarning, Text: "remote comment path is ambiguous in this review"}
+		return
+	case review.RemoteMappingMissing:
+		model.foreground.clearPendingDiffTarget()
+		model.notice = &Notice{Kind: NoticeWarning, Text: "remote comment file is not in this review"}
+		return
+	case review.RemoteMappingMapped:
+	default:
+		model.foreground.clearPendingDiffTarget()
+		model.notice = &Notice{Kind: NoticeWarning, Text: "remote comment mapping is invalid"}
+		return
+	}
+	line, hasLine := thread.Line()
+	if !hasLine {
+		model.activateCommentFile(file, NoticeInformation, "remote comment has no line")
+		return
+	}
+	if thread.Outdated() {
+		model.activateCommentFile(file, NoticeWarning, "remote comment line is outdated; showing its file")
+		return
+	}
+	model.activateCommentLine(file, thread.Side(), line)
+}
+
+func (model *Model) activateCommentFile(
+	file review.FileID,
+	kind NoticeKind,
+	message NoticeText,
+) {
+	model.foreground.clearPendingDiffTarget()
+	if !model.activateFile(file) {
+		model.notice = &Notice{Kind: NoticeWarning, Text: "comment file is not in this review"}
+		return
+	}
+	model.focusReturn = 0
+	model.setFocus(FocusDiff)
+	model.notice = &Notice{Kind: kind, Text: message}
+	if model.review.Patch(file).Status == review.PatchReady {
+		model.requestSyntax()
+		return
+	}
+	model.requestActivePatch()
+}
+
+func (model *Model) activateCommentLine(
+	fileID review.FileID,
+	side review.LineSide,
+	line review.LineNumber,
+) {
+	file, exists := model.review.Snapshot().File(fileID)
+	if !exists {
+		model.foreground.clearPendingDiffTarget()
+		model.notice = &Notice{Kind: NoticeWarning, Text: "comment file is not in this review"}
+		return
+	}
+	target := newSourceLineTarget(
+		model.review.WorkspaceRevision(),
+		file.PatchHandle(),
+		side,
+		line,
+	)
+	model.foreground.clearPendingDiffTarget()
+	if !model.activateFile(fileID) {
+		model.notice = &Notice{Kind: NoticeWarning, Text: "comment file is not in this review"}
+		return
+	}
+	model.focusReturn = 0
+	model.setFocus(FocusDiff)
+	if model.review.Patch(fileID).Status == review.PatchReady {
+		model.applyDiffTarget(target)
+		return
+	}
+	if !model.foreground.setPendingDiffTarget(target) {
+		model.notice = &Notice{Kind: NoticeError, Text: "comment navigation target is invalid"}
+		return
+	}
+	model.requestActivePatch()
+}
+
 func (model *Model) commentRowCount() int {
 	return model.review.CommentCount() + model.review.Snapshot().RemoteThreadCount()
 }

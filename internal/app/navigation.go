@@ -222,6 +222,10 @@ func (model *Model) moveLast() {
 }
 
 func (model *Model) activateSelection() {
+	if model.focus == FocusComments {
+		model.activateCommentSelection()
+		return
+	}
 	if model.focus == FocusFileTree {
 		tree := model.currentFileTree()
 		if node, _, ok := tree.node(model.treeCursor); ok && node.identity.directory {
@@ -233,22 +237,64 @@ func (model *Model) activateSelection() {
 	if !ok {
 		return
 	}
-	previous, hadPrevious := model.review.ActiveFile()
-	next, err := model.review.ActivateFile(selected)
-	if err != nil {
+	model.foreground.clearPendingDiffTarget()
+	if !model.activateFile(selected) {
 		return
 	}
+	model.requestActivePatch()
+}
+
+func (model *Model) activateFile(file review.FileID) bool {
+	previous, hadPrevious := model.review.ActiveFile()
+	next, err := model.review.ActivateFile(file)
+	if err != nil {
+		return false
+	}
 	model.review = next
-	if !hadPrevious || previous != selected {
+	if !hadPrevious || previous != file {
 		model.resetSyntax()
 	}
-	if hadPrevious && previous != selected &&
+	if hadPrevious && previous != file &&
 		model.review.Patch(previous).Status != review.PatchPending {
 		model.review = model.review.DropPatch(previous)
 	}
 	model.diffTop = 0
 	model.diffCursor = 0
-	model.requestActivePatch()
+	model.visualAnchor = 0
+	return true
+}
+
+func (model *Model) applyDiffTarget(target pendingDiffTarget) bool {
+	if !target.valid() || target.workspace != model.review.WorkspaceRevision() {
+		return false
+	}
+	fileID := target.handle.FileID()
+	file, exists := model.review.Snapshot().File(fileID)
+	if !exists || file.PatchHandle() != target.handle ||
+		model.review.Patch(fileID).Status != review.PatchReady {
+		return false
+	}
+	var row uint32
+	switch target.kind {
+	case diffTargetPatchRow:
+		if target.patchRow >= model.review.Patch(fileID).Lines {
+			model.notice = &Notice{Kind: NoticeWarning, Text: "search result is not in the active patch"}
+			return false
+		}
+		row = target.patchRow
+	case diffTargetSourceLine:
+		var found bool
+		row, found = model.review.PatchLineForSource(fileID, target.side, target.line)
+		if !found {
+			model.notice = &Notice{Kind: NoticeWarning, Text: "comment line is not in the active patch"}
+			return false
+		}
+	default:
+		return false
+	}
+	model.diffCursor = row
+	model.moveDiff(0)
+	return true
 }
 
 func (model *Model) cycleFocus(delta int) {
@@ -447,6 +493,7 @@ func (model *Model) clampDiffTop() {
 }
 
 func (model *Model) activatePath(path string) {
+	model.foreground.clearPendingDiffTarget()
 	if _, ambiguous := model.ambiguousPaths[path]; ambiguous {
 		model.notice = &Notice{Kind: NoticeWarning, Text: "path is ambiguous in this review"}
 		return
@@ -471,6 +518,7 @@ func (model *Model) activatePath(path string) {
 }
 
 func (model *Model) selectSourceLine(side review.LineSide, value uint32) {
+	model.foreground.clearPendingDiffTarget()
 	line, err := review.NewLineNumber(value)
 	if err != nil {
 		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}

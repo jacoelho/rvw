@@ -54,12 +54,12 @@ func (model *Model) workspaceLayout(width, height int) workspaceLayout {
 			layout.treeWidth = min(max(width/5, 24), 40)
 		}
 		if model.commentsVisible &&
-			width-layout.treeWidth-32-2 >= 60 {
+			width-layout.treeWidth-32-2 >= unifiedDiffContentWidth+diffCommentAnchorColumns {
 			layout.commentsWidth = 32
 		}
 	case width >= compactWidth && height >= 18:
 		if model.commentsVisible {
-			if width >= 60+32+1 {
+			if width >= unifiedDiffContentWidth+diffCommentAnchorColumns+32+1 {
 				layout.commentsWidth = 32
 			}
 		} else if model.fileTreeVisible && width >= 60+24+1 {
@@ -72,6 +72,7 @@ func (model *Model) workspaceLayout(width, height int) workspaceLayout {
 		1,
 	)
 	layout.sideBySideFallback =
-		model.settings.diffView == DiffViewSideBySide && layout.diffWidth < 100
+		model.settings.diffView == DiffViewSideBySide &&
+			layout.diffWidth < sideBySideContentWidth+diffCommentAnchorColumns
 	return layout
 }

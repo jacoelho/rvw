@@ -3,6 +3,7 @@ package review
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"unicode/utf8"
 )
@@ -33,6 +34,77 @@ func NewLineNumber(value uint32) (LineNumber, error) {
 
 func (line LineNumber) Uint32() uint32 {
 	return uint32(line)
+}
+
+type commentAnchor struct {
+	file FileID
+	side LineSide
+	line LineNumber
+}
+
+type commentAnchorCounts map[commentAnchor]uint16
+
+func targetCommentAnchor(target CommentTarget) (commentAnchor, bool) {
+	file, mapped := target.FileID()
+	side, _, end, lineTarget := target.Lines()
+	if !mapped || !lineTarget {
+		return commentAnchor{}, false
+	}
+	return commentAnchor{file: file, side: side, line: end}, true
+}
+
+func savedCommentAnchor(comment Comment) (commentAnchor, bool) {
+	if comment.stale || comment.unmappable {
+		return commentAnchor{}, false
+	}
+	return targetCommentAnchor(comment.target)
+}
+
+func replaceCommentAnchor(
+	anchors commentAnchorCounts,
+	before *Comment,
+	after *Comment,
+) commentAnchorCounts {
+	var (
+		oldAnchor commentAnchor
+		hasOld    bool
+		newAnchor commentAnchor
+		hasNew    bool
+	)
+	if before != nil {
+		oldAnchor, hasOld = savedCommentAnchor(*before)
+	}
+	if after != nil {
+		newAnchor, hasNew = savedCommentAnchor(*after)
+	}
+	if hasOld == hasNew && (!hasOld || oldAnchor == newAnchor) {
+		return anchors
+	}
+	next := maps.Clone(anchors)
+	if next == nil {
+		next = make(commentAnchorCounts)
+	}
+	if hasOld {
+		if next[oldAnchor] <= 1 {
+			delete(next, oldAnchor)
+		} else {
+			next[oldAnchor]--
+		}
+	}
+	if hasNew {
+		next[newAnchor]++
+	}
+	return next
+}
+
+func indexCommentAnchors(comments []Comment) commentAnchorCounts {
+	anchors := make(commentAnchorCounts, min(len(comments), MaxComments))
+	for index := range comments {
+		if anchor, ok := savedCommentAnchor(comments[index]); ok {
+			anchors[anchor]++
+		}
+	}
+	return anchors
 }
 
 type TargetKind uint8

@@ -14,20 +14,21 @@ type Review struct {
 	snapshot  Snapshot
 	state     uint64
 
-	active       *FileID
-	selected     *FileID
-	showHidden   bool
-	fileMarks    fileMarkSet
-	hunkMarks    hunkMarkSet
-	comments     []Comment
-	commentBody  int64
-	nextComment  uint32
-	draft        *Draft
-	operations   map[OperationID]Operation
-	operationIDs []OperationID
-	patches      map[FileID]PatchState
-	search       searchState
-	publication  publicationState
+	active         *FileID
+	selected       *FileID
+	showHidden     bool
+	fileMarks      fileMarkSet
+	hunkMarks      hunkMarkSet
+	comments       []Comment
+	commentAnchors commentAnchorCounts
+	commentBody    int64
+	nextComment    uint32
+	draft          *Draft
+	operations     map[OperationID]Operation
+	operationIDs   []OperationID
+	patches        map[FileID]PatchState
+	search         searchState
+	publication    publicationState
 }
 
 func NewReview(snapshot Snapshot) (Review, error) {
@@ -201,20 +202,28 @@ func (review Review) SaveDraft() (Review, CommentID, error) {
 		}
 		id = review.comments[index].id
 		next.commentBody -= int64(len(next.comments[index].body))
+		before := next.comments[index]
 		next.comments[index].target = review.draft.target
 		next.comments[index].body = body
 		next.commentBody += int64(len(body))
+		next.commentAnchors = replaceCommentAnchor(
+			review.commentAnchors,
+			&before,
+			&next.comments[index],
+		)
 	} else {
 		if len(review.comments) >= MaxComments || review.nextComment >= MaxComments ||
 			review.commentBody+int64(len(body)) > MaxCommentBodyTotal {
 			return review, 0, ErrInvalidReviewTransition
 		}
 		id, _ = NewCommentID(review.nextComment)
-		next.comments = append(next.comments, Comment{
+		comment := Comment{
 			id:     id,
 			target: review.draft.target,
 			body:   body,
-		})
+		}
+		next.comments = append(next.comments, comment)
+		next.commentAnchors = replaceCommentAnchor(review.commentAnchors, nil, &comment)
 		next.commentBody += int64(len(body))
 		next.nextComment++
 	}
@@ -259,8 +268,10 @@ func (review Review) DeleteComment(id CommentID) (Review, error) {
 	}
 	next := review.clone()
 	next.comments = slices.Clone(review.comments)
+	removed := next.comments[index]
 	next.commentBody -= int64(len(next.comments[index].body))
 	next.comments = slices.Delete(next.comments, index, index+1)
+	next.commentAnchors = replaceCommentAnchor(review.commentAnchors, &removed, nil)
 	return next, nil
 }
 
@@ -299,6 +310,22 @@ func (review Review) Draft() (Draft, bool) {
 		return Draft{}, false
 	}
 	return *review.draft, true
+}
+
+// HasCommentAnchor reports whether a saved local comment or remote review
+// thread is anchored to the source line. Its indexes are immutable across
+// Review values, so the lookup is safe on the rendering path.
+func (review Review) HasCommentAnchor(
+	file FileID,
+	side LineSide,
+	line LineNumber,
+) bool {
+	anchor := commentAnchor{file: file, side: side, line: line}
+	if review.commentAnchors[anchor] != 0 {
+		return true
+	}
+	_, exists := review.snapshot.remoteCommentAnchors[anchor]
+	return exists
 }
 
 func (review Review) clone() Review {

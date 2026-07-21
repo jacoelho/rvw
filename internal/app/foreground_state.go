@@ -51,12 +51,74 @@ type patchFlow struct {
 	active       map[review.OperationID]review.FileID
 	continuation patchContinuation
 	viewport     *diffViewport
+	target       *pendingDiffTarget
 }
 
 type searchFlow struct {
 	active       review.OperationID
 	continuation searchContinuation
-	pendingHit   *review.SearchHit
+}
+
+type diffTargetKind uint8
+
+const (
+	diffTargetPatchRow diffTargetKind = iota + 1
+	diffTargetSourceLine
+)
+
+type pendingDiffTarget struct {
+	kind      diffTargetKind
+	workspace review.WorkspaceRevision
+	handle    review.PatchHandle
+	operation review.OperationID
+	patchRow  uint32
+	side      review.LineSide
+	line      review.LineNumber
+}
+
+func newPatchRowTarget(
+	workspace review.WorkspaceRevision,
+	handle review.PatchHandle,
+	row uint32,
+) pendingDiffTarget {
+	return pendingDiffTarget{
+		kind:      diffTargetPatchRow,
+		workspace: workspace,
+		handle:    handle,
+		patchRow:  row,
+	}
+}
+
+func newSourceLineTarget(
+	workspace review.WorkspaceRevision,
+	handle review.PatchHandle,
+	side review.LineSide,
+	line review.LineNumber,
+) pendingDiffTarget {
+	return pendingDiffTarget{
+		kind:      diffTargetSourceLine,
+		workspace: workspace,
+		handle:    handle,
+		side:      side,
+		line:      line,
+	}
+}
+
+func (target pendingDiffTarget) valid() bool {
+	if target.workspace.Uint64() == 0 || target.handle.ID().Uint64() == 0 ||
+		target.handle.SourceID().Uint64() == 0 ||
+		target.handle.FileID().Uint32() >= review.MaxFiles {
+		return false
+	}
+	switch target.kind {
+	case diffTargetPatchRow:
+		return target.side == 0 && target.line == 0
+	case diffTargetSourceLine:
+		return (target.side == review.LineOld || target.side == review.LineNew) &&
+			target.line != 0
+	default:
+		return false
+	}
 }
 
 // foregroundState is the sole owner of reload, patch, and search coordination.
@@ -147,6 +209,18 @@ func (state *foregroundState) valid() bool {
 	for operation, file := range state.patch.active {
 		if operation == 0 || file.Uint32() >= review.MaxFiles {
 			return false
+		}
+	}
+	if state.patch.target != nil {
+		target := state.patch.target
+		if !target.valid() {
+			return false
+		}
+		if target.operation != 0 {
+			file, exists := state.patch.active[target.operation]
+			if !exists || file != target.handle.FileID() {
+				return false
+			}
 		}
 	}
 	if state.reload.afterReload != nil && !state.reload.afterReload.valid() {
@@ -344,6 +418,10 @@ func (state *foregroundState) admitted(
 			state.patch.continuation = patchContinuation{}
 		}
 		state.patch.active[operation] = start.file
+		if state.patch.target != nil && state.patch.target.operation == 0 &&
+			state.patch.target.handle.FileID() == start.file {
+			state.patch.target.operation = operation
+		}
 	case foregroundStartSearch:
 		prepared, ok := state.prepareSearch(start.search)
 		if !ok || prepared.source != start.source {
@@ -403,6 +481,10 @@ func (state *foregroundState) rejected(start foregroundStart) (foregroundEffect,
 				search: state.patch.continuation.search,
 			}
 			state.patch.continuation = patchContinuation{}
+		}
+		if state.patch.target != nil && state.patch.target.operation == 0 &&
+			state.patch.target.handle.FileID() == start.file {
+			state.patch.target = nil
 		}
 	case foregroundStartSearch:
 		switch start.source {
@@ -499,6 +581,9 @@ func (state *foregroundState) requestReload() (foregroundStart, []review.Operati
 		start, ok := state.prepareReload()
 		return start, nil, ok
 	}
+	if state.patch.target != nil {
+		state.patch.target.operation = 0
+	}
 	var afterReload *pendingSearch
 	if state.patch.continuation.kind == patchContinuationBeginSearch {
 		pending := state.patch.continuation.search
@@ -514,31 +599,37 @@ func (state *foregroundState) requestReload() (foregroundStart, []review.Operati
 
 func (state *foregroundState) completePatch(
 	id review.OperationID,
-) (review.FileID, bool, foregroundEffect) {
+) (review.FileID, *pendingDiffTarget, bool, foregroundEffect) {
 	file, ok := state.patch.active[id]
 	if !ok {
-		return 0, false, foregroundEffect{}
+		return 0, nil, false, foregroundEffect{}
+	}
+	var target *pendingDiffTarget
+	if state.patch.target != nil && state.patch.target.operation == id {
+		value := *state.patch.target
+		target = &value
+		state.patch.target = nil
 	}
 	delete(state.patch.active, id)
 	if len(state.patch.active) != 0 {
-		return file, true, foregroundEffect{}
+		return file, target, true, foregroundEffect{}
 	}
 	if state.reload.phase == reloadWaitingForPatch {
-		return file, true, foregroundEffect{kind: foregroundEffectStartReload}
+		return file, target, true, foregroundEffect{kind: foregroundEffectStartReload}
 	}
 	switch state.patch.continuation.kind {
 	case patchContinuationRetry:
-		return file, true, foregroundEffect{
+		return file, target, true, foregroundEffect{
 			kind: foregroundEffectRequestPatch,
 			file: state.patch.continuation.file,
 		}
 	case patchContinuationBeginSearch:
-		return file, true, foregroundEffect{
+		return file, target, true, foregroundEffect{
 			kind:   foregroundEffectStartSearch,
 			search: state.patch.continuation.search,
 		}
 	default:
-		return file, true, foregroundEffect{}
+		return file, target, true, foregroundEffect{}
 	}
 }
 
@@ -632,6 +723,7 @@ func (state *foregroundState) finishReloadSuccess(
 	}
 	afterReload := state.reload.afterReload
 	state.reload = reloadFlow{}
+	state.patch.target = nil
 	state.patch.viewport = viewport
 	if afterReload == nil {
 		return foregroundEffect{}, true
@@ -664,17 +756,14 @@ func (state *foregroundState) clearReloadViewport(file review.FileID) {
 	}
 }
 
-func (state *foregroundState) setPendingSearchHit(hit review.SearchHit) {
-	state.search.pendingHit = new(hit)
+func (state *foregroundState) setPendingDiffTarget(target pendingDiffTarget) bool {
+	if !target.valid() || target.operation != 0 {
+		return false
+	}
+	state.patch.target = new(target)
+	return true
 }
 
-func (state *foregroundState) takePendingSearchHit(
-	file review.FileID,
-) (review.SearchHit, bool) {
-	if state.search.pendingHit == nil || state.search.pendingHit.FileID() != file {
-		return review.SearchHit{}, false
-	}
-	hit := *state.search.pendingHit
-	state.search.pendingHit = nil
-	return hit, true
+func (state *foregroundState) clearPendingDiffTarget() {
+	state.patch.target = nil
 }

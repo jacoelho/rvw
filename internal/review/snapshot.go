@@ -380,11 +380,12 @@ func (file File) Content(side LineSide) (ObjectID, bool) {
 }
 
 type Snapshot struct {
-	sourceID           SourceID
-	files              []File
-	remoteThreads      []RemoteThread
-	remoteThreadStatus RemoteThreadStatus
-	remoteThreadDetail OperationDetail
+	sourceID             SourceID
+	files                []File
+	remoteThreads        []RemoteThread
+	remoteCommentAnchors map[commentAnchor]struct{}
+	remoteThreadStatus   RemoteThreadStatus
+	remoteThreadDetail   OperationDetail
 }
 
 func NewSnapshot(sourceID SourceID, files []File) (Snapshot, error) {

@@ -108,7 +108,17 @@ type RemoteThread struct {
 	line     *LineNumber
 	side     LineSide
 	comments []RemoteComment
+	mapping  RemoteMappingStatus
+	file     FileID
 }
+
+type RemoteMappingStatus uint8
+
+const (
+	RemoteMappingMissing RemoteMappingStatus = iota + 1
+	RemoteMappingMapped
+	RemoteMappingAmbiguous
+)
 
 type RemoteThreadDescriptor struct {
 	ID       string
@@ -171,6 +181,13 @@ func (thread RemoteThread) Path() Path        { return thread.path }
 func (thread RemoteThread) Side() LineSide    { return thread.side }
 func (thread RemoteThread) CommentCount() int { return len(thread.comments) }
 
+func (thread RemoteThread) FileMapping() (FileID, RemoteMappingStatus) {
+	if thread.mapping == 0 {
+		return 0, RemoteMappingMissing
+	}
+	return thread.file, thread.mapping
+}
+
 func (thread RemoteThread) Line() (LineNumber, bool) {
 	if thread.line == nil {
 		return 0, false
@@ -202,6 +219,8 @@ func (snapshot Snapshot) WithRemoteThreads(threads []RemoteThread) (Snapshot, er
 		)
 	}
 	owned := slices.Clone(threads)
+	pathMappings := snapshot.remotePathMappings()
+	anchors := make(map[commentAnchor]struct{}, min(len(owned), MaxRemoteThreads))
 	threadIDs := make(map[string]struct{}, len(owned))
 	commentIDs := make(map[string]struct{})
 	var retained int64
@@ -244,9 +263,23 @@ func (snapshot Snapshot) WithRemoteThreads(threads []RemoteThread) (Snapshot, er
 				ErrInvalidRemoteThread,
 			)
 		}
+		mapping, exists := pathMappings[validated.path.raw]
+		if !exists {
+			mapping.status = RemoteMappingMissing
+		}
+		validated.mapping = mapping.status
+		validated.file = mapping.file
+		if validated.mapping == RemoteMappingMapped && !validated.outdated && validated.line != nil {
+			anchors[commentAnchor{
+				file: validated.file,
+				side: validated.side,
+				line: *validated.line,
+			}] = struct{}{}
+		}
 		owned[index] = validated
 	}
 	snapshot.remoteThreads = owned
+	snapshot.remoteCommentAnchors = anchors
 	snapshot.remoteThreadStatus = RemoteThreadsReady
 	snapshot.remoteThreadDetail = EmptyOperationDetail()
 	return snapshot, nil
@@ -261,9 +294,34 @@ func (snapshot Snapshot) WithRemoteThreadFailure(
 		return Snapshot{}, ErrInvalidRemoteThread
 	}
 	snapshot.remoteThreads = nil
+	snapshot.remoteCommentAnchors = nil
 	snapshot.remoteThreadStatus = status
 	snapshot.remoteThreadDetail = detail
 	return snapshot, nil
+}
+
+type remotePathMapping struct {
+	status RemoteMappingStatus
+	file   FileID
+}
+
+func (snapshot Snapshot) remotePathMappings() map[string]remotePathMapping {
+	mappings := make(map[string]remotePathMapping, snapshot.FileCount()*2)
+	for file := range snapshot.AllFiles() {
+		for _, path := range fileAliases(file) {
+			mapping, exists := mappings[path]
+			switch {
+			case !exists:
+				mappings[path] = remotePathMapping{
+					status: RemoteMappingMapped,
+					file:   file.ID(),
+				}
+			case mapping.status == RemoteMappingMapped && mapping.file != file.ID():
+				mappings[path] = remotePathMapping{status: RemoteMappingAmbiguous}
+			}
+		}
+	}
+	return mappings
 }
 
 func (snapshot Snapshot) RemoteThreadSummary() RemoteThreadSummary {

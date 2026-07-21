@@ -18,6 +18,7 @@ func (model *Model) startSearch(value string, scope review.SearchScope) {
 		model.notice = &Notice{Kind: NoticeWarning, Text: "search is unavailable during reload"}
 		return
 	}
+	model.foreground.clearPendingDiffTarget()
 	hadSearch := model.foreground.searchOperation() != 0
 	hadPatch := model.foreground.patchCount() != 0
 	start, cancellations, ready := model.foreground.requestSearch(pendingSearch{
@@ -240,27 +241,37 @@ func (model *Model) activateSearchHit(index int) {
 	if !ok {
 		return
 	}
+	file, exists := model.review.Snapshot().File(hit.FileID())
+	if !exists {
+		return
+	}
+	target := newPatchRowTarget(
+		model.review.WorkspaceRevision(),
+		file.PatchHandle(),
+		hit.PatchLine(),
+	)
+	model.foreground.clearPendingDiffTarget()
 	if active, exists := model.review.ActiveFile(); !exists || active != hit.FileID() {
-		next, err := model.review.ActivateFile(hit.FileID())
-		if err != nil {
+		if !model.activateFile(hit.FileID()) {
 			return
 		}
-		model.review = next
-		model.resetSyntax()
-		model.foreground.setPendingSearchHit(hit)
+		if !model.foreground.setPendingDiffTarget(target) {
+			return
+		}
 		model.requestActivePatch()
 		model.searchCursor = index
 		return
 	}
 	if model.review.Patch(hit.FileID()).Status != review.PatchReady {
-		model.foreground.setPendingSearchHit(hit)
+		if !model.foreground.setPendingDiffTarget(target) {
+			return
+		}
 		model.requestActivePatch()
 		model.searchCursor = index
 		return
 	}
 	model.searchCursor = index
-	model.diffCursor = hit.PatchLine()
-	model.moveDiff(0)
+	model.applyDiffTarget(target)
 }
 
 func (model *Model) moveSearchHit(delta int) {

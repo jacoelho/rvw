@@ -36,6 +36,9 @@ func (model *Model) applyAction(action KeyAction, repeat int) tea.Cmd {
 		return nil
 	}
 	if model.mode == ModeVisual {
+		if actionSupersedesDiffTarget(action) {
+			model.foreground.clearPendingDiffTarget()
+		}
 		switch action {
 		case KeyActionCancel, KeyActionInterrupt:
 			model.mode = ModeNormal
@@ -79,6 +82,9 @@ func (model *Model) applyAction(action KeyAction, repeat int) tea.Cmd {
 			Text: "reload is active; this action is temporarily unavailable",
 		}
 		return nil
+	}
+	if actionSupersedesDiffTarget(action) {
+		model.foreground.clearPendingDiffTarget()
 	}
 	switch action {
 	case KeyActionQuit, KeyActionInterrupt:
@@ -187,9 +193,9 @@ func (model *Model) applyAction(action KeyAction, repeat int) tea.Cmd {
 	case KeyActionPreviousHunk:
 		model.moveHunk(-repeat)
 	case KeyActionNextComment:
-		model.moveComment(repeat)
+		model.moveAndActivateComment(repeat)
 	case KeyActionPreviousComment:
-		model.moveComment(-repeat)
+		model.moveAndActivateComment(-repeat)
 	case KeyActionNextSearchHit:
 		model.moveSearchHit(repeat)
 	case KeyActionPreviousSearchHit:
@@ -234,6 +240,24 @@ func (model *Model) applyAction(action KeyAction, repeat int) tea.Cmd {
 		}
 	}
 	return nil
+}
+
+func actionSupersedesDiffTarget(action KeyAction) bool {
+	switch action {
+	case KeyActionMoveUp, KeyActionMoveDown,
+		KeyActionPageUp, KeyActionPageDown,
+		KeyActionHalfPageUp, KeyActionHalfPageDown,
+		KeyActionFirst, KeyActionLast,
+		KeyActionActivate, KeyActionAccept,
+		KeyActionExpandContext,
+		KeyActionNextFile, KeyActionPreviousFile,
+		KeyActionNextHunk, KeyActionPreviousHunk,
+		KeyActionNextComment, KeyActionPreviousComment,
+		KeyActionNextSearchHit, KeyActionPreviousSearchHit:
+		return true
+	default:
+		return false
+	}
 }
 
 func actionAllowedDuringReload(action KeyAction) bool {

@@ -255,6 +255,9 @@ func TestReplaceSnapshotPreservesLineCommentWhenItsSideIsIdentical(t *testing.T)
 	if identical.Comments()[0].Stale() || report.CommentsStale != 0 {
 		t.Fatalf("identical line side became stale: %+v", report)
 	}
+	if !identical.HasCommentAnchor(0, LineNew, line) {
+		t.Fatal("identical replacement lost its comment anchor")
+	}
 
 	changedObject, _ := NewObjectID(strings.Repeat("3", 40))
 	changed, report, err := current.ReplaceSnapshot(
@@ -265,6 +268,9 @@ func TestReplaceSnapshotPreservesLineCommentWhenItsSideIsIdentical(t *testing.T)
 	}
 	if !changed.Comments()[0].Stale() || report.CommentsStale != 1 {
 		t.Fatalf("changed line side remained current: %+v", report)
+	}
+	if changed.HasCommentAnchor(0, LineNew, line) {
+		t.Fatal("stale replacement retained its comment anchor")
 	}
 }
 

@@ -228,6 +228,7 @@ func PrepareReplacementCancellable(
 			report.CommentsStale++
 		}
 	}
+	next.commentAnchors = indexCommentAnchors(next.comments)
 
 	if review.draft != nil {
 		draft := *review.draft

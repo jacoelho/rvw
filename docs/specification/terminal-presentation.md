@@ -42,6 +42,15 @@ Chord/repeat state resets on context changes, invalid continuation, or timeout. 
 reflects user overrides. Search and command-prompt input are each limited to 64 KiB; reaching the
 limit is visible and accepts no further input until the user deletes content or cancels.
 
+In the comments pane, `j` and `k` change only the selected comment. `Enter` activates that
+selection. `] c` and `[ c` select and activate the next or previous comment in one operation,
+clamping at the first and last comment; they remain available when the comments pane is hidden.
+Activation focuses the diff and reveals the comment's mapped file and line. A range targets its
+inclusive end line. File comments reveal the file at its first patch row. Review comments and
+unmappable or ambiguously mapped remote comments preserve the current diff and report why no jump
+is possible. Stale local comments and outdated remote threads reveal the mapped file at its first
+patch row and report that the exact line cannot be selected.
+
 The command prompt accepts:
 
 ```text
@@ -95,6 +104,15 @@ limitation while preserving the selected side-by-side preference. A visible file
 least 24 columns and a visible comments pane at least 32 columns. Optional labels, repeated help,
 secondary metadata, comments, and the tree are removed in that order before the diff falls below
 its useful geometry. Hidden panes retain selection, focus-return target, and scroll identity.
+
+Old-side and new-side line numbers each have a fixed adjacent comment-anchor cell. The cell shows
+`●` exactly when that source line has at least one saved, mapped comment: non-stale local line or
+range comments and non-outdated remote line threads, including resolved threads. Range comments
+anchor at their inclusive end. Drafts, file and review comments, stale local comments, outdated
+remote threads, and missing or ambiguous remote mappings do not produce a line anchor. Wrapped
+continuation rows reserve the cells but leave them blank. Anchor emphasis remains visible without
+color. These fixed cells are rendering chrome and do not count toward the 60- and 100-column
+content-width requirements.
 
 ## 13. Rendering
 

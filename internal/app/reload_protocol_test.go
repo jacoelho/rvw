@@ -103,7 +103,7 @@ func TestDeferredReloadRejectionResumesSearchAgainstOldReview(t *testing.T) {
 	pending := testPendingSearch(t, "after rejected reload")
 	_, _, _ = model.foreground.requestSearch(pending)
 	_, _, _ = model.foreground.requestReload()
-	_, tracked, effect := model.foreground.completePatch(10_000)
+	_, _, tracked, effect := model.foreground.completePatch(10_000)
 	if !tracked || effect.kind != foregroundEffectStartReload {
 		t.Fatalf("deferred reload effect = %+v, tracked %v", effect, tracked)
 	}
@@ -200,7 +200,7 @@ func prepareDeferredReloadState(
 	if ready || len(reloadCancellations) != 1 {
 		t.Fatalf("deferred reload = cancellations %v ready %v", reloadCancellations, ready)
 	}
-	_, tracked, effect := model.foreground.completePatch(10_000)
+	_, _, tracked, effect := model.foreground.completePatch(10_000)
 	if !tracked || effect.kind != foregroundEffectStartReload {
 		t.Fatalf("reload continuation = %+v, tracked %v", effect, tracked)
 	}

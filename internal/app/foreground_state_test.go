@@ -6,6 +6,121 @@ import (
 	"github.com/jacoelho/rvw/internal/review"
 )
 
+func TestForegroundDiffTargetFollowsTheLatestTrackedPatch(t *testing.T) {
+	state := newForegroundState()
+	first := testSourceLineTarget(t, 0, review.LineNew, 3)
+	if !state.setPendingDiffTarget(first) {
+		t.Fatal("first target was rejected")
+	}
+	start, _, ready := state.requestPatch(0)
+	if !ready || !state.admitted(start, 1) {
+		t.Fatal("first patch admission failed")
+	}
+	assertForegroundValid(t, &state)
+
+	second := testSourceLineTarget(t, 1, review.LineOld, 8)
+	if !state.setPendingDiffTarget(second) {
+		t.Fatal("replacement target was rejected")
+	}
+	_, cancellations, ready := state.requestPatch(1)
+	if ready || len(cancellations) != 1 || cancellations[0] != 1 {
+		t.Fatalf("replacement cancellation = %v, ready %v", cancellations, ready)
+	}
+	_, completed, tracked, effect := state.completePatch(1)
+	if !tracked || completed != nil || effect.kind != foregroundEffectRequestPatch || effect.file != 1 {
+		t.Fatalf("superseded completion = target %+v tracked %v effect %+v", completed, tracked, effect)
+	}
+	assertForegroundValid(t, &state)
+
+	retry, ok := state.preparePatch(effect.file)
+	if !ok || !state.admitted(retry, 2) {
+		t.Fatal("replacement patch admission failed")
+	}
+	_, completed, tracked, effect = state.completePatch(2)
+	if !tracked || effect.kind != foregroundEffectNone || completed == nil ||
+		completed.kind != diffTargetSourceLine || completed.handle.FileID() != 1 ||
+		completed.side != review.LineOld || completed.line.Uint32() != 8 {
+		t.Fatalf("replacement completion = target %+v tracked %v effect %+v", completed, tracked, effect)
+	}
+	assertForegroundValid(t, &state)
+}
+
+func TestForegroundDiffTargetSurvivesFailedReloadAndNotSuccessfulReload(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		succeed bool
+	}{
+		{name: "failed reload"},
+		{name: "successful reload", succeed: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			state := newForegroundState()
+			target := testSourceLineTarget(t, 0, review.LineNew, 4)
+			if !state.setPendingDiffTarget(target) {
+				t.Fatal("target was rejected")
+			}
+			patchStart, _, ready := state.requestPatch(0)
+			if !ready || !state.admitted(patchStart, 1) {
+				t.Fatal("patch admission failed")
+			}
+			_, cancellations, ready := state.requestReload()
+			if ready || len(cancellations) != 1 || cancellations[0] != 1 {
+				t.Fatalf("reload cancellation = %v, ready %v", cancellations, ready)
+			}
+			_, completed, tracked, effect := state.completePatch(1)
+			if !tracked || completed != nil || effect.kind != foregroundEffectStartReload {
+				t.Fatalf("cancelled patch completion = target %+v tracked %v effect %+v", completed, tracked, effect)
+			}
+			reloadStart, ok := state.prepareReload()
+			if !ok || !state.admitted(reloadStart, 2) {
+				t.Fatal("reload admission failed")
+			}
+			if testCase.succeed {
+				if !state.reloadPreparationAdmitted(2) {
+					t.Fatal("reload preparation admission failed")
+				}
+				if _, ok := state.finishReloadSuccess(2, nil, reloadNeedsPatch); !ok {
+					t.Fatal("reload success was rejected")
+				}
+				if state.patch.target != nil {
+					t.Fatal("successful reload retained a navigation target")
+				}
+				return
+			}
+			if _, _, ok := state.finishReloadFailure(2); !ok {
+				t.Fatal("reload failure was rejected")
+			}
+			retry, _, ready := state.requestPatch(0)
+			if !ready || !state.admitted(retry, 3) {
+				t.Fatal("restored patch admission failed")
+			}
+			_, completed, tracked, _ = state.completePatch(3)
+			if !tracked || completed == nil || completed.line.Uint32() != 4 {
+				t.Fatalf("restored completion = target %+v tracked %v", completed, tracked)
+			}
+		})
+	}
+}
+
+func testSourceLineTarget(
+	t *testing.T,
+	fileValue uint32,
+	side review.LineSide,
+	lineValue uint32,
+) pendingDiffTarget {
+	t.Helper()
+	workspace, _ := review.NewWorkspaceRevision(1)
+	source, _ := review.NewSourceID(1)
+	file, _ := review.NewFileID(fileValue)
+	patch, _ := review.NewPatchID(uint64(fileValue) + 1)
+	handle, err := review.NewPatchHandle(patch, source, file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line, _ := review.NewLineNumber(lineValue)
+	return newSourceLineTarget(workspace, handle, side, line)
+}
+
 func TestForegroundStatePatchRetryAdmission(t *testing.T) {
 	state := newForegroundState()
 	assertForegroundValid(t, &state)
@@ -26,7 +141,7 @@ func TestForegroundStatePatchRetryAdmission(t *testing.T) {
 	if ready || len(cancellations) != 1 || cancellations[0] != 1 {
 		t.Fatalf("patch retry cancellation = %v, ready %v", cancellations, ready)
 	}
-	_, tracked, effect := state.completePatch(1)
+	_, _, tracked, effect := state.completePatch(1)
 	if !tracked || effect.kind != foregroundEffectRequestPatch || effect.file != 2 {
 		t.Fatalf("patch completion effect = %+v, tracked %v", effect, tracked)
 	}
@@ -62,7 +177,7 @@ func TestForegroundStateSearchReplacementWhilePatchActive(t *testing.T) {
 	if ready || len(cancellations) != 1 || cancellations[0] != 1 {
 		t.Fatalf("replacement cancellation = %v, ready %v", cancellations, ready)
 	}
-	_, tracked, patchEffect := state.completePatch(2)
+	_, _, tracked, patchEffect := state.completePatch(2)
 	if !tracked || patchEffect.kind != foregroundEffectNone {
 		t.Fatalf("patch consumed search continuation: tracked %v effect %+v", tracked, patchEffect)
 	}
@@ -188,7 +303,7 @@ func TestForegroundStateConcurrentCompletionOrder(t *testing.T) {
 				}
 				completePatch := func() {
 					t.Helper()
-					_, tracked, effect := state.completePatch(2)
+					_, _, tracked, effect := state.completePatch(2)
 					if !tracked {
 						t.Fatal("patch completion was not tracked")
 					}
@@ -285,7 +400,7 @@ func TestForegroundStatePatchSearchReloadFailureResumesSearch(t *testing.T) {
 	}
 	assertForegroundValid(t, &state)
 
-	_, tracked, effect := state.completePatch(1)
+	_, _, tracked, effect := state.completePatch(1)
 	if !tracked || effect.kind != foregroundEffectStartReload {
 		t.Fatalf("patch-to-reload effect = %+v, tracked %v", effect, tracked)
 	}
@@ -340,7 +455,7 @@ func TestForegroundStateRejectsOnlyCurrentAdmissionDecision(t *testing.T) {
 		if ready || len(cancellations) != 1 {
 			t.Fatalf("patch retry cancellation = %v, ready %v", cancellations, ready)
 		}
-		_, tracked, effect := state.completePatch(1)
+		_, _, tracked, effect := state.completePatch(1)
 		if !tracked || effect.kind != foregroundEffectRequestPatch {
 			t.Fatalf("patch retry effect = %+v, tracked %v", effect, tracked)
 		}
@@ -449,7 +564,7 @@ func foregroundReloadWithSearch(
 	pending := testPendingSearch(t, "after reload")
 	_, _, _ = state.requestSearch(pending)
 	_, _, _ = state.requestReload()
-	_, _, effect := state.completePatch(1)
+	_, _, _, effect := state.completePatch(1)
 	if effect.kind != foregroundEffectStartReload {
 		t.Fatalf("reload effect = %+v", effect)
 	}

@@ -320,6 +320,7 @@ func (model *Model) setPatchContext(context review.PatchContext) {
 }
 
 func (model *Model) applyPatchContext(context review.PatchContext) {
+	model.foreground.clearPendingDiffTarget()
 	model.settings.patchContext = context
 	model.requestActivePatch()
 	if context.WholeFile() {

@@ -1,11 +1,11 @@
 rvw  [focus:diff]  staged.txt  [source:1 worksp…
-▸     diff --git a/staged.txt b/staged.txt
-      new file mode 100644
-      index 0000000..4480ae4
-      --- /dev/null
-      +++ b/staged.txt
-      @@ -0,0 +1 @@
-    1 +staged contents
+▸       diff --git a/staged.txt b/staged.txt
+        new file mode 100644
+        index 0000000..4480ae4
+        --- /dev/null
+        +++ b/staged.txt
+        @@ -0,0 +1 @@
+     1  +staged contents
 
 
 

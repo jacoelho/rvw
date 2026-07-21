@@ -306,6 +306,9 @@ func (model *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			model.focusVisible(message.focus) {
 			model.setFocus(message.focus)
 			model.focusReturn = 0
+			if message.delta != 0 || message.target != mouseTargetNone {
+				model.foreground.clearPendingDiffTarget()
+			}
 			if message.delta != 0 {
 				mouseCommand = model.move(message.delta)
 			}
@@ -475,7 +478,7 @@ func (model *Model) applyOutcome(outcome Outcome) tea.Cmd {
 }
 
 func (model *Model) applyPatchOutcome(patch PatchOutcome) {
-	fileID, tracked, effect := model.foreground.completePatch(patch.ID)
+	fileID, target, tracked, effect := model.foreground.completePatch(patch.ID)
 	if !tracked {
 		model.notice = &Notice{Kind: NoticeWarning, Text: "stale patch outcome"}
 		return
@@ -518,8 +521,13 @@ func (model *Model) applyPatchOutcome(patch PatchOutcome) {
 	if next, err := model.review.ResolveOperation(patch.ID, status, detail); err == nil {
 		model.review = next
 	}
-	if active, exists := model.review.ActiveFile(); exists && active == fileID &&
-		result.Status == review.PatchReady {
+	file, fileExists := model.review.Snapshot().File(fileID)
+	if target != nil && (!fileExists || target.workspace != model.review.WorkspaceRevision() ||
+		target.handle != file.PatchHandle()) {
+		target = nil
+	}
+	patchReady := model.review.Patch(fileID).Status == review.PatchReady
+	if active, exists := model.review.ActiveFile(); exists && active == fileID && patchReady {
 		if viewport, ok := model.foreground.takeReloadViewport(fileID); ok {
 			model.diffTop = viewport.top
 			model.diffCursor = viewport.cursor
@@ -529,9 +537,8 @@ func (model *Model) applyPatchOutcome(patch PatchOutcome) {
 			model.diffTop = 0
 			model.diffCursor = 0
 		}
-		if hit, ok := model.foreground.takePendingSearchHit(fileID); ok {
-			model.diffCursor = hit.PatchLine()
-			model.moveDiff(0)
+		if target != nil {
+			model.applyDiffTarget(*target)
 		}
 		model.requestSyntax()
 	} else if active, exists := model.review.ActiveFile(); exists && active == fileID {
@@ -649,6 +656,7 @@ func (model *Model) beginPatch(start foregroundStart) {
 	}
 	if !model.foreground.admitted(start, operationID) {
 		model.coordinator.Cancel(operationID)
+		model.foreground.clearPendingDiffTarget()
 		err := errors.New("foreground patch admission invariant violated")
 		model.review = resolveRejectedOperation(next, operationID, err)
 		model.notice = &Notice{Kind: NoticeError, Text: NoticeText(err.Error())}

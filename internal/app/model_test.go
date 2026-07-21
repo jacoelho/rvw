@@ -178,6 +178,252 @@ func TestCommentEditorAnchorsSemanticLineAndRetainsChildState(t *testing.T) {
 	}
 }
 
+func TestCommentActivationLoadsItsFileAndRevealsItsSemanticLine(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{
+		"alpha.txt": "first\nchanged\n",
+		"beta.txt":  "second\nchanged\n",
+	})
+	_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
+	waitForPatch(t, model, coordinator, 0)
+
+	var beta review.FileID
+	found := false
+	for file := range model.review.Snapshot().AllFiles() {
+		if file.DisplayPath() == "beta.txt" {
+			beta = file.ID()
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("beta fixture file is missing")
+	}
+	line, _ := review.NewLineNumber(2)
+	target, _ := review.LineCommentTarget(beta, review.LineNew, line, line)
+	var err error
+	model.review, err = model.review.BeginDraft(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.review, err = model.review.UpdateDraft("beta line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.review, _, err = model.review.SaveDraft()
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.commentCursor = 0
+	model.focus = FocusComments
+
+	_, _ = model.Update(keyMessage("enter"))
+	active, ok := model.review.ActiveFile()
+	if !ok || active != beta || model.focus != FocusDiff {
+		t.Fatalf("activation = file %d ok %v focus %d, want beta and diff", active, ok, model.focus)
+	}
+	if model.foreground.patch.target == nil {
+		t.Fatal("lazy comment jump did not retain its semantic target")
+	}
+	waitForPatch(t, model, coordinator, beta)
+	wantRow, ok := model.review.PatchLineForSource(beta, review.LineNew, line)
+	if !ok {
+		t.Fatal("beta line is not represented by its ready patch")
+	}
+	if model.diffCursor != wantRow || model.foreground.patch.target != nil {
+		t.Fatalf("comment jump = row %d pending %v, want row %d settled", model.diffCursor, model.foreground.patch.target != nil, wantRow)
+	}
+}
+
+func TestRemoteCommentActivationLoadsItsFileAndRevealsItsSemanticLine(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{
+		"alpha.txt": "first\nchanged\n",
+		"beta.txt":  "second\nchanged\n",
+	})
+	_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
+	active, ok := model.review.ActiveFile()
+	if !ok {
+		t.Fatal("missing active file")
+	}
+	waitForPatch(t, model, coordinator, active)
+
+	var targetFile review.File
+	for file := range model.review.Snapshot().AllFiles() {
+		if file.ID() != active {
+			targetFile = file
+			break
+		}
+	}
+	if targetFile.PatchHandle().SourceID() == 0 {
+		t.Fatal("fixture has no second file")
+	}
+	line, _ := review.NewLineNumber(2)
+	thread, err := review.NewRemoteThread(review.RemoteThreadDescriptor{
+		ID:   "thread-1",
+		Path: targetFile.IdentityPath(),
+		Line: &line,
+		Side: review.LineNew,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := model.review.Snapshot().WithRemoteThreads([]review.RemoteThread{thread})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.review, err = review.NewReview(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.commentCursor = 0
+	model.focus = FocusComments
+
+	model.activateCommentSelection()
+	selected, ok := model.review.ActiveFile()
+	if !ok || selected != targetFile.ID() || model.focus != FocusDiff {
+		t.Fatalf("activation = file %d ok %v focus %d, want target file and diff", selected, ok, model.focus)
+	}
+	if model.foreground.patch.target == nil {
+		t.Fatal("lazy remote comment jump did not retain its semantic target")
+	}
+	waitForPatch(t, model, coordinator, targetFile.ID())
+	wantRow, ok := model.review.PatchLineForSource(targetFile.ID(), review.LineNew, line)
+	if !ok {
+		t.Fatal("remote line is not represented by its ready patch")
+	}
+	if model.diffCursor != wantRow || model.foreground.patch.target != nil {
+		t.Fatalf("remote comment jump = row %d pending %v, want row %d settled", model.diffCursor, model.foreground.patch.target != nil, wantRow)
+	}
+}
+
+func TestNonLineCommentActivationUsesExplicitFallbacks(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
+	active, ok := model.review.ActiveFile()
+	if !ok {
+		t.Fatal("missing active file")
+	}
+	waitForPatch(t, model, coordinator, active)
+
+	fileTarget, err := review.FileCommentTarget(active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []review.CommentTarget{fileTarget, review.ReviewCommentTarget()} {
+		model.review, err = model.review.BeginDraft(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		model.review, err = model.review.UpdateDraft("fallback")
+		if err != nil {
+			t.Fatal(err)
+		}
+		model.review, _, err = model.review.SaveDraft()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	model.commentCursor = 1
+	model.diffCursor = 4
+	model.focus = FocusComments
+	model.activateCommentSelection()
+	if current, _ := model.review.ActiveFile(); current != active ||
+		model.diffCursor != 4 || model.focus != FocusComments ||
+		model.notice == nil || model.notice.Text != "review comment has no file or line" {
+		t.Fatalf("review fallback = active %d row %d focus %d notice %+v", current, model.diffCursor, model.focus, model.notice)
+	}
+
+	model.commentCursor = 0
+	model.activateCommentSelection()
+	if current, _ := model.review.ActiveFile(); current != active ||
+		model.diffCursor != 0 || model.focus != FocusDiff ||
+		model.notice == nil || model.notice.Text != "file comment has no line" {
+		t.Fatalf("file fallback = active %d row %d focus %d notice %+v", current, model.diffCursor, model.focus, model.notice)
+	}
+}
+
+func TestRemoteCommentActivationDistinguishesMissingAndOutdatedTargets(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{
+		"alpha.txt": "first\nchanged\n",
+		"beta.txt":  "second\nchanged\n",
+	})
+	active, ok := model.review.ActiveFile()
+	if !ok {
+		t.Fatal("missing active file")
+	}
+	waitForPatch(t, model, coordinator, active)
+	var targetFile review.File
+	for file := range model.review.Snapshot().AllFiles() {
+		if file.ID() != active {
+			targetFile = file
+			break
+		}
+	}
+	missingPath, err := review.NewPath([]byte("missing.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	line, _ := review.NewLineNumber(2)
+	missing, err := review.NewRemoteThread(review.RemoteThreadDescriptor{
+		ID: "missing", Path: missingPath, Line: &line, Side: review.LineNew,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outdated, err := review.NewRemoteThread(review.RemoteThreadDescriptor{
+		ID: "outdated", Outdated: true, Path: targetFile.IdentityPath(),
+		Line: &line, Side: review.LineNew,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := model.review.Snapshot().WithRemoteThreads(
+		[]review.RemoteThread{missing, outdated},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.review, err = review.NewReview(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.diffCursor = 4
+	model.focus = FocusComments
+
+	model.commentCursor = 0
+	model.activateCommentSelection()
+	if current, _ := model.review.ActiveFile(); current != active ||
+		model.diffCursor != 4 || model.focus != FocusComments ||
+		model.notice == nil || model.notice.Text != "remote comment file is not in this review" {
+		t.Fatalf("missing fallback = active %d row %d focus %d notice %+v", current, model.diffCursor, model.focus, model.notice)
+	}
+
+	model.commentCursor = 1
+	model.activateCommentSelection()
+	if current, _ := model.review.ActiveFile(); current != targetFile.ID() ||
+		model.diffCursor != 0 || model.focus != FocusDiff ||
+		model.notice == nil || model.notice.Text != "remote comment line is outdated; showing its file" {
+		t.Fatalf("outdated fallback = active %d row %d focus %d notice %+v", current, model.diffCursor, model.focus, model.notice)
+	}
+}
+
+func waitForPatch(
+	t *testing.T,
+	model *Model,
+	coordinator *Coordinator,
+	file review.FileID,
+) {
+	t.Helper()
+	waitContext, cancelWait := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelWait()
+	for model.review.Patch(file).Status != review.PatchReady {
+		if state := coordinator.WaitReady(waitContext); state != ReadyAvailable {
+			t.Fatalf("patch readiness = %d", state)
+		}
+		_, _ = model.Update(outcomeReadyMsg{state: ReadyAvailable})
+	}
+}
+
 func TestAsyncStdoutExportQuitsOnlyAfterPreparedPayloadIsOwnedByModel(t *testing.T) {
 	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	waitContext, cancelWait := context.WithTimeout(t.Context(), 5*time.Second)

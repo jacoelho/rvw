@@ -332,7 +332,7 @@ func TestDiffLineNumberGuttersUsePatchDigitWidths(t *testing.T) {
 	model.settings.diffView = DiffViewUnified
 	unified, _ := model.diffLines(compactWidth, 12, styles)
 	unifiedRow := renderedLineContaining(t, unified, "+line-0001")
-	if want := strings.Repeat(" ", 7) + "1 +line-0001"; !strings.HasPrefix(unifiedRow, want) {
+	if want := strings.Repeat(" ", 8) + "1  +line-0001"; !strings.HasPrefix(unifiedRow, want) {
 		t.Fatalf("unified first source row = %q, want prefix %q", unifiedRow, want)
 	}
 
@@ -340,9 +340,102 @@ func TestDiffLineNumberGuttersUsePatchDigitWidths(t *testing.T) {
 	sideBySide, _ := model.diffLines(normalWidth, 12, styles)
 	sideRow := renderedLineContaining(t, sideBySide, "line-0001")
 	_, right, ok := strings.Cut(sideRow, "│")
-	if !ok || !strings.HasPrefix(right, "   1 line-0001") {
+	if !ok || !strings.HasPrefix(right, "   1  line-0001") {
 		t.Fatalf("side-by-side first source row = %q", sideRow)
 	}
+}
+
+func TestCommentAnchorsRemainSideSpecificStableAndVisibleWithoutColor(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{
+		"alpha.txt": "original\nadded content that is deliberately long enough to wrap across rows\n",
+	})
+	waitForPatch(t, model, coordinator, 0)
+	active, _ := model.review.ActiveFile()
+	lineOne, _ := review.NewLineNumber(1)
+	lineTwo, _ := review.NewLineNumber(2)
+	for _, target := range []review.CommentTarget{
+		mustLineTarget(t, active, review.LineOld, lineOne),
+		mustLineTarget(t, active, review.LineNew, lineOne),
+		mustLineTarget(t, active, review.LineNew, lineTwo),
+	} {
+		current, err := model.review.BeginDraft(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		current, err = current.UpdateDraft("anchor")
+		if err != nil {
+			t.Fatal(err)
+		}
+		current, _, err = current.SaveDraft()
+		if err != nil {
+			t.Fatal(err)
+		}
+		model.review = current
+	}
+
+	model.settings.colorEnabled = false
+	styles := newSemanticStyles(model.settings)
+	model.settings.diffView = DiffViewUnified
+	model.settings.wrap = true
+	unified, rows := model.diffLines(62, 20, styles)
+	contextRow := renderedLineContaining(t, unified, "original")
+	if strings.Count(contextRow, "●") != 2 || !strings.Contains(contextRow, "1● 1●") {
+		t.Fatalf("unified context markers are not side-specific: %q", contextRow)
+	}
+	additionIndex := -1
+	for index, row := range unified {
+		if strings.Contains(ansi.Strip(row), "added content") {
+			additionIndex = index
+			break
+		}
+	}
+	if additionIndex < 0 || strings.Count(ansi.Strip(unified[additionIndex]), "●") != 1 {
+		t.Fatalf("unified addition marker is missing or duplicated: %q", unified)
+	}
+	for index := additionIndex + 1; index < len(unified) && rows[index] == rows[additionIndex]; index++ {
+		plain := ansi.Strip(unified[index])
+		if strings.Contains(plain, "●") || !strings.HasPrefix(plain, strings.Repeat(" ", 9)) {
+			t.Fatalf("wrapped continuation reused marker cells: %q", plain)
+		}
+	}
+	if marker := model.commentAnchorCell(active, review.LineNew, lineTwo, styles); !strings.Contains(marker, "\x1b[1m") || ansi.Strip(marker) != "●" {
+		t.Fatalf("monochrome marker lacks bold non-color emphasis: %q", marker)
+	}
+
+	model.settings.diffView = DiffViewSideBySide
+	model.settings.wrap = false
+	if fallback, _ := model.diffLines(
+		sideBySideContentWidth+diffCommentAnchorColumns-1,
+		12,
+		styles,
+	); strings.Contains(renderedLineContaining(t, fallback, "original"), "│") {
+		t.Fatal("side-by-side activated below its content-width requirement")
+	}
+	sideBySide, _ := model.diffLines(
+		sideBySideContentWidth+diffCommentAnchorColumns,
+		12,
+		styles,
+	)
+	row := renderedLineContaining(t, sideBySide, "original")
+	left, right, ok := strings.Cut(row, "│")
+	if !ok || !strings.Contains(left, "1● original") ||
+		!strings.Contains(right, "1● original") {
+		t.Fatalf("side-by-side markers are not attached to their halves: %q", row)
+	}
+}
+
+func mustLineTarget(
+	t *testing.T,
+	file review.FileID,
+	side review.LineSide,
+	line review.LineNumber,
+) review.CommentTarget {
+	t.Helper()
+	target, err := review.LineCommentTarget(file, side, line, line)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return target
 }
 
 func TestDecimalDigitWidthBoundaries(t *testing.T) {
