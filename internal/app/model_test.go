@@ -62,6 +62,39 @@ func TestInitialPatchAdmissionOccursInUpdate(t *testing.T) {
 	}
 }
 
+func TestCancelledSyntaxWorkDoesNotReplaceTheCurrentNotice(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	_, _ = model.Update(tea.WindowSizeMsg{Width: normalWidth, Height: 24})
+	active, ok := model.review.ActiveFile()
+	if !ok {
+		t.Fatal("missing active file")
+	}
+	waitContext, cancelWait := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelWait()
+	for model.review.Patch(active).Status != review.PatchReady {
+		if state := coordinator.WaitReady(waitContext); state != ReadyAvailable {
+			t.Fatalf("patch readiness = %d", state)
+		}
+		_, _ = model.Update(outcomeReadyMsg{state: ReadyAvailable})
+	}
+	if model.syntaxOperation == 0 {
+		t.Fatal("ready patch did not request syntax work")
+	}
+	model.notice = &Notice{Kind: NoticeInformation, Text: "reload complete"}
+
+	model.applySyntaxOutcome(SyntaxOutcome{
+		ID:  model.syntaxOperation,
+		Err: context.Canceled,
+	})
+
+	if model.syntaxOperation != 0 {
+		t.Fatal("cancelled syntax work remained active")
+	}
+	if model.notice == nil || model.notice.Text != "reload complete" {
+		t.Fatalf("cancelled syntax notice = %+v, want prior notice", model.notice)
+	}
+}
+
 func TestSelectionAndActivationRemainDistinct(t *testing.T) {
 	model, _ := newTestModel(t, map[string]string{
 		"alpha.txt": "changed\n",

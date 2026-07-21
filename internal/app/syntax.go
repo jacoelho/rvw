@@ -118,7 +118,7 @@ func (model *Model) applySyntaxOutcome(outcome SyntaxOutcome) {
 			Workspace: model.review.WorkspaceRevision(),
 			Source:    model.review.Snapshot().SourceID(),
 			File:      model.syntaxFile,
-			Status:    review.SyntaxFailed,
+			Status:    syntaxStatusForWorkError(outcome.Err),
 			Detail:    boundedOperationDetail(outcome.Err.Error()),
 		}
 	}
@@ -163,6 +163,17 @@ func (model *Model) applySyntaxOutcome(outcome SyntaxOutcome) {
 		result.Detail,
 	); err == nil {
 		model.review = next
+	}
+}
+
+func syntaxStatusForWorkError(err error) review.SyntaxStatus {
+	switch operationStatusForWorkError(err) {
+	case review.OperationCancelled:
+		return review.SyntaxCancelled
+	case review.OperationLimited:
+		return review.SyntaxLimited
+	default:
+		return review.SyntaxFailed
 	}
 }
 

@@ -195,7 +195,9 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 			})
 			scenario.Then("the replacement source is reconciled", func(t testing.TB, w *world) {
 				w.pty.awaitScreen(t, "reload completion", func(screen string) bool {
-					return strings.Contains(screen, "reload complete:") && strings.Contains(screen, "reloaded.txt")
+					return strings.Contains(screen, "[source:2 workspace:2]") &&
+						strings.Contains(screen, "reloaded.txt") &&
+						strings.Contains(screen, "work 0/64")
 				})
 				w.pty.send(t, "q")
 				w.pty.awaitExit(t)
