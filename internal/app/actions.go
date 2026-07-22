@@ -1,0 +1,463 @@
+// Package app implements rvw's interactive terminal application.
+package app
+
+import (
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/jacoelho/rvw/internal/delivery"
+	"github.com/jacoelho/rvw/internal/review"
+)
+
+const (
+	horizontalScrollStep = 8
+	maxHorizontalScroll  = 4_096
+)
+
+func (model *Model) applyAction(action KeyAction, repeat int) tea.Cmd {
+	if command, handled := model.applyRestrictedAction(action, repeat); handled {
+		return command
+	}
+	if model.foreground.reloadActive() && !actionAllowedDuringReload(action) {
+		model.notice = &Notice{
+			Kind: NoticeInformation,
+			Text: "reload is active; this action is temporarily unavailable",
+		}
+		return nil
+	}
+	if actionSupersedesDiffTarget(action) {
+		model.foreground.clearPendingDiffTarget()
+	}
+	if command, handled := model.applyNavigationAction(action, repeat); handled {
+		return command
+	}
+	if command, handled := model.applyReviewAction(action); handled {
+		return command
+	}
+	if command, handled := model.applyViewAction(action); handled {
+		return command
+	}
+	if command, handled := model.applyCommandAction(action); handled {
+		return command
+	}
+	model.notice = &Notice{
+		Kind: NoticeWarning,
+		Text: NoticeText("unsupported action: " + action.String()),
+	}
+	return nil
+}
+
+func (model *Model) applyRestrictedAction(action KeyAction, repeat int) (tea.Cmd, bool) {
+	if model.belowMinimum() {
+		if action == KeyActionQuit || action == KeyActionInterrupt {
+			if model.overlay == OverlayConfirm {
+				return nil, true
+			}
+			return model.requestQuit(), true
+		}
+		return nil, true
+	}
+	if model.overlay == OverlayConfirm {
+		return model.applyConfirmationAction(action), true
+	}
+	if model.mode == ModeCommentEdit {
+		switch action {
+		case KeyActionCancel, KeyActionInterrupt:
+			model.cancelCommentEdit()
+		case KeyActionSaveComment:
+			model.saveComment()
+		default:
+		}
+		return nil, true
+	}
+	if model.mode == ModeVisual {
+		if actionSupersedesDiffTarget(action) {
+			model.foreground.clearPendingDiffTarget()
+		}
+		switch action {
+		case KeyActionCancel, KeyActionInterrupt:
+			model.mode = ModeNormal
+		case KeyActionMoveUp, KeyActionExtendUp:
+			model.moveDiff(-repeat)
+		case KeyActionMoveDown, KeyActionExtendDown:
+			model.moveDiff(repeat)
+		case KeyActionPageUp:
+			model.moveDiff(-max(model.diffHeight(), 1) * repeat)
+		case KeyActionPageDown:
+			model.moveDiff(max(model.diffHeight(), 1) * repeat)
+		case KeyActionCommentSelection:
+			return model.beginSelectionComment(), true
+		default:
+		}
+		return nil, true
+	}
+	switch model.overlay {
+	case OverlayNone:
+		return nil, false
+	case OverlayExport:
+		model.applyExportPickerAction(action)
+		return nil, true
+	case OverlaySubmit:
+		model.applyPublicationAction(action)
+		return nil, true
+	case OverlayHelp:
+		model.applyHelpAction(action, repeat)
+		return nil, true
+	case OverlayStatus:
+		model.applyStatusAction(action, repeat)
+		return nil, true
+	default:
+		if action == KeyActionCancel || action == KeyActionQuit ||
+			action == KeyActionInterrupt {
+			model.overlay = OverlayNone
+		}
+		return nil, true
+	}
+}
+
+func (model *Model) applyNavigationAction(action KeyAction, repeat int) (tea.Cmd, bool) {
+	switch action {
+	case KeyActionFocusNextPane:
+		model.cycleFocus(repeat)
+	case KeyActionFocusPreviousPane:
+		model.cycleFocus(-repeat)
+	case KeyActionMoveUp:
+		return model.move(-repeat), true
+	case KeyActionMoveDown:
+		return model.move(repeat), true
+	case KeyActionScrollLeft:
+		model.scrollDiffHorizontally(-repeat)
+	case KeyActionScrollRight:
+		model.scrollDiffHorizontally(repeat)
+	case KeyActionPageUp:
+		return model.movePage(-repeat), true
+	case KeyActionPageDown:
+		return model.movePage(repeat), true
+	case KeyActionHalfPageUp:
+		model.moveDiff(-max(model.diffHeight()/2, 1) * repeat)
+	case KeyActionHalfPageDown:
+		model.moveDiff(max(model.diffHeight()/2, 1) * repeat)
+	case KeyActionFirst:
+		model.moveFirst()
+	case KeyActionLast:
+		model.moveLast()
+	case KeyActionNextFile:
+		model.moveAndActivateFile(repeat)
+	case KeyActionPreviousFile:
+		model.moveAndActivateFile(-repeat)
+	case KeyActionNextHunk:
+		model.moveHunk(repeat)
+	case KeyActionPreviousHunk:
+		model.moveHunk(-repeat)
+	case KeyActionNextComment:
+		model.moveAndActivateComment(repeat)
+	case KeyActionPreviousComment:
+		model.moveAndActivateComment(-repeat)
+	case KeyActionNextSearchHit:
+		model.moveSearchHit(repeat)
+	case KeyActionPreviousSearchHit:
+		model.moveSearchHit(-repeat)
+	default:
+		return nil, false
+	}
+	return nil, true
+}
+
+func (model *Model) applyReviewAction(action KeyAction) (tea.Cmd, bool) {
+	switch action {
+	case KeyActionActivate, KeyActionAccept:
+		model.activateSelection()
+	case KeyActionCommentAtCursor:
+		return model.beginCursorComment(), true
+	case KeyActionFileComment:
+		return model.beginFileComment(), true
+	case KeyActionSummaryComment:
+		return model.beginSummaryComment(), true
+	case KeyActionEditComment:
+		return model.beginEditComment(), true
+	case KeyActionDeleteComment:
+		model.requestCommentDelete()
+	case KeyActionExpandContext:
+		model.expandPatchContext()
+	case KeyActionVisualLine, KeyActionVisualLines:
+		model.mode = ModeVisual
+		model.visualAnchor = model.diffCursor
+	case KeyActionVisualHunk:
+		model.beginVisualHunk()
+	case KeyActionToggleFileReviewed:
+		if active, ok := model.review.ActiveFile(); ok {
+			if next, err := model.review.ToggleFileReviewed(active); err == nil {
+				model.review = next
+			}
+		}
+	case KeyActionToggleHunkReviewed:
+		model.toggleCurrentHunkReviewed()
+	default:
+		return nil, false
+	}
+	return nil, true
+}
+
+func (model *Model) applyViewAction(action KeyAction) (tea.Cmd, bool) {
+	switch action {
+	case KeyActionToggleWrap:
+		model.settings.wrap = !model.settings.wrap
+	case KeyActionToggleView:
+		if model.settings.diffView == DiffViewUnified {
+			model.settings.diffView = DiffViewSideBySide
+		} else {
+			model.settings.diffView = DiffViewUnified
+		}
+	case KeyActionAlignTop:
+		model.alignDiff(alignTop)
+	case KeyActionAlignCenter:
+		model.alignDiff(alignCenter)
+	case KeyActionAlignBottom:
+		model.alignDiff(alignBottom)
+	case KeyActionToggleDirectory:
+		model.toggleTreeDirectory(treeDirectoryToggle)
+	case KeyActionExpandDirectory:
+		model.toggleTreeDirectory(treeDirectoryExpand)
+	case KeyActionCollapseDirectory:
+		model.toggleTreeDirectory(treeDirectoryCollapse)
+	case KeyActionToggleHiddenFiles:
+		if model.review.ShowHidden() {
+			model.review = model.review.HideHiddenFiles()
+		} else {
+			model.review = model.review.ShowHiddenFiles()
+		}
+		if model.filterQuery != "" {
+			return model.startFileFilter(model.filterQuery), true
+		}
+		model.selectFileOrder()
+	case KeyActionToggleComments:
+		model.commentsVisible = !model.commentsVisible
+		model.clampFocus()
+	case KeyActionToggleFilePanel:
+		model.fileTreeVisible = !model.fileTreeVisible
+		model.clampFocus()
+	case KeyActionHelp:
+		model.overlay = OverlayHelp
+	case KeyActionStatusDetails:
+		model.overlay = OverlayStatus
+	default:
+		return nil, false
+	}
+	return nil, true
+}
+
+func (model *Model) applyCommandAction(action KeyAction) (tea.Cmd, bool) {
+	switch action {
+	case KeyActionQuit, KeyActionInterrupt:
+		return model.requestQuit(), true
+	case KeyActionCancel:
+		if operationID := model.foreground.reloadOperation(); operationID != 0 {
+			model.coordinator.Cancel(operationID)
+			model.notice = &Notice{
+				Kind: NoticeInformation,
+				Text: "cancelling reload; the current source remains active",
+			}
+		}
+	case KeyActionReload:
+		model.requestReload()
+	case KeyActionSearch:
+		return model.openFind(findCurrent), true
+	case KeyActionSearchVisible:
+		return model.openFind(findReview), true
+	case KeyActionFindFile:
+		return model.openFind(findFiles), true
+	case KeyActionFilter:
+		command := model.beginCommandPrompt()
+		model.commandInput.SetValue("filter ")
+		return command, true
+	case KeyActionCommand:
+		return model.beginCommandPrompt(), true
+	case KeyActionCopyMarkdown:
+		model.openExportPicker(exportSelection{
+			format:      review.ExportMarkdown,
+			destination: delivery.DestinationClipboard,
+		})
+	case KeyActionExportMarkdown:
+		model.openExportPicker(exportSelection{
+			format:      review.ExportMarkdown,
+			destination: delivery.DestinationStdout,
+		})
+	case KeyActionExportJSON:
+		model.openExportPicker(exportSelection{
+			format:      review.ExportJSON,
+			destination: delivery.DestinationStdout,
+		})
+	case KeyActionOpenSubmit:
+		model.startPublicationCheck()
+	default:
+		return nil, false
+	}
+	return nil, true
+}
+
+func actionSupersedesDiffTarget(action KeyAction) bool {
+	switch action {
+	case KeyActionMoveUp, KeyActionMoveDown,
+		KeyActionPageUp, KeyActionPageDown,
+		KeyActionHalfPageUp, KeyActionHalfPageDown,
+		KeyActionFirst, KeyActionLast,
+		KeyActionActivate, KeyActionAccept,
+		KeyActionExpandContext,
+		KeyActionNextFile, KeyActionPreviousFile,
+		KeyActionNextHunk, KeyActionPreviousHunk,
+		KeyActionNextComment, KeyActionPreviousComment,
+		KeyActionNextSearchHit, KeyActionPreviousSearchHit:
+		return true
+	default:
+		return false
+	}
+}
+
+func actionAllowedDuringReload(action KeyAction) bool {
+	switch action {
+	case KeyActionQuit, KeyActionInterrupt, KeyActionCancel,
+		KeyActionFocusNextPane, KeyActionFocusPreviousPane,
+		KeyActionMoveUp, KeyActionMoveDown,
+		KeyActionScrollLeft, KeyActionScrollRight,
+		KeyActionPageUp, KeyActionPageDown,
+		KeyActionHalfPageUp, KeyActionHalfPageDown,
+		KeyActionFirst, KeyActionLast,
+		KeyActionNextFile, KeyActionPreviousFile,
+		KeyActionNextHunk, KeyActionPreviousHunk,
+		KeyActionNextComment, KeyActionPreviousComment,
+		KeyActionToggleWrap, KeyActionToggleView,
+		KeyActionAlignTop, KeyActionAlignCenter, KeyActionAlignBottom,
+		KeyActionToggleHiddenFiles, KeyActionToggleComments,
+		KeyActionToggleFilePanel, KeyActionHelp, KeyActionStatusDetails:
+		return true
+	default:
+		return false
+	}
+}
+
+type diffAlignment uint8
+
+const (
+	alignTop diffAlignment = iota + 1
+	alignCenter
+	alignBottom
+)
+
+func (model *Model) scrollDiffHorizontally(direction int) {
+	if model.focus != FocusDiff || direction == 0 {
+		return
+	}
+	model.diffLeft = min(
+		max(model.diffLeft+direction*horizontalScrollStep, 0),
+		maxHorizontalScroll,
+	)
+}
+
+func (model *Model) alignDiff(alignment diffAlignment) {
+	active, ok := model.review.ActiveFile()
+	if !ok {
+		return
+	}
+	lines := model.review.Patch(active).Lines
+	if lines == 0 {
+		model.diffTop = 0
+		return
+	}
+	height := uint32FromInt(max(model.diffHeight(), 1))
+	switch alignment {
+	case alignTop:
+		model.diffTop = model.diffCursor
+	case alignCenter:
+		if model.diffCursor > height/2 {
+			model.diffTop = model.diffCursor - height/2
+		} else {
+			model.diffTop = 0
+		}
+	case alignBottom:
+		if model.diffCursor >= height-1 {
+			model.diffTop = model.diffCursor - height + 1
+		} else {
+			model.diffTop = 0
+		}
+	default:
+		return
+	}
+	maximum := uint32(0)
+	if lines > height {
+		maximum = lines - height
+	}
+	model.diffTop = min(model.diffTop, maximum)
+	model.requestSyntax()
+}
+
+func (model *Model) expandPatchContext() {
+	if model.settings.patchContext.WholeFile() {
+		model.notice = &Notice{Kind: NoticeInformation, Text: "whole-file context is already active"}
+		return
+	}
+	lines, ok := model.settings.patchContext.Lines()
+	if !ok {
+		return
+	}
+	value := lines.Uint16()
+	if value == 10_000 {
+		model.setPatchContext(review.WholeFileContext())
+		return
+	}
+	nextValue := min(max(value*2, value+1), uint16(10_000))
+	next, err := review.NewContextLines(nextValue)
+	if err != nil {
+		model.notice = &Notice{Kind: NoticeError, Text: NoticeText(err.Error())}
+		return
+	}
+	context, err := review.ContextAround(next)
+	if err != nil {
+		model.notice = &Notice{Kind: NoticeError, Text: NoticeText(err.Error())}
+		return
+	}
+	model.setPatchContext(context)
+}
+
+func (model *Model) applyHelpAction(action KeyAction, repeat int) {
+	page := max(model.diffHeight()-4, 1)
+	limit := len(model.effectiveBindings(KeyContextNormal))
+	switch action {
+	case KeyActionCancel, KeyActionInterrupt, KeyActionQuit:
+		model.overlay = OverlayNone
+	case KeyActionNextHelpPage, KeyActionHelpPageDown:
+		model.helpTop += page * repeat
+	case KeyActionPreviousHelpPage, KeyActionHelpPageUp:
+		model.helpTop -= page * repeat
+	case KeyActionHelpLineDown:
+		model.helpTop += repeat
+	case KeyActionHelpLineUp:
+		model.helpTop -= repeat
+	case KeyActionHelpHome:
+		model.helpTop = 0
+	case KeyActionHelpEnd:
+		model.helpTop = limit
+	default:
+	}
+	model.helpTop = min(max(model.helpTop, 0), max(limit-page, 0))
+}
+
+func (model *Model) applyStatusAction(action KeyAction, repeat int) {
+	_, height := model.renderSize()
+	page := max(model.statusOperationRows(height), 1)
+	switch action {
+	case KeyActionCancel, KeyActionInterrupt, KeyActionQuit:
+		model.overlay = OverlayNone
+	case KeyActionMoveDown:
+		model.statusTop += repeat
+	case KeyActionMoveUp:
+		model.statusTop -= repeat
+	case KeyActionPageDown:
+		model.statusTop += page * repeat
+	case KeyActionPageUp:
+		model.statusTop -= page * repeat
+	default:
+	}
+	model.statusTop = min(
+		max(model.statusTop, 0),
+		max(model.review.OperationCount()-page, 0),
+	)
+}

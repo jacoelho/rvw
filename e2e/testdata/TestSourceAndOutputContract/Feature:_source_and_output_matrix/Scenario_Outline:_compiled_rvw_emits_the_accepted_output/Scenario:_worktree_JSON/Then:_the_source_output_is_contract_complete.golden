@@ -1,0 +1,187 @@
+{
+  "file_count": 6,
+  "files": [
+    {
+      "change": {
+        "additions": 1,
+        "classification": "unclassified",
+        "deletions": 0,
+        "kind": "added"
+      },
+      "flags": {
+        "generated": true,
+        "hidden_reasons": [
+          "builtin-default"
+        ],
+        "lock_file": false,
+        "minified": false,
+        "too_large": false,
+        "vendored": false
+      },
+      "id": 0,
+      "new_path": "generated.pb.go",
+      "new_path_bytes_base64": "Z2VuZXJhdGVkLnBiLmdv",
+      "new_path_display": "generated.pb.go",
+      "old_path": null,
+      "old_path_bytes_base64": null,
+      "old_path_display": null,
+      "patch_handle": {
+        "file_id": 0,
+        "id": 1,
+        "source_id": 1
+      }
+    },
+    {
+      "change": {
+        "additions": 1,
+        "classification": "unclassified",
+        "deletions": 0,
+        "kind": "added"
+      },
+      "flags": {
+        "generated": false,
+        "hidden_reasons": [
+          "gitignore"
+        ],
+        "lock_file": false,
+        "minified": false,
+        "too_large": false,
+        "vendored": false
+      },
+      "id": 1,
+      "new_path": "ignored.txt",
+      "new_path_bytes_base64": "aWdub3JlZC50eHQ=",
+      "new_path_display": "ignored.txt",
+      "old_path": null,
+      "old_path_bytes_base64": null,
+      "old_path_display": null,
+      "patch_handle": {
+        "file_id": 1,
+        "id": 2,
+        "source_id": 1
+      }
+    },
+    {
+      "change": {
+        "additions": 1,
+        "classification": "unclassified",
+        "deletions": 0,
+        "kind": "added"
+      },
+      "flags": {
+        "generated": false,
+        "hidden_reasons": [
+          "rvwignore"
+        ],
+        "lock_file": false,
+        "minified": false,
+        "too_large": false,
+        "vendored": false
+      },
+      "id": 2,
+      "new_path": "rvwignored.txt",
+      "new_path_bytes_base64": "cnZ3aWdub3JlZC50eHQ=",
+      "new_path_display": "rvwignored.txt",
+      "old_path": null,
+      "old_path_bytes_base64": null,
+      "old_path_display": null,
+      "patch_handle": {
+        "file_id": 2,
+        "id": 3,
+        "source_id": 1
+      }
+    },
+    {
+      "change": {
+        "additions": 1,
+        "classification": "unclassified",
+        "deletions": 0,
+        "kind": "added"
+      },
+      "flags": {
+        "generated": false,
+        "hidden_reasons": [],
+        "lock_file": false,
+        "minified": false,
+        "too_large": false,
+        "vendored": false
+      },
+      "id": 3,
+      "new_path": "staged.txt",
+      "new_path_bytes_base64": "c3RhZ2VkLnR4dA==",
+      "new_path_display": "staged.txt",
+      "old_path": null,
+      "old_path_bytes_base64": null,
+      "old_path_display": null,
+      "patch_handle": {
+        "file_id": 3,
+        "id": 4,
+        "source_id": 1
+      }
+    },
+    {
+      "change": {
+        "additions": 2,
+        "classification": "unclassified",
+        "deletions": 1,
+        "kind": "modified"
+      },
+      "flags": {
+        "generated": false,
+        "hidden_reasons": [],
+        "lock_file": false,
+        "minified": false,
+        "too_large": false,
+        "vendored": false
+      },
+      "id": 4,
+      "new_path": "tracked.txt",
+      "new_path_bytes_base64": "dHJhY2tlZC50eHQ=",
+      "new_path_display": "tracked.txt",
+      "old_path": "tracked.txt",
+      "old_path_bytes_base64": "dHJhY2tlZC50eHQ=",
+      "old_path_display": "tracked.txt",
+      "patch_handle": {
+        "file_id": 4,
+        "id": 5,
+        "source_id": 1
+      }
+    },
+    {
+      "change": {
+        "additions": 1,
+        "classification": "unclassified",
+        "deletions": 0,
+        "kind": "added"
+      },
+      "flags": {
+        "generated": false,
+        "hidden_reasons": [],
+        "lock_file": false,
+        "minified": false,
+        "too_large": false,
+        "vendored": false
+      },
+      "id": 5,
+      "new_path": "untracked.txt",
+      "new_path_bytes_base64": "dW50cmFja2VkLnR4dA==",
+      "new_path_display": "untracked.txt",
+      "old_path": null,
+      "old_path_bytes_base64": null,
+      "old_path_display": null,
+      "patch_handle": {
+        "file_id": 5,
+        "id": 6,
+        "source_id": 1
+      }
+    }
+  ],
+  "source": "diff",
+  "source_details": {
+    "base": "34e9cee361a6e01ccaac346e5846608cd1d2ffcb",
+    "head": "worktree",
+    "kind": "local-worktree",
+    "repo": "\u003crepository\u003e"
+  },
+  "source_id": 1
+}

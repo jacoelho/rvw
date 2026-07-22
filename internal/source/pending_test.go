@@ -1,0 +1,297 @@
+package source
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/jacoelho/rvw/internal/review"
+)
+
+func TestLoadPendingReviewAcquiresViewerDraftWith64BitIdentities(t *testing.T) {
+	details := remoteThreadDetailsForTest(t)
+	reviewResponse := pendingReviewResponseForTest(details, `[{`+
+		`"id":"PRR_node","fullDatabaseId":"4294967297","body":"summary",`+
+		`"state":"PENDING","viewerDidAuthor":true,"viewerCanUpdate":true,`+
+		`"commit":{"oid":"`+details.HeadOID.String()+`"}}]`)
+	commentsResponse := fmt.Sprintf(`[[{`+
+		`"id":4294967298,"node_id":"PRRC_node","pull_request_review_id":4294967297,`+
+		`"body":"inline","path":"reviewed.go","commit_id":%q,"original_commit_id":%q,`+
+		`"subject_type":"line","line":12,"start_line":null,"side":"RIGHT",`+
+		`"start_side":null,"original_line":12,"original_start_line":null,`+
+		`"in_reply_to_id":null}]]`, details.HeadOID.String(), details.HeadOID.String())
+	service := newPendingReviewTestService(t, reviewResponse, commentsResponse)
+
+	pending, status, detail := service.loadPendingReview(t.Context(), details)
+	if status != review.PendingReviewReady || !detail.IsEmpty() {
+		t.Fatalf("status=%s detail=%q", status, detail.String())
+	}
+	if pending.DatabaseID().Uint64() != 4_294_967_297 || pending.CommentCount() != 1 {
+		t.Fatalf("review=%d comments=%d", pending.DatabaseID().Uint64(), pending.CommentCount())
+	}
+	comment := pending.Comments(0, 1)[0]
+	if comment.DatabaseID().Uint64() != 4_294_967_298 ||
+		comment.Target().Subject() != review.PendingSubjectLine {
+		t.Fatalf("comment=%d subject=%d", comment.DatabaseID().Uint64(), comment.Target().Subject())
+	}
+}
+
+func TestLoadPendingReviewKeepsAbsenceAndAmbiguityDistinct(t *testing.T) {
+	details := remoteThreadDetailsForTest(t)
+	tests := []struct {
+		name   string
+		nodes  string
+		status review.PendingReviewStatus
+	}{
+		{name: "absent", nodes: `[]`, status: review.PendingReviewAbsent},
+		{
+			name: "other viewer only",
+			nodes: `[{"id":"other","fullDatabaseId":"1","body":"x",` +
+				`"state":"PENDING","viewerDidAuthor":false,"viewerCanUpdate":false,` +
+				`"commit":{"oid":"` + details.HeadOID.String() + `"}}]`,
+			status: review.PendingReviewAbsent,
+		},
+		{
+			name: "ambiguous",
+			nodes: `[{"id":"one","fullDatabaseId":"1","body":"x",` +
+				`"state":"PENDING","viewerDidAuthor":true,"viewerCanUpdate":true,` +
+				`"commit":{"oid":"` + details.HeadOID.String() + `"}},` +
+				`{"id":"two","fullDatabaseId":"2","body":"y",` +
+				`"state":"PENDING","viewerDidAuthor":true,"viewerCanUpdate":true,` +
+				`"commit":{"oid":"` + details.HeadOID.String() + `"}}]`,
+			status: review.PendingReviewAmbiguous,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := newPendingReviewTestService(
+				t,
+				pendingReviewResponseForTest(details, test.nodes),
+				`[]`,
+			)
+			_, status, detail := service.loadPendingReview(t.Context(), details)
+			if status != test.status {
+				t.Fatalf("status=%s detail=%q", status, detail.String())
+			}
+			if status == review.PendingReviewAbsent && !detail.IsEmpty() {
+				t.Fatalf("absence detail=%q", detail.String())
+			}
+			if status == review.PendingReviewAmbiguous && detail.IsEmpty() {
+				t.Fatal("ambiguity has no detail")
+			}
+		})
+	}
+}
+
+func TestLoadPendingReviewConsumesEveryValidatedPage(t *testing.T) {
+	details := remoteThreadDetailsForTest(t)
+	page := func(hasNext bool, cursor, nodes string) string {
+		return fmt.Sprintf(
+			`{"errors":[],"data":{"viewer":{"login":"reviewer"},`+
+				`"repository":{"nameWithOwner":%q,"pullRequest":{`+
+				`"number":%d,"baseRefOid":%q,"headRefOid":%q,`+
+				`"reviews":{"pageInfo":{"hasNextPage":%t,"endCursor":%s},"nodes":%s}}}}}`,
+			details.Repository.String(), details.Number.Uint64(),
+			details.BaseOID.String(), details.HeadOID.String(),
+			hasNext, cursor, nodes,
+		)
+	}
+	other := `[{"id":"other","fullDatabaseId":"1","body":"other",` +
+		`"state":"PENDING","viewerDidAuthor":false,"viewerCanUpdate":false,` +
+		`"commit":{"oid":"` + details.HeadOID.String() + `"}}]`
+	owned := `[{"id":"owned","fullDatabaseId":"2","body":"",` +
+		`"state":"PENDING","viewerDidAuthor":true,"viewerCanUpdate":true,` +
+		`"commit":{"oid":"` + details.HeadOID.String() + `"}}]`
+	response := "[" + page(true, `"cursor-1"`, other) + "," +
+		page(false, "null", owned) + "]"
+	service := newPendingReviewTestService(t, response, `[[]]`)
+	pending, status, detail := service.loadPendingReview(t.Context(), details)
+	if status != review.PendingReviewReady || !detail.IsEmpty() ||
+		pending.DatabaseID().Uint64() != 2 {
+		t.Fatalf(
+			"status=%s detail=%q review=%d",
+			status, detail.String(), pending.DatabaseID().Uint64(),
+		)
+	}
+
+	incomplete := "[" + page(false, `"cursor-1"`, other) + "," +
+		page(false, "null", owned) + "]"
+	service = newPendingReviewTestService(t, incomplete, `[[]]`)
+	_, status, detail = service.loadPendingReview(t.Context(), details)
+	if status != review.PendingReviewUnavailable || detail.IsEmpty() {
+		t.Fatalf("incomplete status=%s detail=%q", status, detail.String())
+	}
+}
+
+func TestLoadPendingReviewRejectsCapabilityIdentityMismatch(t *testing.T) {
+	details := remoteThreadDetailsForTest(t)
+	reviewResponse := pendingReviewResponseForTest(details, `[{`+
+		`"id":"PRR_node","fullDatabaseId":"4294967297","body":"summary",`+
+		`"state":"PENDING","viewerDidAuthor":true,"viewerCanUpdate":true,`+
+		`"commit":{"oid":"`+details.HeadOID.String()+`"}}]`)
+	commentsResponse := fmt.Sprintf(`[[{`+
+		`"id":4294967298,"node_id":"PRRC_node","pull_request_review_id":4294967297,`+
+		`"body":"inline","path":"reviewed.go","commit_id":%q,"original_commit_id":%q,`+
+		`"subject_type":"file","line":null,"start_line":null,"side":"",`+
+		`"start_side":null,"original_line":null,"original_start_line":null,`+
+		`"in_reply_to_id":null}]]`, details.HeadOID.String(), details.HeadOID.String())
+	service := newPendingReviewTestService(t, reviewResponse, commentsResponse)
+	t.Setenv("RVW_PENDING_CAPABILITIES", fmt.Sprintf(
+		`[{"errors":[],"data":{"repository":{"nameWithOwner":%q,"pullRequest":{`+
+			`"number":%d,"baseRefOid":%q,"headRefOid":%q}},"node":{"id":"PRR_node",`+
+			`"comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{`+
+			`"id":"PRRC_node","fullDatabaseId":"999",`+
+			`"viewerCanUpdate":true,"viewerCanDelete":true}]}}}}]`,
+		details.Repository.String(), details.Number.Uint64(),
+		details.BaseOID.String(), details.HeadOID.String(),
+	))
+	_, status, detail := service.loadPendingReview(t.Context(), details)
+	if status != review.PendingReviewUnavailable || detail.IsEmpty() {
+		t.Fatalf("status=%s detail=%q", status, detail.String())
+	}
+}
+
+func TestPendingCommentRejectsReplyWithInvalidDatabaseIdentity(t *testing.T) {
+	details := remoteThreadDetailsForTest(t)
+	value := pendingReviewCommentPayload{
+		Body:                new("reply"),
+		NodeID:              "node",
+		Path:                "reviewed.go",
+		CommitID:            details.HeadOID.String(),
+		OriginalCommitID:    details.HeadOID.String(),
+		ID:                  2,
+		PullRequestReviewID: 1,
+		InReplyToID:         new(githubUint64(0)),
+	}
+	if _, err := validatePendingComment(value, map[githubUint64]review.CommentNodeID{2: "node"}); err == nil {
+		t.Fatal("zero reply database identity unexpectedly accepted")
+	}
+}
+
+func TestPendingCommentPreservesOutdatedMultilineRange(t *testing.T) {
+	details := remoteThreadDetailsForTest(t)
+	value := pendingReviewCommentPayload{
+		Body:                new("outdated range"),
+		NodeID:              "node",
+		Path:                "reviewed.go",
+		CommitID:            details.HeadOID.String(),
+		OriginalCommitID:    details.HeadOID.String(),
+		Side:                "RIGHT",
+		StartSide:           new("RIGHT"),
+		SubjectType:         "line",
+		ID:                  2,
+		PullRequestReviewID: 1,
+		OriginalLine:        new(uint32(12)),
+		OriginalStartLine:   new(uint32(10)),
+		viewerUpdate:        true,
+		viewerDelete:        true,
+	}
+	comment, err := validatePendingComment(
+		value,
+		map[githubUint64]review.CommentNodeID{2: "node"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startSide, start, side, line := comment.Target().Lines()
+	if !comment.Target().Outdated() || start == nil || line == nil ||
+		start.Uint32() != 10 || line.Uint32() != 12 ||
+		startSide != review.LineNew || side != review.LineNew {
+		t.Fatalf(
+			"outdated=%t start=%v line=%v sides=%d/%d",
+			comment.Target().Outdated(), start, line, startSide, side,
+		)
+	}
+}
+
+func TestPendingCommentRejectsExplicitZeroLine(t *testing.T) {
+	details := remoteThreadDetailsForTest(t)
+	value := pendingReviewCommentPayload{
+		Body:                new("line"),
+		NodeID:              "node",
+		Path:                "reviewed.go",
+		CommitID:            details.HeadOID.String(),
+		OriginalCommitID:    details.HeadOID.String(),
+		Side:                "RIGHT",
+		SubjectType:         "line",
+		ID:                  2,
+		PullRequestReviewID: 1,
+		Line:                new(uint32(0)),
+	}
+	if _, err := validatePendingComment(
+		value,
+		map[githubUint64]review.CommentNodeID{2: "node"},
+	); err == nil {
+		t.Fatal("zero line unexpectedly accepted")
+	}
+}
+
+func pendingReviewResponseForTest(details PullRequestDetails, nodes string) string {
+	return fmt.Sprintf(
+		`[{"errors":[],"data":{"viewer":{"login":"reviewer"},`+
+			`"repository":{"nameWithOwner":%q,"pullRequest":{`+
+			`"number":%d,"baseRefOid":%q,"headRefOid":%q,`+
+			`"reviews":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":%s}}}}}]`,
+		details.Repository.String(),
+		details.Number.Uint64(),
+		details.BaseOID.String(),
+		details.HeadOID.String(),
+		nodes,
+	)
+}
+
+func newPendingReviewTestService(t *testing.T, reviews, comments string) *Service {
+	t.Helper()
+	binaryDirectory := t.TempDir()
+	binary := filepath.Join(binaryDirectory, "gh")
+	script := `#!/bin/sh
+for argument in "$@"; do
+	case "$argument" in
+		*comments\(first:100*)
+			printf '%s' "$RVW_PENDING_CAPABILITIES"
+			exit 0
+			;;
+	esac
+done
+for argument in "$@"; do
+	if [ "$argument" = "graphql" ]; then
+		printf '%s' "$RVW_PENDING_REVIEWS"
+		exit 0
+	fi
+done
+printf '%s' "$RVW_PENDING_COMMENTS"
+`
+	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binaryDirectory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("RVW_PENDING_REVIEWS", reviews)
+	t.Setenv("RVW_PENDING_COMMENTS", comments)
+	details := remoteThreadDetailsForTest(t)
+	t.Setenv("RVW_PENDING_CAPABILITIES", fmt.Sprintf(
+		`[{"errors":[],"data":{"repository":{"nameWithOwner":%q,"pullRequest":{`+
+			`"number":%d,"baseRefOid":%q,"headRefOid":%q}},"node":{"id":"PRR_node",`+
+			`"comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{`+
+			`"id":"PRRC_node","fullDatabaseId":"4294967298",`+
+			`"viewerCanUpdate":true,"viewerCanDelete":true}]}}}}]`,
+		details.Repository.String(), details.Number.Uint64(),
+		details.BaseOID.String(), details.HeadOID.String(),
+	))
+	service := newTestService(t, t.TempDir())
+	t.Cleanup(func() { closeTestService(t, service) })
+	return service
+}
+
+func TestDecodePendingReviewPagesRejectsInvalidEnvelopes(t *testing.T) {
+	for _, encoded := range [][]byte{
+		[]byte(`[]`),
+		[]byte(`[null]`),
+		{'[', '"', 0xff, '"', ']'},
+	} {
+		if _, err := decodePendingReviewPages(encoded); err == nil {
+			t.Fatalf("decode %q unexpectedly succeeded", strings.ToValidUTF8(string(encoded), "?"))
+		}
+	}
+}
