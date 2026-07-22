@@ -138,7 +138,7 @@ include = ["src/**"]
 exclude = ["**/*.generated.rs"]
 
 [github]
-submit_default = "comment" # comment, draft, approve, or request-changes
+submit_default = "draft" # draft, comment, approve, or request-changes
 fetch_threads = true
 
 [export]
@@ -150,7 +150,7 @@ comment_template = "## {{target}}\n\n{{comment}}"
 
 Defaults are mouse enabled, wrapping enabled, unified view, three context lines, untracked files
 included, built-in filtering enabled, `.gitignore` enabled, `.rvwignore` enabled, remote threads
-fetched, and submission event `comment`.
+fetched, and submission event `draft`.
 
 Filter patterns are nonempty, contain no NUL, and are at most 4,096 UTF-8 bytes each. At most 4,096
 include/exclude patterns are accepted across the merged configuration and command line.

@@ -12,17 +12,18 @@ var ErrInvalidReviewTransition = errors.New("invalid review transition")
 
 // Review represents review.
 type Review struct {
-	operations     map[OperationID]Operation
 	active         *FileID
 	selected       *FileID
 	commentAnchors commentAnchorCounts
 	patches        map[FileID]PatchState
 	draft          *Draft
+	operations     map[OperationID]Operation
+	pending        *pendingReviewState
+	snapshot       Snapshot
 	comments       []Comment
 	operationIDs   []OperationID
 	hunkMarks      hunkMarkSet
 	fileMarks      fileMarkSet
-	snapshot       Snapshot
 	search         searchState
 	publication    publicationState
 	commentBody    int64
@@ -61,7 +62,7 @@ func NewReview(snapshot Snapshot) (Review, error) {
 		review.active = new(id)
 		review.selected = new(id)
 	}
-	return review, nil
+	return importPendingReview(review)
 }
 
 // WorkspaceRevision returns the receiver's workspace revision value.
@@ -261,8 +262,24 @@ func (review Review) BeginEditComment(id CommentID) (Review, error) {
 	if index < 0 {
 		return review, ErrInvalidReviewTransition
 	}
+	restore := false
+	if review.pending != nil {
+		if binding, bound := review.pending.bindings[id]; bound {
+			if !binding.canUpdate {
+				return review, ErrInvalidReviewTransition
+			}
+			restore = binding.deleted
+		}
+	}
 	comment := review.comments[index]
 	next := review.clone()
+	if restore {
+		next.pending = review.pending.clone()
+		binding := next.pending.bindings[id]
+		binding.deleted = false
+		next.pending.bindings[id] = binding
+		next.commentAnchors = replaceCommentAnchor(review.commentAnchors, nil, &comment)
+	}
 	next.draft = &Draft{
 		target:  comment.target,
 		body:    comment.body.String(),
@@ -288,6 +305,24 @@ func (review Review) DeleteComment(id CommentID) (Review, error) {
 	})
 	if index < 0 {
 		return review, ErrInvalidReviewTransition
+	}
+	if review.pending != nil {
+		if binding, bound := review.pending.bindings[id]; bound {
+			if binding.kind == pendingBindingBody && !review.pending.bodyUpdate ||
+				binding.kind == pendingBindingComment && !binding.canDelete {
+				return review, ErrInvalidReviewTransition
+			}
+			next := review.clone()
+			next.pending = review.pending.clone()
+			binding.deleted = true
+			next.pending.bindings[id] = binding
+			next.commentAnchors = replaceCommentAnchor(
+				review.commentAnchors,
+				&review.comments[index],
+				nil,
+			)
+			return next, nil
+		}
 	}
 	next := review.clone()
 	next.comments = slices.Clone(review.comments)
@@ -411,6 +446,6 @@ func (review Review) ShowHidden() bool {
 
 // HasLocalChanges reports the receiver's has local changes state.
 func (review Review) HasLocalChanges() bool {
-	return len(review.comments) != 0 || review.draft != nil ||
+	return review.hasPendingLocalChanges() || review.draft != nil ||
 		review.fileMarks.count != 0 || review.hunkMarks.count != 0
 }

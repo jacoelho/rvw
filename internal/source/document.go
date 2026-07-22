@@ -284,6 +284,7 @@ type OpenOptions struct {
 	Exclude          []FilterPattern
 	IncludeUntracked bool
 	FetchThreads     bool
+	FetchPending     bool
 	BuiltinDefaults  bool
 	Gitignore        bool
 	RVWIgnore        bool

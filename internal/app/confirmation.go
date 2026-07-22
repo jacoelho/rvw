@@ -103,6 +103,9 @@ func (model *Model) confirmationView(width, height int) string {
 		prompt = "Discard local review changes and quit?"
 	case confirmationDeleteComment:
 		prompt = "Delete the selected comment?"
+		if model.review.PendingBindingState(model.confirmation.comment) != review.PendingBindingNew {
+			prompt = "Delete this GitHub draft on the next save?"
+		}
 	case confirmationReload:
 		prompt = "Reload and discard review state that cannot be reconciled?"
 	}

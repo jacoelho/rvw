@@ -92,6 +92,9 @@ The command prompt accepts:
 :export
 :json
 :submit
+:resolve-draft local
+:resolve-draft remote
+:resolve-draft base
 :ack-submit
 :help
 :filter <pattern>
@@ -107,6 +110,8 @@ The command prompt accepts:
 ```
 
 Unknown commands and invalid arguments produce a visible warning without leaving the TUI.
+The three `:resolve-draft` forms operate on the selected conflicting pending-review comment and
+choose the local, freshly acquired remote, or captured base body respectively.
 `:ack-submit` may acknowledge a displayed publication fact but MUST NOT clear an unknown attempt,
 release its retry fence, or manufacture a reconciled outcome.
 

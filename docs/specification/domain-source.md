@@ -211,6 +211,28 @@ GitHub submission always uses an explicit preflight that shows:
 - source/head staleness;
 - any explicit stale-head override.
 
+Interactive pull-request acquisition fully paginates the authenticated viewer's pending reviews.
+Exactly one viewer-authored `PENDING` review is imported; absence, unavailability, limits, and
+multiple-match ambiguity remain distinct. Noninteractive output does not acquire pending review
+state. Any result other than ready or absent blocks writes rather than creating a second review.
+
+The pending review body and comments become copy-on-write local bindings while preserving
+GraphQL node IDs separately from REST 64-bit database IDs. Existing targets are immutable.
+Deletion is a tombstone. Pending comments are removed from the read-only thread projection.
+Reload performs a three-way base/local/remote merge and retains divergent edits as explicit
+conflicts.
+
+`draft` is the default event. It creates a pending review when none exists; otherwise it
+synchronizes the existing review without submitting it. Comment, approve, and request-changes
+synchronize first and submit second. Existing remote drafts cannot be excluded without explicit
+deletion.
+
+Synchronization uses serial GraphQL batches of at most 32 effects and 1 MiB of encoded input.
+Started failures are reconciled from a fresh complete capture. Desired state is committed, base
+state may be retried once, and any third state is unknown. Stable exact terminal comment markers
+identify additions; the review body retains the per-attempt publication marker. A local binding
+is rebased only after a fresh post-write capture.
+
 Publication distinguishes:
 
 1. rejected or failed before a remote commit;
@@ -249,7 +271,6 @@ This draft proposes **process-lifetime publication safety**:
   confirming equivalent content.
 - No durable publication journal is created.
 
-GitHub publication implementation remains blocked until this specification set is accepted.
 Durable cross-process fencing is outside this specification set and MUST NOT be added implicitly.
 Adding it requires an explicit contract for storage location, private permissions, interprocess
 locking, atomicity and directory durability, versioning, corruption, bounded retention, privacy,

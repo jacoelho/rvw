@@ -84,6 +84,12 @@ func TestDefaultsUseExportTemplates(t *testing.T) {
 	}
 }
 
+func TestDefaultsUseDraftGitHubSubmission(t *testing.T) {
+	if got := Defaults().GitHub().SubmitDefault; got != SubmitDraft {
+		t.Fatalf("submit default = %q, want %q", got, SubmitDraft)
+	}
+}
+
 func TestLoadRejectsProjectKeybindings(t *testing.T) {
 	root := projectDirectory(t)
 	writeTestFile(t, filepath.Join(root, ".rvw.toml"), `

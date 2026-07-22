@@ -15,6 +15,12 @@ import (
 
 const maxPromptBytes = 64 << 10
 
+const (
+	draftConflictLocalValue  = "local"
+	draftConflictRemoteValue = "remote"
+	draftConflictBaseValue   = "base"
+)
+
 type commandKind uint8
 
 const (
@@ -25,6 +31,7 @@ const (
 	commandExport
 	commandJSON
 	commandSubmit
+	commandResolveDraft
 	commandAcknowledgeSubmit
 	commandHelp
 	commandFilter
@@ -126,7 +133,7 @@ func (model *Model) commandBarLine(width int, styles semanticStyles) string {
 	return styles.status.Render(fitCellWidth(model.commandInput.View(), width))
 }
 
-func parseCommand(value string) (commandIntent, error) {
+func parseCommand(value string) (commandIntent, error) { //nolint:funlen // One closed switch owns the complete command grammar.
 	value = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(value), ":"))
 	if value == "" {
 		return commandIntent{}, errors.New("command is empty")
@@ -158,6 +165,8 @@ func parseCommand(value string) (commandIntent, error) {
 		return noArguments(commandJSON)
 	case "submit":
 		return noArguments(commandSubmit)
+	case "resolve-draft":
+		return parseResolveDraftCommand(arguments)
 	case "ack-submit":
 		return noArguments(commandAcknowledgeSubmit)
 	case "help":
@@ -208,6 +217,15 @@ func parseCommand(value string) (commandIntent, error) {
 	}
 }
 
+func parseResolveDraftCommand(arguments string) (commandIntent, error) {
+	switch arguments {
+	case draftConflictLocalValue, draftConflictRemoteValue, draftConflictBaseValue:
+		return commandIntent{kind: commandResolveDraft, text: arguments}, nil
+	default:
+		return commandIntent{}, errors.New("resolve-draft requires local, remote, or base")
+	}
+}
+
 func parsePositiveLine(value string) (uint32, error) {
 	number, err := strconv.ParseUint(value, 10, 32)
 	if err != nil || number == 0 {
@@ -249,6 +267,8 @@ func (model *Model) executeCommand(value string) tea.Cmd {
 		})
 	case commandSubmit:
 		model.applyAction(KeyActionOpenSubmit, 1)
+	case commandResolveDraft:
+		model.resolvePendingConflict(intent.text)
 	case commandAcknowledgeSubmit:
 		model.acknowledgePublication()
 	case commandHelp:
@@ -283,6 +303,29 @@ func (model *Model) executeCommand(value string) tea.Cmd {
 		model.selectSourceLine(review.LineNew, intent.number)
 	}
 	return nil
+}
+
+func (model *Model) resolvePendingConflict(value string) {
+	comment, ok := model.review.CommentAt(model.commentCursor)
+	if !ok || model.review.PendingBindingState(comment.ID()) != review.PendingBindingConflict {
+		model.notice = &Notice{Kind: NoticeWarning, Text: "select a conflicting GitHub draft"}
+		return
+	}
+	resolution := review.PendingConflictLocal
+	switch value {
+	case draftConflictRemoteValue:
+		resolution = review.PendingConflictRemote
+	case draftConflictBaseValue:
+		resolution = review.PendingConflictBase
+	}
+	next, err := model.review.ResolvePendingConflict(comment.ID(), resolution)
+	if err != nil {
+		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
+		return
+	}
+	model.review = next
+	model.commentCursor = min(model.commentCursor, max(model.review.CommentCount()-1, 0))
+	model.notice = &Notice{Kind: NoticeInformation, Text: NoticeText("draft conflict resolved with " + value)}
 }
 
 func patchContextForCommand(intent commandIntent) (review.PatchContext, error) {

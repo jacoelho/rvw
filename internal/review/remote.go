@@ -39,7 +39,7 @@ func (status RemoteThreadStatus) String() string {
 	case RemoteThreadsUnavailable:
 		return "unavailable"
 	case RemoteThreadsLimited:
-		return "limited"
+		return limitedValue
 	default:
 		return invalidValue
 	}

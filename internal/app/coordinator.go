@@ -25,7 +25,7 @@ const (
 	MaxCPUWorkers                   = 8
 	MaxPresentationCacheBytes int64 = 128 << 20
 
-	reservedPublicationRequestBytes int64 = review.MaxPublicationBytes
+	reservedPublicationRequestBytes int64 = review.MaxPublicationBytes + review.MaxPendingReviewBytes
 	reservedPublicationResultBytes  int64 = review.MaxPublicationBytes
 	patchResultReservation          int64 = review.MaxPatchBytes +
 		review.MaxPatchLines*25 +

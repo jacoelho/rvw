@@ -33,7 +33,7 @@ func (event PublicationEvent) String() string {
 	case PublicationEventComment:
 		return publicationCommentValue
 	case PublicationEventDraft:
-		return "draft"
+		return draftValue
 	case PublicationEventApprove:
 		return "approve"
 	case PublicationEventRequestChanges:
@@ -309,7 +309,7 @@ const (
 func (decision PublicationDecision) String() string {
 	switch decision {
 	case PublicationIncludedInline:
-		return "inline"
+		return inlineValue
 	case PublicationIncludedSummary:
 		return "summary"
 	case PublicationExcludedManual:
@@ -343,6 +343,7 @@ func (decision PublicationCommentDecision) Decision() PublicationDecision {
 
 // PreparedPublication represents prepared publication.
 type PreparedPublication struct {
+	pending   *PreparedPendingPublication
 	summary   string
 	comments  []PublicationComment
 	decisions []PublicationCommentDecision
@@ -357,6 +358,18 @@ type PreparedPublication struct {
 func (review Review) PreparePublication(options PublicationOptions) (PreparedPublication, error) {
 	if !options.valid() {
 		return PreparedPublication{}, ErrInvalidPublication
+	}
+	if review.pending != nil {
+		return review.preparePendingPublication(options)
+	}
+	status := review.snapshot.PendingReviewSummary().Status
+	if status == PendingReviewUnavailable || status == PendingReviewLimited ||
+		status == PendingReviewAmbiguous {
+		return PreparedPublication{}, fmt.Errorf(
+			"%w: pending GitHub review is %s",
+			ErrInvalidPublication,
+			status,
+		)
 	}
 	prepared := PreparedPublication{
 		workspace: review.workspace,
@@ -558,7 +571,13 @@ func TakeCheckedPublication(
 		!prepared.options.valid() {
 		return nil, fmt.Errorf("%w: checked publication is malformed", ErrInvalidPublication)
 	}
-	payload, err := encodePublicationPayload(target, marker, prepared)
+	var payload string
+	var err error
+	if prepared.pending != nil {
+		payload, err = encodePendingPublicationEnvelope(marker, prepared)
+	} else {
+		payload, err = encodePublicationPayload(target, marker, prepared)
+	}
 	if err != nil {
 		return nil, fmt.Errorf(
 			"%w: encode checked publication: %w",
@@ -573,6 +592,11 @@ func TakeCheckedPublication(
 		prepared:  prepared,
 		staleHead: descriptor.StaleHead,
 	}, nil
+}
+
+// Pending reports whether this publication continues an existing pending review.
+func (checked *CheckedPublication) Pending() bool {
+	return checked != nil && checked.prepared.pending != nil
 }
 
 type publicationPayload struct {
@@ -729,7 +753,10 @@ type publicationState struct {
 	operation    OperationID
 	attempt      OperationID
 	remoteReview uint64
+	included     uint32
+	excluded     uint32
 	status       PublicationStatus
+	event        PublicationEvent
 	acknowledged bool
 }
 
@@ -784,6 +811,7 @@ func (review Review) StartPublicationCheck(
 	next.publication = publicationState{
 		status:    PublicationChecking,
 		operation: id,
+		event:     options.event,
 	}
 	return next, PublicationCheckRequest{
 		Operation: id,
@@ -810,6 +838,7 @@ func (review Review) ApplyPublicationCheck(result PublicationCheckResult) (Revie
 			status:    PublicationFailedBeforeCommit,
 			operation: result.Operation,
 			detail:    result.Detail,
+			event:     review.publication.event,
 		}
 		return next, nil
 	}
@@ -823,6 +852,9 @@ func (review Review) ApplyPublicationCheck(result PublicationCheckResult) (Revie
 		checked:   result.Checked,
 		target:    result.Checked.target,
 		marker:    result.Checked.marker,
+		event:     result.Checked.prepared.options.event,
+		included:  result.Checked.prepared.included,
+		excluded:  result.Checked.prepared.excluded,
 	}
 	return next, nil
 }
@@ -871,6 +903,7 @@ const (
 
 // PublicationResult describes publication result.
 type PublicationResult struct {
+	Pending      *PendingReview
 	Detail       OperationDetail
 	Operation    OperationID
 	Workspace    WorkspaceRevision
@@ -899,6 +932,16 @@ func (review Review) ApplyPublication(result PublicationResult) (Review, error) 
 	case PublicationDispositionCommitted:
 		if result.RemoteReview == 0 {
 			return review, fmt.Errorf("%w: committed result has no remote identity", ErrInvalidPublication)
+		}
+		if result.Pending != nil {
+			if result.Pending.databaseID.Uint64() != result.RemoteReview || next.pending == nil {
+				return review, fmt.Errorf("%w: committed pending review is inconsistent", ErrInvalidPublication)
+			}
+			rebased, err := rebasePendingCapture(next, *result.Pending)
+			if err != nil {
+				return review, fmt.Errorf("%w: rebase committed pending review: %w", ErrInvalidPublication, err)
+			}
+			next = rebased
 		}
 		next.publication.status = PublicationCommitted
 	case PublicationDispositionFailedBeforeCommit, PublicationDispositionCancelledBeforeCommit:
@@ -1017,12 +1060,11 @@ func (review Review) PublicationSummary() PublicationSummary {
 		RemoteReview: review.publication.remoteReview,
 		Detail:       review.publication.detail,
 		Acknowledged: review.publication.acknowledged,
+		Event:        review.publication.event,
+		Included:     review.publication.included,
+		Excluded:     review.publication.excluded,
 	}
 	if review.publication.checked != nil {
-		prepared := review.publication.checked.prepared
-		summary.Event = prepared.options.Event()
-		summary.Included = prepared.included
-		summary.Excluded = prepared.excluded
 		summary.StaleHead = review.publication.checked.staleHead
 	}
 	return summary

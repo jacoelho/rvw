@@ -96,7 +96,7 @@ func (service *Service) loadRemoteThreads(
 		return nil, errors.New("validated GitHub repository cannot be split")
 	}
 	result, err := service.runGH(ctx, []string{
-		ghAPI, "graphql", ghPaginate, ghSlurp,
+		ghAPI, ghGraphQL, ghPaginate, ghSlurp,
 		"-f", "query=" + remoteThreadsQuery,
 		"-F", "owner=" + owner,
 		"-F", "name=" + repository,
@@ -359,9 +359,9 @@ func validateRemoteThread(node remoteThreadNode) (review.RemoteThread, error) {
 	}
 	side := review.LineNew
 	switch node.DiffSide {
-	case "LEFT":
+	case githubSideLeft:
 		side = review.LineOld
-	case "RIGHT":
+	case githubSideRight:
 	default:
 		return review.RemoteThread{}, errors.New("invalid GitHub review thread side")
 	}

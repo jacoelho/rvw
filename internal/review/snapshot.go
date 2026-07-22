@@ -417,11 +417,14 @@ func (file File) Content(side LineSide) (ObjectID, bool) {
 // Snapshot represents snapshot.
 type Snapshot struct {
 	remoteCommentAnchors map[commentAnchor]struct{}
+	pendingReview        *PendingReview
 	remoteThreadDetail   OperationDetail
+	pendingReviewDetail  OperationDetail
 	files                []File
 	remoteThreads        []RemoteThread
 	sourceID             SourceID
 	remoteThreadStatus   RemoteThreadStatus
+	pendingReviewStatus  PendingReviewStatus
 }
 
 // NewSnapshot constructs and validates snapshot.

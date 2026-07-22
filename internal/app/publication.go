@@ -277,7 +277,16 @@ func (model *Model) applyPublicationCommitOutcome(outcome PublicationCommitOutco
 		return
 	}
 	if result.Disposition == review.PublicationDispositionCommitted {
-		model.notice = &Notice{Kind: NoticeInformation, Text: "GitHub review published"}
+		message := "GitHub review published"
+		kind := NoticeInformation
+		if model.review.PublicationSummary().Event == review.PublicationEventDraft {
+			message = "GitHub draft review synchronized"
+			if !result.Detail.IsEmpty() {
+				message = result.Detail.String()
+				kind = NoticeWarning
+			}
+		}
+		model.notice = &Notice{Kind: kind, Text: NoticeText(message)}
 	} else {
 		model.notice = &Notice{
 			Kind: NoticeWarning,
@@ -487,6 +496,14 @@ func (model *Model) togglePublicationExclusion() {
 	if !ok {
 		return
 	}
+	if model.review.PendingReviewSummary().Status == review.PendingReviewReady &&
+		model.review.PendingBindingState(comment.ID()) != review.PendingBindingNew {
+		model.notice = &Notice{
+			Kind: NoticeInformation,
+			Text: "existing GitHub drafts can be removed with delete, not excluded from their review",
+		}
+		return
+	}
 	if _, excluded := model.publicationExcluded[comment.ID()]; excluded {
 		delete(model.publicationExcluded, comment.ID())
 	} else {
@@ -509,7 +526,12 @@ func (model *Model) acknowledgePublication() {
 
 func (model *Model) publicationView(width, height int) string {
 	summary := model.review.PublicationSummary()
-	lines := []string{"GitHub submission preflight"}
+	pending := model.review.PendingReviewSummary()
+	title := "GitHub submission preflight"
+	if summary.Event == review.PublicationEventDraft {
+		title = "GitHub draft synchronization preflight"
+	}
+	lines := []string{title}
 	switch summary.Status {
 	case review.PublicationChecking:
 		lines = append(lines, "Checking immutable repository, pull request, and head…")
@@ -530,6 +552,14 @@ func (model *Model) publicationView(width, height int) string {
 			"Unmappable policy: "+unmappablePolicy,
 			"Source/head: "+headStatus,
 		)
+		if pending.Status == review.PendingReviewReady {
+			lines = append(lines, fmt.Sprintf(
+				"Pending review: continue %d · %d changed · %d conflicts",
+				pending.ReviewID.Uint64(), pending.Dirty, pending.Conflicts,
+			))
+		} else {
+			lines = append(lines, "Pending review: "+pending.Status.String())
+		}
 		chooserHeight := min(max(height-len(lines)-5, 1), 6)
 		lines = append(lines, model.publicationCommentLines(chooserHeight)...)
 		detailHeight := max(height-len(lines)-2, 0)
@@ -570,6 +600,8 @@ func (model *Model) publicationCommentLines(limit int) []string {
 	count := model.review.CommentCount() + 1
 	start = min(start, max(count-limit, 0))
 	lines := make([]string, 0, min(limit, count-start))
+	pendingReady := model.review.Snapshot().PendingReviewSummary().Status ==
+		review.PendingReviewReady
 	for index := start; index < min(start+limit, count); index++ {
 		cursor := "  "
 		if index == model.publicationCursor {
@@ -588,8 +620,12 @@ func (model *Model) publicationCommentLines(limit int) []string {
 			decision.CommentID() == comment.ID() {
 			state = decision.Decision().String()
 		}
-		lines = append(lines, cursor+"["+state+"] "+
-			safeAndClip(comment.Body().String(), 80))
+		label := state
+		if pendingReady {
+			binding := model.review.PendingBindingState(comment.ID()).String()
+			label = binding + " · " + state
+		}
+		lines = append(lines, cursor+"["+label+"] "+safeAndClip(comment.Body().String(), 80))
 	}
 	return lines
 }

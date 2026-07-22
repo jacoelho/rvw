@@ -140,16 +140,16 @@ func (service *Service) openPullRequest(
 		return nil, err
 	}
 	if options.FetchThreads {
-		threads, err := service.loadRemoteThreads(ctx, details)
-		if err != nil {
+		threads, threadErr := service.loadRemoteThreads(ctx, details)
+		if threadErr != nil {
 			status := review.RemoteThreadsUnavailable
 			var limited *LimitError
-			if errors.As(err, &limited) {
+			if errors.As(threadErr, &limited) {
 				status = review.RemoteThreadsLimited
 			}
 			snapshot, err = snapshot.WithRemoteThreadFailure(
 				status,
-				boundedOperationDetail(err.Error()),
+				boundedOperationDetail(threadErr.Error()),
 			)
 		} else {
 			snapshot, err = snapshot.WithRemoteThreads(threads)
@@ -159,6 +159,21 @@ func (service *Service) openPullRequest(
 		}
 		if err != nil {
 			return nil, fmt.Errorf("retain GitHub review thread status: %w", err)
+		}
+	}
+	if options.FetchPending {
+		pending, status, detail := service.loadPendingReview(ctx, details)
+		switch status {
+		case review.PendingReviewReady:
+			snapshot, err = snapshot.WithPendingReview(pending)
+		case review.PendingReviewAbsent, review.PendingReviewUnavailable,
+			review.PendingReviewLimited, review.PendingReviewAmbiguous:
+			snapshot, err = snapshot.WithPendingReviewStatus(status, detail)
+		default:
+			err = errors.New("GitHub pending review returned an invalid acquisition status")
+		}
+		if err != nil {
+			return nil, fmt.Errorf("retain GitHub pending review status: %w", err)
 		}
 	}
 	preparedRevision.cleanupPath = workspace
@@ -361,7 +376,7 @@ func (service *Service) runGH(
 		Name:            "gh",
 		Args:            arguments,
 		Dir:             service.cwd.String(),
-		Env:             map[string]string{localeAllKey: "C", localeLanguageKey: "C", "GH_PROMPT_DISABLED": "1"},
+		Env:             map[string]string{localeAllKey: "C", localeLanguageKey: "C", ghPromptDisabled: "1"},
 		StdoutLimit:     stdoutLimit,
 		OperationDetail: "gh " + strings.Join(arguments[:min(2, len(arguments))], " "),
 	})

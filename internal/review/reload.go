@@ -57,6 +57,7 @@ func PrepareReplacementCancellable(
 		preparation.supersedeOperations,
 		preparation.preserveFileMarks,
 		preparation.remapComments,
+		preparation.mergePendingReview,
 		preparation.preserveDraft,
 	} {
 		if err := step(); err != nil {

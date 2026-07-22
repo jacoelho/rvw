@@ -950,6 +950,8 @@ func (model *Model) commentLines(
 	start = min(start, max(count-height, 0))
 	lines := make([]string, 0, min(height, count-start))
 	rows := make([]int, 0, min(height, count-start))
+	pendingReady := model.review.Snapshot().PendingReviewSummary().Status ==
+		review.PendingReviewReady
 	for index := start; index < min(start+height, count); index++ {
 		prefix := "  "
 		if index == cursor {
@@ -965,6 +967,10 @@ func (model *Model) commentLines(
 				continue
 			}
 			target := commentTargetText(comment.Target())
+			if pendingReady {
+				state := model.review.PendingBindingState(comment.ID()).String()
+				target = "[" + state + "] " + target
+			}
 			line = clipStyled(prefix, 0, width)
 			line = appendSafeAndClip(
 				line,

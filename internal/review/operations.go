@@ -12,6 +12,9 @@ import (
 const (
 	invalidValue            = "invalid"
 	publicationCommentValue = "comment"
+	limitedValue            = "limited"
+	draftValue              = "draft"
+	inlineValue             = "inline"
 )
 
 // ErrInvalidOperation identifies an invalid operation failure.
@@ -173,7 +176,7 @@ func (status OperationStatus) String() string {
 	case OperationSuperseded:
 		return "superseded"
 	case OperationLimited:
-		return "limited"
+		return limitedValue
 	case OperationUnknown:
 		return "unknown"
 	default:

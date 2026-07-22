@@ -67,7 +67,6 @@ linters:
     - misspell
     - musttag
     - nosprintfhostport
-    - tagliatelle
     - testableexamples
     - thelper
     - tparallel
@@ -116,15 +115,6 @@ linters:
             - github.com/jacoelho/rvw
             - github.com/rivo/uniseg
             - golang.org/x/sys/unix
-
-    tagliatelle:
-      case:
-        rules:
-          json: snake
-        overrides:
-          - pkg: internal/source
-            rules:
-              json: camel
 
     revive:
       enable-default-rules: true

@@ -156,6 +156,7 @@ func execute(request executeRequest) (returnErr error) {
 	}
 	options.FetchThreads = request.invocation.Output == OutputInteractive &&
 		resolved.GitHub().FetchThreads
+	options.FetchPending = request.invocation.Output == OutputInteractive
 
 	document, err := service.Open(request.ctx, request.invocation.Target, options)
 	if err != nil {

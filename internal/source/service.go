@@ -28,6 +28,8 @@ const (
 	gitStdin          = "--stdin"
 	gitLSFiles        = "ls-files"
 	ghAPI             = "api"
+	ghGraphQL         = "graphql"
+	ghPromptDisabled  = "GH_PROMPT_DISABLED"
 	gitRevParse       = "rev-parse"
 	gitVerify         = "--verify"
 	gitEndOfOptions   = "--end-of-options"
@@ -38,6 +40,15 @@ const (
 	gitStage          = "--stage"
 	gitUpdateIndex    = "update-index"
 	gitIndexInfo      = "--index-info"
+	githubPending     = "PENDING"
+	githubSubjectLine = "line"
+	githubSideLeft    = "LEFT"
+	githubSideRight   = "RIGHT"
+	graphqlReviewID   = "pullRequestReviewId"
+	graphqlBody       = "body"
+	graphqlClientID   = "clientMutationId"
+	graphqlPath       = "path"
+	graphqlNull       = "null"
 )
 
 // WorkingDirectory represents working directory.

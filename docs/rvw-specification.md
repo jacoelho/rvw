@@ -163,7 +163,7 @@ include = ["src/**"]
 exclude = ["**/*.generated.rs"]
 
 [github]
-submit_default = "comment" # comment, draft, approve, or request-changes
+submit_default = "draft" # draft, comment, approve, or request-changes
 fetch_threads = true
 
 [export]
@@ -175,7 +175,7 @@ comment_template = "## {{target}}\n\n{{comment}}"
 
 Defaults are mouse enabled, wrapping enabled, unified view, three context lines, untracked files
 included, built-in filtering enabled, `.gitignore` enabled, `.rvwignore` enabled, remote threads
-fetched, and submission event `comment`.
+fetched, and submission event `draft`.
 
 Filter patterns are nonempty, contain no NUL, and are at most 4,096 UTF-8 bytes each. At most 4,096
 include/exclude patterns are accepted across the merged configuration and command line.
@@ -705,6 +705,41 @@ GitHub submission always uses an explicit preflight that shows:
 - source/head staleness;
 - any explicit stale-head override.
 
+Interactive pull-request sources also acquire the authenticated viewer's pending review before
+the TUI is constructed. Noninteractive output does not make this additional request. Acquisition
+fully paginates pending reviews, accepts exactly one viewer-authored `PENDING` review, and retains
+absence, unavailability, resource limits, and multiple-match ambiguity as distinct states. A
+limited, unavailable, or ambiguous result remains visible and blocks GitHub writes; it never
+falls back to creating another review.
+
+When a pending review exists, its review body and draft comments are imported as editable local
+comments. GraphQL node IDs and REST 64-bit database IDs remain separate identity domains. Existing
+comment targets are immutable: editing changes only the body, and deletion creates an explicit
+tombstone. Pending comments are removed from the read-only remote-thread projection so they are
+not displayed twice. Bindings are shown as `draft`, `modified`, `deleted`, or `conflict`; new local
+comments are shown as `new`.
+
+`draft` is the default event. With no pending review it creates one using the existing single
+create-review request and omits the GitHub event. With an existing pending review it synchronizes
+body edits, comment edits, deletions, and new line or file threads without submitting the review.
+The other events perform the same synchronization and then submit that review as `COMMENT`,
+`APPROVE`, or `REQUEST_CHANGES`. Existing GitHub drafts cannot be excluded from their review;
+they must be retained or explicitly deleted.
+
+Pending-review synchronization is serial and off the terminal event loop. A GraphQL mutation
+batch contains at most 32 effects and at most 1 MiB of encoded input. Started failures are
+reconciled against a fresh, fully acquired pending review: exact desired state is committed,
+exact base state is retryable once, and any third value is unknown and fences retry. New comments
+carry a stable exact terminal marker so a successful add can be recognized without duplicating
+it. The review body carries the per-attempt publication marker. No local binding is rebased until
+the synchronized pending review has been acquired again.
+
+Reload uses a three-way merge of captured base, local edit, and fresh pending review. Remote-only
+edits are adopted, local-only edits are retained, equal edits become clean, and divergent edits
+become explicit conflicts. `:resolve-draft local`, `:resolve-draft remote`, and
+`:resolve-draft base` resolve the selected conflict. Missing or externally submitted reviews do
+not silently create a replacement while bound local edits remain.
+
 Publication distinguishes:
 
 1. rejected or failed before a remote commit;
@@ -971,6 +1006,9 @@ The command prompt accepts:
 :export
 :json
 :submit
+:resolve-draft local
+:resolve-draft remote
+:resolve-draft base
 :ack-submit
 :help
 :filter <pattern>

@@ -342,7 +342,7 @@ func Defaults() Config {
 			Exclude:         []Pattern{},
 		},
 		github: GitHub{
-			SubmitDefault: SubmitComment,
+			SubmitDefault: SubmitDraft,
 			FetchThreads:  true,
 		},
 		export: Export{

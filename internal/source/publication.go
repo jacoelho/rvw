@@ -63,6 +63,20 @@ func (service *Service) CheckPublication(
 			errors.New("GitHub pull request revision changed before publication"),
 		)
 	}
+	if _, continuing := prepared.PendingPublication(); continuing {
+		fresh, status, detail := service.loadPendingReview(ctx, currentDetails)
+		if status != review.PendingReviewReady {
+			message := "GitHub pending review is " + status.String()
+			if !detail.IsEmpty() {
+				message += ": " + detail.String()
+			}
+			return nil, sourceFailure(OperationCheckPublication, errors.New(message))
+		}
+		prepared, err = prepared.ReconcilePendingPublication(fresh)
+		if err != nil {
+			return nil, sourceFailure(OperationCheckPublication, err)
+		}
+	}
 	target, err := review.NewPublicationTarget(review.PublicationTargetDescriptor{
 		Repository:  expected.Repository.String(),
 		PullRequest: expected.Number.Uint64(),
@@ -99,6 +113,7 @@ func newPublicationMarker() (review.PublicationMarker, error) {
 
 // PublicationCommit represents publication commit.
 type PublicationCommit struct {
+	Pending      *review.PendingReview
 	Detail       review.OperationDetail
 	RemoteReview uint64
 	Disposition  review.PublicationDisposition
@@ -115,6 +130,9 @@ func (service *Service) Publish(
 			Detail:      boundedOperationDetail("checked publication is unavailable"),
 		}
 	}
+	if checked.Pending() {
+		return service.publishPendingReview(ctx, checked)
+	}
 	target := checked.Target()
 	endpoint := "repos/" + target.Repository() + "/pulls/" +
 		strconv.FormatUint(target.PullRequest(), 10) + "/reviews"
@@ -127,7 +145,7 @@ func (service *Service) Publish(
 			"--input", "-",
 		},
 		Dir:             service.cwd.String(),
-		Env:             map[string]string{localeAllKey: "C", localeLanguageKey: "C", "GH_PROMPT_DISABLED": "1"},
+		Env:             map[string]string{localeAllKey: "C", localeLanguageKey: "C", ghPromptDisabled: "1"},
 		Stdin:           []byte(checked.Payload()),
 		StdoutLimit:     1 << 20,
 		StderrLimit:     1 << 20,
@@ -322,7 +340,7 @@ func (item *reviewHistoryItem) UnmarshalJSON(value []byte) error {
 		switch name {
 		case "id":
 			item.id = raw
-		case "body":
+		case graphqlBody:
 			item.body = raw
 		}
 	}

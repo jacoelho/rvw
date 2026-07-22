@@ -39,9 +39,9 @@ const (
 )
 
 type publicationJob struct {
-	publication    PublicationWork
 	ctx            context.Context
 	permit         *publicationCommitPermit
+	publication    PublicationWork
 	reconciliation ReconciliationWork
 	check          PublicationCheckWork
 	kind           publicationJobKind
@@ -290,6 +290,7 @@ func (coordinator *Coordinator) runPublicationCommit(job publicationJob) {
 		)
 		result.Disposition = commit.Disposition
 		result.RemoteReview = commit.RemoteReview
+		result.Pending = commit.Pending
 		result.Detail = commit.Detail
 	}
 	coordinator.complete(PublicationCommitOutcome{

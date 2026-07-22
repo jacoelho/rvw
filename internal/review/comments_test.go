@@ -54,7 +54,7 @@ func TestDraftAndNonLineCommentsDoNotCreateAnchors(t *testing.T) {
 	if draft.HasCommentAnchor(0, LineOld, line) {
 		t.Fatal("unsaved draft created a comment marker")
 	}
-	if fileComment := saveTestComment(t, current, mustFileTarget(t, 0), "file"); fileComment.HasCommentAnchor(0, LineOld, line) {
+	if fileComment := saveTestComment(t, current, mustFileTarget(t), "file"); fileComment.HasCommentAnchor(0, LineOld, line) {
 		t.Fatal("file comment created a line marker")
 	}
 	if reviewComment := saveTestComment(t, current, ReviewCommentTarget(), "review"); reviewComment.HasCommentAnchor(0, LineOld, line) {
@@ -62,9 +62,9 @@ func TestDraftAndNonLineCommentsDoNotCreateAnchors(t *testing.T) {
 	}
 }
 
-func mustFileTarget(t *testing.T, file FileID) CommentTarget {
+func mustFileTarget(t *testing.T) CommentTarget {
 	t.Helper()
-	target, err := FileCommentTarget(file)
+	target, err := FileCommentTarget(0)
 	if err != nil {
 		t.Fatal(err)
 	}

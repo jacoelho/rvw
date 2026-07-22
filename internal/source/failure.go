@@ -52,6 +52,7 @@ const (
 	LimitRenameCandidates LimitResource = "rename-candidates"
 	LimitPullRequestDepth LimitResource = "pull-request-fetch-depth"
 	LimitRemoteThreads    LimitResource = "remote-review-thread-identities"
+	LimitPendingReview    LimitResource = "pending-review-identities"
 )
 
 // LimitError describes limit error.

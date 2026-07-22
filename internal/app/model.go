@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -305,6 +306,26 @@ func NewModel(
 		collapsedTrees:      make(map[string]struct{}),
 	}
 	model.refreshCoordinatorStats()
+	pending := current.PendingReviewSummary()
+	switch pending.Status {
+	case review.PendingReviewNotRequested, review.PendingReviewAbsent:
+	case review.PendingReviewReady:
+		model.notice = &Notice{
+			Kind: NoticeInformation,
+			Text: NoticeText(fmt.Sprintf(
+				"loaded pending GitHub review %d with %d comments",
+				pending.ReviewID.Uint64(),
+				pending.Comments,
+			)),
+		}
+	case review.PendingReviewUnavailable, review.PendingReviewLimited,
+		review.PendingReviewAmbiguous:
+		model.notice = &Notice{
+			Kind: NoticeWarning,
+			Text: NoticeText("pending GitHub review is " + pending.Status.String() +
+				": " + pending.Detail.String()),
+		}
+	}
 	return model, nil
 }
 

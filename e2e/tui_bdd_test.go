@@ -5,6 +5,7 @@ package e2e_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -124,7 +125,100 @@ func TestInteractiveSourceContract(t *testing.T) {
 				assertTerminalLifecycle(t, w.pty, true)
 			})
 		})
+
+		feature.Scenario("an existing pending review is loaded as editable draft state", func(scenario *bdd.ScenarioSpec[*world]) {
+			scenario.Given("GitHub has one viewer-owned pending review", func(t testing.TB, w *world) {
+				configurePendingReview(t, w)
+			})
+			scenario.When("the pull request is opened", func(t testing.TB, w *world) {
+				w.launchPTY(t, 120, 24, "pr", "7", "--repo", "fixture/repository")
+			})
+			scenario.Then("the pending comments are editable draft rows rather than remote duplicates", func(t testing.TB, w *world) {
+				w.pty.awaitScreen(t, "loaded pending review", containsScreen("reviewed.go"))
+				w.pty.send(t, "zc")
+				screen := w.pty.awaitScreen(t, "pending draft rows", func(screen string) bool {
+					return strings.Contains(screen, "[draft]") &&
+						strings.Contains(screen, "reviewed.go:3") &&
+						!strings.Contains(screen, "[remote open]")
+				})
+				assertNoEscapedWidgetStyles(t, w, screen, "pending review")
+				w.pty.send(t, "q")
+				w.pty.awaitExit(t)
+			})
+		})
+
+		feature.Scenario("draft save updates and reloads the existing pending review", func(scenario *bdd.ScenarioSpec[*world]) {
+			scenario.Given("GitHub has one viewer-owned pending review", func(t testing.TB, w *world) {
+				configurePendingReview(t, w)
+			})
+			scenario.Given("the existing inline draft is edited", func(t testing.TB, w *world) {
+				w.launchPTY(t, 120, 24, "pr", "7", "--repo", "fixture/repository")
+				w.pty.awaitScreen(t, "pending source", containsScreen("reviewed.go"))
+				w.pty.send(t, "zc\tj")
+				w.pty.awaitScreen(t, "selected inline draft", containsScreen("▸ [draft] reviewed.go:3"))
+				w.pty.send(t, "e edited")
+				w.pty.send(t, "\x13")
+			})
+			scenario.When("the default draft preflight is committed", func(t testing.TB, w *world) {
+				w.pty.send(t, "s")
+				w.pty.awaitScreen(t, "draft preflight", func(screen string) bool {
+					return strings.Contains(screen, "GitHub draft synchronization preflight") &&
+						strings.Contains(screen, "checked at current head")
+				})
+				w.pty.send(t, "\r")
+			})
+			scenario.Then("the same remote comment is updated and the local binding is clean", func(t testing.TB, w *world) {
+				w.pty.awaitScreen(t, "draft synchronized", containsScreen("Publication committed."))
+				calls := w.calls(t)
+				if !slices.ContainsFunc(calls, func(call externalCall) bool {
+					return slices.Equal(call.Args, []string{"api", "graphql", "--input", "-"}) &&
+						strings.Contains(call.Stdin, "updatePullRequestReviewComment") &&
+						strings.Contains(call.Stdin, "existing inline edited")
+				}) {
+					t.Fatalf("pending update mutation not observed: %+v", calls)
+				}
+				w.pty.send(t, "\x1b")
+				w.pty.awaitScreen(t, "review restored", containsScreen("reviewed.go"))
+				w.pty.send(t, "q")
+				w.pty.awaitExit(t)
+			})
+		})
 	})
+}
+
+func configurePendingReview(t testing.TB, w *world) {
+	t.Helper()
+	w.writeFile(t, w.pending, fmt.Sprintf(
+		`[{"errors":[],"data":{"viewer":{"login":"octo-reviewer"},`+
+			`"repository":{"nameWithOwner":"fixture/repository","pullRequest":{`+
+			`"number":7,"baseRefOid":%q,"headRefOid":%q,`+
+			`"reviews":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{`+
+			`"id":"PRR_pending","fullDatabaseId":"9001","body":"existing summary",`+
+			`"state":"PENDING","viewerDidAuthor":true,"viewerCanUpdate":true,`+
+			`"commit":{"oid":%q}}]}}}}}]`,
+		w.prBase,
+		w.prHead,
+		w.prHead,
+	))
+	w.writeFile(t, w.pendingComments, fmt.Sprintf(
+		`[[{"id":9002,"node_id":"PRRC_pending","pull_request_review_id":9001,`+
+			`"body":"existing inline","path":"reviewed.go","commit_id":%q,`+
+			`"original_commit_id":%q,"subject_type":"line","line":3,`+
+			`"start_line":null,"side":"RIGHT","start_side":null,`+
+			`"original_line":3,"original_start_line":null,"in_reply_to_id":null}]]`,
+		w.prHead,
+		w.prHead,
+	))
+	w.writeFile(t, w.pendingCapabilities, fmt.Sprintf(
+		`[{"errors":[],"data":{"repository":{"nameWithOwner":"fixture/repository",`+
+			`"pullRequest":{"number":7,"baseRefOid":%q,"headRefOid":%q}},`+
+			`"node":{"id":"PRR_pending","comments":{"pageInfo":{`+
+			`"hasNextPage":false,"endCursor":null},"nodes":[{`+
+			`"id":"PRRC_pending","fullDatabaseId":"9002",`+
+			`"viewerCanUpdate":true,"viewerCanDelete":true}]}}}}]`,
+		w.prBase,
+		w.prHead,
+	))
 }
 
 func TestTerminalBehaviorAndExportContract(t *testing.T) {

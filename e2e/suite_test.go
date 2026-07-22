@@ -147,12 +147,29 @@ func runGHHelper(args []string, stdin []byte) int {
 		strings.HasSuffix(args[1], "/pulls/"+strconv.FormatUint(fixturePR, 10)) {
 		return copyHelperFixture("RVW_E2E_GH_METADATA")
 	}
+	if slices.Equal(args, []string{"api", "graphql", "--input", "-"}) {
+		return runPendingMutationHelper(stdin)
+	}
 	if len(args) >= 2 && args[0] == "api" && args[1] == "graphql" {
 		path := os.Getenv("RVW_E2E_GH_THREADS")
+		for _, argument := range args {
+			if strings.Contains(argument, "reviews(first:100") {
+				path = os.Getenv("RVW_E2E_GH_PENDING")
+				break
+			}
+			if strings.Contains(argument, "comments(first:100") {
+				path = os.Getenv("RVW_E2E_GH_PENDING_CAPABILITIES")
+				break
+			}
+		}
 		if path == "" {
-			return helperFailure("RVW_E2E_GH_THREADS is unset")
+			return helperFailure("GitHub GraphQL fixture is unset")
 		}
 		return copyHelperFile(path)
+	}
+	if len(args) >= 2 && args[0] == "api" &&
+		strings.HasSuffix(args[len(args)-1], "/reviews/9001/comments") {
+		return copyHelperFixture("RVW_E2E_GH_PENDING_COMMENTS")
 	}
 	if len(args) == 6 && args[0] == "api" && args[1] == "--method" && args[2] == "POST" &&
 		strings.HasSuffix(args[3], "/reviews") && args[4] == "--input" && args[5] == "-" {
@@ -203,6 +220,120 @@ func runGHHelper(args []string, stdin []byte) int {
 	return helperFailure("unsupported gh argv: %q", args)
 }
 
+func runPendingMutationHelper(stdin []byte) int {
+	var request struct {
+		Variables map[string]map[string]any `json:"variables"`
+	}
+	if err := json.Unmarshal(stdin, &request); err != nil || len(request.Variables) == 0 {
+		return helperFailure("decode pending mutation: %v", err)
+	}
+	keys := make([]string, 0, len(request.Variables))
+	for key := range request.Variables {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	response := make(map[string]map[string]string, len(keys))
+	for _, key := range keys {
+		input := request.Variables[key]
+		client, _ := input["clientMutationId"].(string)
+		if client == "" {
+			return helperFailure("pending mutation %s has no client identity", key)
+		}
+		index, err := strconv.Atoi(strings.TrimPrefix(key, "v"))
+		if err != nil {
+			return helperFailure("pending mutation variable %q is invalid", key)
+		}
+		response["m"+strconv.Itoa(index)] = map[string]string{"clientMutationId": client}
+		body, hasBody := input["body"].(string)
+		switch {
+		case input["pullRequestReviewCommentId"] != nil && hasBody:
+			if err := updatePendingCommentFixture(
+				os.Getenv("RVW_E2E_GH_PENDING_COMMENTS"),
+				fmt.Sprint(input["pullRequestReviewCommentId"]),
+				body,
+			); err != nil {
+				return helperFailure("update pending comment fixture: %v", err)
+			}
+		case input["pullRequestReviewId"] != nil && hasBody:
+			if err := updatePendingReviewFixture(
+				os.Getenv("RVW_E2E_GH_PENDING"),
+				fmt.Sprint(input["pullRequestReviewId"]),
+				body,
+			); err != nil {
+				return helperFailure("update pending review fixture: %v", err)
+			}
+		}
+	}
+	encoded, err := json.Marshal(map[string]any{"data": response, "errors": []any{}})
+	if err != nil {
+		return helperFailure("encode pending mutation response: %v", err)
+	}
+	_, _ = os.Stdout.Write(encoded)
+	return 0
+}
+
+func updatePendingCommentFixture(path, nodeID, body string) error {
+	encoded, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var pages [][]map[string]any
+	if err := json.Unmarshal(encoded, &pages); err != nil {
+		return err
+	}
+	updated := false
+	for _, page := range pages {
+		for _, comment := range page {
+			if comment["node_id"] == nodeID {
+				comment["body"] = body
+				updated = true
+			}
+		}
+	}
+	if !updated {
+		return errors.New("pending comment identity is absent")
+	}
+	return writeHelperJSON(path, pages)
+}
+
+func updatePendingReviewFixture(path, nodeID, body string) error {
+	encoded, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var pages []map[string]any
+	if err := json.Unmarshal(encoded, &pages); err != nil {
+		return err
+	}
+	updated := false
+	for _, page := range pages {
+		data, _ := page["data"].(map[string]any)
+		repository, _ := data["repository"].(map[string]any)
+		pull, _ := repository["pullRequest"].(map[string]any)
+		reviews, _ := pull["reviews"].(map[string]any)
+		nodes, _ := reviews["nodes"].([]any)
+		for _, raw := range nodes {
+			reviewNode, _ := raw.(map[string]any)
+			if reviewNode["id"] == nodeID {
+				reviewNode["body"] = body
+				updated = true
+			}
+		}
+	}
+	if !updated {
+		return errors.New("pending review identity is absent")
+	}
+	return writeHelperJSON(path, pages)
+}
+
+func writeHelperJSON(path string, value any) error {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, encoded, 0o600)
+}
+
 func runClipboardHelper(name string, args []string, stdin []byte) int {
 	valid := len(args) == 0
 	if name == "xclip" {
@@ -250,28 +381,31 @@ func helperFailure(format string, args ...any) int {
 }
 
 type world struct {
-	context       context.Context
-	cancel        context.CancelFunc
-	root          string
-	repository    string
-	home          string
-	configHome    string
-	configPath    string
-	themes        string
-	fakeDirectory string
-	callLog       string
-	clipboard     string
-	metadata      string
-	threads       string
-	history       string
-	remote        string
-	baseRevision  string
-	headRevision  string
-	prBase        string
-	prHead        string
-	environment   []string
-	last          processResult
-	pty           *ptySession
+	context             context.Context
+	cancel              context.CancelFunc
+	root                string
+	repository          string
+	home                string
+	configHome          string
+	configPath          string
+	themes              string
+	fakeDirectory       string
+	callLog             string
+	clipboard           string
+	metadata            string
+	threads             string
+	pending             string
+	pendingComments     string
+	pendingCapabilities string
+	history             string
+	remote              string
+	baseRevision        string
+	headRevision        string
+	prBase              string
+	prHead              string
+	environment         []string
+	last                processResult
+	pty                 *ptySession
 }
 
 func newWorld(t testing.TB) *world {
@@ -281,19 +415,22 @@ func newWorld(t testing.TB) *world {
 
 	root := t.TempDir()
 	w := &world{
-		context:       ctx,
-		cancel:        cancel,
-		root:          root,
-		repository:    filepath.Join(root, "repository"),
-		home:          filepath.Join(root, "home"),
-		configHome:    filepath.Join(root, "config"),
-		fakeDirectory: filepath.Join(root, "bin"),
-		callLog:       filepath.Join(root, "external-calls.jsonl"),
-		clipboard:     filepath.Join(root, "clipboard"),
-		metadata:      filepath.Join(root, "github-metadata.json"),
-		threads:       filepath.Join(root, "github-threads.json"),
-		history:       filepath.Join(root, "github-history.json"),
-		remote:        filepath.Join(root, "pull-request.git"),
+		context:             ctx,
+		cancel:              cancel,
+		root:                root,
+		repository:          filepath.Join(root, "repository"),
+		home:                filepath.Join(root, "home"),
+		configHome:          filepath.Join(root, "config"),
+		fakeDirectory:       filepath.Join(root, "bin"),
+		callLog:             filepath.Join(root, "external-calls.jsonl"),
+		clipboard:           filepath.Join(root, "clipboard"),
+		metadata:            filepath.Join(root, "github-metadata.json"),
+		threads:             filepath.Join(root, "github-threads.json"),
+		pending:             filepath.Join(root, "github-pending.json"),
+		pendingComments:     filepath.Join(root, "github-pending-comments.json"),
+		pendingCapabilities: filepath.Join(root, "github-pending-capabilities.json"),
+		history:             filepath.Join(root, "github-history.json"),
+		remote:              filepath.Join(root, "pull-request.git"),
 	}
 	w.configPath = filepath.Join(w.configHome, "rvw", "config.toml")
 	w.themes = filepath.Join(w.configHome, "rvw", "themes")
@@ -340,6 +477,9 @@ func newWorld(t testing.TB) *world {
 		"RVW_E2E_CLIPBOARD=" + w.clipboard,
 		"RVW_E2E_GH_METADATA=" + w.metadata,
 		"RVW_E2E_GH_THREADS=" + w.threads,
+		"RVW_E2E_GH_PENDING=" + w.pending,
+		"RVW_E2E_GH_PENDING_COMMENTS=" + w.pendingComments,
+		"RVW_E2E_GH_PENDING_CAPABILITIES=" + w.pendingCapabilities,
 		"RVW_E2E_GH_HISTORY=" + w.history,
 		"RVW_E2E_GH_POST_MODE=success",
 	}
@@ -347,6 +487,16 @@ func newWorld(t testing.TB) *world {
 	w.initializePullRequest(t)
 	w.writeFile(t, w.configPath, "[github]\nfetch_threads = false\n")
 	w.writeFile(t, w.threads, "[]")
+	w.writeFile(t, w.pending, fmt.Sprintf(
+		`[{"errors":[],"data":{"viewer":{"login":"octo-reviewer"},`+
+			`"repository":{"nameWithOwner":"fixture/repository","pullRequest":{`+
+			`"number":7,"baseRefOid":%q,"headRefOid":%q,`+
+			`"reviews":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}]`,
+		w.prBase,
+		w.prHead,
+	))
+	w.writeFile(t, w.pendingComments, "[[]]")
+	w.writeFile(t, w.pendingCapabilities, "[]")
 	w.writeFile(t, w.history, "[[]]")
 	t.Cleanup(func() {
 		if w.pty != nil {
