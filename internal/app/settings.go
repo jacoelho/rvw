@@ -138,6 +138,10 @@ const (
 	KeyActionNextSearchHit       KeyAction = "next-search-hit"
 	KeyActionPreviousSearchHit   KeyAction = "previous-search-hit"
 	KeyActionSearch              KeyAction = "search"
+	KeyActionSearchVisible       KeyAction = "search-visible"
+	KeyActionFindFile            KeyAction = "find-file"
+	KeyActionNextSearchScope     KeyAction = "next-search-scope"
+	KeyActionPreviousSearchScope KeyAction = "previous-search-scope"
 	KeyActionCommand             KeyAction = "command"
 	KeyActionFilter              KeyAction = "filter"
 	KeyActionCopyMarkdown        KeyAction = "copy-markdown"
@@ -189,7 +193,9 @@ var validKeyActions = actionSet(
 	KeyActionToggleComments, KeyActionNextFile, KeyActionPreviousFile,
 	KeyActionNextHunk, KeyActionPreviousHunk, KeyActionNextComment,
 	KeyActionPreviousComment, KeyActionNextSearchHit, KeyActionPreviousSearchHit,
-	KeyActionSearch, KeyActionCommand, KeyActionFilter, KeyActionCopyMarkdown,
+	KeyActionSearch, KeyActionSearchVisible, KeyActionFindFile,
+	KeyActionNextSearchScope, KeyActionPreviousSearchScope,
+	KeyActionCommand, KeyActionFilter, KeyActionCopyMarkdown,
 	KeyActionExportMarkdown, KeyActionExportJSON, KeyActionOpenSubmit,
 	KeyActionHelp, KeyActionStatusDetails, KeyActionReload, KeyActionCancel,
 	KeyActionAccept, KeyActionDeleteBackward, KeyActionInsertNewline,
@@ -220,6 +226,7 @@ var contextKeyActions = map[KeyContext]map[KeyAction]struct{}{
 		KeyActionExpandDirectory, KeyActionCollapseDirectory, KeyActionVisualLine,
 		KeyActionVisualLines, KeyActionVisualHunk, KeyActionCommand,
 		KeyActionFilter, KeyActionHelp, KeyActionStatusDetails, KeyActionSearch,
+		KeyActionSearchVisible, KeyActionFindFile,
 		KeyActionOpenSubmit, KeyActionReload, KeyActionCopyMarkdown,
 		KeyActionExportMarkdown, KeyActionExportJSON, KeyActionToggleFilePanel,
 		KeyActionToggleComments, KeyActionToggleHiddenFiles,
@@ -235,7 +242,9 @@ var contextKeyActions = map[KeyContext]map[KeyAction]struct{}{
 	),
 	KeyContextSearch: actionSet(
 		KeyActionCancel, KeyActionInterrupt, KeyActionAccept,
-		KeyActionDeleteBackward,
+		KeyActionDeleteBackward, KeyActionMoveUp, KeyActionMoveDown,
+		KeyActionPageUp, KeyActionPageDown,
+		KeyActionNextSearchScope, KeyActionPreviousSearchScope,
 	),
 	KeyContextCommand: actionSet(
 		KeyActionCancel, KeyActionInterrupt, KeyActionAccept, KeyActionDeleteBackward,

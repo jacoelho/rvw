@@ -17,7 +17,10 @@ import (
 )
 
 // kittyRepeatedCtrlC is Ctrl-c with Kitty keyboard event type 2 (repeat).
-const kittyRepeatedCtrlC = "\x1b[99;5:2u"
+const (
+	kittyEscape        = "\x1b[27u"
+	kittyRepeatedCtrlC = "\x1b[99;5:2u"
+)
 
 func TestTerminalRenderingContract(t *testing.T) {
 	type sizeExample struct {
@@ -137,22 +140,91 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 			})
 			scenario.When("a current-file search completes", func(t testing.TB, w *world) {
 				w.pty.send(t, "/")
-				screen := w.pty.awaitScreen(t, "search prompt", containsScreen("Search changed patches"))
-				assertNoEscapedWidgetStyles(t, w, screen, "search prompt")
-				w.pty.send(t, "staged\r")
-				w.pty.awaitScreen(t, "search result", func(screen string) bool {
-					return strings.Contains(screen, "search hits") && strings.Contains(screen, "work 0/64")
+				screen := w.pty.awaitScreen(t, "current-file find", func(screen string) bool {
+					return strings.Contains(screen, "Find") && strings.Contains(screen, "Current") &&
+						strings.Contains(screen, "Enter searches changed patch lines")
 				})
+				assertNoEscapedWidgetStyles(t, w, screen, "current-file find")
+				w.pty.send(t, "staged\r")
+				w.pty.awaitScreen(t, "current-file find result", func(screen string) bool {
+					return strings.Contains(screen, "1 match") &&
+						strings.Contains(screen, "staged.txt") && strings.Contains(screen, "staged contents")
+				})
+				w.pty.send(t, kittyEscape)
+				w.pty.awaitScreen(t, "workspace after find", containsScreen("staged contents"))
 			})
 			scenario.When("the command prompt opens help", func(t testing.TB, w *world) {
 				w.pty.send(t, ":")
-				screen := w.pty.awaitScreen(t, "command prompt", containsScreen("Command"))
+				screen := w.pty.awaitScreen(t, "command footer", func(screen string) bool {
+					return strings.Contains(screen, "[focus:command]") &&
+						strings.Contains(screen, "staged contents")
+				})
 				assertNoEscapedWidgetStyles(t, w, screen, "command prompt")
+				lines := strings.Split(strings.TrimRight(screen, "\n"), "\n")
+				if len(lines) == 0 || !strings.HasPrefix(lines[len(lines)-1], ":") {
+					t.Fatalf("command input is not docked to the footer:\n%s", screen)
+				}
 				w.pty.send(t, "help\r")
 				w.pty.awaitScreen(t, "command-selected help", containsScreen("Effective help"))
 				w.pty.send(t, "q")
 			})
 			scenario.Then("a clean quit restores the terminal", func(t testing.TB, w *world) {
+				w.pty.send(t, "q")
+				w.pty.awaitExit(t)
+				assertTerminalLifecycle(t, w.pty, true)
+			})
+		})
+
+		feature.Scenario("find scopes preview accept and restore navigation", func(scenario *bdd.ScenarioSpec[*world]) {
+			scenario.Given("a stable worktree screen", launchStableWorktree())
+			scenario.When("review text find previews a match in another file", func(t testing.TB, w *world) {
+				w.pty.send(t, "g/")
+				w.pty.awaitScreen(t, "review find", func(screen string) bool {
+					return strings.Contains(screen, "Find") && strings.Contains(screen, "Review")
+				})
+				w.pty.send(t, "untracked\r")
+				w.pty.awaitScreen(t, "review find result", func(screen string) bool {
+					return strings.Contains(screen, "1 match") &&
+						strings.Contains(screen, "untracked.txt") &&
+						strings.Contains(screen, "untracked contents")
+				})
+			})
+			scenario.Then("escape restores the file active before the preview", func(t testing.TB, w *world) {
+				w.pty.send(t, kittyEscape)
+				w.pty.awaitScreen(t, "restored staged file", func(screen string) bool {
+					return strings.Contains(screen, "[focus:diff]  staged.txt") &&
+						strings.Contains(screen, "staged contents")
+				})
+			})
+			scenario.When("file find accepts a fuzzy path match", func(t testing.TB, w *world) {
+				w.pty.send(t, "\x10")
+				w.pty.awaitScreen(t, "file find", func(screen string) bool {
+					return strings.Contains(screen, "Find") && strings.Contains(screen, "Files")
+				})
+				w.pty.send(t, "untr")
+				w.pty.awaitScreen(t, "file find result", func(screen string) bool {
+					return strings.Contains(screen, "1 match") && strings.Contains(screen, "untracked.txt")
+				})
+				w.pty.send(t, "\r")
+			})
+			scenario.Then("accepted file navigation remains active", func(t testing.TB, w *world) {
+				w.pty.awaitScreen(t, "accepted untracked file", func(screen string) bool {
+					return strings.Contains(screen, "[focus:diff]  untracked.txt") &&
+						strings.Contains(screen, "untracked contents")
+				})
+			})
+			scenario.When("a later file preview is cancelled", func(t testing.TB, w *world) {
+				w.pty.send(t, "\x10staged")
+				w.pty.awaitScreen(t, "staged file preview", func(screen string) bool {
+					return strings.Contains(screen, "1 match") && strings.Contains(screen, "staged.txt")
+				})
+				w.pty.send(t, kittyEscape)
+			})
+			scenario.Then("the accepted file is restored and the terminal exits cleanly", func(t testing.TB, w *world) {
+				w.pty.awaitScreen(t, "restored accepted file", func(screen string) bool {
+					return strings.Contains(screen, "[focus:diff]  untracked.txt") &&
+						strings.Contains(screen, "untracked contents")
+				})
 				w.pty.send(t, "q")
 				w.pty.awaitExit(t)
 				assertTerminalLifecycle(t, w.pty, true)

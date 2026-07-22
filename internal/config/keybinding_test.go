@@ -158,6 +158,41 @@ func TestDefaultVisualKeybindingsPreserveNavigationAlternatives(t *testing.T) {
 	}
 }
 
+func TestDefaultFindKeybindingsExposeScopesAndResultNavigation(t *testing.T) {
+	bindings, err := resolveKeybindings(nil)
+	if err != nil {
+		t.Fatalf("resolve default keybindings: %v", err)
+	}
+
+	want := map[KeyContext]map[KeyChord]KeyAction{
+		KeyContextNormal: {
+			"/":      KeyActionSearch,
+			"g /":    KeyActionSearchVisible,
+			"Ctrl-p": KeyActionFindFile,
+		},
+		KeyContextSearch: {
+			"Tab":       KeyActionNextSearchScope,
+			"Shift-Tab": KeyActionPreviousSearchScope,
+			"up":        KeyActionMoveUp,
+			"down":      KeyActionMoveDown,
+			"Ctrl-p":    KeyActionMoveUp,
+			"Ctrl-n":    KeyActionMoveDown,
+			"pgup":      KeyActionPageUp,
+			"pgdown":    KeyActionPageDown,
+		},
+	}
+	for _, binding := range bindings {
+		if actions, exists := want[binding.Context]; exists && actions[binding.Chord] == binding.Action {
+			delete(actions, binding.Chord)
+		}
+	}
+	for context, missing := range want {
+		for chord, action := range missing {
+			t.Errorf("default %q binding %q does not perform %q", context, chord, action)
+		}
+	}
+}
+
 func TestKeybindingPrefixAmbiguityIsRejectedInEitherOrder(t *testing.T) {
 	short := Keybinding{Context: KeyContextNormal, Chord: "g", Action: KeyActionQuit}
 	long := Keybinding{Context: KeyContextNormal, Chord: "g g", Action: KeyActionInterrupt}

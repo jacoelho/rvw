@@ -260,13 +260,17 @@ func (model *Model) applyCommandAction(action KeyAction) (tea.Cmd, bool) {
 	case KeyActionReload:
 		model.requestReload()
 	case KeyActionSearch:
-		return model.beginPrompt(ModeSearch), true
+		return model.openFind(findCurrent), true
+	case KeyActionSearchVisible:
+		return model.openFind(findReview), true
+	case KeyActionFindFile:
+		return model.openFind(findFiles), true
 	case KeyActionFilter:
-		command := model.beginPrompt(ModeCommand)
+		command := model.beginCommandPrompt()
 		model.commandInput.SetValue("filter ")
 		return command, true
 	case KeyActionCommand:
-		return model.beginPrompt(ModeCommand), true
+		return model.beginCommandPrompt(), true
 	case KeyActionCopyMarkdown:
 		model.openExportPicker(exportSelection{
 			format:      review.ExportMarkdown,

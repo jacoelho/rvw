@@ -150,6 +150,7 @@ func TestModalContextsExecuteSequentialMultiStrokeBindings(t *testing.T) {
 		name       string
 		context    KeyContext
 		mode       InteractionMode
+		overlay    Overlay
 		inputValue func(*Model) string
 	}{
 		{
@@ -163,7 +164,8 @@ func TestModalContextsExecuteSequentialMultiStrokeBindings(t *testing.T) {
 		{
 			name:    "search",
 			context: KeyContextSearch,
-			mode:    ModeSearch,
+			mode:    ModeNormal,
+			overlay: OverlayFind,
 			inputValue: func(model *Model) string {
 				return model.searchInput.Value()
 			},
@@ -183,6 +185,7 @@ func TestModalContextsExecuteSequentialMultiStrokeBindings(t *testing.T) {
 			settleModelWork(t, model, coordinator)
 			model.commandContext = context.Background()
 			model.mode = testCase.mode
+			model.overlay = testCase.overlay
 			model.settings.keybindings = []Keybinding{{
 				Context: testCase.context,
 				Chord:   "g x",
@@ -198,8 +201,13 @@ func TestModalContextsExecuteSequentialMultiStrokeBindings(t *testing.T) {
 			}
 
 			_, _ = model.Update(keyMessage("x"))
-			if model.mode != ModeNormal || len(model.chord.strokes) != 0 {
-				t.Fatalf("completed chord left mode=%v chord=%v", model.mode, model.chord.strokes)
+			if model.mode != ModeNormal || model.overlay != OverlayNone || len(model.chord.strokes) != 0 {
+				t.Fatalf(
+					"completed chord left mode=%v overlay=%v chord=%v",
+					model.mode,
+					model.overlay,
+					model.chord.strokes,
+				)
 			}
 			if value := testCase.inputValue(model); value != "" {
 				t.Fatalf("completed chord entered modal text: %q", value)
@@ -438,7 +446,7 @@ func modelForKeyContext(context KeyContext) *Model {
 	case KeyContextCommentEdit:
 		model.mode = ModeCommentEdit
 	case KeyContextSearch:
-		model.mode = ModeSearch
+		model.overlay = OverlayFind
 	case KeyContextCommand:
 		model.mode = ModeCommand
 	case KeyContextHelp:

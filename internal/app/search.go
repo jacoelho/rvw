@@ -8,22 +8,24 @@ import (
 	"github.com/jacoelho/rvw/internal/review"
 )
 
-func (model *Model) startSearch(value string, scope review.SearchScope) {
+func (model *Model) startSearch(value string, target review.SearchTarget) {
 	query, err := review.NewSearchQuery(value)
 	if err != nil {
 		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
+		model.failFindSearch(err)
 		return
 	}
 	if model.foreground.reloadActive() {
 		model.notice = &Notice{Kind: NoticeWarning, Text: "search is unavailable during reload"}
+		model.failFindSearch(errors.New("search is unavailable during reload"))
 		return
 	}
 	model.foreground.clearPendingDiffTarget()
 	hadSearch := model.foreground.searchOperation() != 0
 	hadPatch := model.foreground.patchCount() != 0
 	start, cancellations, ready := model.foreground.requestSearch(pendingSearch{
-		query: query,
-		scope: scope,
+		query:  query,
+		target: new(target),
 	})
 	for _, operationID := range cancellations {
 		model.coordinator.Cancel(operationID)
@@ -48,18 +50,20 @@ func (model *Model) beginSearch(start foregroundStart) {
 	if err != nil {
 		model.rejectAndApplyForegroundStart(start)
 		model.notice = &Notice{Kind: NoticeError, Text: operationIdentityExhausted}
+		model.failFindSearch(err)
 		return
 	}
 	model.nextOperation++
 	next, request, err := model.review.StartSearch(
 		operationID,
 		start.search.query,
-		start.search.scope,
+		*start.search.target,
 		model.settings.patchContext,
 	)
 	if err != nil {
 		model.rejectAndApplyForegroundStart(start)
 		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
+		model.failFindSearch(err)
 		return
 	}
 	if err := model.coordinator.SubmitSearch(SearchWork{
@@ -70,6 +74,7 @@ func (model *Model) beginSearch(start foregroundStart) {
 		model.review = failSearchAdmission(next, request, err)
 		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
 		model.rejectAndApplyForegroundStart(start)
+		model.failFindSearch(err)
 		return
 	}
 	if !model.foreground.admitted(start, operationID) {
@@ -77,10 +82,15 @@ func (model *Model) beginSearch(start foregroundStart) {
 		err := errors.New("foreground search admission invariant violated")
 		model.review = failSearchAdmission(next, request, err)
 		model.notice = &Notice{Kind: NoticeError, Text: NoticeText(err.Error())}
+		model.failFindSearch(err)
 		return
 	}
 	model.review = next
 	model.searchCursor = 0
+	if model.overlay == OverlayFind && model.find.submittedQuery == start.search.query.String() {
+		model.find.searchOperation = operationID
+		model.find.phase = findSearching
+	}
 	model.notice = &Notice{Kind: NoticeInformation, Text: "searching changed patches"}
 }
 
@@ -213,6 +223,7 @@ func (model *Model) applySearchOutcome(outcome SearchOutcome) {
 	case review.SearchFailed:
 		model.notice = &Notice{Kind: NoticeError, Text: NoticeText(summary.Detail.String())}
 	}
+	model.completeFindSearch(outcome.ID)
 	if summary.HitCount != 0 {
 		model.activateSearchHit(0)
 	}

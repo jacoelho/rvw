@@ -445,7 +445,10 @@ func (coordinator *Coordinator) SubmitSearch(work SearchWork) error {
 		work.Request.Query == "" {
 		return errors.New("invalid search work")
 	}
-	requestBytes := int64(len(work.Request.Query)) + 128
+	if work.Request.Target.FileCount() == 0 {
+		return errors.New("invalid search work")
+	}
+	requestBytes := int64(len(work.Request.Query)) + work.Request.Target.RetainedBytes() + 128
 	return coordinator.submit(
 		work.ID,
 		requestBytes,
@@ -658,20 +661,14 @@ func (coordinator *Coordinator) executeSearch(job searchJob) (review.SearchResul
 	hits := make([]review.SearchHit, 0, 256)
 	var unavailable uint32
 	status := review.SearchComplete
-	files := snapshot.AllFiles()
-	total := snapshot.FileCount()
-	if request.Scope == review.SearchCurrentFile {
-		file, ok := snapshot.File(request.File)
+	total := request.Target.FileCount()
+	retainedBytes := int64(0)
+	fileIndex := 0
+	for fileID := range request.Target.Files() {
+		file, ok := snapshot.File(fileID)
 		if !ok {
 			return review.SearchResult{}, errors.New("search file is unavailable")
 		}
-		files = func(yield func(review.File) bool) {
-			yield(file)
-		}
-		total = 1
-	}
-	fileIndex := 0
-	for file := range files {
 		currentIndex := fileIndex
 		fileIndex++
 		coordinator.reportProgress(Progress{
@@ -728,11 +725,16 @@ func (coordinator *Coordinator) executeSearch(job searchJob) (review.SearchResul
 			)
 			coordinator.releaseCPU()
 			cursor = batch.Cursor
-			if len(hits)+len(batch.Hits) > review.MaxSearchHits {
-				status = review.SearchLimited
-				break
+			for _, hit := range batch.Hits {
+				hitBytes := hit.RetainedBytes()
+				if len(hits) == review.MaxSearchHits ||
+					retainedBytes+hitBytes > review.MaxSearchHitBytes {
+					status = review.SearchLimited
+					break
+				}
+				hits = append(hits, hit)
+				retainedBytes += hitBytes
 			}
-			hits = append(hits, batch.Hits...)
 			coordinator.reportProgress(Progress{
 				ID:        job.work.ID,
 				Completed: uint64FromInt(currentIndex),
@@ -742,6 +744,9 @@ func (coordinator *Coordinator) executeSearch(job searchJob) (review.SearchResul
 			if batch.Done {
 				break
 			}
+			if status == review.SearchLimited {
+				break
+			}
 		}
 		if status == review.SearchCancelled || status == review.SearchLimited {
 			break
@@ -749,8 +754,8 @@ func (coordinator *Coordinator) executeSearch(job searchJob) (review.SearchResul
 	}
 	coordinator.reportProgress(Progress{
 		ID:        job.work.ID,
-		Completed: uint64(total),
-		Total:     uint64(total),
+		Completed: uint64FromInt(total),
+		Total:     uint64FromInt(total),
 		Detail:    boundedOperationDetail("search scan complete"),
 	})
 	return finishSearchResult(request, status, unavailable, hits)

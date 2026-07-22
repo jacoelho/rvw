@@ -901,7 +901,10 @@ Main default controls are:
 | `] f` / `[ f` | Next/previous file |
 | `] h` / `[ h` | Next/previous hunk |
 | `] c` / `[ c` | Next/previous comment |
-| `/`, `n`, `N` | Search; next/previous result |
+| `/` | Find text in the current file |
+| `g /` | Find text in the visible review |
+| `Ctrl-p` | Find a visible file by path |
+| `n` / `N` | Next/previous accepted text-search result |
 | `c` / `C` | Comment at cursor/on active file |
 | `v` / `V` | Select a line range/hunk |
 | `e` / `d d` | Edit/delete focused comment |
@@ -920,12 +923,33 @@ Every accepted textarea update, including bracketed paste, is synchronized into 
 before the next message. A rejected byte or domain limit restores the prior editor contents and
 logical cursor while preserving the textarea's returned command. A paste above 64 KiB is rejected
 before widget update, and a minimum-size or blocking overlay suppresses paste mutation of hidden
-editors. Search and command prompts apply the same pre-widget paste bound and transactional byte
+editors. Find and command inputs apply the same pre-widget paste bound and transactional byte
 limit.
 Multi-key chords time out after 750 milliseconds. Numeric repeats range from 1 through 9,999.
 Chord/repeat state resets on context changes, invalid continuation, or timeout. Effective help
-reflects user overrides. Search and command-prompt input are each limited to 64 KiB; reaching the
-limit is visible and accepts no further input until the user deletes content or cancels.
+reflects user overrides. Text-find and command input are each limited to 64 KiB; file-find input is
+limited to 4 KiB. Reaching a limit is visible and accepts no further input until the user deletes
+content or cancels.
+Command entry replaces the normal status row with one focused footer input while preserving the
+title and review workspace. `Enter` executes the command and `Esc` restores the normal status row.
+
+Find is one workspace-composited palette with `Current`, `Review`, and `Files` scopes. `/`, `g /`,
+and `Ctrl-p` open those scopes directly; `Tab` and `Shift-Tab` switch scope without discarding the
+query. `Current` searches the active file's changed patch lines. `Review` searches the ordered
+visible-file projection captured when the palette opens, so active filters and hidden-file state
+remain stable for that invocation. Both text scopes use literal, case-sensitive UTF-8 matching and
+start only when `Enter` is pressed. `Files` incrementally fuzzy-matches display paths from the same
+captured projection after a short debounce. It does not invoke `fzf` or another subprocess.
+
+The palette overlays the workspace in a centered bordered panel at 48 by 12 cells or larger and
+uses the whole available canvas below that threshold. Only result rows in its viewport are
+materialized. File matching examines at most 256 files and 64 KiB of display paths per update and
+retains at most the best 256 results; text-search results retain bounded excerpts and preserve
+limited, partial, cancelled, and failed outcomes explicitly. Arrow keys or `Ctrl-p`/`Ctrl-n`
+preview results. For text scopes, the first `Enter` starts a changed-patch search and a later
+`Enter` accepts the selected result. For file scope, `Enter` accepts the selected file. `Esc`
+cancels active work, closes the palette, and restores the exact file, selection, focus, and diff
+viewport from before the palette opened; accepted navigation remains active.
 
 In the comments pane, `j` and `k` change only the selected comment. `Enter` activates that
 selection. `] c` and `[ c` select and activate the next or previous comment in one operation,

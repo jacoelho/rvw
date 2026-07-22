@@ -337,10 +337,14 @@ func TestExportInputExcludesPatchAndSearchStateAndPreservesOutput(t *testing.T) 
 	}
 	operation, _ := NewOperationID(1)
 	query, _ := NewSearchQuery("short")
+	searchTarget, err := NewSearchTarget(current.Snapshot(), []FileID{0})
+	if err != nil {
+		t.Fatal(err)
+	}
 	searching, searchRequest, err := current.StartSearch(
 		operation,
 		query,
-		SearchAllFiles,
+		searchTarget,
 		WholeFileContext(),
 	)
 	if err != nil {

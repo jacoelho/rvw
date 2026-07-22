@@ -73,6 +73,7 @@ const (
 	OverlayConfirm
 	OverlayExport
 	OverlaySubmit
+	OverlayFind
 )
 
 // InteractionMode describes interaction mode.
@@ -83,7 +84,6 @@ const (
 	ModeNormal InteractionMode = iota + 1
 	ModeVisual
 	ModeCommentEdit
-	ModeSearch
 	ModeCommand
 )
 
@@ -120,13 +120,15 @@ type chordTimeoutMsg struct {
 type initializeMsg struct{}
 
 type mouseActionMsg struct {
-	tree         treeNodeIdentity
-	reviewState  uint64
-	delta        int
-	commentIndex int
-	diffLine     uint32
-	focus        FocusOwner
-	target       mouseTarget
+	tree           treeNodeIdentity
+	reviewState    uint64
+	findGeneration uint64
+	delta          int
+	commentIndex   int
+	findIndex      int
+	diffLine       uint32
+	focus          FocusOwner
+	target         mouseTarget
 }
 
 type fileFilterChunkMsg struct {
@@ -149,8 +151,8 @@ type exportSelection struct {
 }
 
 type pendingSearch struct {
-	query review.SearchQuery
-	scope review.SearchScope
+	target *review.SearchTarget
+	query  review.SearchQuery
 }
 
 // Model represents model.
@@ -174,6 +176,7 @@ type Model struct {
 	pendingStdout          *review.PreparedExport
 	ambiguousPaths         map[string]struct{}
 	notice                 *Notice
+	findRestore            *findReturnState
 	help                   help.Model
 	filterQuery            string
 	visibleFileTree        fileTree
@@ -186,10 +189,11 @@ type Model struct {
 	fileOrder              []review.FileID
 	searchInput            textinput.Model
 	commandInput           textinput.Model
-	chord                  pendingKeyChord
 	foreground             foregroundState
+	chord                  pendingKeyChord
 	settings               Settings
 	review                 review.Review
+	find                   findPalette
 	coordinatorStats       CoordinatorStats
 	size                   TerminalSize
 	searchCursor           int
@@ -275,7 +279,6 @@ func NewModel(
 	searchInput.CharLimit = maxPromptBytes
 	commandInput := textinput.New()
 	commandInput.Prompt = ": "
-	commandInput.Placeholder = "command"
 	commandInput.CharLimit = maxPromptBytes
 	model := &Model{
 		commandContext:      ctx,
@@ -332,6 +335,10 @@ func (model *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return model.finishUpdate(helpCommand, childCommand, model.advanceFileFilter(message))
 	case treeMoveChunkMsg:
 		return model.finishUpdate(helpCommand, childCommand, model.advanceTreeMove(message))
+	case findDebounceMsg:
+		return model.finishUpdate(helpCommand, childCommand, model.beginFileFind(message))
+	case findChunkMsg:
+		return model.finishUpdate(helpCommand, childCommand, model.advanceFileFind(message))
 	case tea.KeyPressMsg:
 		return model.finishUpdate(helpCommand, childCommand, model.applyKeyPress(message))
 	case outcomeReadyMsg:
@@ -353,15 +360,18 @@ func (model *Model) updateChildren(message tea.Msg) (tea.Cmd, tea.Cmd) {
 		model.help, helpCommand = model.help.Update(message)
 	}
 	if _, isPaste := message.(tea.PasteMsg); isPaste &&
-		(model.belowMinimum() || model.overlay != OverlayNone) {
+		(model.belowMinimum() || model.overlay != OverlayNone && model.overlay != OverlayFind) {
 		return helpCommand, nil
 	}
 	var childCommand tea.Cmd
+	if model.overlay == OverlayFind {
+		return helpCommand, model.updateFindInput(message)
+	}
 	switch model.mode {
 	case ModeNormal, ModeVisual:
 	case ModeCommentEdit:
 		childCommand = model.updateCommentEditor(message)
-	case ModeSearch, ModeCommand:
+	case ModeCommand:
 		childCommand = model.updatePromptInput(message)
 	}
 	return helpCommand, childCommand
@@ -383,6 +393,21 @@ func (model *Model) applyWindowSize(message tea.WindowSizeMsg) {
 }
 
 func (model *Model) applyMouseAction(message mouseActionMsg) tea.Cmd {
+	if model.overlay == OverlayFind {
+		if message.findGeneration != model.find.generation || model.find.phase != findReady {
+			return nil
+		}
+		if message.delta != 0 {
+			model.moveFind(message.delta)
+		}
+		if message.target == mouseTargetFind &&
+			message.findIndex >= 0 && message.findIndex < model.findResultCount() {
+			model.find.cursor = message.findIndex
+			model.clampFindTop()
+			model.previewFindSelection(false)
+		}
+		return nil
+	}
 	if message.reviewState != model.review.StateRevision() ||
 		model.mode != ModeNormal || model.overlay != OverlayNone || model.belowMinimum() ||
 		!model.focusVisible(message.focus) {
@@ -398,7 +423,7 @@ func (model *Model) applyMouseAction(message mouseActionMsg) tea.Cmd {
 		command = model.move(message.delta)
 	}
 	switch message.target {
-	case mouseTargetNone:
+	case mouseTargetNone, mouseTargetFind:
 	case mouseTargetTree:
 		model.selectTreeNode(message.tree)
 	case mouseTargetDiff:
@@ -414,9 +439,11 @@ func (model *Model) applyKeyPress(message tea.KeyPressMsg) tea.Cmd {
 	switch {
 	case model.belowMinimum():
 		return model.handleKey(message)
+	case model.overlay == OverlayFind:
+		return model.handleFindKey(message)
 	case model.mode == ModeCommentEdit:
 		return model.handleCommentEditorKey(message)
-	case model.mode == ModeSearch || model.mode == ModeCommand:
+	case model.mode == ModeCommand:
 		return model.handlePromptKey(message)
 	default:
 		return model.handleKey(message)
@@ -458,9 +485,14 @@ func (model *Model) CloseSourceDocument() error {
 
 // MaterializedRows returns the receiver's materialized rows value.
 func (model *Model) MaterializedRows() int {
-	if !model.size.Known || model.belowMinimum() || model.overlay != OverlayNone {
+	if !model.size.Known || model.belowMinimum() ||
+		model.overlay != OverlayNone && model.overlay != OverlayFind {
 		_, height := model.renderSize()
 		return height
+	}
+	findRows := 0
+	if model.overlay == OverlayFind {
+		findRows = model.findResultRows()
 	}
 	bodyHeight := max(min(model.size.Height, maxRenderHeight)-2, 1)
 	rows := 0
@@ -469,14 +501,14 @@ func (model *Model) MaterializedRows() int {
 	}
 	active, ok := model.review.ActiveFile()
 	if !ok {
-		return rows + 1
+		return rows + 1 + findRows
 	}
 	state := model.review.Patch(active)
 	if state.Status != review.PatchReady {
-		return rows + 1
+		return rows + 1 + findRows
 	}
 	remaining := max(int(state.Lines)-int(model.diffTop), 0)
-	return rows + max(1, min(remaining, bodyHeight+viewportOverscan))
+	return rows + max(1, min(remaining, bodyHeight+viewportOverscan)) + findRows
 }
 
 func (model *Model) handleReady(message outcomeReadyMsg) tea.Cmd {
@@ -613,6 +645,9 @@ func (model *Model) applyPatchOutcome(patch PatchOutcome) {
 		model.requestSyntax()
 	} else if active, exists := model.review.ActiveFile(); exists && active == fileID {
 		model.foreground.clearReloadViewport(fileID)
+	}
+	if active, exists := model.review.ActiveFile(); exists && active == fileID {
+		model.applyPendingFindRestore(fileID)
 	}
 	if effect.kind == foregroundEffectRequestPatch &&
 		result.Status == review.PatchReady {
@@ -1069,7 +1104,7 @@ func (model *Model) keyContext() KeyContext {
 		return KeyContextVisual
 	case model.mode == ModeCommentEdit:
 		return KeyContextCommentEdit
-	case model.mode == ModeSearch:
+	case model.overlay == OverlayFind:
 		return KeyContextSearch
 	case model.mode == ModeCommand:
 		return KeyContextCommand

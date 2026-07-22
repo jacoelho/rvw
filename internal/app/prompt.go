@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/jacoelho/rvw/internal/delivery"
 	"github.com/jacoelho/rvw/internal/review"
@@ -46,20 +47,11 @@ type commandIntent struct {
 	force   bool
 }
 
-func (model *Model) beginPrompt(mode InteractionMode) tea.Cmd {
+func (model *Model) beginCommandPrompt() tea.Cmd {
 	model.abandonChord()
-	switch mode {
-	case ModeSearch:
-		model.mode = mode
-		model.searchInput.SetValue("")
-		return model.searchInput.Focus()
-	case ModeCommand:
-		model.mode = mode
-		model.commandInput.SetValue("")
-		return model.commandInput.Focus()
-	default:
-		return nil
-	}
+	model.mode = ModeCommand
+	model.commandInput.SetValue("")
+	return model.commandInput.Focus()
 }
 
 func (model *Model) handlePromptKey(message tea.KeyPressMsg) tea.Cmd {
@@ -73,12 +65,6 @@ func (model *Model) handlePromptKey(message tea.KeyPressMsg) tea.Cmd {
 			return nil
 		}
 		if action == KeyActionAccept {
-			if model.mode == ModeSearch {
-				query := model.searchInput.Value()
-				model.cancelPrompt()
-				model.startSearch(query, review.SearchCurrentFile)
-				return nil
-			}
 			command := model.commandInput.Value()
 			model.cancelPrompt()
 			return model.executeCommand(command)
@@ -93,9 +79,6 @@ func (model *Model) handlePromptKey(message tea.KeyPressMsg) tea.Cmd {
 
 func (model *Model) updatePromptInput(message tea.Msg) tea.Cmd {
 	input := &model.commandInput
-	if model.mode == ModeSearch {
-		input = &model.searchInput
-	}
 	if paste, ok := message.(tea.PasteMsg); ok && len(paste.Content) > maxPromptBytes {
 		model.notice = &Notice{
 			Kind: NoticeWarning,
@@ -128,24 +111,19 @@ func (model *Model) cancelPrompt() {
 
 func (model *Model) resizePrompts() {
 	width := max(min(model.size.Width, maxRenderWidth)-4, 1)
+	if model.overlay == OverlayFind {
+		renderWidth, renderHeight := model.renderSize()
+		layout := newFindModalLayout(renderWidth, renderHeight)
+		width = max(layout.innerWidth-lipgloss.Width(model.searchInput.Prompt)-1, 1)
+	}
 	model.searchInput.SetWidth(width)
-	model.commandInput.SetWidth(width)
+	commandWidth := min(model.size.Width, maxRenderWidth) -
+		lipgloss.Width(model.commandInput.Prompt) - 1
+	model.commandInput.SetWidth(max(commandWidth, 1))
 }
 
-func (model *Model) promptView(width, height int) string {
-	contextName := KeyContextCommand
-	title := "Command"
-	input := model.commandInput.View()
-	if model.mode == ModeSearch {
-		contextName = KeyContextSearch
-		title = "Search changed patches"
-		input = model.searchInput.View()
-	}
-	return constrainedStyledLines(
-		[]string{title, model.bindingSummary(contextName), input},
-		width,
-		height,
-	)
+func (model *Model) commandBarLine(width int, styles semanticStyles) string {
+	return styles.status.Render(fitCellWidth(model.commandInput.View(), width))
 }
 
 func parseCommand(value string) (commandIntent, error) {
@@ -278,7 +256,10 @@ func (model *Model) executeCommand(value string) tea.Cmd {
 	case commandFilter:
 		return model.startFileFilter(intent.text)
 	case commandSearchAll:
-		model.startSearch(intent.text, review.SearchAllFiles)
+		command := model.openFind(findReview)
+		model.searchInput.SetValue(intent.text)
+		model.submitFindText()
+		return command
 	case commandSearchCancel:
 		model.cancelSearch()
 	case commandContext:

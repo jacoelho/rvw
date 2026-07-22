@@ -306,7 +306,7 @@ func TestBlockingPresentationPreventsPasteMutation(t *testing.T) {
 			}
 
 			promptModel, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
-			_ = promptModel.beginPrompt(ModeSearch)
+			_ = promptModel.openFind(findCurrent)
 			promptModel.searchInput.SetValue("visible")
 			block(promptModel)
 			_, _ = promptModel.Update(tea.PasteMsg{Content: " hidden"})
@@ -318,20 +318,26 @@ func TestBlockingPresentationPreventsPasteMutation(t *testing.T) {
 }
 
 func TestPromptPasteEnforcesByteLimitBeforeAndAfterWidgetUpdate(t *testing.T) {
-	for _, mode := range []InteractionMode{ModeSearch, ModeCommand} {
+	for _, find := range []bool{true, false} {
 		model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
-		if command := model.beginPrompt(mode); command == nil {
-			t.Fatalf("mode %d prompt did not focus", mode)
-		}
 		input := &model.commandInput
-		if mode == ModeSearch {
+		label := "command"
+		var command tea.Cmd
+		if find {
+			label = "find"
+			command = model.openFind(findCurrent)
 			input = &model.searchInput
+		} else {
+			command = model.beginCommandPrompt()
+		}
+		if command == nil {
+			t.Fatalf("%s prompt did not focus", label)
 		}
 		input.SetValue("prefix")
 		input.SetCursor(2)
 		_, _ = model.Update(tea.PasteMsg{Content: strings.Repeat("x", maxPromptBytes+1)})
 		if input.Value() != "prefix" || input.Position() != 2 {
-			t.Fatalf("mode %d oversized raw paste changed prompt to %q at %d", mode, input.Value(), input.Position())
+			t.Fatalf("%s oversized raw paste changed prompt to %q at %d", label, input.Value(), input.Position())
 		}
 
 		previous := strings.Repeat("é", maxPromptBytes/2-8)
@@ -340,10 +346,14 @@ func TestPromptPasteEnforcesByteLimitBeforeAndAfterWidgetUpdate(t *testing.T) {
 		model.notice = nil
 		_, _ = model.Update(tea.PasteMsg{Content: strings.Repeat("é", 16)})
 		if input.Value() != previous || input.Position() != 7 {
-			t.Fatalf("mode %d byte-expanding paste changed prompt bytes=%d cursor=%d", mode, len(input.Value()), input.Position())
+			t.Fatalf("%s byte-expanding paste changed prompt bytes=%d cursor=%d", label, len(input.Value()), input.Position())
 		}
-		if model.notice == nil || !strings.Contains(string(model.notice.Text), "prompt input limit reached") {
-			t.Fatalf("mode %d prompt limit notice = %+v", mode, model.notice)
+		if find {
+			if !strings.Contains(model.find.failure, "query exceeds") {
+				t.Fatalf("find prompt limit failure = %q", model.find.failure)
+			}
+		} else if model.notice == nil || !strings.Contains(string(model.notice.Text), "prompt input limit reached") {
+			t.Fatalf("command prompt limit notice = %+v", model.notice)
 		}
 	}
 }

@@ -68,12 +68,19 @@ type commentEditorLayout struct {
 }
 
 type mouseHitMap struct {
-	treeRows    []treeNodeIdentity
-	diffRows    []uint32
-	commentRows []int
-	layout      workspaceLayout
-	reviewState uint64
-	bodyHeight  int
+	treeRows       []treeNodeIdentity
+	diffRows       []uint32
+	commentRows    []int
+	findRows       []int
+	layout         workspaceLayout
+	reviewState    uint64
+	bodyHeight     int
+	findX          int
+	findY          int
+	findWidth      int
+	findHeight     int
+	findResultY    int
+	findGeneration uint64
 }
 
 type mouseTarget uint8
@@ -83,6 +90,7 @@ const (
 	mouseTargetTree
 	mouseTargetDiff
 	mouseTargetComment
+	mouseTargetFind
 )
 
 type diffLineNumberWidths struct {
@@ -104,8 +112,24 @@ func (model *Model) View() tea.View {
 		content = model.confirmationView(width, height)
 	case model.mode == ModeCommentEdit:
 		content = model.commentEditorView(width, height)
-	case model.mode == ModeSearch || model.mode == ModeCommand:
-		content = model.promptView(width, height)
+	case model.overlay == OverlayFind:
+		layout := model.workspaceLayout(width, height)
+		workspace, _ := model.workspaceView(width, height, layout)
+		styles := newSemanticStyles(model.settings)
+		modal, findLayout, findRows := model.findModalView(width, height, styles)
+		content = lipgloss.NewCompositor(
+			lipgloss.NewLayer(workspace),
+			lipgloss.NewLayer(modal).X(findLayout.x).Y(findLayout.y).Z(1),
+		).Render()
+		mouseHits = mouseHitMap{
+			findRows:       findRows,
+			findX:          findLayout.x,
+			findY:          findLayout.y,
+			findWidth:      findLayout.width,
+			findHeight:     findLayout.height,
+			findResultY:    findLayout.resultY,
+			findGeneration: model.find.generation,
+		}
 	case model.overlay == OverlayHelp:
 		content = model.helpView(width, height)
 	case model.overlay == OverlayStatus:
@@ -163,11 +187,14 @@ func (model *Model) workspaceView(
 		)
 	}
 	title := styles.panel.Render(model.titleLine(width, styles))
-	status := styles.status.Render(model.statusLine(width, styles))
+	footer := styles.status.Render(model.statusLine(width, styles))
+	if model.mode == ModeCommand {
+		footer = model.commandBarLine(width, styles)
+	}
 	lines := make([]string, 0, len(body)+2)
 	lines = append(lines, title)
 	lines = append(lines, body...)
-	lines = append(lines, status)
+	lines = append(lines, footer)
 	return strings.Join(lines, "\n"), mouseHitMap{
 		reviewState: model.review.StateRevision(),
 		bodyHeight:  bodyHeight,
@@ -179,6 +206,9 @@ func (model *Model) workspaceView(
 }
 
 func (hits mouseHitMap) command(message tea.MouseMsg) tea.Cmd {
+	if hits.findGeneration != 0 {
+		return hits.findCommand(message)
+	}
 	mouse := message.Mouse()
 	if hits.bodyHeight == 0 || mouse.Y < 1 || mouse.Y > hits.bodyHeight {
 		return nil
@@ -220,6 +250,39 @@ func (hits mouseHitMap) command(message tea.MouseMsg) tea.Cmd {
 				action.commentIndex = hits.commentRows[row]
 			}
 		}
+	case tea.MouseWheelMsg:
+		switch mouse.Button {
+		case tea.MouseWheelUp:
+			action.delta = -3
+		case tea.MouseWheelDown:
+			action.delta = 3
+		default:
+			return nil
+		}
+	default:
+		return nil
+	}
+	return func() tea.Msg { return action }
+}
+
+func (hits mouseHitMap) findCommand(message tea.MouseMsg) tea.Cmd {
+	mouse := message.Mouse()
+	if mouse.X < hits.findX || mouse.X >= hits.findX+hits.findWidth ||
+		mouse.Y < hits.findY || mouse.Y >= hits.findY+hits.findHeight {
+		return nil
+	}
+	action := mouseActionMsg{findGeneration: hits.findGeneration}
+	switch message.(type) {
+	case tea.MouseClickMsg:
+		if mouse.Button != tea.MouseLeft {
+			return nil
+		}
+		row := mouse.Y - hits.findResultY
+		if row < 0 || row >= len(hits.findRows) || hits.findRows[row] < 0 {
+			return nil
+		}
+		action.target = mouseTargetFind
+		action.findIndex = hits.findRows[row]
 	case tea.MouseWheelMsg:
 		switch mouse.Button {
 		case tea.MouseWheelUp:
@@ -1068,6 +1131,8 @@ func (model *Model) titleLine(width int, styles semanticStyles) string {
 	switch {
 	case model.mode == ModeCommentEdit:
 		focus = "comment"
+	case model.mode == ModeCommand:
+		focus = KeyContextCommand.String()
 	case model.focus == FocusFileTree:
 		focus = "files"
 	case model.focus == FocusComments:

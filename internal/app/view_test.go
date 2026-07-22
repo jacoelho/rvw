@@ -93,20 +93,71 @@ func TestHelpViewPreservesWidgetStyles(t *testing.T) {
 	}
 }
 
-func TestPromptViewsPreserveWidgetStyles(t *testing.T) {
-	for _, mode := range []InteractionMode{ModeSearch, ModeCommand} {
-		t.Run(fmt.Sprint(mode), func(t *testing.T) {
+func TestFindPalettePreservesWidgetStyles(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	_, _ = model.Update(tea.WindowSizeMsg{Width: normalWidth, Height: 24})
+	_ = model.openFind(findCurrent)
+
+	view := model.View()
+	plain := ansi.Strip(view.Content)
+	if strings.Contains(plain, `\x1B[`) {
+		t.Fatalf("prompt exposed escaped widget styling:\n%s", plain)
+	}
+	if !strings.Contains(view.Content, "\x1b[") {
+		t.Fatalf("prompt discarded widget styling:\n%q", view.Content)
+	}
+}
+
+func TestCommandPromptUsesFocusedWorkspaceFooter(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	_, _ = model.Update(tea.WindowSizeMsg{Width: normalWidth, Height: 24})
+	model.commandInput.SetVirtualCursor(false)
+	_ = model.beginCommandPrompt()
+	model.commandInput.SetValue("filter src")
+
+	view := model.View()
+	plain := ansi.Strip(view.Content)
+	lines := strings.Split(plain, "\n")
+	if len(lines) != 24 {
+		t.Fatalf("command prompt rendered %d lines, want 24", len(lines))
+	}
+	if !strings.Contains(lines[0], "[focus:command]") ||
+		!strings.Contains(lines[0], "alpha.txt") {
+		t.Fatalf("command prompt hid or misidentified the workspace:\n%s", plain)
+	}
+	if !strings.Contains(lines[len(lines)-1], ": filter src") {
+		t.Fatalf("command footer is absent:\n%s", plain)
+	}
+	if strings.Contains(plain, "Command\n") {
+		t.Fatalf("command prompt retained the full-screen heading:\n%s", plain)
+	}
+	if view.Cursor == nil || view.Cursor.Y != 23 {
+		t.Fatalf("command cursor = %+v, want footer row 23", view.Cursor)
+	}
+	if !strings.Contains(view.Content, "\x1b[") {
+		t.Fatalf("command footer discarded widget styling:\n%q", view.Content)
+	}
+}
+
+func TestCommandPromptFooterTracksSupportedTerminalHeight(t *testing.T) {
+	for _, size := range []TerminalSize{
+		{Width: minimumWidth, Height: minimumHeight, Known: true},
+		{Width: compactWidth, Height: 24, Known: true},
+		{Width: wideWidth, Height: 30, Known: true},
+	} {
+		t.Run(fmt.Sprintf("%dx%d", size.Width, size.Height), func(t *testing.T) {
 			model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
-			_, _ = model.Update(tea.WindowSizeMsg{Width: normalWidth, Height: 24})
-			model.mode = mode
+			_, _ = model.Update(tea.WindowSizeMsg{Width: size.Width, Height: size.Height})
+			model.commandInput.SetVirtualCursor(false)
+			_ = model.beginCommandPrompt()
 
 			view := model.View()
-			plain := ansi.Strip(view.Content)
-			if strings.Contains(plain, `\x1B[`) {
-				t.Fatalf("prompt exposed escaped widget styling:\n%s", plain)
+			lines := strings.Split(ansi.Strip(view.Content), "\n")
+			if len(lines) != size.Height || !strings.HasPrefix(lines[len(lines)-1], ": ") {
+				t.Fatalf("command footer at %dx%d:\n%s", size.Width, size.Height, view.Content)
 			}
-			if !strings.Contains(view.Content, "\x1b[") {
-				t.Fatalf("prompt discarded widget styling:\n%q", view.Content)
+			if view.Cursor == nil || view.Cursor.Y != size.Height-1 {
+				t.Fatalf("command cursor at %dx%d = %+v", size.Width, size.Height, view.Cursor)
 			}
 		})
 	}

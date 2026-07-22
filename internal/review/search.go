@@ -3,6 +3,7 @@ package review
 import (
 	"errors"
 	"fmt"
+	"iter"
 	"slices"
 	"unicode/utf8"
 )
@@ -14,8 +15,9 @@ const (
 	MaxSearchHitBytes      int64 = 16 << 20
 	MaxSearchBatchBytes          = 256 << 10
 	MaxSearchBatchLines          = 4_096
+	MaxSearchExcerptBytes        = 128
 	maxSearchBatchHits           = 4_096
-	searchHitRetainedBytes       = 32
+	searchHitRetainedBytes       = 48
 )
 
 // ErrInvalidSearch identifies an invalid search failure.
@@ -48,14 +50,50 @@ func (query SearchQuery) String() string {
 	return string(query)
 }
 
-// SearchScope describes search scope.
-type SearchScope uint8
+// SearchTarget is an immutable ordered set of files owned by one search.
+type SearchTarget struct {
+	files  []FileID
+	source SourceID
+}
 
-// SearchCurrentFile identifies a supported search current file value.
-const (
-	SearchCurrentFile SearchScope = iota + 1
-	SearchAllFiles
-)
+// NewSearchTarget constructs and validates a search target.
+func NewSearchTarget(snapshot Snapshot, files []FileID) (SearchTarget, error) {
+	if snapshot.SourceID() == 0 || len(files) == 0 || len(files) > MaxFiles {
+		return SearchTarget{}, fmt.Errorf("%w: invalid search target size", ErrInvalidSearch)
+	}
+	owned := slices.Clone(files)
+	seen := make(map[FileID]struct{}, len(owned))
+	for _, fileID := range owned {
+		if _, duplicate := seen[fileID]; duplicate {
+			return SearchTarget{}, fmt.Errorf("%w: duplicate search target file", ErrInvalidSearch)
+		}
+		if _, exists := snapshot.File(fileID); !exists {
+			return SearchTarget{}, fmt.Errorf("%w: search target file is unavailable", ErrInvalidSearch)
+		}
+		seen[fileID] = struct{}{}
+	}
+	return SearchTarget{source: snapshot.SourceID(), files: owned}, nil
+}
+
+// FileCount returns the receiver's file count value.
+func (target SearchTarget) FileCount() int {
+	return len(target.files)
+}
+
+// Files returns the receiver's ordered file identities.
+func (target SearchTarget) Files() iter.Seq[FileID] {
+	return slices.Values(target.files)
+}
+
+// RetainedBytes returns the receiver's retained bytes value.
+func (target SearchTarget) RetainedBytes() int64 {
+	return int64(len(target.files)) * 4
+}
+
+func (target SearchTarget) validFor(snapshot Snapshot) bool {
+	return target.source != 0 && target.source == snapshot.SourceID() &&
+		len(target.files) > 0 && len(target.files) <= MaxFiles
+}
 
 // SearchStatus describes search status.
 type SearchStatus uint8
@@ -74,6 +112,7 @@ const (
 
 // SearchHit represents search hit.
 type SearchHit struct {
+	excerpt   string
 	fileID    FileID
 	patchLine uint32
 	hunk      uint32
@@ -127,6 +166,16 @@ func (hit SearchHit) ByteRange() (uint32, uint32) {
 	return hit.byteStart, hit.byteEnd
 }
 
+// Excerpt returns a bounded excerpt around the match.
+func (hit SearchHit) Excerpt() string {
+	return hit.excerpt
+}
+
+// RetainedBytes returns the receiver's retained bytes value.
+func (hit SearchHit) RetainedBytes() int64 {
+	return searchHitRetainedBytes + int64(len(hit.excerpt))
+}
+
 // SearchSummary describes search summary.
 type SearchSummary struct {
 	Query            SearchQuery
@@ -149,12 +198,11 @@ type searchState struct {
 // SearchRequest describes search request.
 type SearchRequest struct {
 	Query     SearchQuery
+	Target    SearchTarget
 	Operation OperationID
 	Workspace WorkspaceRevision
 	Source    SourceID
-	File      FileID
 	Context   PatchContext
-	Scope     SearchScope
 }
 
 // SearchResult describes search result.
@@ -184,16 +232,17 @@ func TakeSearchResult(
 	hits []SearchHit,
 ) (SearchResult, error) {
 	if descriptor.Operation == 0 || descriptor.Workspace == 0 || descriptor.Source == 0 ||
-		!terminalSearchStatus(descriptor.Status) ||
-		len(hits) > MaxSearchHits ||
-		int64(len(hits))*searchHitRetainedBytes > MaxSearchHitBytes {
+		!terminalSearchStatus(descriptor.Status) || len(hits) > MaxSearchHits {
 		return SearchResult{}, fmt.Errorf("%w: malformed terminal result", ErrInvalidSearch)
 	}
 	for _, hit := range hits {
 		if hit.fileID >= MaxFiles || hit.patchLine >= MaxPatchLines ||
-			hit.byteStart > hit.byteEnd {
+			hit.byteStart > hit.byteEnd || len(hit.excerpt) > MaxSearchExcerptBytes {
 			return SearchResult{}, fmt.Errorf("%w: malformed hit", ErrInvalidSearch)
 		}
+	}
+	if searchHitsRetainedBytes(hits) > MaxSearchHitBytes {
+		return SearchResult{}, fmt.Errorf("%w: malformed terminal result", ErrInvalidSearch)
 	}
 	return SearchResult{
 		Operation:        descriptor.Operation,
@@ -225,20 +274,12 @@ func (result SearchResult) Detail() OperationDetail {
 func (review Review) StartSearch(
 	id OperationID,
 	query SearchQuery,
-	scope SearchScope,
+	target SearchTarget,
 	context PatchContext,
 ) (Review, SearchRequest, error) {
 	if review.search.status == SearchActive || query == "" || !context.valid() ||
-		scope != SearchCurrentFile && scope != SearchAllFiles {
+		!target.validFor(review.snapshot) {
 		return review, SearchRequest{}, ErrInvalidSearch
-	}
-	var fileID FileID
-	if scope == SearchCurrentFile {
-		var ok bool
-		fileID, ok = review.ActiveFile()
-		if !ok {
-			return review, SearchRequest{}, fmt.Errorf("%w: review has no active file", ErrInvalidSearch)
-		}
 	}
 	next, err := review.BeginOperation(id, OperationSearch)
 	if err != nil {
@@ -255,8 +296,7 @@ func (review Review) StartSearch(
 		Source:    review.snapshot.SourceID(),
 		Query:     query,
 		Context:   context,
-		Scope:     scope,
-		File:      fileID,
+		Target:    target,
 	}, nil
 }
 
@@ -270,7 +310,7 @@ func (review Review) ApplySearch(result SearchResult) (Review, error) {
 		return review, ErrInvalidSearch
 	}
 	if len(result.hits) > MaxSearchHits ||
-		int64(len(result.hits))*searchHitRetainedBytes > MaxSearchHitBytes {
+		searchHitsRetainedBytes(result.hits) > MaxSearchHitBytes {
 		return review, fmt.Errorf("%w: result capacity exceeded", ErrInvalidSearch)
 	}
 	next := review.clone()
@@ -434,13 +474,15 @@ func ScanSearchBatch(
 			inspectedBytes++
 			if int(result.Cursor.matched) == len(query.bytes) {
 				end := result.Cursor.offset
+				start := end - uint32FromInt(len(query.bytes))
 				result.Hits = append(result.Hits, SearchHit{
+					excerpt:   boundedSearchExcerpt(line, start, end),
 					fileID:    fileID,
 					patchLine: lineIndex,
 					hunk:      patch.lineHunks[lineIndex],
 					oldLine:   patch.oldLines[lineIndex],
 					newLine:   patch.newLines[lineIndex],
-					byteStart: end - uint32FromInt(len(query.bytes)),
+					byteStart: start,
 					byteEnd:   end,
 				})
 				result.Cursor.line++
@@ -453,6 +495,25 @@ func ScanSearchBatch(
 	}
 	result.Done = int(result.Cursor.line) >= len(patch.lineOffsets)
 	return result
+}
+
+func searchHitsRetainedBytes(hits []SearchHit) int64 {
+	var retained int64
+	for _, hit := range hits {
+		retained += hit.RetainedBytes()
+	}
+	return retained
+}
+
+func boundedSearchExcerpt(line []byte, matchStart, matchEnd uint32) string {
+	if len(line) <= MaxSearchExcerptBytes {
+		return string(line)
+	}
+	center := (int(matchStart) + int(matchEnd)) / 2
+	start := max(center-MaxSearchExcerptBytes/2, 0)
+	end := min(start+MaxSearchExcerptBytes, len(line))
+	start = max(end-MaxSearchExcerptBytes, 0)
+	return string(line[start:end])
 }
 
 func (patch *PreparedPatch) lineBytes(line uint32) []byte {

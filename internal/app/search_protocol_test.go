@@ -11,12 +11,12 @@ func TestSearchReplacementAndClearSettleDeterministically(t *testing.T) {
 	t.Run("replacement", func(t *testing.T) {
 		model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 		settleModelWork(t, model, coordinator)
-		model.startSearch("changed", review.SearchAllFiles)
+		startTestSearch(t, model, "changed")
 		first := model.foreground.searchOperation()
 		if first == 0 {
 			t.Fatal("search was not admitted")
 		}
-		model.startSearch("absent", review.SearchAllFiles)
+		startTestSearch(t, model, "absent")
 		if model.foreground.searchOperation() != first {
 			t.Fatal("replacement became active before the first search settled")
 		}
@@ -34,7 +34,7 @@ func TestSearchReplacementAndClearSettleDeterministically(t *testing.T) {
 	t.Run("clear", func(t *testing.T) {
 		model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 		settleModelWork(t, model, coordinator)
-		model.startSearch("changed", review.SearchAllFiles)
+		startTestSearch(t, model, "changed")
 		if model.foreground.searchOperation() == 0 {
 			t.Fatal("search was not admitted")
 		}
@@ -53,7 +53,7 @@ func TestSearchAdmissionFailureLeavesNoPhantomOperation(t *testing.T) {
 	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	settleModelWork(t, model, coordinator)
 	coordinator.StopAdmissionAndCancel()
-	model.startSearch("changed", review.SearchAllFiles)
+	startTestSearch(t, model, "changed")
 	if model.foreground.searchOperation() != 0 {
 		t.Fatal("failed search admission left an active operation")
 	}
@@ -79,7 +79,7 @@ func TestSearchSaturationLeavesNoPhantomOperation(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	model.startSearch("changed", review.SearchAllFiles)
+	startTestSearch(t, model, "changed")
 	if model.foreground.searchOperation() != 0 {
 		t.Fatal("saturated search admission left an active operation")
 	}
@@ -93,7 +93,7 @@ func TestOperationIdentityExhaustionLeavesForegroundIdle(t *testing.T) {
 	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	settleModelWork(t, model, coordinator)
 	model.nextOperation = 0
-	model.startSearch("changed", review.SearchAllFiles)
+	startTestSearch(t, model, "changed")
 	if model.foreground.searchOperation() != 0 ||
 		model.review.SearchSummary().Status != review.SearchIdle {
 		t.Fatal("operation identity exhaustion changed foreground state")
@@ -106,7 +106,7 @@ func TestOperationIdentityExhaustionLeavesForegroundIdle(t *testing.T) {
 func TestStaleSearchOutcomeDoesNotConsumeActiveSearch(t *testing.T) {
 	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	settleModelWork(t, model, coordinator)
-	model.startSearch("changed", review.SearchAllFiles)
+	startTestSearch(t, model, "changed")
 	active := model.foreground.searchOperation()
 	if active == 0 {
 		t.Fatal("search was not admitted")
@@ -118,4 +118,13 @@ func TestStaleSearchOutcomeDoesNotConsumeActiveSearch(t *testing.T) {
 	}
 	model.cancelSearch()
 	settleModelWork(t, model, coordinator)
+}
+
+func startTestSearch(t *testing.T, model *Model, query string) {
+	t.Helper()
+	target, err := review.NewSearchTarget(model.review.Snapshot(), model.fileOrder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.startSearch(query, target)
 }

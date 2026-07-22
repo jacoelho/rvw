@@ -337,6 +337,27 @@ func TestForegroundStateConcurrentCompletionOrder(t *testing.T) {
 }
 
 func TestForegroundStateSearchContinuationPrecedence(t *testing.T) {
+	t.Run("clear discards search queued behind patch", func(t *testing.T) {
+		state := newForegroundState()
+		patchStart, _, ready := state.requestPatch(0)
+		if !ready || !state.admitted(patchStart, 1) {
+			t.Fatal("patch admission failed")
+		}
+		pending := testPendingSearch(t, "queued")
+		_, cancellations, ready := state.requestSearch(pending)
+		if ready || len(cancellations) != 1 || cancellations[0] != 1 {
+			t.Fatalf("queued search cancellations=%v ready=%v", cancellations, ready)
+		}
+		if operation, active := state.requestClearSearch(); active || operation != 0 {
+			t.Fatalf("queued search clear operation=%d active=%v", operation, active)
+		}
+		_, _, tracked, effect := state.completePatch(1)
+		if !tracked || effect.kind != foregroundEffectNone {
+			t.Fatalf("cleared queued search produced effect %+v tracked=%v", effect, tracked)
+		}
+		assertForegroundValid(t, &state)
+	})
+
 	t.Run("clear replaces replacement", func(t *testing.T) {
 		state, operation := activeForegroundSearch(t)
 		replacement := testPendingSearch(t, "replacement")
@@ -582,7 +603,15 @@ func testPendingSearch(t *testing.T, value string) pendingSearch {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return pendingSearch{query: query, scope: review.SearchAllFiles}
+	model, _ := newTestModel(t, map[string]string{"search.txt": "changed\n"})
+	target, err := review.NewSearchTarget(
+		model.review.Snapshot(),
+		[]review.FileID{0},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pendingSearch{query: query, target: new(target)}
 }
 
 func assertForegroundValid(t *testing.T, state *foregroundState) {

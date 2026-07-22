@@ -20,23 +20,27 @@ func (model *Model) completeView(content string, mouseHits mouseHitMap) tea.View
 	}
 	cursorVisible := model.size.Known &&
 		!model.belowMinimum() &&
-		model.overlay == OverlayNone
+		(model.overlay == OverlayNone || model.overlay == OverlayFind)
 	switch {
+	case cursorVisible && model.overlay == OverlayFind:
+		view.Cursor = model.searchInput.Cursor()
+		if view.Cursor != nil {
+			width, height := model.renderSize()
+			layout := newFindModalLayout(width, height)
+			view.Cursor.X += layout.inputX
+			view.Cursor.Y += layout.inputY
+		}
 	case cursorVisible && model.mode == ModeCommentEdit:
 		view.Cursor = model.commentEditor.Cursor()
 		if view.Cursor != nil {
 			_, height := model.renderSize()
 			view.Cursor.Y += newCommentEditorLayout(height).editorTop
 		}
-	case cursorVisible && model.mode == ModeSearch:
-		view.Cursor = model.searchInput.Cursor()
-		if view.Cursor != nil {
-			view.Cursor.Y += 2
-		}
 	case cursorVisible && model.mode == ModeCommand:
 		view.Cursor = model.commandInput.Cursor()
 		if view.Cursor != nil {
-			view.Cursor.Y += 2
+			_, height := model.renderSize()
+			view.Cursor.Y += height - 1
 		}
 	}
 	return view

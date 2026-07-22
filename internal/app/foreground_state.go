@@ -132,8 +132,8 @@ type foregroundState struct {
 
 func (search pendingSearch) valid() bool {
 	query, err := review.NewSearchQuery(search.query.String())
-	return err == nil && query == search.query &&
-		(search.scope == review.SearchCurrentFile || search.scope == review.SearchAllFiles)
+	return err == nil && query == search.query && search.target != nil &&
+		search.target.FileCount() != 0
 }
 
 func validForegroundPatchContext(context review.PatchContext) bool {
@@ -587,6 +587,12 @@ func (state *foregroundState) requestSearch(
 }
 
 func (state *foregroundState) requestClearSearch() (review.OperationID, bool) {
+	if state.patch.continuation.kind == patchContinuationBeginSearch {
+		state.patch.continuation = patchContinuation{}
+	}
+	if state.reload.afterReload != nil {
+		state.reload.afterReload = nil
+	}
 	if state.search.active == 0 {
 		return 0, false
 	}
