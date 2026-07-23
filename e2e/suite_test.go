@@ -3,18 +3,22 @@
 package e2e_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -31,11 +35,18 @@ var (
 	suiteTemporary string
 	systemGit      string
 	systemScript   string
+	systemShell    string
+	systemStty     string
+	githubFixture  *httptest.Server
+	activeWorld    struct {
+		sync.RWMutex
+		value *world
+	}
 )
 
 func TestMain(m *testing.M) {
 	if helper := filepath.Base(os.Args[0]); slices.Contains(
-		[]string{"gh", "pbcopy", "wl-copy", "xclip"},
+		[]string{"pbcopy", "wl-copy", "xclip"},
 		helper,
 	) {
 		os.Exit(runExternalHelper(helper, os.Args[1:]))
@@ -50,6 +61,16 @@ func TestMain(m *testing.M) {
 	systemGit, err = exec.LookPath("git")
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "resolve git: %v\n", err)
+		os.Exit(1)
+	}
+	systemShell, err = exec.LookPath("sh")
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "resolve sh: %v\n", err)
+		os.Exit(1)
+	}
+	systemStty, err = exec.LookPath("stty")
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "resolve stty: %v\n", err)
 		os.Exit(1)
 	}
 	systemScript = "/usr/bin/script"
@@ -68,7 +89,15 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	rvwBinary = filepath.Join(suiteTemporary, "rvw")
-	build := exec.Command("go", "build", "-trimpath", "-o", rvwBinary, "./cmd/rvw")
+	githubFixture = httptest.NewServer(http.HandlerFunc(serveGitHubFixture))
+	linkEndpoints := strings.Join([]string{
+		"-X=github.com/jacoelho/rvw/internal/source.githubAPIBase=" + githubFixture.URL,
+		"-X=github.com/jacoelho/rvw/internal/source.githubGitBase=" + githubFixture.URL,
+	}, " ")
+	build := exec.Command(
+		"go", "build", "-trimpath", "-ldflags", linkEndpoints,
+		"-o", rvwBinary, "./cmd/rvw",
+	)
 	build.Dir = repositoryRoot()
 	if output, buildErr := build.CombinedOutput(); buildErr != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "build rvw E2E binary: %v\n%s", buildErr, output)
@@ -77,6 +106,7 @@ func TestMain(m *testing.M) {
 	}
 
 	status := m.Run()
+	githubFixture.Close()
 	if err := os.RemoveAll(suiteTemporary); err != nil && status == 0 {
 		_, _ = fmt.Fprintf(os.Stderr, "remove E2E suite directory: %v\n", err)
 		status = 1
@@ -111,8 +141,6 @@ func runExternalHelper(name string, args []string) int {
 	}
 
 	switch name {
-	case "gh":
-		return runGHHelper(args, stdin)
 	case "pbcopy", "wl-copy", "xclip":
 		return runClipboardHelper(name, args, stdin)
 	default:
@@ -125,6 +153,10 @@ func appendExternalCall(call externalCall) error {
 	if path == "" {
 		return errors.New("RVW_E2E_CALL_LOG is unset")
 	}
+	return appendExternalCallAt(path, call)
+}
+
+func appendExternalCallAt(path string, call externalCall) error {
 	encoded, err := json.Marshal(call)
 	if err != nil {
 		return err
@@ -138,94 +170,298 @@ func appendExternalCall(call externalCall) error {
 	return errors.Join(writeErr, file.Close())
 }
 
-func runGHHelper(args []string, stdin []byte) int {
-	if slices.Equal(args, []string{"repo", "view", "--json", "nameWithOwner"}) {
-		_, _ = io.WriteString(os.Stdout, `{"nameWithOwner":"`+fixtureOwner+`/`+fixtureRepository+`"}`)
-		return 0
+func serveGitHubFixture(writer http.ResponseWriter, request *http.Request) {
+	activeWorld.RLock()
+	w := activeWorld.value
+	activeWorld.RUnlock()
+	if w == nil {
+		http.Error(writer, "no active E2E world", http.StatusServiceUnavailable)
+		return
 	}
-	if len(args) == 2 && args[0] == "api" && strings.HasPrefix(args[1], "repos/") &&
-		strings.HasSuffix(args[1], "/pulls/"+strconv.FormatUint(fixturePR, 10)) {
-		return copyHelperFixture("RVW_E2E_GH_METADATA")
+	if strings.HasPrefix(request.URL.Path, "/fixture/repository.git/") {
+		_ = appendExternalCallAt(w.callLog, externalCall{
+			Command: "smart-git",
+			Args:    []string{request.Method, request.URL.RequestURI()},
+		})
+		serveWorldGitHTTP(w, writer, request)
+		return
 	}
-	if slices.Equal(args, []string{"api", "graphql", "--input", "-"}) {
-		return runPendingMutationHelper(stdin)
+	body, err := io.ReadAll(io.LimitReader(request.Body, 16<<20+1))
+	if err != nil || len(body) > 16<<20 {
+		http.Error(writer, "invalid request body", http.StatusBadRequest)
+		return
 	}
-	if len(args) >= 2 && args[0] == "api" && args[1] == "graphql" {
-		path := os.Getenv("RVW_E2E_GH_THREADS")
-		for _, argument := range args {
-			if strings.Contains(argument, "reviews(first:100") {
-				path = os.Getenv("RVW_E2E_GH_PENDING")
-				break
-			}
-			if strings.Contains(argument, "comments(first:100") {
-				path = os.Getenv("RVW_E2E_GH_PENDING_CAPABILITIES")
-				break
-			}
-		}
-		if path == "" {
-			return helperFailure("GitHub GraphQL fixture is unset")
-		}
-		return copyHelperFile(path)
+	if err := appendExternalCallAt(w.callLog, externalCall{
+		Command: "github-http",
+		Args:    []string{request.Method, request.URL.RequestURI()},
+		Stdin:   string(body),
+	}); err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
 	}
-	if len(args) >= 2 && args[0] == "api" &&
-		strings.HasSuffix(args[len(args)-1], "/reviews/9001/comments") {
-		return copyHelperFixture("RVW_E2E_GH_PENDING_COMMENTS")
+	if request.Header.Get("Authorization") != "Bearer e2e-token" {
+		http.Error(writer, "missing test token", http.StatusUnauthorized)
+		return
 	}
-	if len(args) == 6 && args[0] == "api" && args[1] == "--method" && args[2] == "POST" &&
-		strings.HasSuffix(args[3], "/reviews") && args[4] == "--input" && args[5] == "-" {
-		if !json.Valid(stdin) {
-			return helperFailure("publication stdin is not JSON")
-		}
-		switch os.Getenv("RVW_E2E_GH_POST_MODE") {
-		case "", "success":
-			_, _ = io.WriteString(os.Stdout, `{"id":9001}`)
-			return 0
-		case "unknown", "unknown-present":
-			if os.Getenv("RVW_E2E_GH_POST_MODE") == "unknown-present" {
-				var payload struct {
-					Body string `json:"body"`
-				}
-				if err := json.Unmarshal(stdin, &payload); err != nil {
-					return helperFailure("decode ambiguous publication: %v", err)
-				}
-				history, err := json.Marshal([][]map[string]any{{{
-					"id":   9002,
-					"body": "remote body\n" + payload.Body,
-				}}})
-				if err != nil {
-					return helperFailure("encode reconciliation history: %v", err)
-				}
-				if err := os.WriteFile(os.Getenv("RVW_E2E_GH_HISTORY"), history, 0o600); err != nil {
-					return helperFailure("write reconciliation history: %v", err)
-				}
-			}
-			_, _ = io.WriteString(os.Stderr, "simulated ambiguous GitHub write\n")
-			return 75
-		case "invalid-response":
-			_, _ = io.WriteString(os.Stdout, `{}`)
-			return 0
-		default:
-			return helperFailure("unsupported RVW_E2E_GH_POST_MODE")
-		}
+
+	switch {
+	case request.Method == http.MethodGet && request.URL.Path ==
+		"/repos/fixture/repository/pulls/7":
+		serveFixtureFile(writer, w.metadata, false)
+	case request.Method == http.MethodPost && request.URL.Path == "/graphql":
+		serveGraphQLFixture(w, writer, body)
+	case request.Method == http.MethodGet && strings.HasSuffix(
+		request.URL.Path, "/reviews/9001/comments",
+	):
+		serveFixtureFile(writer, w.pendingComments, true)
+	case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/reviews"):
+		servePublicationFixture(w, writer, body)
+	case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/reviews"):
+		serveFixtureFile(writer, w.history, true)
+	default:
+		http.Error(writer, "unsupported native GitHub fixture request", http.StatusNotFound)
 	}
-	if len(args) == 4 && args[0] == "api" && strings.HasSuffix(args[1], "/reviews") &&
-		args[2] == "--paginate" && args[3] == "--slurp" {
-		path := os.Getenv("RVW_E2E_GH_HISTORY")
-		if path == "" {
-			_, _ = io.WriteString(os.Stdout, "[[]]")
-			return 0
-		}
-		return copyHelperFile(path)
-	}
-	return helperFailure("unsupported gh argv: %q", args)
 }
 
-func runPendingMutationHelper(stdin []byte) int {
+func serveGraphQLFixture(w *world, writer http.ResponseWriter, body []byte) {
+	var request struct {
+		Query string `json:"query"`
+	}
+	if err := json.Unmarshal(body, &request); err != nil || request.Query == "" {
+		http.Error(writer, "invalid GraphQL request", http.StatusBadRequest)
+		return
+	}
+	if strings.HasPrefix(request.Query, "mutation(") {
+		response, err := pendingMutationResponse(w, body)
+		if err != nil {
+			http.Error(writer, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write(response)
+		return
+	}
+	path := w.threads
+	if strings.Contains(request.Query, "reviewThreads(first:100") {
+		path = w.threads
+	} else if strings.Contains(request.Query, "reviews(first:100") {
+		path = w.pending
+	} else if strings.Contains(request.Query, "comments(first:100") {
+		path = w.pendingCapabilities
+	}
+	serveFixtureFile(writer, path, true)
+}
+
+func servePublicationFixture(w *world, writer http.ResponseWriter, body []byte) {
+	if !json.Valid(body) {
+		http.Error(writer, "publication body is not JSON", http.StatusBadRequest)
+		return
+	}
+	switch worldEnvironment(w, "RVW_E2E_GH_POST_MODE") {
+	case "", "success":
+		if err := installCreatedPendingFixture(w, body); err != nil {
+			http.Error(writer, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"id":9001}`)
+	case "unknown", "unknown-present":
+		if worldEnvironment(w, "RVW_E2E_GH_POST_MODE") == "unknown-present" {
+			var payload struct {
+				Body string `json:"body"`
+			}
+			if err := json.Unmarshal(body, &payload); err != nil {
+				http.Error(writer, err.Error(), http.StatusBadRequest)
+				return
+			}
+			history, err := json.Marshal([][]map[string]any{{{
+				"id": 9002, "body": "remote body\n" + payload.Body,
+			}}})
+			if err != nil || os.WriteFile(w.history, history, 0o600) != nil {
+				http.Error(writer, "write reconciliation fixture", http.StatusInternalServerError)
+				return
+			}
+		}
+		http.Error(writer, "simulated ambiguous GitHub write", http.StatusInternalServerError)
+	case "invalid-response":
+		_, _ = io.WriteString(writer, `{}`)
+	default:
+		http.Error(writer, "unsupported post mode", http.StatusInternalServerError)
+	}
+}
+
+func installCreatedPendingFixture(w *world, body []byte) error {
+	var payload struct {
+		CommitID string `json:"commit_id"`
+		Body     string `json:"body"`
+		Comments []struct {
+			Path      string  `json:"path"`
+			Body      string  `json:"body"`
+			Side      string  `json:"side"`
+			StartSide *string `json:"start_side"`
+			Line      uint32  `json:"line"`
+			StartLine *uint32 `json:"start_line"`
+		} `json:"comments"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return err
+	}
+	pageInfo := map[string]any{"hasNextPage": false, "endCursor": nil}
+	pending := []any{map[string]any{
+		"errors": []any{},
+		"data": map[string]any{
+			"viewer": map[string]any{"login": "octo-reviewer"},
+			"repository": map[string]any{
+				"nameWithOwner": "fixture/repository",
+				"pullRequest": map[string]any{
+					"number": 7, "baseRefOid": w.prBase, "headRefOid": w.prHead,
+					"reviews": map[string]any{
+						"pageInfo": pageInfo,
+						"nodes": []any{map[string]any{
+							"id": "PRR_created", "fullDatabaseId": "9001",
+							"body": payload.Body, "state": "PENDING",
+							"viewerDidAuthor": true, "viewerCanUpdate": true,
+							"commit": map[string]any{"oid": payload.CommitID},
+						}},
+					},
+				},
+			},
+		},
+	}}
+	comments := make([]any, 0, len(payload.Comments))
+	capabilities := make([]any, 0, len(payload.Comments))
+	for index, comment := range payload.Comments {
+		databaseID := 9100 + index
+		nodeID := fmt.Sprintf("PRRC_created_%d", index)
+		comments = append(comments, map[string]any{
+			"id": databaseID, "node_id": nodeID, "pull_request_review_id": 9001,
+			"body": comment.Body, "path": comment.Path,
+			"commit_id": payload.CommitID, "original_commit_id": payload.CommitID,
+			"subject_type": "line", "line": comment.Line,
+			"start_line": comment.StartLine, "side": comment.Side,
+			"start_side": comment.StartSide, "original_line": comment.Line,
+			"original_start_line": comment.StartLine, "in_reply_to_id": nil,
+		})
+		capabilities = append(capabilities, map[string]any{
+			"id": nodeID, "fullDatabaseId": strconv.Itoa(databaseID),
+			"viewerCanUpdate": true, "viewerCanDelete": true,
+		})
+	}
+	capabilityPages := []any{map[string]any{
+		"errors": []any{},
+		"data": map[string]any{
+			"repository": map[string]any{
+				"nameWithOwner": "fixture/repository",
+				"pullRequest": map[string]any{
+					"number": 7, "baseRefOid": w.prBase, "headRefOid": w.prHead,
+				},
+			},
+			"node": map[string]any{
+				"id":       "PRR_created",
+				"comments": map[string]any{"pageInfo": pageInfo, "nodes": capabilities},
+			},
+		},
+	}}
+	for path, value := range map[string]any{
+		w.pending:             pending,
+		w.pendingComments:     []any{comments},
+		w.pendingCapabilities: capabilityPages,
+	} {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(path, encoded, 0o600); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func serveFixtureFile(writer http.ResponseWriter, path string, firstPage bool) {
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if firstPage {
+		var pages []json.RawMessage
+		if err := json.Unmarshal(contents, &pages); err != nil || len(pages) == 0 {
+			http.Error(writer, "fixture contains no page", http.StatusInternalServerError)
+			return
+		}
+		contents = pages[0]
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	_, _ = writer.Write(contents)
+}
+
+func serveWorldGitHTTP(w *world, writer http.ResponseWriter, request *http.Request) {
+	command := exec.CommandContext(request.Context(), systemGit, "http-backend")
+	pathInfo := "/pull-request.git" + strings.TrimPrefix(
+		request.URL.Path, "/fixture/repository.git",
+	)
+	command.Env = append(os.Environ(),
+		"GIT_PROJECT_ROOT="+w.root,
+		"GIT_HTTP_EXPORT_ALL=1",
+		"PATH_INFO="+pathInfo,
+		"QUERY_STRING="+request.URL.RawQuery,
+		"REQUEST_METHOD="+request.Method,
+		"CONTENT_TYPE="+request.Header.Get("Content-Type"),
+		"CONTENT_LENGTH="+strconv.FormatInt(request.ContentLength, 10),
+		"REMOTE_USER=rvw-e2e",
+	)
+	command.Stdin = request.Body
+	var stdout, stderr bytes.Buffer
+	command.Stdout, command.Stderr = &stdout, &stderr
+	if err := command.Run(); err != nil {
+		http.Error(writer, err.Error()+": "+stderr.String(), http.StatusInternalServerError)
+		return
+	}
+	reader := bufio.NewReader(&stdout)
+	status := http.StatusOK
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			http.Error(writer, "malformed smart-Git response", http.StatusInternalServerError)
+			return
+		}
+		line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+		if line == "" {
+			break
+		}
+		name, value, ok := strings.Cut(line, ":")
+		if !ok {
+			http.Error(writer, "malformed smart-Git header", http.StatusInternalServerError)
+			return
+		}
+		value = strings.TrimSpace(value)
+		if strings.EqualFold(name, "Status") {
+			status, _ = strconv.Atoi(strings.Fields(value)[0])
+			continue
+		}
+		writer.Header().Add(name, value)
+	}
+	writer.WriteHeader(status)
+	_, _ = io.Copy(writer, reader)
+}
+
+func worldEnvironment(w *world, name string) string {
+	prefix := name + "="
+	for _, value := range w.environment {
+		if strings.HasPrefix(value, prefix) {
+			return strings.TrimPrefix(value, prefix)
+		}
+	}
+	return ""
+}
+
+func pendingMutationResponse(w *world, stdin []byte) ([]byte, error) {
 	var request struct {
 		Variables map[string]map[string]any `json:"variables"`
 	}
 	if err := json.Unmarshal(stdin, &request); err != nil || len(request.Variables) == 0 {
-		return helperFailure("decode pending mutation: %v", err)
+		return nil, fmt.Errorf("decode pending mutation: %w", err)
 	}
 	keys := make([]string, 0, len(request.Variables))
 	for key := range request.Variables {
@@ -237,39 +473,38 @@ func runPendingMutationHelper(stdin []byte) int {
 		input := request.Variables[key]
 		client, _ := input["clientMutationId"].(string)
 		if client == "" {
-			return helperFailure("pending mutation %s has no client identity", key)
+			return nil, fmt.Errorf("pending mutation %s has no client identity", key)
 		}
 		index, err := strconv.Atoi(strings.TrimPrefix(key, "v"))
 		if err != nil {
-			return helperFailure("pending mutation variable %q is invalid", key)
+			return nil, fmt.Errorf("pending mutation variable %q is invalid", key)
 		}
 		response["m"+strconv.Itoa(index)] = map[string]string{"clientMutationId": client}
 		body, hasBody := input["body"].(string)
 		switch {
 		case input["pullRequestReviewCommentId"] != nil && hasBody:
 			if err := updatePendingCommentFixture(
-				os.Getenv("RVW_E2E_GH_PENDING_COMMENTS"),
+				w.pendingComments,
 				fmt.Sprint(input["pullRequestReviewCommentId"]),
 				body,
 			); err != nil {
-				return helperFailure("update pending comment fixture: %v", err)
+				return nil, fmt.Errorf("update pending comment fixture: %w", err)
 			}
 		case input["pullRequestReviewId"] != nil && hasBody:
 			if err := updatePendingReviewFixture(
-				os.Getenv("RVW_E2E_GH_PENDING"),
+				w.pending,
 				fmt.Sprint(input["pullRequestReviewId"]),
 				body,
 			); err != nil {
-				return helperFailure("update pending review fixture: %v", err)
+				return nil, fmt.Errorf("update pending review fixture: %w", err)
 			}
 		}
 	}
 	encoded, err := json.Marshal(map[string]any{"data": response, "errors": []any{}})
 	if err != nil {
-		return helperFailure("encode pending mutation response: %v", err)
+		return nil, fmt.Errorf("encode pending mutation response: %w", err)
 	}
-	_, _ = os.Stdout.Write(encoded)
-	return 0
+	return encoded, nil
 }
 
 func updatePendingCommentFixture(path, nodeID, body string) error {
@@ -356,25 +591,6 @@ func runClipboardHelper(name string, args []string, stdin []byte) int {
 	return 0
 }
 
-func copyHelperFixture(environmentName string) int {
-	path := os.Getenv(environmentName)
-	if path == "" {
-		return helperFailure("%s is unset", environmentName)
-	}
-	return copyHelperFile(path)
-}
-
-func copyHelperFile(path string) int {
-	contents, err := os.ReadFile(path)
-	if err != nil {
-		return helperFailure("read fixture: %v", err)
-	}
-	if _, err := os.Stdout.Write(contents); err != nil {
-		return helperFailure("write fixture: %v", err)
-	}
-	return 0
-}
-
 func helperFailure(format string, args ...any) int {
 	_, _ = fmt.Fprintf(os.Stderr, "rvw-e2e-helper: "+format+"\n", args...)
 	return 64
@@ -446,25 +662,22 @@ func newWorld(t testing.TB) *world {
 			t.Fatalf("create %s: %v", path, err)
 		}
 	}
-	for _, name := range []string{"gh", "pbcopy", "wl-copy", "xclip"} {
+	for _, name := range []string{"pbcopy", "wl-copy", "xclip"} {
 		if err := os.Symlink(testExecutable, filepath.Join(w.fakeDirectory, name)); err != nil {
 			t.Fatalf("link %s helper: %v", name, err)
 		}
 	}
 
-	path := strings.Join([]string{
-		w.fakeDirectory,
-		filepath.Dir(systemGit),
-		"/usr/bin",
-		"/bin",
-	}, string(os.PathListSeparator))
 	w.environment = []string{
-		"PATH=" + path,
+		// Production receives only the bounded clipboard shims. Fixture setup
+		// uses systemGit by absolute path before rvw starts, so any runtime
+		// attempt to execute git or gh fails deterministically.
+		"PATH=" + w.fakeDirectory,
 		"HOME=" + w.home,
 		"XDG_CONFIG_HOME=" + w.configHome,
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL=" + filepath.Join(w.home, ".gitconfig"),
-		"GH_CONFIG_DIR=" + filepath.Join(w.configHome, "gh"),
+		"GITHUB_TOKEN=e2e-token",
 		"LC_ALL=C",
 		"LANG=C",
 		"TERM=xterm-256color",
@@ -475,14 +688,11 @@ func newWorld(t testing.TB) *world {
 		"GIT_COMMITTER_DATE=2001-02-03T04:05:06Z",
 		"RVW_E2E_CALL_LOG=" + w.callLog,
 		"RVW_E2E_CLIPBOARD=" + w.clipboard,
-		"RVW_E2E_GH_METADATA=" + w.metadata,
-		"RVW_E2E_GH_THREADS=" + w.threads,
-		"RVW_E2E_GH_PENDING=" + w.pending,
-		"RVW_E2E_GH_PENDING_COMMENTS=" + w.pendingComments,
-		"RVW_E2E_GH_PENDING_CAPABILITIES=" + w.pendingCapabilities,
-		"RVW_E2E_GH_HISTORY=" + w.history,
 		"RVW_E2E_GH_POST_MODE=success",
 	}
+	activeWorld.Lock()
+	activeWorld.value = w
+	activeWorld.Unlock()
 	w.initializeRepository(t)
 	w.initializePullRequest(t)
 	w.writeFile(t, w.configPath, "[github]\nfetch_threads = false\n")
@@ -502,6 +712,11 @@ func newWorld(t testing.TB) *world {
 		if w.pty != nil {
 			w.pty.close()
 		}
+		activeWorld.Lock()
+		if activeWorld.value == w {
+			activeWorld.value = nil
+		}
+		activeWorld.Unlock()
 	})
 	return w
 }
@@ -550,18 +765,11 @@ func (w *world) initializePullRequest(t testing.TB) {
 	w.prHead = strings.TrimSpace(runGit(t, seed, w.environment, "rev-parse", "HEAD"))
 
 	runGit(t, w.root, w.environment, "init", "--bare", w.remote)
+	runGit(t, w.remote, w.environment, "config", "uploadpack.allowFilter", "true")
+	runGit(t, w.remote, w.environment, "config", "uploadpack.allowTipSHA1InWant", "true")
+	runGit(t, w.remote, w.environment, "config", "uploadpack.allowReachableSHA1InWant", "true")
 	runGit(t, seed, w.environment, "push", w.remote, w.prBase+":refs/heads/main")
 	runGit(t, seed, w.environment, "push", w.remote, w.prHead+":refs/pull/7/head")
-	runGit(t, w.repository, w.environment, "config", "--global", "protocol.file.allow", "always")
-	runGit(
-		t,
-		w.repository,
-		w.environment,
-		"config",
-		"--global",
-		"url.file://"+w.remote+".insteadOf",
-		"https://github.com/"+fixtureOwner+"/"+fixtureRepository+".git",
-	)
 
 	metadata := map[string]any{
 		"number":        fixturePR,

@@ -21,6 +21,7 @@ import (
 const (
 	kittyEscape        = "\x1b[27u"
 	kittyRepeatedCtrlC = "\x1b[99;5:2u"
+	xtermF2            = "\x1bOQ"
 )
 
 func TestTerminalRenderingContract(t *testing.T) {
@@ -147,27 +148,55 @@ func TestInteractiveSourceContract(t *testing.T) {
 			})
 		})
 
+		feature.Scenario("an existing remote thread is loaded into the comments pane", func(scenario *bdd.ScenarioSpec[*world]) {
+			scenario.Given("GitHub has one inline review thread", func(t testing.TB, w *world) {
+				w.writeConfig(t, "[github]\nfetch_threads = true\n")
+				configureRemoteThread(t, w)
+			})
+			scenario.When("the pull request is opened", func(t testing.TB, w *world) {
+				w.launchPTY(t, 120, 24, "pr", "7", "--repo", "fixture/repository")
+			})
+			scenario.Then("the remote comment is retained and anchored to its diff line", func(t testing.TB, w *world) {
+				w.pty.awaitScreen(t, "pull request with remote thread", containsScreen("reviewed.go"))
+				w.pty.send(t, xtermF2)
+				status := w.pty.awaitScreen(t, "remote thread status", containsScreen("remote threads"))
+				if !strings.Contains(status, "remote threads       ready (1)") {
+					t.Fatalf("remote thread acquisition failed\n%s", status)
+				}
+				w.pty.send(t, kittyEscape)
+				w.pty.send(t, "zc")
+				screen := w.pty.awaitScreen(t, "remote comment row", func(screen string) bool {
+					return strings.Contains(screen, "[remote open]") &&
+						strings.Contains(screen, "reviewed.go:3") &&
+						strings.Contains(screen, "●")
+				})
+				assertNoEscapedWidgetStyles(t, w, screen, "remote thread")
+				w.pty.send(t, "q")
+				w.pty.awaitExit(t)
+			})
+		})
+
 		feature.Scenario("draft save updates and reloads the existing pending review", func(scenario *bdd.ScenarioSpec[*world]) {
 			scenario.Given("GitHub has one viewer-owned pending review", func(t testing.TB, w *world) {
-				w.writeConfig(t, "[github]\nfetch_threads = false\nsubmit_default = \"draft\"\n")
+				w.writeConfig(t, "[github]\nfetch_threads = false\nsubmit_default = \"comment\"\n")
 				configurePendingReview(t, w)
 			})
 			scenario.Given("the existing inline draft is edited", func(t testing.TB, w *world) {
 				w.launchPTY(t, 120, 24, "pr", "7", "--repo", "fixture/repository")
 				w.pty.awaitScreen(t, "pending source", containsScreen("reviewed.go"))
 				w.pty.send(t, "zc\tj")
-				w.pty.awaitScreen(t, "selected inline draft", containsScreen("▸ [issue] [draft] reviewed.go:3"))
+				w.pty.awaitScreen(t, "selected inline draft", containsScreen("▸ [draft] reviewed.go:3"))
 				w.pty.send(t, "e")
-				w.pty.awaitScreen(t, "comment editor", containsScreen("Comment [issue] ·"))
+				w.pty.awaitScreen(t, "comment editor", containsScreen("Comment ·"))
 				w.pty.send(t, " edited")
 				w.pty.send(t, "\x13")
 				w.pty.awaitScreen(t, "saved comment", containsScreen("comment saved"))
 			})
-			scenario.When("the configured draft preflight is committed", func(t testing.TB, w *world) {
+			scenario.When("the draft synchronization preflight is committed", func(t testing.TB, w *world) {
 				w.pty.send(t, "s")
 				w.pty.awaitScreen(t, "draft preflight", func(screen string) bool {
-					return strings.Contains(screen, "GitHub draft synchronization preflight") &&
-						strings.Contains(screen, "Event: draft") &&
+					return strings.Contains(screen, "Synchronize comments to a pending GitHub draft") &&
+						strings.Contains(screen, "Submit as (h/l): [Comment]") &&
 						strings.Contains(screen, "Source/head: checked at current head") &&
 						strings.Contains(screen, "Pending review: continue 9001 · 1 changed · 0 conflicts") &&
 						strings.Contains(screen, "[modified · inline] existing inline edited")
@@ -175,10 +204,14 @@ func TestInteractiveSourceContract(t *testing.T) {
 				w.pty.send(t, "\r")
 			})
 			scenario.Then("the same remote comment is updated and the local binding is clean", func(t testing.TB, w *world) {
-				w.pty.awaitScreen(t, "draft synchronized", containsScreen("Publication committed."))
+				w.pty.awaitScreen(t, "draft synchronized", func(screen string) bool {
+					return strings.Contains(screen, "Submit pending draft as comment") &&
+						strings.Contains(screen, "Pending review: continue 9001 · 0 changed · 0 conflicts")
+				})
 				calls := w.calls(t)
 				if !slices.ContainsFunc(calls, func(call externalCall) bool {
-					return slices.Equal(call.Args, []string{"api", "graphql", "--input", "-"}) &&
+					return call.Command == "github-http" &&
+						slices.Equal(call.Args, []string{"POST", "/graphql"}) &&
 						strings.Contains(call.Stdin, "updatePullRequestReviewComment") &&
 						strings.Contains(call.Stdin, "existing inline edited")
 				}) {
@@ -191,6 +224,50 @@ func TestInteractiveSourceContract(t *testing.T) {
 			})
 		})
 	})
+}
+
+func configureRemoteThread(t testing.TB, w *world) {
+	t.Helper()
+	pageInfo := map[string]any{"hasNextPage": false, "endCursor": nil}
+	comment := map[string]any{
+		"id":        "PRRC_existing",
+		"body":      "existing remote comment",
+		"createdAt": "2001-02-03T04:05:06Z",
+		"url":       "https://github.com/fixture/repository/pull/7#discussion_r1",
+		"author":    map[string]any{"login": "octo-reviewer"},
+	}
+	thread := map[string]any{
+		"id":         "PRRT_existing",
+		"isResolved": false,
+		"isOutdated": false,
+		"path":       "reviewed.go",
+		"line":       3,
+		"startLine":  nil,
+		"diffSide":   "RIGHT",
+		"comments": map[string]any{
+			"pageInfo": pageInfo,
+			"nodes":    []any{comment},
+		},
+	}
+	pullRequest := map[string]any{
+		"number":     7,
+		"baseRefOid": w.prBase,
+		"headRefOid": w.prHead,
+		"reviewThreads": map[string]any{
+			"pageInfo": pageInfo,
+			"nodes":    []any{thread},
+		},
+	}
+	pages := []any{map[string]any{
+		"errors": []any{},
+		"data": map[string]any{"repository": map[string]any{
+			"nameWithOwner": "fixture/repository",
+			"pullRequest":   pullRequest,
+		}},
+	}}
+	if err := writeHelperJSON(w.threads, pages); err != nil {
+		t.Fatalf("write remote thread fixture: %v", err)
+	}
 }
 
 func configurePendingReview(t testing.TB, w *world) {
@@ -373,7 +450,7 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 				}
 				golden.RequireEqual(t, string(contents))
 				calls := w.calls(t)
-				if len(calls) != 1 || calls[0].Command == "gh" || calls[0].Stdin != string(contents) {
+				if len(calls) != 1 || calls[0].Command == "github-http" || calls[0].Stdin != string(contents) {
 					t.Fatalf("clipboard calls = %+v", calls)
 				}
 				w.pty.send(t, ":q!\r")
@@ -474,7 +551,7 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 			})
 			scenario.Then("the unknown delivery outcome is shown", func(t testing.TB, w *world) {
 				w.pty.awaitScreen(t, "clipboard failure", func(screen string) bool {
-					return strings.Contains(screen, "clipboard delivery") && strings.Contains(screen, "fenced")
+					return strings.Contains(screen, "clipboard command:") && strings.Contains(screen, "fenced")
 				})
 				w.pty.send(t, ":q!\r")
 				w.pty.awaitExit(t)
@@ -501,7 +578,7 @@ func saveLineComment(body string) bdd.Step[*world] {
 		// Patch presentation opens on its metadata header. Move to the final
 		// changed line before asking the line-comment action to anchor a draft.
 		w.pty.send(t, "Gc")
-		w.pty.awaitScreen(t, "comment editor", containsScreen("Comment [issue] ·"))
+		w.pty.awaitScreen(t, "comment editor", containsScreen("Comment ·"))
 		w.pty.send(t, body+"\x13")
 		w.pty.awaitScreen(t, "saved comment", containsScreen("comment saved"))
 	}
@@ -510,7 +587,7 @@ func saveLineComment(body string) bdd.Step[*world] {
 func savePastedLineComment(body string) bdd.Step[*world] {
 	return func(t testing.TB, w *world) {
 		w.pty.send(t, "Gc")
-		w.pty.awaitScreen(t, "comment editor", containsScreen("Comment [issue] ·"))
+		w.pty.awaitScreen(t, "comment editor", containsScreen("Comment ·"))
 		w.pty.send(t, "\x1b[200~"+body+"\x1b[201~")
 		w.pty.awaitScreen(t, "pasted comment body", containsScreen(body))
 		w.pty.send(t, "\x13")
@@ -619,30 +696,46 @@ func TestGitHubPublicationContract(t *testing.T) {
 	}
 	events := []bdd.Example[eventExample]{
 		bdd.Case("comment", eventExample{"comment", "COMMENT"}),
-		bdd.Case("draft", eventExample{"draft", ""}),
 		bdd.Case("approve", eventExample{"approve", "APPROVE"}),
 		bdd.Case("request changes", eventExample{"request-changes", "REQUEST_CHANGES"}),
 	}
 
 	bdd.Feature(t, "GitHub publication is checked and observable", newWorld, func(feature *bdd.Suite[*world]) {
-		bdd.Outline(feature, "all four publication events send the canonical request", events, func(example eventExample, scenario *bdd.ScenarioSpec[*world]) {
+		bdd.Outline(feature, "draft comments are synchronized before the selected submission event", events, func(example eventExample, scenario *bdd.ScenarioSpec[*world]) {
 			scenario.Given("the publication event is configured", func(t testing.TB, w *world) {
 				w.writeConfig(t, "[github]\nfetch_threads = false\nsubmit_default = \""+example.configured+"\"\n")
 			})
 			scenario.Given("a pull request has one local comment", launchCommentedPullRequest())
 			scenario.When("preflight is accepted and publication is confirmed", publishReview())
-			scenario.Then("the exact event and marker shape reached gh", func(t testing.TB, w *world) {
+			scenario.Then("the draft and exact submission event reached GitHub HTTP", func(t testing.TB, w *world) {
 				call := publicationCall(t, w.calls(t))
 				var payload struct {
-					Event string `json:"event"`
-					Body  string `json:"body"`
+					Event    string `json:"event"`
+					Body     string `json:"body"`
+					Comments []struct {
+						Path string `json:"path"`
+						Body string `json:"body"`
+						Side string `json:"side"`
+						Line uint32 `json:"line"`
+					} `json:"comments"`
 				}
 				if err := json.Unmarshal([]byte(call.Stdin), &payload); err != nil {
 					t.Fatal(err)
 				}
-				if payload.Event != example.payload ||
+				if payload.Event != "" ||
 					!regexp.MustCompile(`<!-- rvw-publication:v1:[0-9a-f]{32} -->`).MatchString(payload.Body) {
 					t.Fatalf("publication payload = %s", call.Stdin)
+				}
+				if len(payload.Comments) != 1 ||
+					payload.Comments[0].Path != "reviewed.go" ||
+					payload.Comments[0].Body != "This should be published." ||
+					payload.Comments[0].Side != "RIGHT" ||
+					payload.Comments[0].Line != 3 {
+					t.Fatalf("publication comments = %+v; payload = %s", payload.Comments, call.Stdin)
+				}
+				mutation := publicationMutationCall(t, w.calls(t))
+				if !strings.Contains(mutation.Stdin, `"event":"`+example.payload+`"`) {
+					t.Fatalf("submission mutation does not contain event %q: %s", example.payload, mutation.Stdin)
 				}
 				quitDirtyReview(t, w)
 			})
@@ -669,7 +762,8 @@ func TestGitHubPublicationContract(t *testing.T) {
 				}
 				calls := w.calls(t)
 				if !slices.ContainsFunc(calls, func(call externalCall) bool {
-					return slices.Contains(call.Args, "--paginate")
+					return call.Command == "github-http" && len(call.Args) == 2 &&
+						call.Args[0] == "GET" && strings.HasSuffix(call.Args[1], "/reviews")
 				}) {
 					t.Fatalf("ambiguous publication was not reconciled: %+v", calls)
 				}
@@ -692,23 +786,45 @@ func launchCommentedPullRequest() bdd.Step[*world] {
 func publishReview() bdd.Step[*world] {
 	return func(t testing.TB, w *world) {
 		w.pty.send(t, "s")
-		w.pty.awaitScreen(t, "checked publication", containsScreen("checked at current head"))
 		w.pty.send(t, "\r")
-		w.pty.awaitScreen(t, "publication result", func(screen string) bool {
-			return strings.Contains(screen, "Publication committed.") ||
-				strings.Contains(screen, "Outcome unknown; retry is fenced.")
+		screen := w.pty.awaitScreen(t, "draft synchronization or publication result", func(screen string) bool {
+			return strings.Contains(screen, "Submit pending draft as") ||
+				strings.Contains(screen, "Outcome unknown; retry is fenced.") ||
+				strings.Contains(screen, "Publication committed.")
 		})
+		if strings.Contains(screen, "Submit pending draft as") {
+			w.pty.send(t, "\r")
+			w.pty.awaitScreen(t, "publication result", func(screen string) bool {
+				return strings.Contains(screen, "Publication committed.") ||
+					strings.Contains(screen, "Outcome unknown; retry is fenced.")
+			})
+		}
 	}
 }
 
 func publicationCall(t testing.TB, calls []externalCall) externalCall {
 	t.Helper()
 	for _, call := range calls {
-		if call.Command == "gh" && slices.Contains(call.Args, "POST") {
+		if call.Command == "github-http" && len(call.Args) == 2 &&
+			call.Args[0] == "POST" && strings.HasSuffix(call.Args[1], "/reviews") {
 			return call
 		}
 	}
 	t.Fatalf("publication POST not found in %+v", calls)
+	return externalCall{}
+}
+
+func publicationMutationCall(t testing.TB, calls []externalCall) externalCall {
+	t.Helper()
+	for _, call := range calls {
+		if call.Command == "github-http" && len(call.Args) == 2 &&
+			call.Args[0] == "POST" && strings.HasSuffix(call.Args[1], "/graphql") &&
+			strings.Contains(call.Stdin, `"query":"mutation(`) &&
+			strings.Contains(call.Stdin, `"event":`) {
+			return call
+		}
+	}
+	t.Fatalf("publication mutation not found in %+v", calls)
 	return externalCall{}
 }
 

@@ -12,8 +12,6 @@ const (
 // transitions replace commentState rather than mutating its retained slices.
 type commentSource struct {
 	comments      []Comment
-	kinds         CommentKinds
-	policies      CommentPolicies
 	retainedBytes int64
 	revision      uint64
 }
@@ -21,15 +19,13 @@ type commentSource struct {
 func (state *commentState) source() commentSource {
 	return commentSource{
 		comments:      state.comments,
-		kinds:         state.commentKinds,
-		policies:      state.commentPolicies,
-		retainedBytes: state.commentBytes + state.commentKinds.retained(),
+		retainedBytes: state.commentBytes,
 		revision:      state.revision,
 	}
 }
 
 func (source commentSource) ready() bool {
-	return source.revision != 0 && source.kinds.valid() && source.policies.valid()
+	return source.revision != 0
 }
 
 func (state *commentState) refresh() {
@@ -76,8 +72,7 @@ func (state *commentState) calculateRetainedBytesCancellable(
 		}
 	}
 	return commentBytes,
-		commentBytes + pendingBytes + draftRetainedBytes(state.draft) +
-			state.commentKinds.retained(),
+		commentBytes + pendingBytes + draftRetainedBytes(state.draft),
 		nil
 }
 

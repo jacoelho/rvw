@@ -34,7 +34,6 @@
     "author": "octo-reviewer",
     "base_oid": "81f16377a5f1ac7f99c6882ed6325fdb603c0d60",
     "base_ref": "main",
-    "files_api_cap_reached": false,
     "head_oid": "8969696900a992b51498a8fb0a0b7a301cea2916",
     "head_ref": "feature",
     "is_draft": false,
@@ -48,7 +47,6 @@
   "source_details": {
     "base": "81f16377a5f1ac7f99c6882ed6325fdb603c0d60",
     "base_ref": "main",
-    "files_api_cap_reached": false,
     "head": "8969696900a992b51498a8fb0a0b7a301cea2916",
     "head_ref": "feature",
     "kind": "github-pr",

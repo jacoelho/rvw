@@ -27,7 +27,7 @@ const (
 	// Reconciliation can retain the captured response, one maximum decoded
 	// token, a response-implied duplicate-ID set, and bounded command error.
 	publicationResultReservation int64 = 4*review.MaxPublicationBytes +
-		source.MaxCommandErrorConstructionBytes
+		source.MaxSourceErrorConstructionBytes
 	patchResultReservation             int64 = source.MaxPatchResultConstructionBytes
 	reloadResultReservation            int64 = MaxRetainedResultBytes
 	reloadAcquisitionResultReservation int64 = MaxRetainedResultBytes

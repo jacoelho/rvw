@@ -1,5 +1,3 @@
 I reviewed your code and have the following comments. Please address them.
 
-Comment types: ISSUE, NOTE, PRAISE, SUGGESTION
-
-1. **[ISSUE]** `staged.txt:1` - Please keep this deterministic.
+1. `staged.txt:1` - Please keep this deterministic.

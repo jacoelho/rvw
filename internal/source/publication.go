@@ -6,10 +6,10 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 
 	"github.com/jacoelho/rvw/internal/review"
-	"github.com/jacoelho/rvw/internal/subprocess"
 )
 
 // PublicationCheckAcquisition is the validated network phase of preflight.
@@ -247,42 +247,116 @@ func (service *Service) Publish(
 	target := checked.Target()
 	endpoint := "repos/" + target.Repository() + "/pulls/" +
 		strconv.FormatUint(target.PullRequest(), 10) + "/reviews"
-	result, err := service.runner.Run(ctx, subprocess.Request{
-		Name: "gh",
-		Args: []string{
-			ghAPI,
-			"--method", "POST",
-			endpoint,
-			"--input", "-",
-		},
-		Dir:             service.cwd.String(),
-		Env:             map[string]string{localeAllKey: "C", localeLanguageKey: "C", ghPromptDisabled: "1"},
-		Stdin:           []byte(checked.Payload()),
-		StdoutLimit:     1 << 20,
-		StderrLimit:     MaxCommandStderrBytes,
-		OperationDetail: "gh api publication",
-	})
+	result, err := service.github.mutation(
+		ctx, http.MethodPost, "/"+endpoint, []byte(checked.Payload()), 1<<20,
+	)
 	if err != nil {
-		disposition := review.PublicationDispositionFailedBeforeCommit
-		if result.Started {
-			disposition = review.PublicationDispositionUnknown
+		disposition := review.PublicationDispositionUnknown
+		if githubMutationFailedBeforeCommit(err) {
+			disposition = review.PublicationDispositionFailedBeforeCommit
 		}
 		return PublicationCommit{
 			Disposition: disposition,
 			Detail:      boundedOperationDetail(err.Error()),
 		}
 	}
-	reviewID, err := decodePublicationReviewID(ctx, result.Stdout)
+	if result.status != http.StatusOK {
+		return PublicationCommit{
+			Disposition: review.PublicationDispositionUnknown,
+			Detail: boundedOperationDetail(
+				"GitHub publication returned an undocumented success status",
+			),
+		}
+	}
+	reviewID, err := decodePublicationReviewID(ctx, result.body)
 	if err != nil {
 		return PublicationCommit{
 			Disposition: review.PublicationDispositionUnknown,
 			Detail:      boundedOperationDetail("decode GitHub publication response: " + err.Error()),
 		}
 	}
-	return PublicationCommit{
+	commit := PublicationCommit{
 		Disposition:  review.PublicationDispositionCommitted,
 		RemoteReview: reviewID,
 	}
+	if checked.Prepared().Options().Event() != review.PublicationEventDraft {
+		return commit
+	}
+	pending, detail, ok := service.acquireCreatedDraft(
+		ctx,
+		checked,
+		reviewID,
+	)
+	if !ok {
+		commit.PendingRefresh = review.PendingRefreshUnavailable
+		commit.Detail = detail
+		return commit
+	}
+	commit.Pending = new(pending)
+	commit.PendingRefresh = review.PendingRefreshAcquired
+	return commit
+}
+
+func (service *Service) acquireCreatedDraft(
+	ctx context.Context,
+	checked *review.CheckedPublication,
+	reviewID uint64,
+) (review.PendingReview, review.OperationDetail, bool) {
+	if checked == nil || reviewID == 0 {
+		return review.PendingReview{}, boundedOperationDetail(
+			"GitHub draft was created, but its checked identity is unavailable",
+		), false
+	}
+	target := checked.Target()
+	repository, err := NewOwnerRepository(target.Repository())
+	if err != nil {
+		return review.PendingReview{}, boundedOperationDetail(
+			"GitHub draft was created, but its repository identity is invalid",
+		), false
+	}
+	payload, err := service.pullRequestMetadata(
+		ctx,
+		repository,
+		PullRequestNumber(target.PullRequest()),
+		directCPUAdmission,
+	)
+	if err != nil {
+		return review.PendingReview{}, boundedOperationDetail(
+			"GitHub draft was created, but its pending state could not be loaded: " + err.Error(),
+		), false
+	}
+	details, err := validatePullRequestPayload(
+		repository,
+		PullRequestNumber(target.PullRequest()),
+		payload,
+	)
+	if err != nil || details.BaseOID != target.Base() || details.HeadOID != target.Head() {
+		return review.PendingReview{}, boundedOperationDetail(
+			"GitHub draft was created, but the pull request changed before it could be loaded",
+		), false
+	}
+	pending, status, detail := service.loadPendingReview(ctx, details, directCPUAdmission)
+	if status != review.PendingReviewReady || pending.DatabaseID().Uint64() != reviewID {
+		message := "GitHub draft was created, but its pending state is " + status.String()
+		if status == review.PendingReviewReady {
+			message = "GitHub draft was created, but GitHub returned a different pending review"
+		} else if !detail.IsEmpty() {
+			message += ": " + detail.String()
+		}
+		return review.PendingReview{}, boundedOperationDetail(message), false
+	}
+	matches, matchErr := checked.CreatedDraftMatchesCancellable(
+		func() error { return context.Cause(ctx) },
+		pending,
+	)
+	if matchErr != nil || !matches {
+		message := "GitHub draft was created, but its pending state does not match the published comments"
+		if matchErr != nil {
+			message += ": " + matchErr.Error()
+		}
+		return review.PendingReview{}, boundedOperationDetail(message), false
+	}
+	return pending, review.EmptyOperationDetail(), true
 }
 
 type publicationReviewResponseCollector struct {
@@ -421,7 +495,7 @@ func (service *Service) ReconcilePublication(
 // PublicationReconciliationAcquisition owns one bounded GitHub history spool
 // awaiting cancellable CPU validation.
 type PublicationReconciliationAcquisition struct {
-	spool   *commandSpool
+	spool   *githubSpool
 	request review.ReconciliationRequest
 }
 
@@ -436,13 +510,9 @@ func (service *Service) AcquirePublicationReconciliation(
 		return nil, errors.New("publication reconciliation request is invalid")
 	}
 	target := request.Target
-	endpoint := "repos/" + target.Repository() + "/pulls/" +
+	endpoint := "/repos/" + target.Repository() + "/pulls/" +
 		strconv.FormatUint(target.PullRequest(), 10) + "/reviews"
-	spool, err := service.runGHToSpool(
-		ctx,
-		[]string{ghAPI, endpoint, ghPaginate, ghSlurp},
-		review.MaxPublicationBytes,
-	)
+	spool, err := service.restSpool(ctx, endpoint, review.MaxPublicationBytes)
 	if err != nil {
 		return nil, err
 	}

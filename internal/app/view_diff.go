@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"iter"
+	"strconv"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -130,25 +131,17 @@ func (model *Model) renderUnifiedPatchLine(
 ) []string {
 	raw := line.Text.String()
 	kind := line.Kind()
-	oldNumber, newNumber := "", ""
+	oldNumber, newNumber := uint32(0), uint32(0)
+	hasOldNumber, hasNewNumber := false, false
 	oldAnchor, newAnchor := " ", " "
 	if value, ok := line.OldLine(); ok {
-		oldNumber = fmt.Sprint(value.Uint32())
+		oldNumber, hasOldNumber = value.Uint32(), true
 		oldAnchor = model.commentAnchorCell(fileID, review.LineOld, value, styles)
 	}
 	if value, ok := line.NewLine(); ok {
-		newNumber = fmt.Sprint(value.Uint32())
+		newNumber, hasNewNumber = value.Uint32(), true
 		newAnchor = model.commentAnchorCell(fileID, review.LineNew, value, styles)
 	}
-	numberPrefix := fmt.Sprintf(
-		"%*s%s %*s%s ",
-		numberWidths.old,
-		oldNumber,
-		oldAnchor,
-		numberWidths.new,
-		newNumber,
-		newAnchor,
-	)
 	marker := ""
 	content := raw
 	if kind == review.PatchLineContext || kind == review.PatchLineAddition ||
@@ -168,7 +161,10 @@ func (model *Model) renderUnifiedPatchLine(
 	case review.PatchLineDeletion:
 		styledMarker = styles.deleted.Render(marker)
 	}
-	prefix := numberPrefix + styledMarker
+	prefix := nativeDiffLinePrefix(
+		numberWidths, oldNumber, hasOldNumber, oldAnchor,
+		newNumber, hasNewNumber, newAnchor, styledMarker,
+	)
 	prefixWidth := lipgloss.Width(prefix)
 	if width <= prefixWidth {
 		return []string{stylePatchLine(safeAndClip(raw, width), kind, styles)}
@@ -200,7 +196,7 @@ func (model *Model) renderUnifiedPatchLine(
 		}
 		value := segmentPrefix + fitCellWidth(segment, contentWidth)
 		switch {
-		case kind == review.PatchLineContext:
+		case kind == review.PatchLineContext && model.settings.colorEnabled:
 			value = styles.context.Render(value)
 		case kind == review.PatchLineHunkHeader:
 			value = styles.hunk.Render(value)
@@ -457,17 +453,15 @@ func (model *Model) renderSyntaxContent(content syntaxContent) string {
 	if int64(len(raw)) > maxBytes {
 		raw = raw[:int(maxBytes)]
 	}
-	var rendered strings.Builder
-	rendered.Grow(len(raw))
 	sanitizer := terminalTextRenderer{}
+	var value string
 	if content.spans == nil {
-		rendered.WriteString(sanitizer.render(raw))
+		value = sanitizer.render(raw)
 	} else {
 		styled, spansLimited := renderSyntaxSpans(raw, content.spans, content.styles)
-		rendered.WriteString(styled)
+		value = styled
 		limited = limited || spansLimited
 	}
-	value := rendered.String()
 	if content.wrap {
 		if limited {
 			value += "…"
@@ -483,6 +477,47 @@ func (model *Model) renderSyntaxContent(content syntaxContent) string {
 		return lipgloss.NewStyle().MaxWidth(content.width-1).Render(value) + "…"
 	}
 	return value
+}
+
+func nativeDiffLinePrefix(
+	widths diffLineNumberWidths,
+	oldNumber uint32,
+	hasOld bool,
+	oldAnchor string,
+	newNumber uint32,
+	hasNew bool,
+	newAnchor string,
+	marker string,
+) string {
+	var storage [96]byte
+	prefix := storage[:0]
+	prefix = appendPaddedDiffNumber(prefix, widths.old, oldNumber, hasOld)
+	prefix = append(prefix, oldAnchor...)
+	prefix = append(prefix, ' ')
+	prefix = appendPaddedDiffNumber(prefix, widths.new, newNumber, hasNew)
+	prefix = append(prefix, newAnchor...)
+	prefix = append(prefix, ' ')
+	prefix = append(prefix, marker...)
+	return string(prefix)
+}
+
+func appendPaddedDiffNumber(
+	destination []byte,
+	width int,
+	value uint32,
+	present bool,
+) []byte {
+	digits := 0
+	if present {
+		digits = decimalDigitWidth(value)
+	}
+	for range max(width-digits, 0) {
+		destination = append(destination, ' ')
+	}
+	if present {
+		destination = strconv.AppendUint(destination, uint64(value), 10)
+	}
+	return destination
 }
 
 func renderSyntaxSpans(

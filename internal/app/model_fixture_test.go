@@ -63,24 +63,12 @@ func newTestModel(tb testing.TB, changed map[string]string) (*Model, *Coordinato
 		cancelWork()
 		t.Fatal(err)
 	}
-	commentKinds, err := review.NewCommentKinds("issue", "note", "praise", "suggestion")
-	if err != nil {
-		cancelWork()
-		t.Fatal(err)
-	}
-	commentPolicies, err := review.NewCommentPolicies(review.CommentTypePrefixForGitHub)
-	if err != nil {
-		cancelWork()
-		t.Fatal(err)
-	}
 	syntaxSelector, err := review.NewSyntaxSelector("test")
 	if err != nil {
 		cancelWork()
 		t.Fatal(err)
 	}
 	settings, err := NewSettings(SettingsRequest{
-		CommentKinds:    commentKinds,
-		CommentPolicies: commentPolicies,
 		Features:        features,
 		DiffView:        DiffViewUnified,
 		ContextLines:    contextLines,
@@ -147,17 +135,7 @@ func newTestModel(tb testing.TB, changed map[string]string) (*Model, *Coordinato
 }
 
 func testReviewRequest(snapshot review.Snapshot) review.ReviewRequest {
-	kinds, err := review.NewCommentKinds("issue", "note", "praise", "suggestion")
-	if err != nil {
-		panic(err)
-	}
-	policies, err := review.NewCommentPolicies(review.CommentTypePrefixForGitHub)
-	if err != nil {
-		panic(err)
-	}
-	return review.ReviewRequest{
-		Snapshot: snapshot, CommentKinds: kinds, CommentPolicies: policies,
-	}
+	return review.ReviewRequest{Snapshot: snapshot}
 }
 
 func newTestDeliveryManager(tb testing.TB) *delivery.Manager {
@@ -203,7 +181,7 @@ func newSourceFixture(tb testing.TB, changed map[string]string) sourceFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := source.NewService(workingDirectory)
+	service, err := source.NewService(workingDirectory, source.ServiceOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

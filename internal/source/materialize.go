@@ -3,16 +3,14 @@ package source
 import (
 	"context"
 	"errors"
-	"fmt"
-	"strconv"
+	"strings"
 
 	"github.com/jacoelho/rvw/internal/review"
-	"github.com/jacoelho/rvw/internal/subprocess"
 )
 
 // PatchAcquisition owns patch bytes acquired from Git until CPU preparation.
 type PatchAcquisition struct {
-	text    []byte
+	native  *nativePatchInput
 	result  review.PatchResult
 	valid   bool
 	prepare bool
@@ -43,7 +41,7 @@ func (acquisition *PatchAcquisition) Finish(
 		return review.PatchResult{}, errors.New("patch CPU admission is nil")
 	}
 	result := acquisition.result
-	text := acquisition.text
+	native := acquisition.native
 	prepare := acquisition.prepare
 	acquisition.Close()
 	if !prepare {
@@ -52,10 +50,11 @@ func (acquisition *PatchAcquisition) Finish(
 	var prepared *review.PreparedPatch
 	var prepareErr error
 	admissionErr := runCPU(ctx, func() error {
-		prepared, prepareErr = review.TakePatchCancellable(
-			func() error { return context.Cause(ctx) },
-			text,
-		)
+		if native == nil {
+			prepareErr = errors.New("native patch input is unavailable")
+			return nil
+		}
+		prepared, prepareErr = prepareNativePatch(ctx, native)
 		return nil
 	})
 	if admissionErr != nil {
@@ -115,113 +114,33 @@ func (service *Service) AcquirePatch(
 		return PatchAcquisition{}, errors.New("patch request has an invalid file identity")
 	}
 
-	paths := make([]string, 0, 2)
+	if document.revision.repository == nil {
+		return PatchAcquisition{}, errors.New("source document has no native repository revision")
+	}
+	oldPath, newPath := "", ""
 	if path, ok := file.OldPath(); ok {
-		paths = append(paths, string(path.Raw()))
+		oldPath = string(path.Raw())
 	}
 	if path, ok := file.NewPath(); ok {
-		if oldPath, oldOK := file.OldPath(); !oldOK || !path.Equal(oldPath) {
-			paths = append(paths, string(path.Raw()))
-		}
+		newPath = string(path.Raw())
 	}
-	if document.revision.kind == revisionIndex {
-		unmerged, err := service.indexPathUnmerged(
-			ctx,
-			document.revision.repository,
-			document.revision.environment,
-			paths,
-		)
-		if err != nil {
-			return PatchAcquisition{}, err
-		}
-		if unmerged {
-			result.Status = review.PatchUnavailable
-			result.Detail = review.PatchDetail("unmerged index path has no single staged patch")
-			return PatchAcquisition{result: result, valid: true}, nil
-		}
-	}
-
-	arguments := []string{"--literal-pathspecs"}
-	if document.revision.kind == revisionIndex {
-		arguments = append(arguments,
-			gitDiff,
-			gitCached,
-			"-p",
-		)
-	} else {
-		arguments = append(arguments,
-			"diff-tree",
-			"--no-commit-id",
-			"-r",
-			"-p",
-		)
-	}
-	arguments = append(arguments,
-		"--no-color",
-		gitNoExtDiff,
-		gitNoTextconv,
-		"--unified="+strconv.FormatUint(uint64(request.Context.UnifiedLines()), 10),
-		document.revision.base.String(),
-	)
-	if document.revision.kind == revisionTree {
-		arguments = append(arguments,
-			document.revision.head.String(),
-		)
-	}
-	arguments = append(arguments,
-		"--",
-	)
-	arguments = append(arguments, paths...)
-	processResult, err := service.runGitWithInputIn(
-		ctx,
-		document.revision.repository.gitDirectory(),
-		document.revision.environment,
-		arguments,
-		nil,
-		nil,
-		review.MaxPatchBytes,
-	)
-	if err != nil {
-		switch {
-		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-			result.Status = review.PatchCancelled
-		case errors.Is(err, subprocess.ErrLimited):
-			result.Status = review.PatchLimited
-		default:
-			result.Status = review.PatchFailed
-		}
-		result.Detail = review.PatchDetail(boundedText(err.Error(), 16<<10))
+	if _, conflict := document.revision.unmerged[primaryAvailablePath(oldPath, newPath)]; conflict {
+		result.Status = review.PatchUnavailable
+		result.Detail = review.PatchDetail("unmerged index path has no single prepared patch")
 		return PatchAcquisition{result: result, valid: true}, nil
 	}
-	return PatchAcquisition{
-		result:  result,
-		text:    processResult.Stdout,
-		valid:   true,
-		prepare: true,
-	}, nil
-}
-
-func (service *Service) indexPathUnmerged(
-	ctx context.Context,
-	repository *rootedRepository,
-	environment map[string]string,
-	paths []string,
-) (bool, error) {
-	arguments := []string{"--literal-pathspecs", gitLSFiles, "--unmerged", "-z", "--"}
-	arguments = append(arguments, paths...)
-	result, err := service.runGitWithInputIn(
-		ctx,
-		repository.gitDirectory(),
-		environment,
-		arguments,
-		nil,
-		nil,
-		64<<10,
-	)
+	native, err := acquireNativePatch(ctx, document, file, request.Context)
 	if err != nil {
-		return false, fmt.Errorf("inspect staged conflict: %w", err)
+		if strings.Contains(err.Error(), "submodule") {
+			result.Status = review.PatchUnavailable
+			result.Detail = review.PatchDetail(boundedText(err.Error(), 16<<10))
+			return PatchAcquisition{result: result, valid: true}, nil
+		}
+		return PatchAcquisition{}, err
 	}
-	return len(result.Stdout) != 0, nil
+	return PatchAcquisition{
+		result: result, native: native, valid: true, prepare: true,
+	}, nil
 }
 
 // SyntaxAcquisition owns one Git blob until CPU preparation completes.
@@ -331,20 +250,20 @@ func (service *Service) LoadSyntaxWithCPUAdmission(
 	}
 	for _, demand := range request.Demands {
 		content := demand.Identity.Content()
-		command, err := service.runGitWithInputIn(
-			ctx,
-			document.revision.repository.gitDirectory(),
-			document.revision.environment,
-			[]string{"cat-file", "blob", content.String()},
-			nil,
-			nil,
-			review.MaxBlobBytes,
-		)
+		var blob []byte
+		var err error
+		if document.revision.repository == nil {
+			return result, errors.New("source document has no native repository revision")
+		}
+		blob, err = readNativeRecordSide(ctx, document.revision.repository, &content)
+		if err == nil && int64(len(blob)) > review.MaxBlobBytes {
+			err = &LimitError{Resource: LimitDiffInputBytes, Limit: uint64(review.MaxBlobBytes)}
+		}
 		if err != nil {
 			switch {
 			case contextCancellation(ctx, err):
 				result.Status = review.SyntaxCancelled
-			case errors.Is(err, subprocess.ErrLimited):
+			case errors.Is(err, ErrSourceLimited):
 				result.Status = review.SyntaxLimited
 			default:
 				result.Status = review.SyntaxUnavailable
@@ -355,7 +274,7 @@ func (service *Service) LoadSyntaxWithCPUAdmission(
 		acquisition := SyntaxAcquisition{
 			identity: demand.Identity,
 			lines:    demand.Lines,
-			blob:     command.Stdout,
+			blob:     blob,
 			valid:    true,
 		}
 		prepared, err := acquisition.Finish(ctx, runCPU)

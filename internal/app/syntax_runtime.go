@@ -29,7 +29,7 @@ type syntaxJob struct {
 }
 
 const syntaxResultConstructionBytes = review.MaxBlobBytes +
-	3*review.MaxSyntaxBytes + source.MaxCommandErrorConstructionBytes
+	3*review.MaxSyntaxBytes + source.MaxSourceErrorConstructionBytes
 
 func (work SyntaxWork) requestBytes() int64 {
 	requestBytes := work.Request.RetainedBytes()

@@ -155,7 +155,7 @@ func recognizedJSONField(name string) (jsonPresenceField, bool) {
 		return jsonFieldIDBaseRefOID, true
 	case "headRefOid":
 		return jsonFieldIDHeadRefOID, true
-	case "number":
+	case githubFieldNumber:
 		return jsonFieldIDNumber, true
 	case "reviewThreads":
 		return jsonFieldIDReviewThreads, true
@@ -169,7 +169,7 @@ func recognizedJSONField(name string) (jsonPresenceField, bool) {
 		return jsonFieldIDPageInfo, true
 	case "hasNextPage":
 		return jsonFieldIDHasNextPage, true
-	case "endCursor":
+	case githubFieldEndCursor:
 		return jsonFieldIDEndCursor, true
 	case jsonFieldNodes:
 		return jsonFieldIDNodes, true

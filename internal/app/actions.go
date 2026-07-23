@@ -65,10 +65,6 @@ func (model *Model) applyRestrictedAction(action KeyAction, repeat int) (tea.Cmd
 			model.cancelCommentEdit()
 		case KeyActionSaveComment:
 			model.saveComment()
-		case KeyActionNextCommentKind:
-			model.cycleCommentKind(review.NavigateNext)
-		case KeyActionPreviousCommentKind:
-			model.cycleCommentKind(review.NavigatePrevious)
 		default:
 		}
 		return nil, true
@@ -296,7 +292,7 @@ func (model *Model) applyCommandAction(action KeyAction) (tea.Cmd, bool) {
 			options:     review.DefaultExportOptions(),
 		})
 	case KeyActionOpenSubmit:
-		model.startPublicationCheck()
+		model.openPublication()
 	default:
 		return nil, false
 	}

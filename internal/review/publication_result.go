@@ -826,8 +826,13 @@ func pendingRebaseSourceMatchesResult(
 	sourceID SourceID,
 	pending PendingReview,
 ) bool {
-	return pendingRebaseSourceMatchesRequest(source, workspace, sourceID) &&
-		source.state.pending != nil && pending.nodeID == source.state.pending.nodeID &&
+	if !pendingRebaseSourceMatchesRequest(source, workspace, sourceID) {
+		return false
+	}
+	if source.createdDraft {
+		return source.state.pending == nil
+	}
+	return source.state.pending != nil && pending.nodeID == source.state.pending.nodeID &&
 		pending.databaseID == source.state.pending.databaseID
 }
 

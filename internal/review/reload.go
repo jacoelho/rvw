@@ -443,12 +443,18 @@ func (preparation *replacementPreparation) preserveDraft() error {
 }
 
 func sameLineSideContentIdentity(left, right File, side LineSide) bool {
+	if !sameFileSemanticIdentity(left, right) {
+		return false
+	}
 	leftObject, leftExists := left.Content(side)
 	rightObject, rightExists := right.Content(side)
 	return leftExists && rightExists && leftObject == rightObject
 }
 
 func sameFileContentIdentity(left, right File) bool {
+	if !sameFileSemanticIdentity(left, right) {
+		return false
+	}
 	compared := false
 	for _, side := range []LineSide{LineOld, LineNew} {
 		leftObject, leftExists := left.Content(side)
@@ -460,6 +466,13 @@ func sameFileContentIdentity(left, right File) bool {
 		compared = compared || leftExists
 	}
 	return compared
+}
+
+func sameFileSemanticIdentity(left, right File) bool {
+	if left.contents.semantic == nil || right.contents.semantic == nil {
+		return left.contents.semantic == nil && right.contents.semantic == nil
+	}
+	return *left.contents.semantic == *right.contents.semantic
 }
 
 // CommitReplacement performs the commit replacement operation.

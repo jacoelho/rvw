@@ -59,7 +59,7 @@ func TestCommentEditorDockKeepsCodeVisibleWithoutEscapedWidgetStyles(t *testing.
 	if !strings.Contains(plain, "changed") {
 		t.Fatalf("comment editor hid the selected code:\n%s", plain)
 	}
-	if !strings.Contains(plain, "Comment [issue] ·") || !strings.Contains(plain, "[focus:comment]") {
+	if !strings.Contains(plain, "Comment ·") || !strings.Contains(plain, "[focus:comment]") {
 		t.Fatalf("comment editor omitted its visible focus state:\n%s", plain)
 	}
 	if strings.Contains(plain, "enter activate") || !strings.Contains(plain, "comment editor owns input") {
@@ -174,7 +174,7 @@ func TestCommentEditorDockPreservesWorkspaceAcrossHeightBoundary(t *testing.T) {
 			_, _ = model.Update(tea.WindowSizeMsg{Width: normalWidth, Height: height})
 			view := model.View()
 			plain := ansi.Strip(view.Content)
-			if !strings.Contains(plain, "changed") || !strings.Contains(plain, "Comment [issue] ·") {
+			if !strings.Contains(plain, "changed") || !strings.Contains(plain, "Comment ·") {
 				t.Fatalf("height %d did not preserve code and editor:\n%s", height, plain)
 			}
 			if lines := strings.Count(view.Content, "\n") + 1; lines != height {

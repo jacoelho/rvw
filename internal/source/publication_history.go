@@ -115,7 +115,7 @@ func countPublicationMarkersCancellable(
 		if err := context.Cause(ctx); err != nil {
 			return 0, err
 		}
-		checkpoint := min(searchStart+maxSourceProtocolToken, len(body))
+		checkpoint := min(searchStart+sourceCPUPollBytes, len(body))
 		windowEnd := min(checkpoint+len(marker)-1, len(body))
 		match := strings.Index(body[searchStart:windowEnd], marker)
 		if match < 0 || searchStart+match >= checkpoint {

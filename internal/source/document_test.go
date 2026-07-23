@@ -9,32 +9,30 @@ import (
 	"github.com/jacoelho/rvw/internal/review"
 )
 
-func TestDocumentDetachCleanupReleasesGraphAndTransfersWorkspace(t *testing.T) {
-	workspace := filepath.Join(t.TempDir(), "detached")
-	if err := os.Mkdir(workspace, 0o700); err != nil {
+func initializeCommittedRepositoryAt(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	runGitTest(t, path, "init", "--quiet")
+	runGitTest(t, path, "config", "user.email", "test@example.com")
+	runGitTest(t, path, "config", "user.name", "Test")
+	writeFile(t, filepath.Join(path, "file"), contents)
+	runGitTest(t, path, "add", "file")
+	runGitTest(t, path, "commit", "--quiet", "-m", "commit")
+}
+
+func TestDocumentDetachCleanupReleasesGraphAndTransfersWorkspace(t *testing.T) {
 	document := &Document{
 		local: new(LocalDetails),
-		revision: revision{
-			environment: map[string]string{"retained": "value"},
-			cleanupPath: workspace,
-		},
 	}
 
 	cleanup := document.DetachCleanup()
-	if cleanup == nil || document.local != nil || document.revision.environment != nil ||
-		document.revision.cleanupPath != "" || !document.closed {
+	if cleanup == nil || document.local != nil || document.revision.repository != nil || !document.closed {
 		t.Fatalf("detached document retained source ownership: %+v", document)
-	}
-	if _, err := os.Stat(workspace); err != nil {
-		t.Fatalf("cleanup ran before ownership transfer: %v", err)
 	}
 	if err := cleanup.Close(); err != nil {
 		t.Fatal(err)
-	}
-	if _, err := os.Stat(workspace); !os.IsNotExist(err) {
-		t.Fatalf("detached cleanup did not remove workspace: %v", err)
 	}
 	if err := cleanup.Close(); err != nil {
 		t.Fatalf("repeated detached cleanup: %v", err)

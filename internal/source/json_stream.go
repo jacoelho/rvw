@@ -70,7 +70,7 @@ func (metrics *jsonCommandMetrics) release(ledger *sourceLedger) {
 
 func validateCommandJSONWithLimits(
 	ctx context.Context,
-	spool *commandSpool,
+	spool *githubSpool,
 	runCPU CPUAdmission,
 	ledger *sourceLedger,
 	limits jsonFramingLimits,

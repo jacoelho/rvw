@@ -49,7 +49,7 @@ func TestDraftBodyOwnershipTransitionsPreserveExplicitCopyContracts(t *testing.T
 		t.Fatal(err)
 	}
 	clearedDraft, ok := cleared.Draft()
-	if !ok || clearedDraft.Body() != "" || clearedDraft.Kind() != ownedDraft.Kind() ||
+	if !ok || clearedDraft.Body() != "" ||
 		clearedDraft.Target() != ownedDraft.Target() {
 		t.Fatalf("cleared draft metadata = (%+v, %t), want preserved empty draft", clearedDraft, ok)
 	}

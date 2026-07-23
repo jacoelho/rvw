@@ -126,6 +126,20 @@ func TestDefaultKeybindingsReserveInterruptInEveryContext(t *testing.T) {
 	}
 }
 
+func TestDefaultSubmitKeybindingsExposeStatusDetails(t *testing.T) {
+	bindings, err := resolveKeybindings(nil)
+	if err != nil {
+		t.Fatalf("resolve default keybindings: %v", err)
+	}
+	for _, binding := range bindings {
+		if binding.Context == KeyContextSubmit && binding.Chord == "F2" &&
+			binding.Action == KeyActionStatusDetails {
+			return
+		}
+	}
+	t.Fatal("submit context has no default F2 status-details binding")
+}
+
 func TestDefaultVisualKeybindingsPreserveNavigationAlternatives(t *testing.T) {
 	bindings, err := resolveKeybindings(nil)
 	if err != nil {

@@ -5,11 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"unicode/utf8"
 
 	"github.com/jacoelho/rvw/internal/review"
-	"github.com/jacoelho/rvw/internal/subprocess"
 )
 
 func encodePendingMutationBatch(
@@ -394,17 +394,17 @@ func pendingWireCancellation(cancelled func() error) error {
 func (service *Service) runGraphQLMutation(
 	ctx context.Context,
 	payload string,
-) (subprocess.Result, error) {
-	return service.runner.Run(ctx, subprocess.Request{
-		Name:            "gh",
-		Args:            []string{ghAPI, ghGraphQL, "--input", "-"},
-		Dir:             service.cwd.String(),
-		Env:             map[string]string{localeAllKey: "C", localeLanguageKey: "C", ghPromptDisabled: "1"},
-		StdinText:       payload,
-		StdoutLimit:     pendingMutationResponseBytes,
-		StderrLimit:     MaxCommandStderrBytes,
-		OperationDetail: "gh api pending review mutation",
-	})
+) (githubHTTPResult, error) {
+	result, err := service.github.mutation(
+		ctx, http.MethodPost, "/graphql", []byte(payload), pendingMutationResponseBytes,
+	)
+	if err == nil && result.status != http.StatusOK {
+		err = &githubHTTPError{
+			cause:  errors.New("GitHub GraphQL mutation returned an undocumented success status"),
+			status: result.status, attempted: result.attempted,
+		}
+	}
+	return result, err
 }
 
 func validatePendingMutationResponse(
@@ -512,14 +512,21 @@ func (service *Service) acquirePendingSubmission(
 	target review.PublicationTarget,
 	databaseID uint64,
 ) ([]byte, error) {
-	endpoint := "repos/" + target.Repository() + "/pulls/" +
+	endpoint := "/repos/" + target.Repository() + "/pulls/" +
 		strconv.FormatUint(target.PullRequest(), 10) + "/reviews/" +
 		strconv.FormatUint(databaseID, 10)
-	result, err := service.runGH(ctx, []string{ghAPI, endpoint}, pendingMutationResponseBytes)
+	response, err := service.github.request(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
-	return result.Stdout, nil
+	if response.StatusCode != http.StatusOK {
+		return nil, errors.Join(
+			fmt.Errorf("GitHub pending submission returned %s", response.Status),
+			response.Body.Close(),
+		)
+	}
+	body, readErr := readGitHubBody(response.Body, pendingMutationResponseBytes)
+	return body, errors.Join(readErr, response.Body.Close())
 }
 
 type pendingSubmissionClassification uint8

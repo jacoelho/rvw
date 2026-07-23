@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"slices"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -30,6 +32,7 @@ type interactiveRequest struct {
 	service     *source.Service
 	document    *source.Document
 	termination *terminationOwner
+	environment []string
 	resolved    config.Config
 }
 
@@ -105,6 +108,10 @@ func runInteractive(request interactiveRequest) (returnErr error) {
 		tea.WithoutSignalHandler(),
 		tea.WithInput(request.input),
 		tea.WithOutput(request.output),
+		tea.WithEnvironment(interactiveProgramEnvironment(
+			request.environment,
+			request.resolved.UI().ExplicitTheme,
+		)),
 	)
 	_, runErr := program.Run()
 
@@ -112,6 +119,17 @@ func runInteractive(request interactiveRequest) (returnErr error) {
 		runErr = errors.Join(runErr, program.ReleaseTerminal())
 	}
 	return finishInteractive(request, model, coordinator, receiver, cancelReceiver, runErr)
+}
+
+func interactiveProgramEnvironment(environment []string, explicitTheme bool) []string {
+	owned := slices.Clone(environment)
+	if !explicitTheme {
+		return owned
+	}
+	return slices.DeleteFunc(owned, func(value string) bool {
+		name, _, _ := strings.Cut(value, "=")
+		return name == "NO_COLOR"
+	})
 }
 
 func finishInteractive(
@@ -283,8 +301,6 @@ func interactiveSettings(resolved config.Config) (app.Settings, error) {
 	publicationEvent := review.PublicationEventComment
 	switch githubConfig.SubmitDefault {
 	case config.SubmitComment:
-	case config.SubmitDraft:
-		publicationEvent = review.PublicationEventDraft
 	case config.SubmitApprove:
 		publicationEvent = review.PublicationEventApprove
 	case config.SubmitRequestChanges:
@@ -301,19 +317,6 @@ func interactiveSettings(resolved config.Config) (app.Settings, error) {
 	if err != nil {
 		return app.Settings{}, err
 	}
-	commentsConfig := resolved.Comments()
-	commentKinds, err := review.NewCommentKinds(commentsConfig.Kinds...)
-	if err != nil {
-		return app.Settings{}, err
-	}
-	commentPolicyValues := []review.CommentPolicy{}
-	if commentsConfig.TypePrefixForGitHub {
-		commentPolicyValues = append(commentPolicyValues, review.CommentTypePrefixForGitHub)
-	}
-	commentPolicies, err := review.NewCommentPolicies(commentPolicyValues...)
-	if err != nil {
-		return app.Settings{}, err
-	}
 	keybindings, err := interactiveKeybindings(ui.Keybindings)
 	if err != nil {
 		return app.Settings{}, err
@@ -323,8 +326,6 @@ func interactiveSettings(resolved config.Config) (app.Settings, error) {
 		return app.Settings{}, err
 	}
 	return app.NewSettings(app.SettingsRequest{
-		CommentKinds:    commentKinds,
-		CommentPolicies: commentPolicies,
 		Features:        settingFeatures,
 		DiffView:        diffView,
 		ContextLines:    contextLines,
@@ -359,8 +360,6 @@ func interactivePalette(resolved config.Config, activeTheme config.ThemeName) (a
 		"diff_hunk_header":   app.PaletteDiffHunk,
 		"message_warning_fg": app.PaletteWarningForeground,
 		"message_warning_bg": app.PaletteWarningBackground,
-		"comment_note":       app.PaletteCommentNote,
-		"comment_suggestion": app.PaletteCommentSuggestion,
 	}
 	for name, role := range roles {
 		if color := theme.Colors[name].String(); color != "" {

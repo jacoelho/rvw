@@ -444,7 +444,7 @@ func (service *Service) AcquirePendingPublication(
 		}
 		state.batchAttempt++
 		command, runErr := service.runGraphQLMutation(ctx, batch.payload)
-		if runErr != nil && !command.Started {
+		if runErr != nil && githubGraphQLMutationFailedBeforeCommit(runErr) {
 			return state.terminalFailure(runErr, pendingPublicationNoUncertainty)
 		}
 		if runErr != nil {
@@ -452,7 +452,7 @@ func (service *Service) AcquirePendingPublication(
 			state.reconciliation = pendingPublicationReconcileMutation
 			return service.AcquirePendingPublication(ctx, execution, runCPU)
 		}
-		return state.acquiredStep(pendingMutationResponse, command.Stdout, review.PendingReview{}, nil)
+		return state.acquiredStep(pendingMutationResponse, command.body, review.PendingReview{}, nil)
 	}
 	if state.submission.payload == "" {
 		fresh, err := service.acquirePendingReview(
@@ -475,7 +475,7 @@ func (service *Service) AcquirePendingPublication(
 	}
 	state.submissionAttempt++
 	command, runErr := service.runGraphQLMutation(ctx, state.submission.payload)
-	if runErr != nil && !command.Started {
+	if runErr != nil && githubGraphQLMutationFailedBeforeCommit(runErr) {
 		return state.terminalFailure(runErr, pendingPublicationNoUncertainty)
 	}
 	if runErr != nil {
@@ -483,7 +483,7 @@ func (service *Service) AcquirePendingPublication(
 		state.reconciliation = pendingPublicationReconcileSubmission
 		return service.AcquirePendingPublication(ctx, execution, runCPU)
 	}
-	return state.acquiredStep(pendingSubmissionResponse, command.Stdout, review.PendingReview{}, nil)
+	return state.acquiredStep(pendingSubmissionResponse, command.body, review.PendingReview{}, nil)
 }
 
 // Finish consumes acquired remote state and returns either an explicit

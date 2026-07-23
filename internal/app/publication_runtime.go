@@ -101,9 +101,12 @@ func (coordinator *Coordinator) SubmitPublicationCheck(work PublicationCheckWork
 
 // SubmitPublication performs the submit publication operation.
 func (coordinator *Coordinator) SubmitPublication(work PublicationWork) error {
+	checked := work.Request.Checked
+	directDraft := checked != nil && !checked.Pending() &&
+		checked.Prepared().Options().Event() == review.PublicationEventDraft
 	if work.ID == 0 || work.Request.Operation != work.ID ||
-		work.Request.Checked == nil ||
-		work.Request.Checked.Pending() != work.Rebase.Ready() ||
+		checked == nil ||
+		(checked.Pending() || directDraft) != work.Rebase.Ready() ||
 		work.Rebase.Ready() && (work.Rebase.Workspace() != work.Request.Workspace ||
 			work.Rebase.Source() != work.Request.Source) {
 		return errors.New("invalid publication work")

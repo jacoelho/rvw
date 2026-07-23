@@ -1,10 +1,8 @@
 package source
 
 import (
-	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/jacoelho/rvw/internal/review"
@@ -45,42 +43,6 @@ func TestConstructionLimitClassificationRemainsLimited(t *testing.T) {
 	var classified *FailureError
 	if !errors.As(failure, &classified) || classified.Kind != FailureLimited {
 		t.Fatalf("required source failure = %#v", classified)
-	}
-}
-
-func TestRawDiffConstructionChargeCoversSHA256RecordAtBoundary(t *testing.T) {
-	const path = "p"
-	oid := strings.Repeat("1", 64)
-	raw := ":100644 100755 " + oid + " " + oid + " M\x00" + path + "\x00"
-	exact := int64(16)*diffRecordConstructionCharge + int64(len(path))
-
-	ledger, err := newSourceLedgerWithLimit(exact, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	records, err := parseRawDiffStreamWithLedgerLimits(
-		context.Background(),
-		strings.NewReader(raw),
-		ledger,
-		16,
-		int64(len(path)),
-	)
-	if err != nil || len(records) != 1 || ledger.used != exact {
-		t.Fatalf("exact records=%d used=%d err=%v", len(records), ledger.used, err)
-	}
-
-	ledger, err = newSourceLedgerWithLimit(exact-1, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := parseRawDiffStreamWithLedgerLimits(
-		context.Background(),
-		strings.NewReader(raw),
-		ledger,
-		16,
-		int64(len(path)),
-	); !errors.Is(err, ErrSourceLimited) {
-		t.Fatalf("one-byte-over error = %v", err)
 	}
 }
 

@@ -443,6 +443,7 @@ type PreparedPublication struct {
 // new review or a continuation of one captured pending review.
 type PublicationSource struct {
 	state         *pendingReviewState
+	pendingDetail OperationDetail
 	baseline      PendingReview
 	comments      commentSource
 	workspace     WorkspaceRevision
@@ -468,11 +469,13 @@ func (review Review) PublicationSource() PublicationSource {
 	if hasBaseline {
 		retained += review.snapshot.pendingRetainedBytes
 	}
+	pending := review.snapshot.PendingReviewSummary()
 	return PublicationSource{
 		state:         review.pending,
 		comments:      review.source(),
 		baseline:      baseline,
-		status:        review.snapshot.PendingReviewSummary().Status,
+		status:        pending.Status,
+		pendingDetail: pending.Detail,
 		workspace:     review.workspace,
 		source:        review.snapshot.SourceID(),
 		retainedBytes: retained + publicationSourceMetadataBytes,
@@ -507,7 +510,7 @@ func (source PublicationSource) ConstructionBytes() int64 {
 	}
 	comments := int64(len(source.comments.comments) + 1)
 	return source.retainedBytes + 2*MaxPublicationBytes +
-		comments*(64+8+16+256+MaxEncodedCommentKindPrefixBytes) + 1_024
+		comments*(64+8+16+256) + 1_024
 }
 
 func (prepared PreparedPublication) retainedBytes() int64 {
@@ -578,6 +581,14 @@ func (source PublicationSource) PreparePublicationCancellable(
 	status := source.status
 	if status == PendingReviewUnavailable || status == PendingReviewLimited ||
 		status == PendingReviewAmbiguous {
+		if !source.pendingDetail.IsEmpty() {
+			return PreparedPublication{}, fmt.Errorf(
+				"%w: pending GitHub review is %s: %s",
+				ErrInvalidPublication,
+				status,
+				source.pendingDetail.String(),
+			)
+		}
 		return PreparedPublication{}, fmt.Errorf(
 			"%w: pending GitHub review is %s",
 			ErrInvalidPublication,
@@ -615,9 +626,7 @@ func (source PublicationSource) PreparePublicationCancellable(
 			pathUTF8, validUTF8 := path.UTF8()
 			side, start, end, hasLines := target.Lines()
 			if hasPath && validUTF8 && hasLines {
-				body, encodeErr := encodeCommentWire(
-					commentContentFrom(comment), source.comments.policies,
-				)
+				body, encodeErr := encodeCommentWire(commentContentFrom(comment))
 				if encodeErr != nil {
 					return PreparedPublication{}, fmt.Errorf("%w: %w", ErrInvalidPublication, encodeErr)
 				}
@@ -639,7 +648,7 @@ func (source PublicationSource) PreparePublicationCancellable(
 		if target.Kind() == TargetReview || target.Kind() == TargetFile ||
 			options.Policies().Has(PublicationMoveUnmappableToSummary) {
 			body, encodeErr := encodePublicationSummaryWire(
-				commentContentFrom(comment), target, source.comments.policies,
+				commentContentFrom(comment), target,
 			)
 			if encodeErr != nil {
 				return PreparedPublication{}, fmt.Errorf("%w: %w", ErrInvalidPublication, encodeErr)
@@ -707,14 +716,13 @@ func appendPublicationSummary(
 func encodePublicationSummaryWire(
 	content commentContent,
 	target CommentTarget,
-	policies CommentPolicies,
 ) (string, error) {
 	if target.Kind() != TargetReview {
 		if path, ok := target.AnchoredPath(); ok {
 			content.body = "`" + markdownEscape(path.Display()) + "`: " + content.body
 		}
 	}
-	return encodeCommentWire(content, policies)
+	return encodeCommentWire(content)
 }
 
 func validatePreparedPublicationBytes(

@@ -41,7 +41,6 @@ type SubmitEvent string
 // SubmitComment identifies a supported submit comment value.
 const (
 	SubmitComment        SubmitEvent = "comment"
-	SubmitDraft          SubmitEvent = "draft"
 	SubmitApprove        SubmitEvent = "approve"
 	SubmitRequestChanges SubmitEvent = "request-changes"
 )
@@ -210,8 +209,6 @@ const (
 	KeyActionExtendDown          KeyAction = "extend-down"
 	KeyActionCommentSelection    KeyAction = "comment-selection"
 	KeyActionSaveComment         KeyAction = "save-comment"
-	KeyActionNextCommentKind     KeyAction = "next-comment-kind"
-	KeyActionPreviousCommentKind KeyAction = "previous-comment-kind"
 	KeyActionNextFile            KeyAction = "next-file"
 	KeyActionPreviousFile        KeyAction = "previous-file"
 	KeyActionNextHunk            KeyAction = "next-hunk"
@@ -230,6 +227,8 @@ const (
 	KeyActionExportMarkdown      KeyAction = "export-markdown"
 	KeyActionExportJSON          KeyAction = "export-json"
 	KeyActionOpenSubmit          KeyAction = "open-submit"
+	KeyActionPreviousSubmitEvent KeyAction = "previous-submit-event"
+	KeyActionNextSubmitEvent     KeyAction = "next-submit-event"
 	KeyActionHelp                KeyAction = "help"
 	KeyActionStatusDetails       KeyAction = "status-details"
 	KeyActionReload              KeyAction = "reload"
@@ -248,8 +247,6 @@ const (
 	KeyActionNextHelpPage        KeyAction = "next-help-page"
 	KeyActionPreviousHelpPage    KeyAction = "previous-help-page"
 	KeyActionToggleExportUnmap   KeyAction = "toggle-export-unmappable"
-	KeyActionToggleExportNotes   KeyAction = "toggle-export-notes"
-	KeyActionToggleExportPraise  KeyAction = "toggle-export-praise"
 	KeyActionToggleSubmitExclude KeyAction = "toggle-submit-exclusion"
 	KeyActionToggleSubmitSummary KeyAction = "toggle-submit-summary"
 	KeyActionToggleStaleOverride KeyAction = "toggle-stale-head-override"
@@ -312,28 +309,16 @@ type Export struct {
 	CommentTemplate  Template
 }
 
-// Comments describes stable review-comment configuration.
-type Comments struct {
-	Kinds               []string
-	TypePrefixForGitHub bool
-}
-
 // Config describes config.
 type Config struct {
 	themes      map[ThemeName]Theme
 	export      Export
-	comments    Comments
 	activeTheme ThemeName
 	filter      Filter
 	github      GitHub
 	ui          UI
 	diff        Diff
 }
-
-const (
-	defaultIssueCommentKind      = "issue"
-	defaultSuggestionCommentKind = "suggestion"
-)
 
 // Defaults performs the defaults operation.
 func Defaults() Config {
@@ -361,18 +346,9 @@ func Defaults() Config {
 			SubmitDefault: SubmitComment,
 			FetchThreads:  true,
 		},
-		comments: Comments{
-			Kinds: []string{
-				defaultIssueCommentKind,
-				"note",
-				"praise",
-				defaultSuggestionCommentKind,
-			},
-			TypePrefixForGitHub: true,
-		},
 		export: Export{
-			MarkdownTemplate: Template("I reviewed your code and have the following comments. Please address them.\n\nComment types: {{comment_types}}\n\n{{comments}}\n"),
-			CommentTemplate:  Template("{{index}}. **[{{kind_upper}}]** `{{target}}` - {{comment}}"),
+			MarkdownTemplate: Template("I reviewed your code and have the following comments. Please address them.\n\n{{comments}}\n"),
+			CommentTemplate:  Template("{{index}}. `{{target}}` - {{comment}}"),
 		},
 	}
 }
@@ -405,13 +381,6 @@ func (config Config) GitHub() GitHub {
 // Export returns the receiver's export value.
 func (config Config) Export() Export {
 	return config.export
-}
-
-// Comments returns stable review-comment configuration.
-func (config Config) Comments() Comments {
-	comments := config.comments
-	comments.Kinds = slices.Clone(comments.Kinds)
-	return comments
 }
 
 // Theme performs the theme operation.

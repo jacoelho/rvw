@@ -98,7 +98,7 @@ func (preparation *replacementPreparation) mergeMissingPendingReview() error {
 		binding.conflict = &pendingConflict{
 			base:   cloneCommentContent(binding.baseline),
 			local:  cloneCommentContent(local),
-			remote: commentContent{kind: binding.baseline.kind},
+			remote: commentContent{},
 		}
 		state.bindings[id] = binding
 		if binding.kind == pendingBindingComment {
@@ -133,11 +133,9 @@ func (preparation *replacementPreparation) mergeReadyPendingReview(
 	seenRemote := make(map[CommentNodeID]struct{}, remote.CommentCount())
 
 	remoteBody, remoteBodyMarker := splitPendingMarker(remote.body, publicationMarkerPrefix)
-	remoteBodyContent := commentContent{
-		kind: preparation.next.commentKinds.first(), body: remoteBody,
-	}
+	remoteBodyContent := commentContent{body: remoteBody}
 	if remoteBodyMarker != "" {
-		remoteBodyContent = decodeOwnedCommentWire(remoteBody, preparation.next.commentKinds)
+		remoteBodyContent = decodeOwnedCommentWire(remoteBody)
 	}
 	applied, err := preparation.pendingSummaryCommentsApplied(remoteBody)
 	if err != nil {
@@ -248,9 +246,9 @@ func (preparation *replacementPreparation) mergeExistingPendingComments(
 		}
 		seenRemote[node] = struct{}{}
 		body, marker := splitPendingMarker(remoteComment.body, draftCommentMarkerPrefix)
-		content := commentContent{kind: preparation.next.commentKinds.first(), body: body}
+		content := commentContent{body: body}
 		if marker != "" {
-			content = decodeOwnedCommentWire(body, preparation.next.commentKinds)
+			content = decodeOwnedCommentWire(body)
 		}
 		if err := preparation.mergePendingComment(
 			state,
@@ -304,9 +302,9 @@ func (preparation *replacementPreparation) mergeNewPendingComments(
 			continue
 		}
 		body, marker := splitPendingMarker(remoteComment.body, draftCommentMarkerPrefix)
-		content := commentContent{kind: preparation.next.commentKinds.first(), body: body}
+		content := commentContent{body: body}
 		if marker != "" {
-			content = decodeOwnedCommentWire(body, preparation.next.commentKinds)
+			content = decodeOwnedCommentWire(body)
 		}
 		if localID, matched := localMarkers[marker]; matched && marker != "" {
 			local, exists := preparation.comment(localID)
@@ -325,7 +323,7 @@ func (preparation *replacementPreparation) mergeNewPendingComments(
 			}
 			if commentContentFrom(local) != content {
 				binding.conflict = &pendingConflict{
-					base:   commentContent{kind: local.kind},
+					base:   commentContent{},
 					local:  cloneCommentContent(commentContentFrom(local)),
 					remote: cloneCommentContent(content),
 				}
@@ -385,7 +383,6 @@ func (preparation *replacementPreparation) pendingSummaryCommentsApplied(
 					var err error
 					wire, err = encodePublicationSummaryWire(
 						commentContentFrom(comment), comment.target,
-						preparation.next.commentPolicies,
 					)
 					if err != nil {
 						return nil, err
@@ -406,7 +403,7 @@ func (preparation *replacementPreparation) pendingSummaryCommentsApplied(
 			continue
 		}
 		wire, err := encodePublicationSummaryWire(
-			commentContentFrom(comment), comment.target, preparation.next.commentPolicies,
+			commentContentFrom(comment), comment.target,
 		)
 		if err != nil {
 			return nil, err
@@ -448,7 +445,6 @@ func (preparation *replacementPreparation) pendingLocalCommentMarkers(
 			comment,
 			options,
 			original.commit,
-			preparation.next.commentPolicies,
 		)
 		if prepareErr != nil {
 			return nil, prepareErr
@@ -598,7 +594,7 @@ func (preparation *replacementPreparation) mergeDeletedRemoteComment(
 	binding.conflict = &pendingConflict{
 		base:   cloneCommentContent(binding.baseline),
 		local:  cloneCommentContent(local),
-		remote: commentContent{kind: binding.baseline.kind},
+		remote: commentContent{},
 	}
 	state.bindings[id] = binding
 	return nil
@@ -630,7 +626,6 @@ func (preparation *replacementPreparation) replacePendingComment(
 	}
 	preparation.next.commentBody -= int64(len(preparation.next.comments[index].body))
 	preparation.next.comments[index].body = validated
-	preparation.next.comments[index].kind = content.kind
 	preparation.next.commentBody += int64(len(validated))
 	return nil
 }
@@ -666,7 +661,7 @@ func (preparation *replacementPreparation) appendPendingComment(
 	preparation.commentIndexes[id] = len(preparation.next.comments)
 	preparation.next.comments = append(preparation.next.comments, Comment{
 		id: id, target: target, body: validated,
-		kind: content.kind, flags: flags,
+		flags: flags,
 	})
 	preparation.next.commentBody += int64(len(validated))
 	preparation.next.nextComment++

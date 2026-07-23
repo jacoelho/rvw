@@ -36,7 +36,6 @@ type commentState struct {
 	draft           *Draft
 	pending         *pendingReviewState
 	comments        []Comment
-	commentKinds    CommentKinds
 	commentBody     int64
 	commentBytes    int64
 	retainedBytes   int64
@@ -45,15 +44,12 @@ type commentState struct {
 	pendingDirty    uint32
 	pendingConflict uint32
 	nextComment     uint32
-	commentPolicies CommentPolicies
 	mutationKind    CommentMutationKind
 }
 
 // ReviewRequest describes the required immutable inputs for a review.
 type ReviewRequest struct {
-	CommentKinds    CommentKinds
-	Snapshot        Snapshot
-	CommentPolicies CommentPolicies
+	Snapshot Snapshot
 }
 
 // NewReview constructs and validates review.
@@ -62,15 +58,10 @@ func NewReview(request ReviewRequest) (Review, error) {
 	if snapshot.SourceID() == 0 {
 		return Review{}, fmt.Errorf("%w: snapshot has no source", ErrInvalidReviewTransition)
 	}
-	if !request.CommentKinds.valid() || !request.CommentPolicies.valid() {
-		return Review{}, fmt.Errorf("%w: comment settings are invalid", ErrInvalidReviewTransition)
-	}
 	workspace := WorkspaceRevision(1)
 	review := Review{
 		commentState: commentState{
-			revision:        1,
-			commentKinds:    request.CommentKinds,
-			commentPolicies: request.CommentPolicies,
+			revision: 1,
 		},
 		workspace:   workspace,
 		snapshot:    snapshot,
@@ -220,28 +211,8 @@ func (review Review) BeginDraft(target CommentTarget) (Review, error) {
 		target = target.withPath(file.IdentityPath())
 	}
 	next := review.cloneCommentState()
-	next.draft = &Draft{target: target, kind: review.commentKinds.first()}
+	next.draft = &Draft{target: target}
 	next.retainedBytes += draftRetainedBytes(next.draft)
-	return next, nil
-}
-
-// CycleDraftKind moves the active draft through the configured lexical kinds.
-func (review Review) CycleDraftKind(direction NavigationDirection) (Review, error) {
-	if review.draft == nil || review.activeMutation != 0 ||
-		direction != NavigatePrevious && direction != NavigateNext {
-		return review, ErrInvalidReviewTransition
-	}
-	index, found := slices.BinarySearchFunc(
-		review.commentKinds.values,
-		review.draft.kind,
-		func(left, right CommentKind) int { return strings.Compare(left.label, right.label) },
-	)
-	if !found {
-		return review, ErrInvalidReviewTransition
-	}
-	index = (index + int(direction) + review.commentKinds.Len()) % review.commentKinds.Len()
-	next := review.cloneCommentState()
-	next.draft.kind = review.commentKinds.values[index]
 	return next, nil
 }
 

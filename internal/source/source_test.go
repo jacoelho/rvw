@@ -16,7 +16,6 @@ import (
 	"testing"
 
 	"github.com/jacoelho/rvw/internal/review"
-	"github.com/jacoelho/rvw/internal/subprocess"
 )
 
 func TestTargetValidation(t *testing.T) {
@@ -280,23 +279,6 @@ func TestWorktreeAcceptsGenuinelyUnspecifiedFilterWithSameNamedDriverConfigured(
 	}
 }
 
-func TestWorktreeReportsExplicitUnsetFilterAsAmbiguousWithSameNamedDriver(t *testing.T) {
-	root := initializedRepository(t)
-	writeFile(t, filepath.Join(root, "tracked.txt"), "base\n")
-	runGitTest(t, root, "add", "tracked.txt")
-	runGitTest(t, root, "commit", "-m", "base")
-	writeFile(t, filepath.Join(root, "tracked.txt"), "worktree\n")
-	writeFile(t, filepath.Join(root, ".gitattributes"), "*.txt -filter\n")
-	runGitTest(t, root, "config", "filter.unset.clean", "false")
-
-	service := newTestService(t, root)
-	defer closeTestService(t, service)
-	if _, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{}); err == nil ||
-		!strings.Contains(err.Error(), "ambiguous with configured driver name \"unset\"") {
-		t.Fatalf("explicit unset ambiguity error = %v", err)
-	}
-}
-
 func TestTrackedWorktreeUsesLiveIndexMembership(t *testing.T) {
 	root := initializedRepository(t)
 	writeFile(t, filepath.Join(root, "tracked.txt"), "base\n")
@@ -332,6 +314,133 @@ func TestTrackedWorktreeUsesLiveIndexMembership(t *testing.T) {
 	}
 }
 
+func TestWorktreeHonorsCoreFileMode(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		fileMode    string
+		wantChanges int
+	}{
+		{name: "enabled", fileMode: "true", wantChanges: 1},
+		{name: "disabled", fileMode: "false"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := initializedRepository(t)
+			path := filepath.Join(root, "script")
+			writeFile(t, path, "#!/bin/sh\n")
+			runGitTest(t, root, "add", "script")
+			runGitTest(t, root, "commit", "-m", "base")
+			runGitTest(t, root, "config", "core.filemode", test.fileMode)
+			if err := os.Chmod(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+
+			service := newTestService(t, root)
+			defer closeTestService(t, service)
+			document, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer document.Close()
+			if document.Snapshot().FileCount() != test.wantChanges {
+				t.Fatalf("file count = %d, want %d", document.Snapshot().FileCount(), test.wantChanges)
+			}
+			if test.wantChanges == 0 {
+				return
+			}
+			file, _ := document.Snapshot().File(0)
+			mode, ok := file.Change().Mode()
+			if file.Change().Kind() != review.ChangeModeOnly || !ok ||
+				mode.Old().String() != "100644" || mode.New().String() != "100755" {
+				t.Fatalf("executable-bit change = %+v, mode=%+v", file.Change(), mode)
+			}
+		})
+	}
+}
+
+func TestWorktreeDetectsEditedRenameWithoutCommandFallback(t *testing.T) {
+	root := initializedRepository(t)
+	oldPath := filepath.Join(root, "old.txt")
+	writeFile(t, oldPath, "one\ntwo\nthree\nfour\n")
+	runGitTest(t, root, "add", "old.txt")
+	runGitTest(t, root, "commit", "-m", "base")
+	newPath := filepath.Join(root, "new.txt")
+	if err := os.Rename(oldPath, newPath); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, newPath, "one\ntwo\nchanged\nfour\n")
+
+	service := newTestService(t, root)
+	defer closeTestService(t, service)
+	document, err := service.Open(
+		t.Context(), WorktreeTarget(), OpenOptions{IncludeUntracked: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer document.Close()
+	file, ok := document.Snapshot().File(0)
+	old, hasOld := file.OldPath()
+	newer, hasNew := file.NewPath()
+	if !ok || document.Snapshot().FileCount() != 1 ||
+		file.Change().Kind() != review.ChangeRenamed || !hasOld || !hasNew ||
+		string(old.Raw()) != "old.txt" || string(newer.Raw()) != "new.txt" {
+		t.Fatalf("edited rename snapshot = %+v, present=%v", document.Snapshot(), ok)
+	}
+	if file.Change().Additions() != 1 || file.Change().Deletions() != 1 {
+		t.Fatalf("edited rename counts = +%d -%d, want +1 -1",
+			file.Change().Additions(), file.Change().Deletions())
+	}
+}
+
+func TestNativePatchMetadataUsesSelectedSimilarityScore(t *testing.T) {
+	mode, err := review.NewFileMode("100644")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := nativePatchMetadata(&nativePatchInput{
+		oldPath:    "old.txt",
+		newPath:    "new.txt",
+		oldMode:    mode,
+		newMode:    mode,
+		kind:       review.ChangeRenamed,
+		similarity: 45_000,
+	})
+	if len(lines) < 2 || string(lines[1].Text) != "similarity index 75%" {
+		t.Fatalf("similarity metadata = %+v, want 75%%", lines)
+	}
+}
+
+func TestNativeSimilarityCandidatesExcludeConsumedRenameSources(t *testing.T) {
+	mode, err := review.NewFileMode("100644")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oid, err := review.NewObjectID(strings.Repeat("1", 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources, targets := nativeSimilarityCandidates([]diffRecord{
+		{oldOID: &oid, newOID: &oid, oldMode: mode, newMode: mode, oldPath: "old", newPath: "renamed", status: 'R'},
+		{newOID: &oid, newMode: mode, newPath: "copy", status: 'A'},
+	})
+	if len(sources) != 0 || len(targets) != 1 {
+		t.Fatalf("similarity candidates = %d sources, %d targets; want 0, 1", len(sources), len(targets))
+	}
+}
+
+func TestNativeIndexGroupRejectsStageZeroMixedWithConflictStages(t *testing.T) {
+	err := validateNativeIndexGroup(nativeIndexGroup{
+		path: "conflict.txt",
+		entries: []streamedIndexEntry{
+			{path: "conflict.txt", stage: 0},
+			{path: "conflict.txt", stage: 1},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "mixes stage zero") {
+		t.Fatalf("mixed index group error = %v", err)
+	}
+}
+
 func TestWorktreeRejectsIndexFlagsThatHideTrackedChanges(t *testing.T) {
 	root := initializedRepository(t)
 	writeFile(t, filepath.Join(root, "tracked.txt"), "base\n")
@@ -345,6 +454,94 @@ func TestWorktreeRejectsIndexFlagsThatHideTrackedChanges(t *testing.T) {
 	if _, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{}); err == nil ||
 		!strings.Contains(err.Error(), "assume-unchanged") {
 		t.Fatalf("hidden worktree change error = %v", err)
+	}
+}
+
+func TestServiceRejectsRepositoryReplacementBetweenOpens(t *testing.T) {
+	root := initializedRepository(t)
+	writeFile(t, filepath.Join(root, "tracked.txt"), "base\n")
+	runGitTest(t, root, "add", "tracked.txt")
+	runGitTest(t, root, "commit", "-m", "base")
+
+	service := newTestService(t, root)
+	defer closeTestService(t, service)
+	document, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := document.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	moved := root + "-moved"
+	if err := os.Rename(root, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, root, "init", "--quiet")
+
+	_, err = service.Open(t.Context(), WorktreeTarget(), OpenOptions{})
+	if !errors.Is(err, ErrSourceStale) {
+		t.Fatalf("replacement open error = %v, want ErrSourceStale", err)
+	}
+}
+
+func TestRangeReadsPinnedObjectAlternateWithoutGitFallback(t *testing.T) {
+	origin := initializedRepository(t)
+	writeFile(t, filepath.Join(origin, "tracked.txt"), "one\n")
+	runGitTest(t, origin, "add", "tracked.txt")
+	runGitTest(t, origin, "commit", "-m", "first")
+	first := strings.TrimSpace(runGitTest(t, origin, "rev-parse", "HEAD"))
+	writeFile(t, filepath.Join(origin, "tracked.txt"), "one\ntwo\n")
+	runGitTest(t, origin, "commit", "-am", "second")
+	second := strings.TrimSpace(runGitTest(t, origin, "rev-parse", "HEAD"))
+
+	dependent := t.TempDir()
+	gitDirectory := filepath.Join(dependent, ".git")
+	if err := os.MkdirAll(filepath.Join(gitDirectory, "objects", "info"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(gitDirectory, "refs", "heads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(gitDirectory, "HEAD"), "ref: refs/heads/main\n")
+	writeFile(t, filepath.Join(gitDirectory, "refs", "heads", "main"), second+"\n")
+	writeFile(t, filepath.Join(gitDirectory, "objects", "info", "alternates"),
+		filepath.Join(origin, ".git", "objects")+"\n")
+
+	target, err := NewRangeTarget(first + ".." + second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := newTestService(t, dependent)
+	defer closeTestService(t, service)
+	document, err := service.Open(t.Context(), target, OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer document.Close()
+	file, ok := document.Snapshot().File(0)
+	if !ok || document.Snapshot().FileCount() != 1 || file.DisplayPath() != "tracked.txt" ||
+		file.Change().Additions() != 1 {
+		t.Fatalf("alternate-backed range snapshot = %+v", document.Snapshot())
+	}
+}
+
+func TestObjectAlternateCycleIsRejected(t *testing.T) {
+	first := initializedRepository(t)
+	second := initializedRepository(t)
+	firstObjects := filepath.Join(first, ".git", "objects")
+	secondObjects := filepath.Join(second, ".git", "objects")
+	writeFile(t, filepath.Join(firstObjects, "info", "alternates"), secondObjects+"\n")
+	writeFile(t, filepath.Join(secondObjects, "info", "alternates"), firstObjects+"\n")
+
+	service := newTestService(t, first)
+	defer closeTestService(t, service)
+	_, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{})
+	if err == nil || !strings.Contains(err.Error(), "alternates contain a cycle") {
+		t.Fatalf("alternate cycle error = %v", err)
 	}
 }
 
@@ -495,6 +692,9 @@ func TestWorktreeCollapsesEmbeddedRepositoryAboveTrackedDescendants(t *testing.T
 	}
 	if !foundGitlink {
 		t.Fatal("embedded repository root is absent from the parent snapshot")
+	}
+	if document.Snapshot().FileCount() != 1 {
+		t.Fatalf("embedded repository replacement produced %d records, want 1", document.Snapshot().FileCount())
 	}
 }
 
@@ -668,6 +868,61 @@ func TestLoadPatchAndReloadUseGenerationFencedIdentities(t *testing.T) {
 	}
 }
 
+func TestLoadPatchStreamsLargeContentThroughDiskDiff(t *testing.T) {
+	root := initializedRepository(t)
+	var contents strings.Builder
+	for line := range 90_000 {
+		fmt.Fprintf(&contents, "line-%06d-value\n", line)
+	}
+	base := contents.String()
+	writeFile(t, filepath.Join(root, "large.txt"), base)
+	runGitTest(t, root, "add", "large.txt")
+	runGitTest(t, root, "commit", "-m", "base")
+	updated := strings.Replace(base, "line-045000-value\n", "line-045000-edited\n", 1)
+	writeFile(t, filepath.Join(root, "large.txt"), updated)
+
+	service := newTestService(t, root)
+	defer closeTestService(t, service)
+	document, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer document.Close()
+	file, ok := document.Snapshot().File(0)
+	if !ok || file.Change().Additions() != 1 || file.Change().Deletions() != 1 {
+		t.Fatalf("large diff file = %+v, present %v", file, ok)
+	}
+	current, err := review.NewReview(testReviewRequest(document.Snapshot()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contextLines, _ := review.NewContextLines(2)
+	patchContext, _ := review.ContextAround(contextLines)
+	current, request, err := current.RequestPatch(file.ID(), patchContext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.LoadPatch(t.Context(), document, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != review.PatchReady || result.Prepared.Hunks() != 1 {
+		t.Fatalf("large patch result = %+v", result)
+	}
+	current, err = current.ApplyPatch(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := patchLinesText(current.PatchLines(file.ID(), 0, 32, 4_096))
+	for _, expected := range []string{
+		" line-044998-value", "-line-045000-value", "+line-045000-edited", " line-045002-value",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("large patch omitted %q:\n%s", expected, text)
+		}
+	}
+}
+
 func TestLoadPatchTreatsRawPathAsLiteral(t *testing.T) {
 	root := initializedRepository(t)
 	hostileName := ":(glob)**"
@@ -763,14 +1018,6 @@ func TestSourceFailureClassificationPreservesDominantOutcome(t *testing.T) {
 		kind FailureKind
 	}{
 		{
-			name: "non-graceful dominates cancellation",
-			err: errors.Join(
-				context.Canceled,
-				&subprocess.NonGracefulError{PID: 42},
-			),
-			kind: FailureNonGraceful,
-		},
-		{
 			name: "stale",
 			err:  fmt.Errorf("%w: changed head", ErrSourceStale),
 			kind: FailureStale,
@@ -795,21 +1042,6 @@ func TestSourceFailureClassificationPreservesDominantOutcome(t *testing.T) {
 	}
 }
 
-func TestCommandScalarPreservesLegalWhitespace(t *testing.T) {
-	value, err := parseCommandScalar([]byte("/tmp/repo \r\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if value != "/tmp/repo \r" {
-		t.Fatalf("scalar = %q", value)
-	}
-	for _, invalid := range [][]byte{nil, []byte("\n"), []byte("value"), []byte("a\x00b\n")} {
-		if _, err := parseCommandScalar(invalid); err == nil {
-			t.Fatalf("parseCommandScalar(%q) succeeded", invalid)
-		}
-	}
-}
-
 func TestIgnoreFileCannotFollowSymlinkOutsideRepository(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "outside")
@@ -819,7 +1051,10 @@ func TestIgnoreFileCannotFollowSymlinkOutsideRepository(t *testing.T) {
 	}
 	repository, _ := NewRepositoryPath(root)
 	name, _ := NewIgnoreFile(".rvwignore")
-	rooted, err := openRootedRepository(repository)
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rooted, err := openRepositorySession(repository)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -901,7 +1136,7 @@ func TestValidatePullRequestPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !details.FilesAPICapReached || details.State != GitHubOpen {
+	if details.State != GitHubOpen {
 		t.Fatalf("unexpected details: %+v", details)
 	}
 	for _, value := range []string{"", "not-a-time"} {
@@ -934,7 +1169,7 @@ func newTestService(t *testing.T, root string) *Service {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewService(workingDirectory)
+	service, err := NewService(workingDirectory, ServiceOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

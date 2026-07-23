@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"slices"
 	"syscall"
 	"time"
 	"unicode"
@@ -51,6 +52,7 @@ type runRequest struct {
 }
 
 func run(request runRequest) int {
+	environment := slices.Clone(request.environment)
 	invocation, err := parseArgs(request.args)
 	if err != nil {
 		if writeErr := writeStartupError(request.stderr, err); writeErr != nil {
@@ -67,7 +69,11 @@ func run(request runRequest) int {
 		}
 		return 0
 	}
-	if admissionErr := validateTerminalAdmission(invocation, request.terminals); admissionErr != nil {
+	if admissionErr := validateTerminalAdmission(
+		invocation,
+		request.terminals,
+		environment,
+	); admissionErr != nil {
 		if writeErr := writeStartupError(request.stderr, admissionErr); writeErr != nil {
 			return 1
 		}
@@ -80,7 +86,7 @@ func run(request runRequest) int {
 	err = execute(executeRequest{
 		ctx:         executionContext,
 		invocation:  invocation,
-		environment: request.environment,
+		environment: environment,
 		cwd:         request.cwd,
 		stdin:       request.stdin,
 		stdout:      request.stdout,
@@ -119,13 +125,13 @@ func execute(request executeRequest) (returnErr error) {
 	if err != nil {
 		return err
 	}
-	service, err := source.NewService(workingDirectory)
+	serviceOptions, err := sourceServiceOptions(request.cwd, request.environment)
 	if err != nil {
 		return err
 	}
-	if request.termination != nil {
-		unregister := request.termination.RegisterEscalator(service.Escalate)
-		defer unregister()
+	service, err := source.NewService(workingDirectory, serviceOptions)
+	if err != nil {
+		return err
 	}
 	defer func() {
 		shutdownContext, cancel := context.WithTimeout(context.WithoutCancel(request.ctx), 10*time.Second)
@@ -171,6 +177,7 @@ func execute(request executeRequest) (returnErr error) {
 			service:     service,
 			document:    document,
 			termination: request.termination,
+			environment: request.environment,
 		})
 	}
 	defer func() {

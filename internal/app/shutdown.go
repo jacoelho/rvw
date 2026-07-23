@@ -49,7 +49,6 @@ func (coordinator *Coordinator) StopAdmissionAndCancel() {
 
 // Escalate performs the escalate operation.
 func (coordinator *Coordinator) Escalate() {
-	coordinator.service.Escalate()
 	coordinator.delivery.Escalate()
 }
 

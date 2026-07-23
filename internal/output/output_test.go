@@ -298,7 +298,7 @@ func nonUTF8StagedDocument(t *testing.T, path []byte) *source.Document {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := source.NewService(workingDirectory)
+	service, err := source.NewService(workingDirectory, source.ServiceOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -347,7 +347,7 @@ func localDocument(t *testing.T, files map[string]string) *source.Document {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := source.NewService(workingDirectory)
+	service, err := source.NewService(workingDirectory, source.ServiceOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -5,7 +5,10 @@ import (
 	"os"
 )
 
-const interactiveTerminalDiagnostic = "interactive mode requires terminal stdin and stdout; use --stdout or --json for noninteractive output"
+const (
+	interactiveTerminalDiagnostic = "interactive mode requires terminal stdin and stdout; use --stdout or --json for noninteractive output"
+	dumbTerminalDiagnostic        = "interactive mode does not support TERM=dumb; use --stdout or --json for noninteractive output"
+)
 
 type terminalCapability uint8
 
@@ -66,9 +69,13 @@ func terminalCapabilityBit(member terminalCapability) (uint8, bool) {
 func validateTerminalAdmission(
 	invocation Invocation,
 	capabilities terminalCapabilities,
+	environment []string,
 ) error {
 	if invocation.Output != OutputInteractive {
 		return nil
+	}
+	if term, _ := environmentValue(environment, "TERM"); term == "dumb" {
+		return errors.New(dumbTerminalDiagnostic)
 	}
 	if !capabilities.has(terminalInput) || !capabilities.has(terminalOutput) {
 		return errors.New(interactiveTerminalDiagnostic)

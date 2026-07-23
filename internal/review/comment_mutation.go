@@ -395,7 +395,7 @@ func (intent beginEditCommentIntent) apply(
 		}
 	}
 	state.draft = &Draft{
-		target: comment.target, body: comment.body.String(), kind: comment.kind,
+		target: comment.target, body: comment.body.String(),
 		editing: new(intent.id),
 	}
 	return 0, nil
@@ -429,7 +429,6 @@ func (saveCommentIntent) apply(
 		state.commentBody -= int64(len(beforeComment.body))
 		state.comments[index].target = state.draft.target
 		state.comments[index].body = body
-		state.comments[index].kind = state.draft.kind
 		state.commentBody += int64(len(body))
 		state.applyCommentAnchorTransition(
 			before,
@@ -441,11 +440,8 @@ func (saveCommentIntent) apply(
 			return 0, ErrInvalidReviewTransition
 		}
 		id = CommentID(state.nextComment)
-		if !state.commentKinds.contains(state.draft.kind) {
-			return 0, ErrInvalidReviewTransition
-		}
 		comment := Comment{
-			id: id, target: state.draft.target, body: body, kind: state.draft.kind,
+			id: id, target: state.draft.target, body: body,
 		}
 		state.comments = append(state.comments, comment)
 		state.commentBody += int64(len(body))
@@ -650,7 +646,6 @@ func replaceCommentContentOwned(
 	}
 	state.commentBody -= int64(len(state.comments[index].body))
 	state.comments[index].body = validated
-	state.comments[index].kind = content.kind
 	state.commentBody += int64(len(validated))
 	return nil
 }

@@ -10,7 +10,7 @@ import (
 )
 
 func newScriptCommand(ctx context.Context, shell string) *exec.Cmd {
-	return exec.CommandContext(ctx, systemScript, "-q", "/dev/null", "sh", "-c", shell)
+	return exec.CommandContext(ctx, systemScript, "-q", "/dev/null", systemShell, "-c", shell)
 }
 
 func stableTerminalState(value string) string {

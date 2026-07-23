@@ -3,7 +3,6 @@ package source
 import (
 	"errors"
 	"fmt"
-	"os"
 	"slices"
 	"strings"
 	"unicode"
@@ -117,34 +116,23 @@ type LocalDetails struct {
 
 // PullRequestDetails represents pull request details.
 type PullRequestDetails struct {
-	Author             *GitHubAuthor
-	Repository         OwnerRepository
-	Title              Title
-	BaseOID            review.ObjectID
-	HeadOID            review.ObjectID
-	BaseRef            GitReference
-	HeadRef            GitReference
-	URL                GitHubURL
-	State              GitHubState
-	Number             PullRequestNumber
-	FilesAPICapReached bool
-	Draft              bool
+	Author     *GitHubAuthor
+	Repository OwnerRepository
+	Title      Title
+	BaseOID    review.ObjectID
+	HeadOID    review.ObjectID
+	BaseRef    GitReference
+	HeadRef    GitReference
+	URL        GitHubURL
+	State      GitHubState
+	Number     PullRequestNumber
+	Draft      bool
 }
 
-type revisionKind uint8
-
-const (
-	revisionTree revisionKind = iota + 1
-	revisionIndex
-)
-
 type revision struct {
-	environment map[string]string
-	repository  *rootedRepository
-	base        review.ObjectID
-	head        review.ObjectID
-	cleanupPath string
-	kind        revisionKind
+	repository   *repositorySession
+	unmerged     map[string]review.FileSemanticIdentity
+	similarities map[nativeSimilarityPair]uint16
 }
 
 // Document represents document.
@@ -161,9 +149,8 @@ type Document struct {
 
 // Cleanup owns the lightweight filesystem cleanup detached from a source document.
 type Cleanup struct {
-	repository *rootedRepository
+	repository *repositorySession
 	closeErr   error
-	path       string
 	closed     bool
 }
 
@@ -290,11 +277,7 @@ func (document *Document) DetachCleanup() *Cleanup {
 	cleanup := &Cleanup{
 		repository: document.revision.repository,
 		closeErr:   document.closeErr,
-		path:       document.revision.cleanupPath,
 		closed:     document.closed,
-	}
-	if cleanup.repository != nil {
-		cleanup.path = ""
 	}
 	document.local = nil
 	document.pull = nil
@@ -317,8 +300,6 @@ func (cleanup *Cleanup) Close() error {
 	cleanup.closed = true
 	if cleanup.repository != nil {
 		cleanup.closeErr = cleanup.repository.Close()
-	} else if cleanup.path != "" {
-		cleanup.closeErr = os.RemoveAll(cleanup.path)
 	}
 	return cleanup.closeErr
 }

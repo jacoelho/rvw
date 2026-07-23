@@ -15,5 +15,7 @@ only supported platforms; project-owned and direct/runtime Windows code or depen
 forbidden; the pinned Bubble Tea dependency graph's unavoidable, unreachable transitive Windows
 module metadata is permitted.
 
-This record does not alter or supplement the product contract. The accepted specification is the
-exact byte sequence identified by the digest above.
+This record does not alter or supplement the product contract. It applies only to the exact
+2026-07-20 byte sequence identified by the digest above. Later working revisions, including the
+pure-Go Git/GitHub migration amendments, require separate explicit acceptance; this digest does
+not attest to the current contents of `docs/rvw-specification.md`.

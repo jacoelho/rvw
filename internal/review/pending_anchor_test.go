@@ -207,14 +207,13 @@ func installPendingAnchorConflict(
 	scenario pendingAnchorConflictScenario,
 ) Review {
 	t.Helper()
-	comment, exists := current.commentByID(pendingID)
+	_, exists := current.commentByID(pendingID)
 	if !exists {
 		t.Fatal("pending comment is unavailable")
 	}
-	kind := comment.kind
-	base := commentContent{kind: kind, body: "inline"}
-	local := commentContent{kind: kind, body: "local"}
-	remote := commentContent{kind: kind, body: "remote"}
+	base := commentContent{body: "inline"}
+	local := commentContent{body: "local"}
+	remote := commentContent{body: "remote"}
 
 	var err error
 	switch scenario {
@@ -238,11 +237,11 @@ func installPendingAnchorConflict(
 		}
 	case anchorConflictLiveRemoteAbsent:
 		binding.baseline = cloneCommentContent(base)
-		binding.conflict = &pendingConflict{base: base, local: local, remote: commentContent{kind: kind}}
+		binding.conflict = &pendingConflict{base: base, local: local, remote: commentContent{}}
 	case anchorConflictLiveBaseAbsent:
 		binding.baseline = cloneCommentContent(remote)
 		binding.conflict = &pendingConflict{
-			base: commentContent{kind: kind}, local: local, remote: remote,
+			base: commentContent{}, local: local, remote: remote,
 		}
 	}
 	current.pending.bindings[pendingID] = binding

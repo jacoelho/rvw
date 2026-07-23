@@ -257,7 +257,6 @@ func (flags commentFlags) clearUnmappable() commentFlags {
 // Comment represents comment.
 type Comment struct {
 	body   CommentBody
-	kind   CommentKind
 	target CommentTarget
 	id     CommentID
 	flags  commentFlags
@@ -278,11 +277,6 @@ func (comment Comment) Body() CommentBody {
 	return comment.body
 }
 
-// Kind returns the comment's configured kind.
-func (comment Comment) Kind() CommentKind {
-	return comment.kind
-}
-
 // Stale reports the receiver's stale state.
 func (comment Comment) Stale() bool {
 	return comment.flags.has(commentFlagStale)
@@ -297,7 +291,6 @@ func (comment Comment) Unmappable() bool {
 type Draft struct {
 	editing *CommentID
 	body    string
-	kind    CommentKind
 	target  CommentTarget
 }
 
@@ -309,11 +302,6 @@ func (draft Draft) Target() CommentTarget {
 // Body returns the receiver's body value.
 func (draft Draft) Body() string {
 	return draft.body
-}
-
-// Kind returns the draft's configured kind.
-func (draft Draft) Kind() CommentKind {
-	return draft.kind
 }
 
 // EditingComment returns the receiver's editing comment value.

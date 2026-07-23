@@ -351,6 +351,24 @@ type PreparedPatch struct {
 	maxNewLine  uint32
 }
 
+// StructuredPatchLine is one already-classified line used to construct a
+// PreparedPatch without reparsing a textual diff protocol.
+type StructuredPatchLine struct {
+	Text      []byte
+	OldLine   uint32
+	NewLine   uint32
+	Hunk      uint32
+	Kind      PatchLineKind
+	HasHunk   bool
+	OldMarker bool
+	NewMarker bool
+}
+
+// StructuredPatchGenerator emits one complete patch in display order. The
+// generator must be repeatable: preparation invokes it once to admit exact
+// retained sizes and once to publish the immutable PreparedPatch.
+type StructuredPatchGenerator func(yield func(StructuredPatchLine) error) error
+
 type patchParseState struct {
 	activeHunk     uint32
 	oldLine        uint32
@@ -413,6 +431,157 @@ func TakePatchCancellable(cancelled func() error, text []byte) (*PreparedPatch, 
 		return nil, err
 	}
 	patch.lineOffsets = offsets
+	return patch, nil
+}
+
+// PrepareStructuredPatchCancellable constructs a patch from validated line
+// semantics while retaining the exact display text owned by the result.
+func PrepareStructuredPatchCancellable(
+	cancelled func() error,
+	lines []StructuredPatchLine,
+) (*PreparedPatch, error) {
+	return PrepareGeneratedPatchCancellable(cancelled, func(yield func(StructuredPatchLine) error) error {
+		for _, line := range lines {
+			if err := yield(line); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// PrepareGeneratedPatchCancellable constructs a patch without requiring the
+// caller to retain all structured lines. Exact byte and line admission occurs
+// before the result allocation is published.
+//
+//nolint:gocognit,cyclop,funlen,maintidx // Validation and direct publication intentionally share one bounded construction pass.
+func PrepareGeneratedPatchCancellable(
+	cancelled func() error,
+	generate StructuredPatchGenerator,
+) (*PreparedPatch, error) {
+	if generate == nil {
+		return nil, errors.New("structured patch generator is nil")
+	}
+	lineCount, total := 0, 0
+	err := generate(func(line StructuredPatchLine) error {
+		if lineCount%4_096 == 0 {
+			if err := cancellationError(cancelled); err != nil {
+				return err
+			}
+		}
+		if lineCount == MaxPatchLines {
+			return fmt.Errorf("patch lines exceed %d", MaxPatchLines)
+		}
+		if bytes.IndexByte(line.Text, '\n') >= 0 {
+			return errors.New("structured patch line contains a newline")
+		}
+		separator := 0
+		if lineCount != 0 {
+			separator = 1
+		}
+		if len(line.Text) > int(MaxPatchBytes)-total-separator {
+			return fmt.Errorf("patch exceeds %d bytes", MaxPatchBytes)
+		}
+		total += separator + len(line.Text)
+		lineCount++
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	patch := newPreparedPatch(make([]byte, total), lineCount)
+	activeHunk := noPatchHunk
+	var displayOffset uint32
+	row, offset := 0, 0
+	err = generate(func(line StructuredPatchLine) error {
+		if row%4_096 == 0 {
+			if cancelErr := cancellationError(cancelled); cancelErr != nil {
+				return cancelErr
+			}
+		}
+		if row >= lineCount || bytes.IndexByte(line.Text, '\n') >= 0 {
+			return errors.New("structured patch generator changed between passes")
+		}
+		if row != 0 {
+			patch.text[offset] = '\n'
+			offset++
+		}
+		if len(line.Text) > len(patch.text)-offset {
+			return errors.New("structured patch generator changed between passes")
+		}
+		copy(patch.text[offset:], line.Text)
+		offset += len(line.Text)
+		patch.lineOffsets = append(patch.lineOffsets, PatchOffset(displayOffset))
+		displayOffset += uint32(len(line.Text)) //nolint:gosec // aggregate text is capped at 64 MiB above.
+		if row+1 < lineCount {
+			displayOffset++
+		}
+		descriptor := plainPatchLineDescriptor(line.Kind)
+		switch line.Kind {
+		case PatchLineMetadata:
+			if line.HasHunk || line.OldLine != 0 || line.NewLine != 0 || line.OldMarker || line.NewMarker {
+				return errors.New("structured metadata line has source semantics")
+			}
+			activeHunk = noPatchHunk
+		case PatchLineHunkHeader:
+			if !line.HasHunk || line.Hunk != patch.hunks || line.OldLine != 0 || line.NewLine != 0 ||
+				line.OldMarker || line.NewMarker {
+				return errors.New("structured hunk header is invalid")
+			}
+			if patch.hunks == MaxHunks {
+				return fmt.Errorf("patch hunks exceed %d", MaxHunks)
+			}
+			activeHunk = line.Hunk
+			patch.hunks++
+			patch.appendHunk(uint32(row)) //nolint:gosec // lineCount is admitted below one million.
+		case PatchLineContext:
+			if !line.HasHunk || line.Hunk != activeHunk || line.OldLine == 0 || line.NewLine == 0 ||
+				line.OldMarker || line.NewMarker {
+				return errors.New("structured context line is invalid")
+			}
+		case PatchLineAddition:
+			if !line.HasHunk || line.Hunk != activeHunk || line.OldLine != 0 || line.NewLine == 0 ||
+				line.OldMarker || line.NewMarker {
+				return errors.New("structured addition line is invalid")
+			}
+		case PatchLineDeletion:
+			if !line.HasHunk || line.Hunk != activeHunk || line.OldLine == 0 || line.NewLine != 0 ||
+				line.OldMarker || line.NewMarker {
+				return errors.New("structured deletion line is invalid")
+			}
+		case PatchLineNoNewline:
+			if !line.HasHunk || line.Hunk != activeHunk || line.OldLine != 0 || line.NewLine != 0 {
+				return errors.New("structured no-newline line is invalid")
+			}
+			sides := patchLineSides(0)
+			if line.OldMarker {
+				sides |= patchLineOldSide
+			}
+			if line.NewMarker {
+				sides |= patchLineNewSide
+			}
+			var valid bool
+			descriptor, valid = noNewlinePatchLineDescriptor(sides)
+			if !valid || string(line.Text) != noNewlineMarkerText {
+				return errors.New("structured no-newline marker is invalid")
+			}
+		default:
+			return errors.New("structured patch line kind is invalid")
+		}
+		patch.appendParsedLine(uint32(row), activeHunk, parsedPatchLine{ //nolint:gosec // lineCount is admitted below one million.
+			descriptor: descriptor,
+			oldLine:    line.OldLine,
+			newLine:    line.NewLine,
+		})
+		row++
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if row != lineCount || offset != total {
+		return nil, errors.New("structured patch generator changed between passes")
+	}
 	return patch, nil
 }
 

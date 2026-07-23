@@ -114,6 +114,14 @@ type Notice struct {
 	Kind NoticeKind
 }
 
+type publicationOperationIntent uint8
+
+const (
+	publicationOperationIntentNone publicationOperationIntent = iota
+	publicationOperationIntentSubmit
+	publicationOperationIntentCancel
+)
+
 // TerminalSize represents terminal size.
 type TerminalSize struct {
 	Width  int
@@ -233,9 +241,11 @@ type Model struct {
 	exportPicker              exportSelection
 	publicationAllowStale     bool
 	commentsVisible           bool
-	publicationCancel         bool
+	publicationIntent         publicationOperationIntent
 	quitting                  bool
 	publicationMoveSummary    bool
+	publicationDraftReady     bool
+	publicationEvent          review.PublicationEvent
 	focusReturn               FocusOwner
 	fileTreeVisible           bool
 	filterTreeBuilding        bool
@@ -275,9 +285,7 @@ func NewModel(
 		return nil, err
 	}
 	current, err := review.NewReview(review.ReviewRequest{
-		Snapshot:        document.Snapshot(),
-		CommentKinds:    settings.commentKinds,
-		CommentPolicies: settings.commentPolicies,
+		Snapshot: document.Snapshot(),
 	})
 	if err != nil {
 		return nil, err
@@ -298,6 +306,7 @@ func NewModel(
 		coordinator:        coordinator,
 		receiver:           receiver,
 		settings:           settings,
+		publicationEvent:   settings.publication.Event(),
 		help:               helpModel,
 		commentEditor:      editor,
 		searchInput:        searchInput,

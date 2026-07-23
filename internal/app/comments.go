@@ -147,15 +147,6 @@ func (model *Model) saveComment() {
 	}
 }
 
-func (model *Model) cycleCommentKind(direction review.NavigationDirection) {
-	next, err := model.review.CycleDraftKind(direction)
-	if err != nil {
-		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
-		return
-	}
-	model.review = next
-}
-
 func (model *Model) deleteComment(id review.CommentID) {
 	model.startCommentMutation(
 		func(operation review.OperationID) (review.Review, review.CommentMutation, error) {

@@ -22,12 +22,7 @@ func TestPatchResultReservationUsesLowerLevelPhaseMaximum(t *testing.T) {
 			source.MaxPatchResultConstructionBytes,
 		)
 	}
-	want := max(
-		source.MaxPatchCaptureConstructionBytes,
-		source.MaxPatchErrorConstructionBytes,
-		review.MaxPreparedPatchConstructionBytes,
-		review.MaxPreparedPatchRetainedBytes,
-	)
+	want := max(review.MaxPreparedPatchConstructionBytes, review.MaxPreparedPatchRetainedBytes)
 	if patchResultReservation != want {
 		t.Fatalf("patch reservation = %d, phase maximum %d", patchResultReservation, want)
 	}

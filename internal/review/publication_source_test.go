@@ -7,6 +7,28 @@ import (
 	"unsafe"
 )
 
+func TestPublicationSourcePreservesPendingAcquisitionFailure(t *testing.T) {
+	snapshot := testSnapshot(t, 1, "file.go")
+	detail, err := NewOperationDetail("GraphQL pending-review query was rejected")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = snapshot.WithPendingReviewStatus(PendingReviewUnavailable, detail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := NewReview(testReviewRequest(snapshot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policies, _ := NewPublicationPolicies()
+	options, _ := NewPublicationOptions(PublicationEventComment, policies)
+	_, err = current.PublicationSource().PreparePublication(options)
+	if !errors.Is(err, ErrInvalidPublication) || !strings.Contains(err.Error(), detail.String()) {
+		t.Fatalf("preparation error = %v, want invalid publication with %q", err, detail.String())
+	}
+}
+
 func TestPublicationSourceIsConstantTimeAndAccountsOnlyCapturedState(t *testing.T) {
 	current, err := NewReview(testReviewRequest(testSnapshot(t, 1, "file.go")))
 	if err != nil {
