@@ -11,7 +11,89 @@ import (
 
 	"github.com/jacoelho/rvw/internal/delivery"
 	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/source"
 )
+
+func TestPatchResultReservationUsesLowerLevelPhaseMaximum(t *testing.T) {
+	if patchResultReservation != source.MaxPatchResultConstructionBytes {
+		t.Fatalf(
+			"patch reservation = %d, lower-level maximum %d",
+			patchResultReservation,
+			source.MaxPatchResultConstructionBytes,
+		)
+	}
+	want := max(
+		source.MaxPatchCaptureConstructionBytes,
+		source.MaxPatchErrorConstructionBytes,
+		review.MaxPreparedPatchConstructionBytes,
+		review.MaxPreparedPatchRetainedBytes,
+	)
+	if patchResultReservation != want {
+		t.Fatalf("patch reservation = %d, phase maximum %d", patchResultReservation, want)
+	}
+	if patchResultReservation > MaxRetainedResultBytes {
+		t.Fatalf("patch reservation = %d, coordinator limit %d", patchResultReservation, MaxRetainedResultBytes)
+	}
+}
+
+func TestCoordinatorAcceptsExactPatchAndSearchReservationsAndRejectsPlusOne(t *testing.T) {
+	query, err := review.NewSearchQuery(strings.Repeat("x", review.MaxSearchQueryBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := review.SearchRequestConstructionBytes(query, review.MaxFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	searchReservation := request + patchResultReservation + review.MaxSearchHitBytes +
+		review.MaxSearchBatchConstructionBytes
+	for name, resultBytes := range map[string]int64{
+		"patch":  patchResultReservation,
+		"search": searchReservation,
+	} {
+		t.Run(name, func(t *testing.T) {
+			coordinator := &Coordinator{
+				workContext: t.Context(),
+				accepted:    make(map[review.OperationID]reservation),
+				required:    newRequiredScheduler(),
+			}
+			coordinator.stats.Store(CoordinatorStats{})
+			fillerID, _ := review.NewOperationID(1)
+			if err := coordinator.submit(
+				fillerID,
+				0,
+				MaxRetainedResultBytes-resultBytes,
+				func(context.Context) bool { return true },
+			); err != nil {
+				t.Fatalf("fill to exact boundary: %v", err)
+			}
+			operationID, _ := review.NewOperationID(2)
+			if err := coordinator.submit(
+				operationID,
+				0,
+				resultBytes,
+				func(context.Context) bool { return true },
+			); err != nil {
+				t.Fatalf("exact reservation: %v", err)
+			}
+			if got := coordinator.Stats().ReservedResult; got != MaxRetainedResultBytes {
+				t.Fatalf("exact reservation total = %d", got)
+			}
+			oneOverID, _ := review.NewOperationID(3)
+			if err := coordinator.submit(
+				oneOverID,
+				0,
+				1,
+				func(context.Context) bool { return true },
+			); !errors.Is(err, ErrCoordinatorSaturated) {
+				t.Fatalf("one-byte-over error = %v, want %v", err, ErrCoordinatorSaturated)
+			}
+			if got := coordinator.Stats().ReservedResult; got != MaxRetainedResultBytes {
+				t.Fatalf("rejected reservation mutated total = %d", got)
+			}
+		})
+	}
+}
 
 func TestCoordinatorAdmissionRetainsOutcomeUntilClaim(t *testing.T) {
 	fixture := newSourceFixture(t, map[string]string{"alpha.txt": "changed\n"})
@@ -31,7 +113,7 @@ func TestCoordinatorAdmissionRetainsOutcomeUntilClaim(t *testing.T) {
 		}
 	})
 
-	current, err := review.NewReview(fixture.document.Snapshot())
+	current, err := review.NewReview(testReviewRequest(fixture.document.Snapshot()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +145,8 @@ func TestCoordinatorAdmissionRetainsOutcomeUntilClaim(t *testing.T) {
 	if state := coordinator.WaitReady(waitContext); state != ReadyAvailable {
 		t.Fatalf("ready state = %d, want available", state)
 	}
-	if stats := coordinator.Stats(); stats.Accepted != 1 || stats.Retained != 1 {
+	if stats := coordinator.Stats(); stats.Accepted != 1 || stats.Retained != 1 ||
+		stats.ReservedResult != patchResultReservation {
 		t.Fatalf("stats before claim = %+v", stats)
 	}
 	outcome, ok := coordinator.ClaimNext()
@@ -71,8 +154,49 @@ func TestCoordinatorAdmissionRetainsOutcomeUntilClaim(t *testing.T) {
 	if !ok || !patchOK {
 		t.Fatalf("claim = (%T, %t), want patch outcome", outcome, ok)
 	}
-	if stats := coordinator.Stats(); stats.Accepted != 0 || stats.Retained != 0 {
+	if stats := coordinator.Stats(); stats.Accepted != 0 || stats.Retained != 0 ||
+		stats.ReservedResult != 0 {
 		t.Fatalf("stats after claim = %+v", stats)
+	}
+}
+
+func TestWorkspaceIndexReservesSnapshotDerivedAllowanceUntilClaim(t *testing.T) {
+	coordinator := &Coordinator{
+		workContext:        t.Context(),
+		workspaceIndexJobs: make(chan workspaceIndexJob, 1),
+		accepted:           make(map[review.OperationID]reservation),
+		progress:           make(map[review.OperationID]Progress),
+		required:           newRequiredScheduler(),
+		ready:              make(chan struct{}, 1),
+	}
+	coordinator.stats.Store(CoordinatorStats{})
+	id, err := review.NewOperationID(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := fileTreeSnapshot(t, []string{"alpha.txt"})
+	want, err := workspaceIndexAllowance(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.SubmitWorkspaceIndex(WorkspaceIndexWork{
+		ID:       id,
+		Snapshot: snapshot,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := coordinator.Stats().ReservedResult; got != want {
+		t.Fatalf("workspace reservation = %d, want snapshot-derived %d", got, want)
+	}
+	coordinator.complete(WorkspaceIndexOutcome{ID: id})
+	if got := coordinator.Stats().ReservedResult; got != want {
+		t.Fatalf("completed workspace reservation = %d, want retained %d", got, want)
+	}
+	if _, ok := coordinator.ClaimNext(); !ok {
+		t.Fatal("workspace outcome was not claimable")
+	}
+	if got := coordinator.Stats().ReservedResult; got != 0 {
+		t.Fatalf("workspace reservation after claim = %d, want 0", got)
 	}
 }
 
@@ -97,7 +221,33 @@ func TestCoordinatorClaimClearsVacatedOutcomeSlot(t *testing.T) {
 	}
 }
 
-func TestCoordinatorKeepsPublicationByteCapacityReserved(t *testing.T) {
+func TestCoordinatorGrowsResultReservationBeforeProportionalConstruction(t *testing.T) {
+	id, _ := review.NewOperationID(1)
+	coordinator := &Coordinator{
+		accepted: map[review.OperationID]reservation{
+			id: {resultBytes: 1},
+		},
+		reservedResult: 1,
+	}
+	coordinator.stats.Store(CoordinatorStats{})
+	if err := coordinator.growResultReservation(id, MaxRetainedResultBytes); err != nil {
+		t.Fatal(err)
+	}
+	if stats := coordinator.Stats(); stats.ReservedResult != MaxRetainedResultBytes {
+		t.Fatalf("grown result reservation = %+v", stats)
+	}
+	other, _ := review.NewOperationID(2)
+	coordinator.accepted[other] = reservation{resultBytes: 1}
+	coordinator.reservedResult++
+	if err := coordinator.growResultReservation(other, 2); !errors.Is(err, ErrCoordinatorSaturated) {
+		t.Fatalf("overflow growth error = %v, want %v", err, ErrCoordinatorSaturated)
+	}
+	if coordinator.accepted[other].resultBytes != 1 {
+		t.Fatal("rejected growth mutated reservation")
+	}
+}
+
+func TestCoordinatorAccountsPublicationWithinGlobalByteCapacity(t *testing.T) {
 	fixture := newSourceFixture(t, map[string]string{"alpha.txt": "changed\n"})
 	workContext, cancelWork := context.WithCancel(t.Context())
 	t.Cleanup(cancelWork)
@@ -117,25 +267,6 @@ func TestCoordinatorKeepsPublicationByteCapacityReserved(t *testing.T) {
 		}
 	})
 
-	ordinaryID, _ := review.NewOperationID(1)
-	if err := coordinator.submit(
-		ordinaryID,
-		MaxQueuedRequestBytes-reservedPublicationRequestBytes,
-		MaxRetainedResultBytes-reservedPublicationResultBytes,
-		func(context.Context) bool { return true },
-	); err != nil {
-		t.Fatalf("fill ordinary partition: %v", err)
-	}
-	rejectedID, _ := review.NewOperationID(2)
-	if err := coordinator.submit(
-		rejectedID,
-		1,
-		1,
-		func(context.Context) bool { return true },
-	); !errors.Is(err, ErrCoordinatorSaturated) {
-		t.Fatalf("ordinary overflow error = %v, want %v", err, ErrCoordinatorSaturated)
-	}
-
 	publicationID, _ := review.NewOperationID(3)
 	marker, err := review.NewPublicationMarker(
 		"<!-- rvw-publication:v1:0123456789abcdef0123456789abcdef -->",
@@ -143,7 +274,7 @@ func TestCoordinatorKeepsPublicationByteCapacityReserved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := coordinator.SubmitReconciliation(ReconciliationWork{
+	reconciliation := ReconciliationWork{
 		ID: publicationID,
 		Request: review.ReconciliationRequest{
 			Operation: publicationID,
@@ -152,13 +283,33 @@ func TestCoordinatorKeepsPublicationByteCapacityReserved(t *testing.T) {
 			Target:    testPublicationTarget(t),
 			Marker:    marker,
 		},
-	}); err != nil {
+	}
+	reconciliationBytes := reconciliation.Request.RetainedBytes()
+	ordinaryID, _ := review.NewOperationID(1)
+	if err := coordinator.submit(
+		ordinaryID,
+		MaxQueuedRequestBytes-reconciliationBytes,
+		MaxRetainedResultBytes-publicationResultReservation,
+		func(context.Context) bool { return true },
+	); err != nil {
+		t.Fatalf("fill ordinary partition: %v", err)
+	}
+	if err := coordinator.SubmitReconciliation(reconciliation); err != nil {
 		t.Fatalf("reserved reconciliation admission: %v", err)
 	}
 	stats := coordinator.Stats()
-	if stats.RequestBytes != MaxQueuedRequestBytes-reservedPublicationRequestBytes+512 ||
+	if stats.RequestBytes != MaxQueuedRequestBytes ||
 		stats.ReservedResult != MaxRetainedResultBytes {
 		t.Fatalf("full partition stats = %+v", stats)
+	}
+	rejectedID, _ := review.NewOperationID(2)
+	if err := coordinator.submit(
+		rejectedID,
+		1,
+		1,
+		func(context.Context) bool { return true },
+	); !errors.Is(err, ErrCoordinatorSaturated) {
+		t.Fatalf("global overflow error = %v, want %v", err, ErrCoordinatorSaturated)
 	}
 	waitContext, cancelWait := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancelWait()
@@ -178,16 +329,70 @@ func TestCoordinatorKeepsPublicationByteCapacityReserved(t *testing.T) {
 	}
 	stats = coordinator.Stats()
 	if stats.Accepted != 1 ||
-		stats.RequestBytes != MaxQueuedRequestBytes-reservedPublicationRequestBytes ||
-		stats.ReservedResult != MaxRetainedResultBytes-reservedPublicationResultBytes {
+		stats.RequestBytes != MaxQueuedRequestBytes-reconciliationBytes ||
+		stats.ReservedResult != MaxRetainedResultBytes-publicationResultReservation {
 		t.Fatalf("post-reconciliation stats = %+v", stats)
+	}
+}
+
+func TestCoordinatorSerializesMaximumSearchAndPatchReservations(t *testing.T) {
+	fixture := newSourceFixture(t, map[string]string{"alpha.txt": "changed\n"})
+	coordinator := newShutdownTestCoordinator(t, fixture)
+	searchID, _ := review.NewOperationID(1)
+	query, _ := review.NewSearchQuery(strings.Repeat("x", review.MaxSearchQueryBytes))
+	construction, err := review.SearchRequestConstructionBytes(query, review.MaxFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	searchReservation := construction + patchResultReservation + review.MaxSearchHitBytes +
+		review.MaxSearchBatchConstructionBytes
+	if err := coordinator.submit(
+		searchID,
+		1,
+		searchReservation,
+		func(context.Context) bool { return true },
+	); err != nil {
+		t.Fatalf("maximum search reservation: %v", err)
+	}
+	if stats := coordinator.Stats(); stats.ReservedResult != searchReservation {
+		t.Fatalf("search reservation stats = %+v", stats)
+	}
+
+	patchID, _ := review.NewOperationID(2)
+	if err := coordinator.submit(
+		patchID,
+		1,
+		patchResultReservation,
+		func(context.Context) bool { return true },
+	); !errors.Is(err, ErrCoordinatorSaturated) {
+		t.Fatalf("concurrent patch error = %v, want %v", err, ErrCoordinatorSaturated)
+	}
+
+	coordinator.complete(SearchOutcome{ID: searchID})
+	if _, ok := coordinator.ClaimNext(); !ok {
+		t.Fatal("completed search was not claimable")
+	}
+	if stats := coordinator.Stats(); stats.ReservedResult != 0 {
+		t.Fatalf("claimed search retained result credit: %+v", stats)
+	}
+	if err := coordinator.submit(
+		patchID,
+		1,
+		patchResultReservation,
+		func(context.Context) bool { return true },
+	); err != nil {
+		t.Fatalf("patch after search claim: %v", err)
+	}
+	coordinator.complete(PatchOutcome{ID: patchID})
+	if _, ok := coordinator.ClaimNext(); !ok {
+		t.Fatal("completed patch was not claimable")
 	}
 }
 
 func TestCoordinatorChargesExportProjectionUntilRequestSaturation(t *testing.T) {
 	fixture := newSourceFixture(t, map[string]string{"alpha.txt": "changed\n"})
 	coordinator := newShutdownTestCoordinator(t, fixture)
-	current, err := review.NewReview(fixture.document.Snapshot())
+	current, err := review.NewReview(testReviewRequest(fixture.document.Snapshot()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,11 +411,11 @@ func TestCoordinatorChargesExportProjectionUntilRequestSaturation(t *testing.T) 
 			t.Fatal(err)
 		}
 	}
-	input := current.ExportInput()
-	if input.RetainedBytes() <= current.RetainedCommentBytes() {
+	source := current.ExportSource()
+	if source.RetainedBytes() == 0 || source.ConstructionBytes() <= source.RetainedBytes() {
 		t.Fatalf(
-			"export input bytes = %d, want comment bodies plus metadata",
-			input.RetainedBytes(),
+			"export source bytes = %d construction %d",
+			source.RetainedBytes(), source.ConstructionBytes(),
 		)
 	}
 
@@ -219,8 +424,8 @@ func TestCoordinatorChargesExportProjectionUntilRequestSaturation(t *testing.T) 
 		id, _ := review.NewOperationID(value)
 		err := coordinator.SubmitExport(ExportWork{
 			ID:          id,
-			Input:       input,
-			Options:     review.ExportOptions{},
+			Source:      source,
+			Options:     review.DefaultExportOptions(),
 			Format:      review.ExportJSON,
 			Destination: delivery.DestinationStdout,
 		})
@@ -236,8 +441,8 @@ func TestCoordinatorChargesExportProjectionUntilRequestSaturation(t *testing.T) 
 		t.Fatalf("accepted exports = %d, want request-byte saturation", accepted)
 	}
 	stats := coordinator.Stats()
-	if stats.RequestBytes != int64(accepted)*input.RetainedBytes() ||
-		stats.RequestBytes > MaxQueuedRequestBytes-reservedPublicationRequestBytes {
+	if stats.RequestBytes != int64(accepted)*source.RetainedBytes() ||
+		stats.RequestBytes > MaxQueuedRequestBytes {
 		t.Fatalf("export projection accounting = %+v for %d admissions", stats, accepted)
 	}
 	_ = shutdownTestCoordinator(t, coordinator)

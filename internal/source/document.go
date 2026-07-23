@@ -140,7 +140,7 @@ const (
 
 type revision struct {
 	environment map[string]string
-	repository  RepositoryPath
+	repository  *rootedRepository
 	base        review.ObjectID
 	head        review.ObjectID
 	cleanupPath string
@@ -157,6 +157,14 @@ type Document struct {
 	options  OpenOptions
 	snapshot review.Snapshot
 	closed   bool
+}
+
+// Cleanup owns the lightweight filesystem cleanup detached from a source document.
+type Cleanup struct {
+	repository *rootedRepository
+	closeErr   error
+	path       string
+	closed     bool
 }
 
 func newLocalDocument(
@@ -224,6 +232,41 @@ func (document *Document) PullRequest() (PullRequestDetails, bool) {
 	return details, true
 }
 
+// PublicationTarget is the narrow immutable GitHub target needed by
+// publication preflight. It cannot reach snapshot or repository resources.
+type PublicationTarget struct {
+	repository OwnerRepository
+	base       review.ObjectID
+	head       review.ObjectID
+	number     PullRequestNumber
+	source     review.SourceID
+}
+
+// PublicationTarget returns the source-bound pull-request publication target.
+func (document *Document) PublicationTarget() (PublicationTarget, bool) {
+	if document == nil || document.pull == nil || document.snapshot.SourceID() == 0 {
+		return PublicationTarget{}, false
+	}
+	return PublicationTarget{
+		repository: document.pull.Repository,
+		number:     document.pull.Number,
+		base:       document.pull.BaseOID,
+		head:       document.pull.HeadOID,
+		source:     document.snapshot.SourceID(),
+	}, true
+}
+
+// SourceID returns the target source identity.
+func (target PublicationTarget) SourceID() review.SourceID { return target.source }
+
+// RetainedBytes returns target-owned immutable string bytes and metadata.
+func (target PublicationTarget) RetainedBytes() int64 {
+	if target.source == 0 {
+		return 0
+	}
+	return int64(len(target.repository.String())+len(target.base)+len(target.head)) + 64
+}
+
 // Options returns the receiver's options value.
 func (document *Document) Options() OpenOptions {
 	return document.options.clone()
@@ -234,11 +277,50 @@ func (document *Document) Close() error {
 	if document.closed {
 		return document.closeErr
 	}
-	document.closed = true
-	if document.revision.cleanupPath != "" {
-		document.closeErr = os.RemoveAll(document.revision.cleanupPath)
-	}
+	cleanup := document.DetachCleanup()
+	document.closeErr = cleanup.Close()
 	return document.closeErr
+}
+
+// DetachCleanup transfers cleanup ownership and releases the document's retained graph.
+func (document *Document) DetachCleanup() *Cleanup {
+	if document == nil {
+		return nil
+	}
+	cleanup := &Cleanup{
+		repository: document.revision.repository,
+		closeErr:   document.closeErr,
+		path:       document.revision.cleanupPath,
+		closed:     document.closed,
+	}
+	if cleanup.repository != nil {
+		cleanup.path = ""
+	}
+	document.local = nil
+	document.pull = nil
+	document.revision = revision{}
+	document.target = Target{}
+	document.options = OpenOptions{}
+	document.snapshot = review.Snapshot{}
+	document.closed = true
+	return cleanup
+}
+
+// Close removes the detached source workspace exactly once.
+func (cleanup *Cleanup) Close() error {
+	if cleanup == nil || cleanup.closed {
+		if cleanup == nil {
+			return nil
+		}
+		return cleanup.closeErr
+	}
+	cleanup.closed = true
+	if cleanup.repository != nil {
+		cleanup.closeErr = cleanup.repository.Close()
+	} else if cleanup.path != "" {
+		cleanup.closeErr = os.RemoveAll(cleanup.path)
+	}
+	return cleanup.closeErr
 }
 
 // FilterPattern represents filter pattern.
@@ -294,6 +376,18 @@ func (options OpenOptions) clone() OpenOptions {
 	options.Include = slices.Clone(options.Include)
 	options.Exclude = slices.Clone(options.Exclude)
 	return options
+}
+
+// RetainedBytes returns conservative immutable option ownership.
+func (options OpenOptions) RetainedBytes() int64 {
+	retained := int64(64 + len(options.IgnoreFile))
+	for _, pattern := range options.Include {
+		retained += int64(16 + len(pattern))
+	}
+	for _, pattern := range options.Exclude {
+		retained += int64(16 + len(pattern))
+	}
+	return retained
 }
 
 func cloneLocalDetails(details LocalDetails) LocalDetails {

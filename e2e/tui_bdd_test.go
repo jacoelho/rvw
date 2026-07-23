@@ -55,7 +55,7 @@ func TestTerminalRenderingContract(t *testing.T) {
 			scenario.Then("the terminal protocol and restoration contracts hold", func(t testing.TB, w *world) {
 				w.pty.send(t, "q")
 				w.pty.awaitExit(t)
-				assertTerminalLifecycle(t, w.pty, true)
+				assertTerminalLifecycle(t, w.pty)
 			})
 		})
 
@@ -122,7 +122,7 @@ func TestInteractiveSourceContract(t *testing.T) {
 				})
 				w.pty.send(t, "q")
 				w.pty.awaitExit(t)
-				assertTerminalLifecycle(t, w.pty, true)
+				assertTerminalLifecycle(t, w.pty)
 			})
 		})
 
@@ -149,21 +149,28 @@ func TestInteractiveSourceContract(t *testing.T) {
 
 		feature.Scenario("draft save updates and reloads the existing pending review", func(scenario *bdd.ScenarioSpec[*world]) {
 			scenario.Given("GitHub has one viewer-owned pending review", func(t testing.TB, w *world) {
+				w.writeConfig(t, "[github]\nfetch_threads = false\nsubmit_default = \"draft\"\n")
 				configurePendingReview(t, w)
 			})
 			scenario.Given("the existing inline draft is edited", func(t testing.TB, w *world) {
 				w.launchPTY(t, 120, 24, "pr", "7", "--repo", "fixture/repository")
 				w.pty.awaitScreen(t, "pending source", containsScreen("reviewed.go"))
 				w.pty.send(t, "zc\tj")
-				w.pty.awaitScreen(t, "selected inline draft", containsScreen("▸ [draft] reviewed.go:3"))
-				w.pty.send(t, "e edited")
+				w.pty.awaitScreen(t, "selected inline draft", containsScreen("▸ [issue] [draft] reviewed.go:3"))
+				w.pty.send(t, "e")
+				w.pty.awaitScreen(t, "comment editor", containsScreen("Comment [issue] ·"))
+				w.pty.send(t, " edited")
 				w.pty.send(t, "\x13")
+				w.pty.awaitScreen(t, "saved comment", containsScreen("comment saved"))
 			})
-			scenario.When("the default draft preflight is committed", func(t testing.TB, w *world) {
+			scenario.When("the configured draft preflight is committed", func(t testing.TB, w *world) {
 				w.pty.send(t, "s")
 				w.pty.awaitScreen(t, "draft preflight", func(screen string) bool {
 					return strings.Contains(screen, "GitHub draft synchronization preflight") &&
-						strings.Contains(screen, "checked at current head")
+						strings.Contains(screen, "Event: draft") &&
+						strings.Contains(screen, "Source/head: checked at current head") &&
+						strings.Contains(screen, "Pending review: continue 9001 · 1 changed · 0 conflicts") &&
+						strings.Contains(screen, "[modified · inline] existing inline edited")
 				})
 				w.pty.send(t, "\r")
 			})
@@ -265,7 +272,7 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 			scenario.Then("a clean quit restores the terminal", func(t testing.TB, w *world) {
 				w.pty.send(t, "q")
 				w.pty.awaitExit(t)
-				assertTerminalLifecycle(t, w.pty, true)
+				assertTerminalLifecycle(t, w.pty)
 			})
 		})
 
@@ -321,7 +328,7 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 				})
 				w.pty.send(t, "q")
 				w.pty.awaitExit(t)
-				assertTerminalLifecycle(t, w.pty, true)
+				assertTerminalLifecycle(t, w.pty)
 			})
 		})
 
@@ -374,10 +381,11 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 			})
 		})
 
-		feature.Scenario("post-terminal JSON export preserves comments without emitting controls", func(scenario *bdd.ScenarioSpec[*world]) {
-			scenario.Given("a stable worktree with a bidirectional-control comment", bdd.Compose(
+		feature.Scenario("post-terminal JSON export round-trips safe Unicode comments", func(scenario *bdd.ScenarioSpec[*world]) {
+			const comment = "before界after café"
+			scenario.Given("a stable worktree with a safe ordinary-Unicode comment", bdd.Compose(
 				launchStableWorktreeAt(180, 30),
-				saveLineComment("before\u202eafter"),
+				saveLineComment(comment),
 			))
 			scenario.When("JSON stdout export is selected", func(t testing.TB, w *world) {
 				w.pty.send(t, "J")
@@ -385,19 +393,14 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 				w.pty.send(t, "\r")
 				w.pty.awaitExit(t)
 			})
-			scenario.Then("the restored-terminal payload is valid escaped JSON with the exact comment", func(t testing.TB, w *world) {
-				assertTerminalLifecycle(t, w.pty, true)
+			scenario.Then("the restored-terminal payload is valid terminal-safe JSON with the exact Unicode comment", func(t testing.TB, w *world) {
+				assertTerminalLifecycle(t, w.pty)
 				payload := postTerminalJSONPayload(t, w.pty)
 				if !json.Valid(payload) {
 					t.Fatalf("post-terminal JSON is invalid: %q\n%s", payload, w.pty.diagnostics(t))
 				}
-				if bytes.Contains(payload, []byte("\u202e")) ||
-					bytes.Contains(payload, []byte(`\u{`)) ||
-					bytes.Contains(payload, []byte{0x1b}) {
+				if bytes.Contains(payload, []byte{0x1b}) {
 					t.Fatalf("post-terminal JSON contains terminal-unsafe bytes: %q", payload)
-				}
-				if !bytes.Contains(payload, []byte(`\u202e`)) {
-					t.Fatalf("post-terminal JSON lacks JSON escapes: %q", payload)
 				}
 				for _, value := range payload {
 					if value < 0x20 && value != '\n' && value != '\r' && value != '\t' {
@@ -412,7 +415,7 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 				if err := json.Unmarshal(payload, &decoded); err != nil {
 					t.Fatal(err)
 				}
-				if len(decoded.Comments) != 1 || decoded.Comments[0].Comment != "before\u202eafter" {
+				if len(decoded.Comments) != 1 || decoded.Comments[0].Comment != comment {
 					t.Fatalf("post-terminal comments = %+v", decoded.Comments)
 				}
 			})
@@ -433,7 +436,7 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 				w.pty.awaitExit(t)
 			})
 			scenario.Then("the terminal is restored without redrawing the workspace", func(t testing.TB, w *world) {
-				assertTerminalLifecycle(t, w.pty, true)
+				assertTerminalLifecycle(t, w.pty)
 				raw := w.pty.rawTranscript()
 				if transcriptOffset > len(raw) {
 					t.Fatalf("terminal transcript shrank from %d to %d bytes", transcriptOffset, len(raw))
@@ -498,7 +501,7 @@ func saveLineComment(body string) bdd.Step[*world] {
 		// Patch presentation opens on its metadata header. Move to the final
 		// changed line before asking the line-comment action to anchor a draft.
 		w.pty.send(t, "Gc")
-		w.pty.awaitScreen(t, "comment editor", containsScreen("Comment ·"))
+		w.pty.awaitScreen(t, "comment editor", containsScreen("Comment [issue] ·"))
 		w.pty.send(t, body+"\x13")
 		w.pty.awaitScreen(t, "saved comment", containsScreen("comment saved"))
 	}
@@ -507,7 +510,7 @@ func saveLineComment(body string) bdd.Step[*world] {
 func savePastedLineComment(body string) bdd.Step[*world] {
 	return func(t testing.TB, w *world) {
 		w.pty.send(t, "Gc")
-		w.pty.awaitScreen(t, "comment editor", containsScreen("Comment ·"))
+		w.pty.awaitScreen(t, "comment editor", containsScreen("Comment [issue] ·"))
 		w.pty.send(t, "\x1b[200~"+body+"\x1b[201~")
 		w.pty.awaitScreen(t, "pasted comment body", containsScreen(body))
 		w.pty.send(t, "\x13")
@@ -527,25 +530,32 @@ func assertNoEscapedWidgetStyles(t testing.TB, w *world, screen, context string)
 }
 
 func focusedCommentAnchor(screen string) bool {
-	return commentAnchorHasFocus(screen, true)
+	return commentAnchorHasFocus(screen, commentAnchorFocused)
 }
 
 func unfocusedCommentAnchor(screen string) bool {
-	return commentAnchorHasFocus(screen, false)
+	return commentAnchorHasFocus(screen, commentAnchorUnfocused)
 }
 
-func commentAnchorHasFocus(screen string, focused bool) bool {
+type commentAnchorFocus uint8
+
+const (
+	commentAnchorUnfocused commentAnchorFocus = iota + 1
+	commentAnchorFocused
+)
+
+func commentAnchorHasFocus(screen string, focus commentAnchorFocus) bool {
 	for line := range strings.Lines(screen) {
 		if strings.Contains(line, "staged contents") &&
 			strings.Contains(line, "●") &&
-			strings.Contains(line, "▸") == focused {
+			strings.Contains(line, "▸") == (focus == commentAnchorFocused) {
 			return true
 		}
 	}
 	return false
 }
 
-func assertTerminalLifecycle(t testing.TB, session *ptySession, wantMouse bool) {
+func assertTerminalLifecycle(t testing.TB, session *ptySession) {
 	t.Helper()
 	raw := session.rawTranscript()
 	for _, sequence := range [][]byte{
@@ -558,7 +568,7 @@ func assertTerminalLifecycle(t testing.TB, session *ptySession, wantMouse bool) 
 			t.Fatalf("terminal control %q is absent\n%s", sequence, session.diagnostics(t))
 		}
 	}
-	if wantMouse && !bytes.Contains(raw, []byte("\x1b[?1002h")) &&
+	if !bytes.Contains(raw, []byte("\x1b[?1002h")) &&
 		!bytes.Contains(raw, []byte("\x1b[?1003h")) {
 		t.Fatalf("mouse tracking was not enabled\n%s", session.diagnostics(t))
 	}

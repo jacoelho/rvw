@@ -8,7 +8,7 @@ import (
 	"github.com/jacoelho/rvw/internal/review"
 )
 
-func (model *Model) startSearch(value string, target review.SearchTarget) {
+func (model *Model) startSearch(value string, files []review.FileID) {
 	query, err := review.NewSearchQuery(value)
 	if err != nil {
 		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
@@ -20,13 +20,28 @@ func (model *Model) startSearch(value string, target review.SearchTarget) {
 		model.failFindSearch(errors.New("search is unavailable during reload"))
 		return
 	}
+	candidates, err := newSearchCandidates(model.review, files)
+	if err != nil {
+		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
+		model.failFindSearch(err)
+		return
+	}
+	pending := pendingSearch{query: query, candidates: candidates}
+	if model.syntaxOperation != 0 {
+		model.searchAfterSyntax = new(pending)
+		model.syntaxDeferred = false
+		model.coordinator.Cancel(model.syntaxOperation)
+		model.notice = &Notice{Kind: NoticeInformation, Text: "waiting for syntax cancellation"}
+		return
+	}
+	model.startPendingSearch(pending)
+}
+
+func (model *Model) startPendingSearch(pending pendingSearch) {
 	model.foreground.clearPendingDiffTarget()
 	hadSearch := model.foreground.searchOperation() != 0
 	hadPatch := model.foreground.patchCount() != 0
-	start, cancellations, ready := model.foreground.requestSearch(pendingSearch{
-		query:  query,
-		target: new(target),
-	})
+	start, cancellations, ready := model.foreground.requestSearch(pending)
 	for _, operationID := range cancellations {
 		model.coordinator.Cancel(operationID)
 	}
@@ -54,10 +69,9 @@ func (model *Model) beginSearch(start foregroundStart) {
 		return
 	}
 	model.nextOperation++
-	next, request, err := model.review.StartSearch(
+	next, admission, err := model.review.StartSearch(
 		operationID,
 		start.search.query,
-		*start.search.target,
 		model.settings.patchContext,
 	)
 	if err != nil {
@@ -67,11 +81,11 @@ func (model *Model) beginSearch(start foregroundStart) {
 		return
 	}
 	if err := model.coordinator.SubmitSearch(SearchWork{
-		ID:       operationID,
-		Document: model.document,
-		Request:  request,
+		Document:   model.document,
+		Admission:  admission,
+		Candidates: start.search.candidates,
 	}); err != nil {
-		model.review = failSearchAdmission(next, request, err)
+		model.review = failSearchAdmission(next, admission, err)
 		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
 		model.rejectAndApplyForegroundStart(start)
 		model.failFindSearch(err)
@@ -80,7 +94,7 @@ func (model *Model) beginSearch(start foregroundStart) {
 	if !model.foreground.admitted(start, operationID) {
 		model.coordinator.Cancel(operationID)
 		err := errors.New("foreground search admission invariant violated")
-		model.review = failSearchAdmission(next, request, err)
+		model.review = failSearchAdmission(next, admission, err)
 		model.notice = &Notice{Kind: NoticeError, Text: NoticeText(err.Error())}
 		model.failFindSearch(err)
 		return
@@ -96,13 +110,13 @@ func (model *Model) beginSearch(start foregroundStart) {
 
 func failSearchAdmission(
 	current review.Review,
-	request review.SearchRequest,
+	admission review.SearchAdmission,
 	admissionErr error,
 ) review.Review {
 	result, resultErr := review.TakeSearchResult(review.SearchResultDescriptor{
-		Operation: request.Operation,
-		Workspace: request.Workspace,
-		Source:    request.Source,
+		Operation: admission.Operation(),
+		Workspace: admission.Workspace(),
+		Source:    admission.Source(),
 		Status:    review.SearchFailed,
 		Detail:    boundedOperationDetail(admissionErr.Error()),
 	}, nil)
@@ -111,7 +125,7 @@ func failSearchAdmission(
 	}
 	if resultErr == nil {
 		current, resultErr = current.ResolveOperation(
-			request.Operation,
+			admission.Operation(),
 			review.OperationFailed,
 			boundedOperationDetail(admissionErr.Error()),
 		)
@@ -123,6 +137,10 @@ func failSearchAdmission(
 }
 
 func (model *Model) cancelSearch() {
+	if model.searchAfterSyntax != nil {
+		model.searchAfterSyntax = nil
+		model.syntaxDeferred = true
+	}
 	operationID, active := model.foreground.requestClearSearch()
 	if !active {
 		model.review = model.review.ClearSearch()
@@ -172,7 +190,7 @@ func (model *Model) applySearchOutcome(outcome SearchOutcome) {
 		return
 	}
 	status := review.OperationSucceeded
-	switch result.Status {
+	switch result.Status() {
 	case review.SearchComplete, review.SearchPartial:
 	case review.SearchCancelled:
 		status = review.OperationCancelled

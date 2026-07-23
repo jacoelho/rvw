@@ -1,8 +1,8 @@
 package source
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -30,13 +30,15 @@ type remoteThreadPage struct {
 			NameWithOwner string `json:"nameWithOwner"`
 		} `json:"repository"`
 	} `json:"data"`
-	Errors []json.RawMessage `json:"errors"`
+	Errors githubErrors `json:"errors"`
 }
 
 type remoteThreadConnection struct {
-	PageInfo *remotePageInfo     `json:"pageInfo"`
-	Nodes    *[]remoteThreadNode `json:"nodes"`
+	PageInfo *remotePageInfo    `json:"pageInfo"`
+	Nodes    *remoteThreadNodes `json:"nodes"`
 }
+
+type remoteThreadNodes []remoteThreadNode
 
 type remotePageInfo struct {
 	HasNextPage *bool   `json:"hasNextPage"`
@@ -55,9 +57,11 @@ type remoteThreadNode struct {
 }
 
 type remoteCommentConnection struct {
-	PageInfo *remotePageInfo      `json:"pageInfo"`
-	Nodes    *[]remoteCommentNode `json:"nodes"`
+	PageInfo *remotePageInfo     `json:"pageInfo"`
+	Nodes    *remoteCommentNodes `json:"nodes"`
 }
+
+type remoteCommentNodes []remoteCommentNode
 
 type remoteCommentNode struct {
 	Body   *string `json:"body"`
@@ -84,18 +88,40 @@ type remoteCommentPage struct {
 			ID       string                   `json:"id"`
 		} `json:"node"`
 	} `json:"data"`
-	Errors []json.RawMessage `json:"errors"`
+	Errors githubErrors `json:"errors"`
 }
+
+type remotePagePosition uint8
+
+const (
+	remotePageIntermediate remotePagePosition = iota + 1
+	remotePageFinal
+)
 
 func (service *Service) loadRemoteThreads(
 	ctx context.Context,
 	details PullRequestDetails,
 ) ([]review.RemoteThread, error) {
+	ledger, err := newSourceLedger(0)
+	if err != nil {
+		return nil, err
+	}
+	return service.loadRemoteThreadsWithLedgerCPU(ctx, details, ledger, directCPUAdmission)
+}
+
+func (service *Service) loadRemoteThreadsWithLedgerCPU(
+	ctx context.Context,
+	details PullRequestDetails,
+	ledger *sourceLedger,
+	runCPU CPUAdmission,
+) ([]review.RemoteThread, error) {
+	checkpoint := ledger.checkpoint()
+	defer checkpoint.rollback()
 	owner, repository, ok := strings.Cut(details.Repository.String(), "/")
 	if !ok {
 		return nil, errors.New("validated GitHub repository cannot be split")
 	}
-	result, err := service.runGH(ctx, []string{
+	spool, err := service.runGHToSpool(ctx, []string{
 		ghAPI, ghGraphQL, ghPaginate, ghSlurp,
 		"-f", "query=" + remoteThreadsQuery,
 		"-F", "owner=" + owner,
@@ -105,80 +131,251 @@ func (service *Service) loadRemoteThreads(
 	if err != nil {
 		return nil, fmt.Errorf("load GitHub review threads: %w", err)
 	}
-	pages, err := decodeRemoteThreadPages(result.Stdout)
+	responseBytes, err := spool.Size()
+	if err != nil {
+		return nil, errors.Join(err, spool.Close())
+	}
+	limits, err := newJSONFramingLimits(
+		review.MaxRemoteThreads, maxGitHubPageCollectionElements,
+	)
 	if err != nil {
 		return nil, err
 	}
-	threads := make([]review.RemoteThread, 0)
-	threadIDs := make(map[string]struct{})
-	commentIDs := make(map[string]struct{})
-	responseBytes := int64(len(result.Stdout))
-	for pageIndex, page := range pages {
-		if err := validateRemoteThreadTarget(page, details); err != nil {
+	metrics, lexicalErr := validateCommandJSONWithLimits(
+		ctx, spool, runCPU, ledger,
+		limits,
+	)
+	if lexicalErr != nil {
+		return nil, errors.Join(lexicalErr, spool.Close())
+	}
+	collector := remoteThreadCollector{
+		service:       service,
+		ctx:           ctx,
+		details:       details,
+		threadIDs:     make(map[string]struct{}),
+		commentIDs:    make(map[string]struct{}),
+		responseBytes: responseBytes,
+		ledger:        ledger,
+		runCPU:        runCPU,
+	}
+	complete := false
+	defer func() {
+		if !complete {
+			collector.discard()
+		}
+	}()
+	err = decodeRemoteThreadStream(
+		ctx, spool.Reader(), runCPU, ledger, metrics, collector.stagePage,
+	)
+	metrics.release(ledger)
+	if err != nil {
+		return nil, errors.Join(err, spool.Close())
+	}
+	if closeErr := spool.Close(); closeErr != nil {
+		return nil, closeErr
+	}
+	for index := range collector.staged {
+		staged := &collector.staged[index]
+		if err := collector.addNode(staged.node); err != nil {
 			return nil, err
 		}
-		pullRequest := page.Data.Repository.PullRequest
-		connection := pullRequest.ReviewThreads
-		if connection == nil || connection.PageInfo == nil ||
-			connection.PageInfo.HasNextPage == nil || connection.Nodes == nil {
-			return nil, errors.New("GitHub review thread connection is incomplete")
-		}
-		finalPage := pageIndex == len(pages)-1
-		if *connection.PageInfo.HasNextPage == finalPage ||
-			!finalPage && connection.PageInfo.EndCursor == nil {
-			return nil, errors.New("GitHub review thread pagination is incomplete")
-		}
-		for _, node := range *connection.Nodes {
-			if node.Comments != nil && node.Comments.PageInfo != nil &&
-				node.Comments.PageInfo.HasNextPage != nil &&
-				*node.Comments.PageInfo.HasNextPage {
-				remaining := review.MaxRemoteThreadBytes - responseBytes
-				if remaining <= 0 {
-					return nil, &LimitError{
-						Resource: LimitRemoteThreads,
-						Limit:    uint32(review.MaxRemoteThreadBytes),
-					}
-				}
-				comments, used, err := service.loadRemainingRemoteComments(
-					ctx,
-					details,
-					node.ID,
-					node.Comments,
-					remaining,
-				)
-				if err != nil {
-					return nil, err
-				}
-				responseBytes += used
-				node.Comments = comments
-			}
-			if len(threads) >= review.MaxRemoteThreads {
-				return nil, &LimitError{
-					Resource: LimitRemoteThreads,
-					Limit:    review.MaxRemoteThreads,
-				}
-			}
-			thread, err := validateRemoteThread(node)
-			if err != nil {
-				return nil, err
-			}
-			if _, exists := threadIDs[thread.ID()]; exists {
-				return nil, errors.New("GitHub review threads contain a duplicate identity")
-			}
-			threadIDs[thread.ID()] = struct{}{}
-			for _, comment := range thread.Comments(0, thread.CommentCount()) {
-				if _, exists := commentIDs[comment.ID()]; exists {
-					return nil, errors.New("GitHub review comments contain a duplicate identity")
-				}
-				commentIDs[comment.ID()] = struct{}{}
-			}
-			if len(threadIDs)+len(commentIDs) > review.MaxRemoteThreads {
-				return nil, errors.New("GitHub review thread identities exceed their bound")
-			}
-			threads = append(threads, thread)
-		}
+		collector.ledger.release(staged.decodedBytes)
+		staged.node = remoteThreadNode{}
+		staged.decodedBytes = 0
 	}
-	return threads, nil
+	collector.ledger.release(collector.stagedStorageBytes)
+	collector.staged = nil
+	collector.stagedStorageBytes = 0
+	if err := checkpoint.commit(collector.domainBytes); err != nil {
+		return nil, err
+	}
+	complete = true
+	return collector.threads, nil
+}
+
+type remoteThreadCollector struct {
+	ctx                context.Context
+	threadIDs          map[string]struct{}
+	commentIDs         map[string]struct{}
+	service            *Service
+	ledger             *sourceLedger
+	threads            []review.RemoteThread
+	staged             []pendingRemoteThread
+	runCPU             CPUAdmission
+	details            PullRequestDetails
+	responseBytes      int64
+	domainBytes        int64
+	stagedStorageBytes int64
+	poisoned           bool
+}
+
+type pendingRemoteThread struct {
+	node         remoteThreadNode
+	decodedBytes int64
+}
+
+func (collector *remoteThreadCollector) stagePage(
+	_ int,
+	position remotePagePosition,
+	page remoteThreadPage,
+) (int64, error) {
+	if collector.poisoned {
+		return 0, errors.New("GitHub review thread collector is discarded")
+	}
+	if err := validateRemoteThreadPage(page, position, collector.details); err != nil {
+		return 0, err
+	}
+	connection := page.Data.Repository.PullRequest.ReviewThreads
+	retained := int64(0)
+	for _, node := range *connection.Nodes {
+		if len(collector.staged) >= review.MaxRemoteThreads {
+			return 0, &LimitError{
+				Resource: LimitRemoteThreads,
+				Limit:    review.MaxRemoteThreads,
+			}
+		}
+		if len(collector.staged) == cap(collector.staged) {
+			capacity := max(16, cap(collector.staged)*2)
+			capacity = min(capacity, review.MaxRemoteThreads)
+			bytes := int64(capacity) * jsonDecodedElementBytes
+			if err := collector.ledger.reserve(bytes); err != nil {
+				return 0, err
+			}
+			grown := make([]pendingRemoteThread, len(collector.staged), capacity)
+			copy(grown, collector.staged)
+			collector.ledger.release(collector.stagedStorageBytes)
+			collector.stagedStorageBytes = bytes
+			collector.staged = grown
+		}
+		decodedBytes := remoteThreadNodeDecodedBytes(node)
+		collector.staged = append(collector.staged, pendingRemoteThread{
+			node: node, decodedBytes: decodedBytes,
+		})
+		retained += decodedBytes
+	}
+	return retained, nil
+}
+
+func (collector *remoteThreadCollector) addNode(node remoteThreadNode) (returnErr error) {
+	if collector.poisoned {
+		return errors.New("GitHub review thread collector is discarded")
+	}
+	defer func() {
+		if returnErr != nil {
+			collector.discard()
+		}
+	}()
+	if node.Comments != nil && node.Comments.PageInfo != nil &&
+		node.Comments.PageInfo.HasNextPage != nil && *node.Comments.PageInfo.HasNextPage {
+		remaining := review.MaxRemoteThreadBytes - collector.responseBytes
+		if remaining <= 0 {
+			return &LimitError{Resource: LimitRemoteThreads, Limit: uint32(review.MaxRemoteThreadBytes)}
+		}
+		comments, used, err := collector.service.loadRemainingRemoteComments(
+			collector.ctx,
+			collector.details,
+			node.ID,
+			node.Comments,
+			remaining,
+			collector.ledger,
+			collector.runCPU,
+		)
+		if err != nil {
+			return err
+		}
+		collector.responseBytes += used
+		node.Comments = comments
+	}
+	if len(collector.threads) >= review.MaxRemoteThreads {
+		return &LimitError{Resource: LimitRemoteThreads, Limit: review.MaxRemoteThreads}
+	}
+	return collector.runCPU(collector.ctx, func() error {
+		cancelled := func() error { return context.Cause(collector.ctx) }
+		domainBytes, identityBytes, err := remoteThreadNodeConstructionBytes(
+			cancelled,
+			node,
+		)
+		if err != nil {
+			return err
+		}
+		if reserveErr := collector.ledger.reserve(domainBytes + identityBytes); reserveErr != nil {
+			return reserveErr
+		}
+		thread, err := validateRemoteThreadCancellable(cancelled, node)
+		if err != nil {
+			return err
+		}
+		if err := collector.installIdentities(cancelled, thread); err != nil {
+			return err
+		}
+		collector.threads = append(collector.threads, thread)
+		collector.domainBytes += domainBytes
+		return nil
+	})
+}
+
+func (collector *remoteThreadCollector) installIdentities(
+	cancelled func() error,
+	thread review.RemoteThread,
+) error {
+	if _, exists := collector.threadIDs[thread.ID()]; exists {
+		return errors.New("GitHub review threads contain a duplicate identity")
+	}
+	collector.threadIDs[thread.ID()] = struct{}{}
+	for index := range thread.CommentCount() {
+		if err := cancelled(); err != nil {
+			return err
+		}
+		comment, exists := thread.Comment(index)
+		if !exists {
+			return errors.New("GitHub review thread comment index is invalid")
+		}
+		if _, exists := collector.commentIDs[comment.ID()]; exists {
+			return errors.New("GitHub review comments contain a duplicate identity")
+		}
+		collector.commentIDs[comment.ID()] = struct{}{}
+	}
+	if err := cancelled(); err != nil {
+		return err
+	}
+	if len(collector.threadIDs)+len(collector.commentIDs) > review.MaxRemoteThreads {
+		return errors.New("GitHub review thread identities exceed their bound")
+	}
+	return nil
+}
+
+func (collector *remoteThreadCollector) discard() {
+	collector.poisoned = true
+	collector.threadIDs = nil
+	collector.commentIDs = nil
+	collector.threads = nil
+	collector.staged = nil
+	collector.domainBytes = 0
+	collector.stagedStorageBytes = 0
+}
+
+func validateRemoteThreadPage(
+	page remoteThreadPage,
+	position remotePagePosition,
+	details PullRequestDetails,
+) error {
+	if position != remotePageIntermediate && position != remotePageFinal {
+		return errors.New("GitHub review thread page position is invalid")
+	}
+	if err := validateRemoteThreadTarget(page, details); err != nil {
+		return err
+	}
+	connection := page.Data.Repository.PullRequest.ReviewThreads
+	if connection == nil || connection.PageInfo == nil ||
+		connection.PageInfo.HasNextPage == nil || connection.Nodes == nil {
+		return errors.New("GitHub review thread connection is incomplete")
+	}
+	finalPage := position == remotePageFinal
+	if *connection.PageInfo.HasNextPage == finalPage ||
+		position == remotePageIntermediate && connection.PageInfo.EndCursor == nil {
+		return errors.New("GitHub review thread pagination is incomplete")
+	}
+	return nil
 }
 
 func (service *Service) loadRemainingRemoteComments(
@@ -187,7 +384,11 @@ func (service *Service) loadRemainingRemoteComments(
 	threadID string,
 	initial *remoteCommentConnection,
 	byteLimit int64,
+	ledger *sourceLedger,
+	runCPU CPUAdmission,
 ) (*remoteCommentConnection, int64, error) {
+	checkpoint := ledger.checkpoint()
+	defer checkpoint.rollback()
 	if initial == nil || initial.PageInfo == nil ||
 		initial.PageInfo.HasNextPage == nil || initial.Nodes == nil ||
 		!*initial.PageInfo.HasNextPage || initial.PageInfo.EndCursor == nil {
@@ -197,7 +398,7 @@ func (service *Service) loadRemainingRemoteComments(
 	if !ok {
 		return nil, 0, errors.New("validated GitHub repository cannot be split")
 	}
-	result, err := service.runGH(ctx, []string{
+	spool, err := service.runGHToSpool(ctx, []string{
 		ghAPI, "graphql", ghPaginate, ghSlurp,
 		"-f", "query=" + remoteThreadCommentsQuery,
 		"-F", "owner=" + owner,
@@ -209,62 +410,264 @@ func (service *Service) loadRemainingRemoteComments(
 	if err != nil {
 		return nil, 0, fmt.Errorf("load GitHub review thread comments: %w", err)
 	}
-	pages, err := decodeRemoteCommentPages(result.Stdout)
+	responseBytes, err := spool.Size()
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, errors.Join(err, spool.Close())
 	}
-	comments := append([]remoteCommentNode(nil), (*initial.Nodes)...)
+	limits, err := newJSONFramingLimits(
+		review.MaxRemoteComments, maxGitHubPageCollectionElements,
+	)
+	if err != nil {
+		return nil, 0, errors.Join(err, spool.Close())
+	}
+	metrics, lexicalErr := validateCommandJSONWithLimits(
+		ctx, spool, runCPU, ledger,
+		limits,
+	)
+	if lexicalErr != nil {
+		return nil, 0, errors.Join(lexicalErr, spool.Close())
+	}
+	retainedBytes := int64(len(*initial.Nodes)) * remoteCommentPayloadMetadataBytes
+	if reserveErr := ledger.reserve(retainedBytes); reserveErr != nil {
+		return nil, 0, errors.Join(reserveErr, spool.Close())
+	}
+	comments := append(remoteCommentNodes(nil), (*initial.Nodes)...)
+	commentStorageBytes := retainedBytes
+	cursorBytes := int64(64 + len(*initial.PageInfo.EndCursor))
+	if reserveErr := ledger.reserve(cursorBytes); reserveErr != nil {
+		return nil, 0, errors.Join(reserveErr, spool.Close())
+	}
 	seenCursors := map[string]struct{}{*initial.PageInfo.EndCursor: {}}
-	for index, page := range pages {
-		if err := validateRemoteCommentTarget(page, details, threadID); err != nil {
-			return nil, 0, err
-		}
-		connection := page.Data.Node.Comments
-		finalPage := index == len(pages)-1
-		if *connection.PageInfo.HasNextPage == finalPage ||
-			!finalPage && connection.PageInfo.EndCursor == nil {
-			return nil, 0, errors.New("GitHub review comment pagination is incomplete")
-		}
-		comments = append(comments, (*connection.Nodes)...)
-		if len(comments) > review.MaxRemoteComments {
-			return nil, 0, &LimitError{
-				Resource: LimitRemoteThreads,
-				Limit:    review.MaxRemoteComments,
-			}
-		}
-		if connection.PageInfo.EndCursor != nil {
-			if _, repeated := seenCursors[*connection.PageInfo.EndCursor]; repeated {
-				return nil, 0, errors.New("GitHub review comment cursor repeated")
-			}
-			seenCursors[*connection.PageInfo.EndCursor] = struct{}{}
-		}
+	err = decodeRemoteCommentStream(
+		ctx, spool.Reader(), runCPU, ledger, metrics,
+		func(_ int, position remotePagePosition, page remoteCommentPage) (int64, error) {
+			retained, collectErr := collectRemoteCommentPage(
+				page,
+				position,
+				details,
+				threadID,
+				&comments,
+				seenCursors,
+				ledger,
+				&commentStorageBytes,
+				&retainedBytes,
+			)
+			retainedBytes += retained
+			return retained, collectErr
+		},
+	)
+	metrics.release(ledger)
+	if err != nil {
+		return nil, 0, errors.Join(err, spool.Close())
+	}
+	const connectionBytes = int64(64)
+	if reserveErr := ledger.reserve(connectionBytes); reserveErr != nil {
+		return nil, 0, errors.Join(reserveErr, spool.Close())
 	}
 	done := false
-	return &remoteCommentConnection{
+	connection := &remoteCommentConnection{
 		PageInfo: &remotePageInfo{HasNextPage: &done},
 		Nodes:    &comments,
-	}, int64(len(result.Stdout)), nil
+	}
+	if closeErr := spool.Close(); closeErr != nil {
+		return nil, 0, closeErr
+	}
+	retainedBytes += connectionBytes
+	if err := checkpoint.commit(retainedBytes); err != nil {
+		return nil, 0, err
+	}
+	return connection, responseBytes, nil
 }
 
-func decodeRemoteCommentPages(value []byte) ([]remoteCommentPage, error) {
-	if !utf8.Valid(value) {
-		return nil, errors.New("GitHub review comment response is not valid UTF-8")
-	}
-	var decoded []*remoteCommentPage
-	if err := json.Unmarshal(value, &decoded); err != nil {
-		return nil, fmt.Errorf("decode GitHub review comments: %w", err)
-	}
-	if len(decoded) == 0 {
-		return nil, errors.New("GitHub review comment pagination returned no page")
-	}
-	pages := make([]remoteCommentPage, len(decoded))
-	for index, page := range decoded {
-		if page == nil {
-			return nil, fmt.Errorf("GitHub review comment page %d is null", index+1)
+const remoteCommentPayloadMetadataBytes int64 = 192
+
+func remoteThreadNodeDecodedBytes(node remoteThreadNode) int64 {
+	bytes := int64(len(node.ID) + len(node.Path) + len(node.DiffSide))
+	for _, present := range []bool{
+		node.IsResolved != nil,
+		node.IsOutdated != nil,
+		node.Line != nil,
+		node.StartLine != nil,
+	} {
+		if present {
+			bytes += jsonDecodedPointerBytes
 		}
-		pages[index] = *page
 	}
-	return pages, nil
+	if node.Comments == nil {
+		return bytes
+	}
+	bytes += jsonDecodedElementBytes
+	if node.Comments.PageInfo != nil {
+		bytes += jsonDecodedElementBytes
+		if node.Comments.PageInfo.HasNextPage != nil {
+			bytes += jsonDecodedPointerBytes
+		}
+		if node.Comments.PageInfo.EndCursor != nil {
+			bytes += jsonDecodedPointerBytes + int64(len(*node.Comments.PageInfo.EndCursor))
+		}
+	}
+	if node.Comments.Nodes == nil {
+		return bytes
+	}
+	bytes += int64(len(*node.Comments.Nodes)) * jsonDecodedElementBytes
+	for _, comment := range *node.Comments.Nodes {
+		bytes += int64(len(comment.ID) + len(comment.CreatedAt) + len(comment.URL))
+		if comment.Body != nil {
+			bytes += jsonDecodedPointerBytes + int64(len(*comment.Body))
+		}
+		if comment.Author != nil {
+			bytes += jsonDecodedElementBytes + int64(len(comment.Author.Login))
+		}
+	}
+	return bytes
+}
+
+func remoteThreadNodeConstructionBytes(
+	cancelled func() error,
+	node remoteThreadNode,
+) (int64, int64, error) {
+	if err := cancelled(); err != nil {
+		return 0, 0, err
+	}
+	domain := int64(96 + len(node.ID) + len(node.Path))
+	identities := int64(48)
+	if node.Comments == nil || node.Comments.Nodes == nil {
+		return domain, identities, cancelled()
+	}
+	for index, comment := range *node.Comments.Nodes {
+		domain += 96 + int64(
+			len(comment.ID)+len(comment.CreatedAt)+len(comment.URL),
+		)
+		if comment.Body != nil {
+			domain += int64(len(*comment.Body))
+		}
+		if comment.Author != nil {
+			domain += int64(len(comment.Author.Login))
+		}
+		identities += 48
+		if (index+1)%256 == 0 {
+			if err := cancelled(); err != nil {
+				return 0, 0, err
+			}
+		}
+	}
+	if err := cancelled(); err != nil {
+		return 0, 0, err
+	}
+	return domain, identities, nil
+}
+
+func remoteThreadInstallationBytes(
+	ctx context.Context,
+	snapshot review.Snapshot,
+	threads []review.RemoteThread,
+) (int64, int64, error) {
+	return remoteThreadInstallationBytesCancellable(
+		func() error { return context.Cause(ctx) },
+		snapshot,
+		threads,
+	)
+}
+
+func remoteThreadInstallationBytesCancellable(
+	cancelled func() error,
+	snapshot review.Snapshot,
+	threads []review.RemoteThread,
+) (int64, int64, error) {
+	if err := cancelled(); err != nil {
+		return 0, 0, err
+	}
+	identities := len(threads)
+	for index, thread := range threads {
+		identities += thread.CommentCount()
+		if (index+1)%256 == 0 {
+			if err := cancelled(); err != nil {
+				return 0, 0, err
+			}
+		}
+	}
+	if err := cancelled(); err != nil {
+		return 0, 0, err
+	}
+	scratch := int64(snapshot.FileCount()*2*48 + identities*48)
+	retained := int64(min(len(threads), review.MaxRemoteThreads) * 32)
+	return scratch, retained, nil
+}
+
+func collectRemoteCommentPage(
+	page remoteCommentPage,
+	position remotePagePosition,
+	details PullRequestDetails,
+	threadID string,
+	comments *remoteCommentNodes,
+	seenCursors map[string]struct{},
+	ledger *sourceLedger,
+	storageBytes *int64,
+	retainedBytes *int64,
+) (int64, error) {
+	if comments == nil || seenCursors == nil || ledger == nil || storageBytes == nil ||
+		retainedBytes == nil {
+		return 0, errors.New("GitHub review comment collection ownership is incomplete")
+	}
+	if position != remotePageIntermediate && position != remotePageFinal {
+		return 0, errors.New("GitHub review comment page position is invalid")
+	}
+	if err := validateRemoteCommentTarget(page, details, threadID); err != nil {
+		return 0, err
+	}
+	connection := page.Data.Node.Comments
+	finalPage := position == remotePageFinal
+	if *connection.PageInfo.HasNextPage == finalPage ||
+		position == remotePageIntermediate && connection.PageInfo.EndCursor == nil {
+		return 0, errors.New("GitHub review comment pagination is incomplete")
+	}
+	if len(*connection.Nodes) > review.MaxRemoteComments-len(*comments) {
+		return 0, &LimitError{Resource: LimitRemoteThreads, Limit: review.MaxRemoteComments}
+	}
+	charge := remoteCommentPayloadBytes(*connection.Nodes)
+	needed := len(*comments) + len(*connection.Nodes)
+	if needed > cap(*comments) {
+		capacity := max(16, cap(*comments)*2)
+		capacity = max(capacity, needed)
+		capacity = min(capacity, review.MaxRemoteComments)
+		bytes := int64(capacity) * remoteCommentPayloadMetadataBytes
+		if err := ledger.reserve(bytes); err != nil {
+			return 0, err
+		}
+		grown := make(remoteCommentNodes, len(*comments), capacity)
+		copy(grown, *comments)
+		ledger.release(*storageBytes)
+		*retainedBytes += bytes - *storageBytes
+		*storageBytes = bytes
+		*comments = grown
+	}
+	*comments = append(*comments, (*connection.Nodes)...)
+	if connection.PageInfo.EndCursor != nil {
+		if _, repeated := seenCursors[*connection.PageInfo.EndCursor]; repeated {
+			return 0, errors.New("GitHub review comment cursor repeated")
+		}
+		cursorBytes := int64(64 + len(*connection.PageInfo.EndCursor))
+		if err := ledger.reserve(cursorBytes); err != nil {
+			return 0, err
+		}
+		*retainedBytes += cursorBytes
+		seenCursors[*connection.PageInfo.EndCursor] = struct{}{}
+	}
+	return charge, nil
+}
+
+func remoteCommentPayloadBytes(comments []remoteCommentNode) int64 {
+	bytes := int64(len(comments)) * remoteCommentPayloadMetadataBytes
+	for _, comment := range comments {
+		bytes += int64(len(comment.ID) + len(comment.CreatedAt) + len(comment.URL))
+		if comment.Body != nil {
+			bytes += int64(len(*comment.Body))
+		}
+		if comment.Author != nil {
+			bytes += int64(len(comment.Author.Login))
+		}
+	}
+	return bytes
 }
 
 func validateRemoteCommentTarget(
@@ -319,27 +722,45 @@ func validateRemoteThreadTarget(
 }
 
 func decodeRemoteThreadPages(value []byte) ([]remoteThreadPage, error) {
-	if !utf8.Valid(value) {
-		return nil, errors.New("GitHub review thread response is not valid UTF-8")
+	ledger, err := newSourceLedger(int64(len(value)))
+	if err != nil {
+		return nil, err
 	}
-	var decoded []*remoteThreadPage
-	if err := json.Unmarshal(value, &decoded); err != nil {
-		return nil, fmt.Errorf("decode GitHub review threads: %w", err)
+	limits, err := newJSONFramingLimits(
+		review.MaxRemoteThreads, maxGitHubPageCollectionElements,
+	)
+	if err != nil {
+		return nil, err
 	}
-	if len(decoded) == 0 {
-		return nil, errors.New("GitHub review thread pagination returned no page")
+	metrics, err := inspectJSONWithLimits(
+		context.Background(), bytes.NewReader(value),
+		maxGitHubJSONTokenBytes, directCPUAdmission, ledger,
+		limits,
+	)
+	if err != nil {
+		return nil, err
 	}
-	pages := make([]remoteThreadPage, len(decoded))
-	for index, page := range decoded {
-		if page == nil {
-			return nil, fmt.Errorf("GitHub review thread page %d is null", index+1)
-		}
-		pages[index] = *page
-	}
-	return pages, nil
+	defer metrics.release(ledger)
+	pages := make([]remoteThreadPage, 0)
+	err = decodeRemoteThreadStream(
+		context.Background(), bytes.NewReader(value),
+		directCPUAdmission, ledger, metrics,
+		func(_ int, _ remotePagePosition, page remoteThreadPage) (int64, error) {
+			pages = append(pages, page)
+			return 0, nil
+		},
+	)
+	return pages, err
 }
 
 func validateRemoteThread(node remoteThreadNode) (review.RemoteThread, error) {
+	return validateRemoteThreadCancellable(nil, node)
+}
+
+func validateRemoteThreadCancellable(
+	cancelled func() error,
+	node remoteThreadNode,
+) (review.RemoteThread, error) {
 	if node.IsResolved == nil || node.IsOutdated == nil ||
 		node.Comments == nil || node.Comments.PageInfo == nil ||
 		node.Comments.PageInfo.HasNextPage == nil || node.Comments.Nodes == nil {
@@ -383,15 +804,30 @@ func validateRemoteThread(node remoteThreadNode) (review.RemoteThread, error) {
 			Limit:    review.MaxRemoteThreads,
 		}
 	}
+	if cancelled != nil {
+		if err := cancelled(); err != nil {
+			return review.RemoteThread{}, err
+		}
+	}
 	comments := make([]review.RemoteComment, 0, len(*node.Comments.Nodes))
 	for _, raw := range *node.Comments.Nodes {
+		if cancelled != nil {
+			if err := cancelled(); err != nil {
+				return review.RemoteThread{}, err
+			}
+		}
 		comment, commentErr := validateRemoteComment(raw)
 		if commentErr != nil {
 			return review.RemoteThread{}, commentErr
 		}
 		comments = append(comments, comment)
 	}
-	return review.NewRemoteThread(review.RemoteThreadDescriptor{
+	if cancelled != nil {
+		if err := cancelled(); err != nil {
+			return review.RemoteThread{}, err
+		}
+	}
+	return review.TakeRemoteThreadCancellable(cancelled, review.RemoteThreadDescriptor{
 		ID:       node.ID,
 		Resolved: *node.IsResolved,
 		Outdated: *node.IsOutdated,
@@ -411,8 +847,14 @@ func validateRemoteComment(node remoteCommentNode) (review.RemoteComment, error)
 		!utf8.ValidString(*node.Body) {
 		return review.RemoteComment{}, errors.New("invalid GitHub review comment body")
 	}
+	if err := validateRemoteField(node.CreatedAt, review.MaxPathBytes); err != nil {
+		return review.RemoteComment{}, errors.New("invalid GitHub review comment timestamp")
+	}
 	if _, err := time.Parse(time.RFC3339, node.CreatedAt); err != nil {
 		return review.RemoteComment{}, errors.New("invalid GitHub review comment timestamp")
+	}
+	if err := validateRemoteField(node.URL, 16<<10); err != nil {
+		return review.RemoteComment{}, errors.New("invalid GitHub review comment URL")
 	}
 	parsedURL, err := url.ParseRequestURI(node.URL)
 	if err != nil || parsedURL.Scheme != "https" || parsedURL.Host != "github.com" {
@@ -425,7 +867,7 @@ func validateRemoteComment(node remoteCommentNode) (review.RemoteComment, error)
 			return review.RemoteComment{}, errors.New("invalid GitHub review comment author")
 		}
 	}
-	return review.NewRemoteComment(review.RemoteCommentDescriptor{
+	return review.TakeRemoteComment(review.RemoteCommentDescriptor{
 		ID:        node.ID,
 		Author:    author,
 		Body:      *node.Body,

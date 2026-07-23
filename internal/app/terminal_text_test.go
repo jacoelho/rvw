@@ -1,6 +1,9 @@
 package app
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestTerminalTextRendering(t *testing.T) {
 	tests := []struct {
@@ -65,5 +68,21 @@ func TestTerminalTextRendererCarriesTabColumnAcrossSegments(t *testing.T) {
 func TestTerminalTextRendererMeasuresWholeGraphemes(t *testing.T) {
 	if got := safeText("1️⃣\tvalue"); got != "1️⃣  value" {
 		t.Fatalf("keycap render = %q, want %q", got, "1️⃣  value")
+	}
+}
+
+func TestContainsBidiControlScansMaximumInputWithoutAllocation(t *testing.T) {
+	value := strings.Repeat("a", maxPromptBytes)
+	var found bool
+	if allocations := testing.AllocsPerRun(100, func() {
+		found = containsBidiControl(value)
+	}); allocations != 0 {
+		t.Fatalf("containsBidiControl allocations = %f, want 0", allocations)
+	}
+	if found {
+		t.Fatal("safe maximum input reported a bidirectional control")
+	}
+	if !containsBidiControl(value[:len(value)-3] + "\u202e") {
+		t.Fatal("maximum input bidirectional control was not detected")
 	}
 }

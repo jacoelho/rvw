@@ -24,7 +24,7 @@ func TestMismatchedExportOutcomeDoesNotConsumeActiveExport(t *testing.T) {
 	}
 	prepared, err := model.review.PrepareMarkdown(
 		model.settings.exportTemplates,
-		review.ExportOptions{},
+		review.DefaultExportOptions(),
 	)
 	if err != nil {
 		t.Fatal(err)

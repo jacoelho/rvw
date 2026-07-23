@@ -13,9 +13,9 @@ import (
 
 func TestDeliveryOutcomeFencingAndSettlement(t *testing.T) {
 	testCases := []struct {
+		err        error
 		name       string
 		outcome    delivery.Outcome
-		err        error
 		wantStatus review.OperationStatus
 	}{
 		{
@@ -95,7 +95,7 @@ func TestDeliveryAdmissionFailureLeavesNoPhantomOperation(t *testing.T) {
 	settleModelWork(t, model, coordinator)
 	prepared, err := model.review.PrepareMarkdown(
 		model.settings.exportTemplates,
-		review.ExportOptions{},
+		review.DefaultExportOptions(),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -133,7 +133,7 @@ func TestFencedDeliveryRetrySettlesThroughWorker(t *testing.T) {
 	settleModelWork(t, model, coordinator)
 	prepared, err := model.review.PrepareMarkdown(
 		model.settings.exportTemplates,
-		review.ExportOptions{},
+		review.DefaultExportOptions(),
 	)
 	if err != nil {
 		t.Fatal(err)

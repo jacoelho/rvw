@@ -2,18 +2,15 @@ package app
 
 import (
 	"context"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/jacoelho/rvw/internal/delivery"
 	"github.com/jacoelho/rvw/internal/review"
-	"github.com/jacoelho/rvw/internal/source"
 )
 
 func TestModelRetainsOwnerAndBuildsCompleteBoundedViews(t *testing.T) {
@@ -154,9 +151,9 @@ func TestCommentEditorAnchorsSemanticLineAndRetainsChildState(t *testing.T) {
 		t.Fatal("fixture patch has no addition")
 	}
 
-	_, focusCommand := model.Update(keyMessage("c"))
-	if model.mode != ModeCommentEdit || focusCommand == nil {
-		t.Fatalf("comment edit did not start: mode=%d command=%v", model.mode, focusCommand)
+	_, _ = model.Update(keyMessage("c"))
+	if model.mode != ModeCommentEdit {
+		t.Fatalf("comment edit did not start: mode=%d", model.mode)
 	}
 	for _, character := range "fix this" {
 		_, _ = model.Update(tea.KeyPressMsg(tea.Key{Text: string(character), Code: character}))
@@ -165,6 +162,7 @@ func TestCommentEditorAnchorsSemanticLineAndRetainsChildState(t *testing.T) {
 	if model.mode != ModeNormal {
 		t.Fatalf("comment editor mode = %d after save", model.mode)
 	}
+	settleModelWork(t, model, coordinator)
 	comments := model.review.Comments()
 	if len(comments) != 1 || comments[0].Body().String() != "fix this" {
 		t.Fatalf("saved comments = %+v", comments)
@@ -196,19 +194,80 @@ func TestCommentEditorSynchronizesPastedNewAndEditedDrafts(t *testing.T) {
 		t.Fatalf("pasted draft = %q, editor = %q, present=%v", draft.Body(), model.commentEditor.Value(), ok)
 	}
 	_, _ = model.Update(tea.KeyPressMsg(tea.Key{Code: 's', Mod: tea.ModCtrl}))
+	settleModelWork(t, model, coordinator)
 	comments := model.review.Comments()
 	if len(comments) != 1 || comments[0].Body().String() != "pasted\nbody" {
 		t.Fatalf("saved pasted comments = %+v", comments)
 	}
 
 	model.commentCursor = 0
-	if command := model.beginEditComment(); command == nil {
-		t.Fatal("editing pasted comment did not return a focus command")
+	model.beginEditComment()
+	if model.review.CommentMutationOperation() == 0 {
+		t.Fatalf(
+			"editing pasted comment operation = %d",
+			model.review.CommentMutationOperation(),
+		)
+	}
+	settleModelWork(t, model, coordinator)
+	if model.mode != ModeCommentEdit {
+		t.Fatalf("prepared edit mode = %v", model.mode)
 	}
 	_, _ = model.Update(tea.PasteMsg{Content: " edited"})
 	draft, ok = model.review.Draft()
 	if !ok || draft.Body() != "pasted\nbody edited" || model.commentEditor.Value() != draft.Body() {
 		t.Fatalf("edited pasted draft = %q, editor = %q, present=%v", draft.Body(), model.commentEditor.Value(), ok)
+	}
+}
+
+func TestCommentEditorCyclesKindsAndRendersCurrentKind(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{
+		"alpha.txt": "original\nadded\n",
+	})
+	_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
+	active, _ := model.review.ActiveFile()
+	waitForPatch(t, model, coordinator, active)
+	beginTestLineComment(t, model)
+
+	model.applyAction(KeyActionNextCommentKind, 1)
+	draft, ok := model.review.Draft()
+	if !ok || draft.Kind().String() != "note" ||
+		!strings.Contains(ansi.Strip(model.View().Content), "Comment [note]") {
+		t.Fatalf("next kind draft = %#v, present = %t", draft, ok)
+	}
+	model.applyAction(KeyActionPreviousCommentKind, 1)
+	draft, _ = model.review.Draft()
+	if draft.Kind().String() != "issue" {
+		t.Fatalf("previous kind = %q", draft.Kind())
+	}
+}
+
+func TestExportPickerDefaultsAndTogglesKindFilters(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	model.openExportPicker(exportSelection{
+		format: review.ExportMarkdown, destination: delivery.DestinationClipboard,
+		options: review.DefaultExportOptions(),
+	})
+	if model.overlay != OverlayExport ||
+		!model.exportPicker.options.Has(review.ExportNotes) ||
+		!model.exportPicker.options.Has(review.ExportPraise) ||
+		model.exportPicker.options.Has(review.ExportUnmappable) {
+		t.Fatalf("default picker = %#v", model.exportPicker)
+	}
+	model.applyExportPickerAction(KeyActionToggleExportNotes)
+	model.applyExportPickerAction(KeyActionToggleExportPraise)
+	model.applyExportPickerAction(KeyActionToggleExportUnmap)
+	if model.exportPicker.options.Has(review.ExportNotes) ||
+		model.exportPicker.options.Has(review.ExportPraise) ||
+		!model.exportPicker.options.Has(review.ExportUnmappable) {
+		t.Fatalf("toggled picker = %#v", model.exportPicker)
+	}
+	view := model.exportPickerView(80, 20)
+	for _, want := range []string{
+		"[ ] include notes", "[ ] include praise", "[x] include unmappable comments",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("picker view omitted %q:\n%s", want, view)
+		}
 	}
 }
 
@@ -450,7 +509,7 @@ func TestRemoteCommentActivationLoadsItsFileAndRevealsItsSemanticLine(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	model.review, err = review.NewReview(snapshot)
+	model.review, err = review.NewReview(testReviewRequest(snapshot))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -563,7 +622,7 @@ func TestRemoteCommentActivationDistinguishesMissingAndOutdatedTargets(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	model.review, err = review.NewReview(snapshot)
+	model.review, err = review.NewReview(testReviewRequest(snapshot))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -681,7 +740,7 @@ func TestAsyncStdoutExportDoesNotQuitWhenOperationTransitionFails(t *testing.T) 
 	}
 	prepared, err := model.review.PrepareMarkdown(
 		model.settings.exportTemplates,
-		review.ExportOptions{},
+		review.DefaultExportOptions(),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -745,20 +804,12 @@ func TestEffectiveBindingsDriveRoutingAndVisibleHelp(t *testing.T) {
 		"a.txt": "changed\n",
 		"b.txt": "changed\n",
 	})
-	model.settings.keybindings = append(
-		model.settings.keybindings,
-		Keybinding{
-			Context: KeyContextNormal,
-			Focus:   KeyFocusFileTree,
-			Chord:   "j",
-			Action:  KeyActionLast,
-		},
-		Keybinding{
-			Context: KeyContextMinimumSize,
-			Chord:   "j",
-			Action:  KeyActionMoveDown,
-		},
-	)
+	setModelKeybindings(t, model, Keybinding{
+		Context: KeyContextNormal,
+		Focus:   KeyFocusFileTree,
+		Chord:   "j",
+		Action:  KeyActionLast,
+	})
 	_, _ = model.Update(tea.WindowSizeMsg{Width: compactWidth, Height: 18})
 	model.focus = FocusFileTree
 
@@ -860,12 +911,12 @@ func TestMouseActionForHiddenPaneDoesNotMutateInputOwnership(t *testing.T) {
 				t.Fatalf("click message type = %T", command())
 			}
 
-			model.settings.keybindings = []Keybinding{{
+			setModelKeybindings(t, model, Keybinding{
 				Context: KeyContextNormal,
 				Focus:   KeyFocusDiff,
 				Chord:   "x t",
 				Action:  KeyActionToggleWrap,
-			}}
+			})
 			_, _ = model.Update(keyMessage("5"))
 			_, _ = model.Update(keyMessage("x"))
 			_, _ = model.Update(tea.WindowSizeMsg{
@@ -931,293 +982,4 @@ func TestResponsiveLayoutUsesBothWidthAndHeightBoundaries(t *testing.T) {
 		model.workspaceLayout(180, 30).sideBySideFallback {
 		t.Fatal("side-by-side fallback did not follow diff content width")
 	}
-}
-
-func TestReloadAcquisitionAndPreparationCommitAtomicallyOffUpdate(t *testing.T) {
-	model, coordinator := newTestModel(t, map[string]string{"a.txt": "changed\n"})
-	waitContext, cancelWait := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancelWait()
-	if state := coordinator.WaitReady(waitContext); state != ReadyAvailable {
-		t.Fatalf("patch ready state = %d", state)
-	}
-	_, _ = model.Update(outcomeReadyMsg{state: ReadyAvailable})
-
-	local, ok := model.document.Local()
-	if !ok || local.Repo == nil {
-		t.Fatal("test document has no local repository")
-	}
-	if err := os.WriteFile(
-		filepath.Join(local.Repo.String(), "b.txt"),
-		[]byte("untracked\n"),
-		0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
-	oldSource := model.review.Snapshot().SourceID()
-	oldWorkspace := model.review.WorkspaceRevision()
-	model.startReload()
-	if model.foreground.reloadOperation() == 0 || model.foreground.reloadIsPreparing() {
-		t.Fatalf(
-			"reload acquisition state = operation %d preparing %v",
-			model.foreground.reloadOperation(),
-			model.foreground.reloadIsPreparing(),
-		)
-	}
-
-	for attempts := 0; !model.foreground.reloadIsPreparing() && attempts < 8; attempts++ {
-		if state := coordinator.WaitReady(waitContext); state != ReadyAvailable {
-			t.Fatalf("reload acquisition ready state = %d", state)
-		}
-		_, _ = model.Update(outcomeReadyMsg{state: ReadyAvailable})
-	}
-	if !model.foreground.reloadIsPreparing() {
-		t.Fatal("reload did not enter off-loop reconciliation")
-	}
-	if model.review.Snapshot().SourceID() != oldSource {
-		t.Fatal("source became observable before prepared replacement committed")
-	}
-	var err error
-	model.review, err = model.review.ToggleFileReviewed(0)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	for attempts := 0; model.foreground.reloadOperation() != 0 && attempts < 8; attempts++ {
-		if state := coordinator.WaitReady(waitContext); state != ReadyAvailable {
-			t.Fatalf("reload preparation ready state = %d", state)
-		}
-		_, _ = model.Update(outcomeReadyMsg{state: ReadyAvailable})
-	}
-	if model.foreground.reloadOperation() != 0 || model.foreground.reloadIsPreparing() {
-		t.Fatalf(
-			"reload did not settle: operation %d preparing %v",
-			model.foreground.reloadOperation(),
-			model.foreground.reloadIsPreparing(),
-		)
-	}
-	if model.review.Snapshot().SourceID() == oldSource ||
-		model.review.WorkspaceRevision().Uint64() != oldWorkspace.Uint64()+1 ||
-		model.review.Snapshot().FileCount() != 2 {
-		t.Fatalf(
-			"replacement = source %d workspace %d files %d",
-			model.review.Snapshot().SourceID(),
-			model.review.WorkspaceRevision(),
-			model.review.Snapshot().FileCount(),
-		)
-	}
-	if len(model.allFileOrder) != 2 {
-		t.Fatalf("prepared file order length = %d", len(model.allFileOrder))
-	}
-	if !model.review.FileReviewed(0) {
-		t.Fatal("reload retry lost review state changed during preparation")
-	}
-}
-
-func newTestModel(tb testing.TB, changed map[string]string) (*Model, *Coordinator) {
-	tb.Helper()
-	t := tb
-	fixture := newSourceFixture(t, changed)
-	workContext, cancelWork := context.WithCancel(t.Context())
-	deliveryManager := newTestDeliveryManager(t)
-	coordinator, err := NewCoordinator(workContext, fixture.service, deliveryManager)
-	if err != nil {
-		cancelWork()
-		t.Fatal(err)
-	}
-	receiver, err := NewReadyReceiver(t.Context())
-	if err != nil {
-		cancelWork()
-		t.Fatal(err)
-	}
-	contextLines, err := review.NewContextLines(3)
-	if err != nil {
-		cancelWork()
-		t.Fatal(err)
-	}
-	exportTemplates, err := review.CompileExportTemplates(
-		"{{comments}}",
-		"{{index}} {{comment}}",
-	)
-	if err != nil {
-		cancelWork()
-		t.Fatal(err)
-	}
-	features, err := NewSettingFeatures(FeatureMouse, FeatureWrap)
-	if err != nil {
-		cancelWork()
-		t.Fatal(err)
-	}
-	publicationPolicies, err := review.NewPublicationPolicies()
-	if err != nil {
-		cancelWork()
-		t.Fatal(err)
-	}
-	publicationOptions, err := review.NewPublicationOptions(
-		review.PublicationEventComment,
-		publicationPolicies,
-	)
-	if err != nil {
-		cancelWork()
-		t.Fatal(err)
-	}
-	syntaxSelector, err := review.NewSyntaxSelector("test")
-	if err != nil {
-		cancelWork()
-		t.Fatal(err)
-	}
-	settings, err := NewSettings(SettingsRequest{
-		Features:        features,
-		DiffView:        DiffViewUnified,
-		ContextLines:    contextLines,
-		SyntaxSelector:  syntaxSelector,
-		ExportTemplates: exportTemplates,
-		Publication:     publicationOptions,
-		Keybindings: []Keybinding{
-			{Context: KeyContextNormal, Chord: "q", Action: KeyActionQuit},
-			{Context: KeyContextNormal, Chord: "j", Action: KeyActionMoveDown},
-			{Context: KeyContextNormal, Chord: "enter", Action: KeyActionActivate},
-			{Context: KeyContextNormal, Chord: "c", Action: KeyActionCommentAtCursor},
-			{Context: KeyContextNormal, Chord: "M", Action: KeyActionExportMarkdown},
-			{Context: KeyContextNormal, Chord: "J", Action: KeyActionExportJSON},
-			{Context: KeyContextNormal, Chord: "?", Action: KeyActionHelp},
-			{Context: KeyContextCommentEdit, Chord: "ctrl-s", Action: KeyActionSaveComment},
-			{Context: KeyContextCommentEdit, Chord: "esc", Action: KeyActionCancel},
-			{Context: KeyContextHelp, Chord: "q", Action: KeyActionCancel},
-			{Context: KeyContextExportPicker, Chord: "enter", Action: KeyActionExportSelected},
-			{Context: KeyContextExportPicker, Chord: "esc", Action: KeyActionCancel},
-			{Context: KeyContextMinimumSize, Chord: "q", Action: KeyActionQuit},
-		},
-	})
-	if err != nil {
-		cancelWork()
-		t.Fatal(err)
-	}
-	model, err := NewModel(workContext, fixture.document, settings, coordinator, receiver)
-	if err != nil {
-		cancelWork()
-		t.Fatal(err)
-	}
-	if got := coordinator.Stats().Accepted; got != 0 {
-		cancelWork()
-		t.Fatalf("model construction accepted %d operations, want 0", got)
-	}
-	updated, command := model.Update(initializeMsg{})
-	if updated != model || command != nil {
-		cancelWork()
-		t.Fatalf("initialize update = (%T, %v), want same model and no command", updated, command)
-	}
-	indexContext, cancelIndex := context.WithTimeout(t.Context(), 5*time.Second)
-	if state := coordinator.WaitReady(indexContext); state != ReadyAvailable {
-		cancelIndex()
-		cancelWork()
-		t.Fatalf("workspace index readiness = %v, want available", state)
-	}
-	cancelIndex()
-	_, _ = model.Update(outcomeReadyMsg{state: ReadyAvailable})
-	t.Cleanup(func() {
-		receiverContext, cancelReceiver := context.WithTimeout(context.Background(), time.Second)
-		defer cancelReceiver()
-		if err := receiver.StopAndWait(receiverContext); err != nil {
-			t.Error(err)
-		}
-		coordinator.StopAdmissionAndCancel()
-		shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancelShutdown()
-		if err := coordinator.Shutdown(shutdownContext); err != nil {
-			t.Error(err)
-		}
-		cancelWork()
-	})
-	return model, coordinator
-}
-
-func newTestDeliveryManager(tb testing.TB) *delivery.Manager {
-	tb.Helper()
-	t := tb
-	manager, err := delivery.NewManager()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		closeContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := manager.Close(closeContext); err != nil {
-			t.Error(err)
-		}
-	})
-	return manager
-}
-
-type sourceFixture struct {
-	service  *source.Service
-	document *source.Document
-}
-
-func newSourceFixture(tb testing.TB, changed map[string]string) sourceFixture {
-	tb.Helper()
-	t := tb
-	root := t.TempDir()
-	runGit(t, root, "init")
-	runGit(t, root, "config", "user.email", "rvw@example.test")
-	runGit(t, root, "config", "user.name", "rvw test")
-	for name := range changed {
-		path := filepath.Join(root, name)
-		if err := os.WriteFile(path, []byte("original\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	runGit(t, root, "add", ".")
-	runGit(t, root, "commit", "-m", "initial")
-	for name, contents := range changed {
-		if err := os.WriteFile(filepath.Join(root, name), []byte(contents), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	workingDirectory, err := source.NewWorkingDirectory(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	service, err := source.NewService(workingDirectory)
-	if err != nil {
-		t.Fatal(err)
-	}
-	document, err := service.Open(t.Context(), source.WorktreeTarget(), source.OpenOptions{
-		IncludeUntracked: true,
-		BuiltinDefaults:  true,
-		Gitignore:        true,
-		RVWIgnore:        true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := document.Close(); err != nil {
-			t.Error(err)
-		}
-		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := service.Close(shutdownContext); err != nil {
-			t.Error(err)
-		}
-	})
-	return sourceFixture{service: service, document: document}
-}
-
-func runGit(tb testing.TB, directory string, arguments ...string) {
-	tb.Helper()
-	t := tb
-	command := exec.CommandContext(tb.Context(), "git", arguments...)
-	command.Dir = directory
-	command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "LC_ALL=C")
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("git %s: %v\n%s", strings.Join(arguments, " "), err, output)
-	}
-}
-
-func keyMessage(value string) tea.KeyPressMsg {
-	code := []rune(value)[0]
-	if value == "enter" {
-		code = tea.KeyEnter
-	}
-	return tea.KeyPressMsg(tea.Key{Text: value, Code: code})
 }

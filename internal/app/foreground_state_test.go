@@ -76,7 +76,8 @@ func TestForegroundDiffTargetSurvivesFailedReloadAndNotSuccessfulReload(t *testi
 				t.Fatal("reload admission failed")
 			}
 			if testCase.succeed {
-				if !state.reloadPreparationAdmitted(2) {
+				if !state.reloadCaptureStarted(2) ||
+					!state.reloadPreparationAdmitted(2, 0) {
 					t.Fatal("reload preparation admission failed")
 				}
 				if _, ok := state.finishReloadSuccess(2, nil, reloadNeedsPatch); !ok {
@@ -160,7 +161,7 @@ func TestForegroundStatePatchRetryAdmission(t *testing.T) {
 	assertForegroundValid(t, &state)
 }
 
-func TestForegroundStateSearchReplacementWhilePatchActive(t *testing.T) {
+func TestForegroundStateSearchReplacementSupersedesQueuedPatch(t *testing.T) {
 	state := newForegroundState()
 	first := testPendingSearch(t, "first")
 	replacement := testPendingSearch(t, "replacement")
@@ -170,16 +171,12 @@ func TestForegroundStateSearchReplacementWhilePatchActive(t *testing.T) {
 		t.Fatal("initial search admission failed")
 	}
 	patchStart, _, ready := state.requestPatch(1)
-	if !ready || !state.admitted(patchStart, 2) {
-		t.Fatal("concurrent patch admission failed")
+	if ready || patchStart.kind != foregroundStartNone {
+		t.Fatal("patch did not wait for the active search")
 	}
 	_, cancellations, ready := state.requestSearch(replacement)
 	if ready || len(cancellations) != 1 || cancellations[0] != 1 {
 		t.Fatalf("replacement cancellation = %v, ready %v", cancellations, ready)
-	}
-	_, _, tracked, patchEffect := state.completePatch(2)
-	if !tracked || patchEffect.kind != foregroundEffectNone {
-		t.Fatalf("patch consumed search continuation: tracked %v effect %+v", tracked, patchEffect)
 	}
 	tracked, searchEffect := state.completeSearch(1)
 	if !tracked || searchEffect.kind != foregroundEffectStartSearch ||
@@ -196,144 +193,26 @@ func TestForegroundStateSearchReplacementWhilePatchActive(t *testing.T) {
 	assertForegroundValid(t, &state)
 }
 
-func TestForegroundStateConcurrentCompletionOrder(t *testing.T) {
-	testCases := []struct {
-		name       string
-		configure  func(*testing.T, *foregroundState)
-		wantPatch  int
-		wantSearch bool
-	}{
-		{name: "none"},
-		{
-			name: "patch retry",
-			configure: func(t *testing.T, state *foregroundState) {
-				t.Helper()
-				_, cancellations, ready := state.requestPatch(2)
-				if ready || len(cancellations) != 1 || cancellations[0] != 2 {
-					t.Fatalf("retry cancellation = %v, ready %v", cancellations, ready)
-				}
-			},
-			wantPatch: 1,
-		},
-		{
-			name: "replace search",
-			configure: func(t *testing.T, state *foregroundState) {
-				t.Helper()
-				_, cancellations, ready := state.requestSearch(
-					testPendingSearch(t, "replacement"),
-				)
-				if ready || len(cancellations) != 1 || cancellations[0] != 1 {
-					t.Fatalf("replacement cancellation = %v, ready %v", cancellations, ready)
-				}
-			},
-			wantSearch: true,
-		},
-		{
-			name: "clear search",
-			configure: func(t *testing.T, state *foregroundState) {
-				t.Helper()
-				if operation, active := state.requestClearSearch(); !active || operation != 1 {
-					t.Fatalf("clear cancellation = %d, active %v", operation, active)
-				}
-			},
-		},
-		{
-			name: "apply patch context",
-			configure: func(t *testing.T, state *foregroundState) {
-				t.Helper()
-				if operation, active := state.requestPatchContext(
-					review.WholeFileContext(),
-				); !active || operation != 1 {
-					t.Fatalf("context cancellation = %d, active %v", operation, active)
-				}
-			},
-			wantPatch: 1,
-		},
+func TestForegroundStatePatchStartsAfterSearchCompletion(t *testing.T) {
+	state := newForegroundState()
+	searchStart, _, ready := state.requestSearch(testPendingSearch(t, "active"))
+	if !ready || !state.admitted(searchStart, 1) {
+		t.Fatal("search admission failed")
 	}
-	for _, testCase := range testCases {
-		for _, searchFirst := range []bool{false, true} {
-			order := "patch-first"
-			if searchFirst {
-				order = "search-first"
-			}
-			t.Run(testCase.name+"/"+order, func(t *testing.T) {
-				state := newForegroundState()
-				searchStart, _, ready := state.requestSearch(testPendingSearch(t, "active"))
-				if !ready || !state.admitted(searchStart, 1) {
-					t.Fatal("search admission failed")
-				}
-				patchStart, _, ready := state.requestPatch(1)
-				if !ready || !state.admitted(patchStart, 2) {
-					t.Fatal("patch admission failed")
-				}
-				if testCase.configure != nil {
-					testCase.configure(t, &state)
-				}
-
-				nextOperation := review.OperationID(10)
-				applyEffect := func(effect foregroundEffect) {
-					t.Helper()
-					switch effect.kind {
-					case foregroundEffectNone, foregroundEffectClearSearch:
-					case foregroundEffectRequestPatch:
-						start, ok := state.preparePatch(effect.file)
-						if !ok || !state.admitted(start, nextOperation) {
-							t.Fatalf("patch effect admission failed: %+v", effect)
-						}
-						nextOperation++
-					case foregroundEffectStartSearch:
-						start, ok := state.prepareSearch(effect.search)
-						if !ok || !state.admitted(start, nextOperation) {
-							t.Fatalf("search effect admission failed: %+v", effect)
-						}
-						nextOperation++
-					case foregroundEffectApplyPatchContext:
-						start, cancellations, ready := state.requestPatch(2)
-						if ready {
-							if !state.admitted(start, nextOperation) {
-								t.Fatal("context patch admission failed")
-							}
-							nextOperation++
-						} else if len(cancellations) != 1 || cancellations[0] != 2 {
-							t.Fatalf("context patch cancellations = %v", cancellations)
-						}
-					default:
-						t.Fatalf("unexpected effect: %+v", effect)
-					}
-				}
-				completePatch := func() {
-					t.Helper()
-					_, _, tracked, effect := state.completePatch(2)
-					if !tracked {
-						t.Fatal("patch completion was not tracked")
-					}
-					applyEffect(effect)
-				}
-				completeSearch := func() {
-					t.Helper()
-					tracked, effect := state.completeSearch(1)
-					if !tracked {
-						t.Fatal("search completion was not tracked")
-					}
-					applyEffect(effect)
-				}
-				if searchFirst {
-					completeSearch()
-					completePatch()
-				} else {
-					completePatch()
-					completeSearch()
-				}
-				if state.patchCount() != testCase.wantPatch {
-					t.Fatalf("active patches = %d, want %d", state.patchCount(), testCase.wantPatch)
-				}
-				if active := state.searchOperation() != 0; active != testCase.wantSearch {
-					t.Fatalf("active search = %v, want %v", active, testCase.wantSearch)
-				}
-				assertForegroundValid(t, &state)
-			})
-		}
+	patchStart, cancellations, ready := state.requestPatch(2)
+	if ready || patchStart.kind != foregroundStartNone || len(cancellations) != 1 ||
+		cancellations[0] != 1 {
+		t.Fatalf("queued patch = start %+v cancellations %v ready %v", patchStart, cancellations, ready)
 	}
+	tracked, effect := state.completeSearch(1)
+	if !tracked || effect.kind != foregroundEffectRequestPatch || effect.file != 2 {
+		t.Fatalf("search completion = tracked %v effect %+v", tracked, effect)
+	}
+	start, ok := state.preparePatch(effect.file)
+	if !ok || !state.admitted(start, 2) {
+		t.Fatal("deferred patch admission failed")
+	}
+	assertForegroundValid(t, &state)
 }
 
 func TestForegroundStateSearchContinuationPrecedence(t *testing.T) {
@@ -395,6 +274,14 @@ func TestForegroundStateSearchContinuationPrecedence(t *testing.T) {
 		}
 		_, _, _ = state.requestSearch(testPendingSearch(t, "also discarded"))
 		_, _ = state.requestClearSearch()
+		patchStart, cancellations, ready := state.requestPatch(2)
+		if ready || patchStart.kind != foregroundStartNone || len(cancellations) != 1 ||
+			cancellations[0] != operation {
+			t.Fatalf(
+				"patch during context cancellation = start %+v cancellations %v ready %v",
+				patchStart, cancellations, ready,
+			)
+		}
 		_, effect := state.completeSearch(operation)
 		if effect.kind != foregroundEffectApplyPatchContext ||
 			effect.context != context {
@@ -443,7 +330,8 @@ func TestForegroundStatePatchSearchReloadFailureResumesSearch(t *testing.T) {
 
 func TestForegroundStatePostReloadPatchRejectionResumesSearch(t *testing.T) {
 	state, pending, reloadID := foregroundReloadWithSearch(t)
-	if !state.reloadPreparationAdmitted(reloadID) {
+	if !state.reloadCaptureStarted(reloadID) ||
+		!state.reloadPreparationAdmitted(reloadID, 0) {
 		t.Fatal("reload preparation admission failed")
 	}
 	effect, tracked := state.finishReloadSuccess(reloadID, nil, reloadNeedsPatch)
@@ -525,7 +413,8 @@ func TestForegroundStateRejectsOnlyCurrentAdmissionDecision(t *testing.T) {
 
 func TestForegroundStateReloadWithoutActiveFileResumesSearch(t *testing.T) {
 	state, pending, reloadID := foregroundReloadWithSearch(t)
-	if !state.reloadPreparationAdmitted(reloadID) {
+	if !state.reloadCaptureStarted(reloadID) ||
+		!state.reloadPreparationAdmitted(reloadID, 0) {
 		t.Fatal("reload preparation admission failed")
 	}
 	effect, tracked := state.finishReloadSuccess(reloadID, nil, reloadNoPatch)
@@ -549,7 +438,8 @@ func TestForegroundStateReloadRejectsNewSearchAndIgnoresStaleResults(t *testing.
 	if _, _, tracked := state.finishReloadFailure(2); tracked {
 		t.Fatal("stale reload failure consumed the active reload")
 	}
-	if !state.reloadAcquired(1) || !state.reloadPreparationAdmitted(1) {
+	if !state.reloadAcquired(1) || !state.reloadCaptureStarted(1) ||
+		!state.reloadPreparationAdmitted(1, 0) {
 		t.Fatal("reload did not enter preparation")
 	}
 	if effect, tracked := state.finishReloadSuccess(2, nil, reloadNoPatch); tracked ||
@@ -604,14 +494,11 @@ func testPendingSearch(t *testing.T, value string) pendingSearch {
 		t.Fatal(err)
 	}
 	model, _ := newTestModel(t, map[string]string{"search.txt": "changed\n"})
-	target, err := review.NewSearchTarget(
-		model.review.Snapshot(),
-		[]review.FileID{0},
-	)
+	candidates, err := newSearchCandidates(model.review, []review.FileID{0})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return pendingSearch{query: query, target: new(target)}
+	return pendingSearch{query: query, candidates: candidates}
 }
 
 func assertForegroundValid(t *testing.T, state *foregroundState) {

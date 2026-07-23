@@ -18,7 +18,6 @@ import (
 func TestMinimumSizeOwnsInput(t *testing.T) {
 	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	model.mode = ModeCommentEdit
-	_ = model.commentEditor.Focus()
 	_, _ = model.Update(tea.WindowSizeMsg{Width: minimumWidth - 1, Height: minimumHeight})
 	if cursor := model.View().Cursor; cursor != nil {
 		t.Fatalf("minimum-size view exposed hidden editor cursor: %+v", cursor)
@@ -60,7 +59,7 @@ func TestCommentEditorDockKeepsCodeVisibleWithoutEscapedWidgetStyles(t *testing.
 	if !strings.Contains(plain, "changed") {
 		t.Fatalf("comment editor hid the selected code:\n%s", plain)
 	}
-	if !strings.Contains(plain, "Comment ·") || !strings.Contains(plain, "[focus:comment]") {
+	if !strings.Contains(plain, "Comment [issue] ·") || !strings.Contains(plain, "[focus:comment]") {
 		t.Fatalf("comment editor omitted its visible focus state:\n%s", plain)
 	}
 	if strings.Contains(plain, "enter activate") || !strings.Contains(plain, "comment editor owns input") {
@@ -71,9 +70,6 @@ func TestCommentEditorDockKeepsCodeVisibleWithoutEscapedWidgetStyles(t *testing.
 	}
 	if lines := strings.Count(view.Content, "\n") + 1; lines != 24 {
 		t.Fatalf("comment editor rendered %d lines, want 24", lines)
-	}
-	if !model.commentEditor.Focused() {
-		t.Fatal("comment editor did not retain focus")
 	}
 }
 
@@ -178,7 +174,7 @@ func TestCommentEditorDockPreservesWorkspaceAcrossHeightBoundary(t *testing.T) {
 			_, _ = model.Update(tea.WindowSizeMsg{Width: normalWidth, Height: height})
 			view := model.View()
 			plain := ansi.Strip(view.Content)
-			if !strings.Contains(plain, "changed") || !strings.Contains(plain, "Comment ·") {
+			if !strings.Contains(plain, "changed") || !strings.Contains(plain, "Comment [issue] ·") {
 				t.Fatalf("height %d did not preserve code and editor:\n%s", height, plain)
 			}
 			if lines := strings.Count(view.Content, "\n") + 1; lines != height {
@@ -222,8 +218,8 @@ func TestFocusedCommentPanePreservesStyleSequences(t *testing.T) {
 	styles := newSemanticStyles(model.settings)
 	for _, test := range []struct {
 		name   string
-		focus  FocusOwner
 		marker string
+		focus  FocusOwner
 	}{
 		{name: "unfocused", focus: FocusDiff, marker: "› "},
 		{name: "focused", focus: FocusComments, marker: "▸ "},
@@ -245,6 +241,50 @@ func TestFocusedCommentPanePreservesStyleSequences(t *testing.T) {
 	}
 }
 
+func TestRemoteCommentRowPreservesRenderedText(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	active, ok := model.review.ActiveFile()
+	if !ok {
+		t.Fatal("missing active file")
+	}
+	file, ok := model.review.Snapshot().File(active)
+	if !ok {
+		t.Fatal("missing active file descriptor")
+	}
+	line, _ := review.NewLineNumber(2)
+	comment, err := review.NewRemoteComment(review.RemoteCommentDescriptor{
+		ID: "comment", Body: "remote body",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	thread, err := review.NewRemoteThread(review.RemoteThreadDescriptor{
+		ID: "thread", Path: file.IdentityPath(), Line: &line, Side: review.LineNew,
+		Comments: []review.RemoteComment{comment},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := model.review.Snapshot().WithRemoteThreads([]review.RemoteThread{thread})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.review, err = review.NewReview(testReviewRequest(snapshot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.focus = FocusDiff
+
+	lines, _ := model.commentLines(80, 3, newSemanticStyles(model.settings))
+	if len(lines) != 1 {
+		t.Fatalf("remote comment lines = %d, want 1", len(lines))
+	}
+	if got, want := ansi.Strip(lines[0]),
+		"› [remote open] alpha.txt:2 — deleted user: remote body"; got != want {
+		t.Fatalf("remote comment row = %q, want %q", got, want)
+	}
+}
+
 func beginTestLineComment(t *testing.T, model *Model) {
 	t.Helper()
 	active, ok := model.review.ActiveFile()
@@ -258,9 +298,7 @@ func beginTestLineComment(t *testing.T, model *Model) {
 		}
 		model.diffCursor = line.Number
 		model.diffTop = line.Number
-		if command := model.beginCursorComment(); command == nil {
-			t.Fatal("comment editor did not return its focus command")
-		}
+		_ = model.beginCursorComment()
 		return
 	}
 	t.Fatal("fixture patch has no commentable addition")
@@ -592,15 +630,27 @@ func TestDiffRenderingEscapesHostileTextInEveryLayout(t *testing.T) {
 
 	for _, test := range []struct {
 		name     string
+		expected string
+		width    int
 		view     DiffView
 		wrap     bool
-		width    int
-		expected string
 	}{
-		{"unified wrapped", DiffViewUnified, true, compactWidth, `\x1B\u{0085}\u{202E}\xFF`},
-		{"unified clipped", DiffViewUnified, false, compactWidth, `\x1B\u{0085}\u{202E}\xFF`},
-		{"side-by-side wrapped", DiffViewSideBySide, true, wideWidth, `\x1B\u{0085}\u{202E}\xFF`},
-		{"side-by-side clipped", DiffViewSideBySide, false, wideWidth, `\x1B\u{0085}\u{202E}\xFF`},
+		{
+			name: "unified wrapped", expected: `\x1B\u{0085}\u{202E}\xFF`,
+			width: compactWidth, view: DiffViewUnified, wrap: true,
+		},
+		{
+			name: "unified clipped", expected: `\x1B\u{0085}\u{202E}\xFF`,
+			width: compactWidth, view: DiffViewUnified,
+		},
+		{
+			name: "side-by-side wrapped", expected: `\x1B\u{0085}\u{202E}\xFF`,
+			width: wideWidth, view: DiffViewSideBySide, wrap: true,
+		},
+		{
+			name: "side-by-side clipped", expected: `\x1B\u{0085}\u{202E}\xFF`,
+			width: wideWidth, view: DiffViewSideBySide,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			model.settings.diffView = test.view
@@ -638,6 +688,113 @@ func TestSyntaxRenderingDoesNotSplitGraphemeForStyle(t *testing.T) {
 	want := lipgloss.NewStyle().Bold(true).Render("1️⃣") + `  value\x1B`
 	if rendered != want {
 		t.Fatalf("syntax render = %q, want exact grapheme styling %q", rendered, want)
+	}
+}
+
+func TestRenderSyntaxSpansStopsAtViewportBoundary(t *testing.T) {
+	raw := "plain"
+	visible := review.SyntaxSpan{Start: 0, End: 1, Kind: review.SyntaxNumber}
+	styles := semanticStyles{number: lipgloss.NewStyle().Bold(true)}
+	want, wantLimited := renderSyntaxSpans(raw, func(yield func(review.SyntaxSpan) bool) {
+		yield(visible)
+	}, styles)
+
+	pulls := 0
+	stopped := false
+	spans := func(yield func(review.SyntaxSpan) bool) {
+		defer func() {
+			stopped = true
+		}()
+		pulls++
+		if !yield(visible) {
+			return
+		}
+		for index := len(raw) + 1; index < len(raw)+1_024; index++ {
+			pulls++
+			if !yield(review.SyntaxSpan{
+				Start: uint32(index),
+				End:   uint32(index + 1),
+			}) {
+				return
+			}
+		}
+	}
+	got, gotLimited := renderSyntaxSpans(raw, spans, styles)
+	if got != want || gotLimited != wantLimited {
+		t.Fatalf(
+			"syntax render = (%q, %t), want visible-only result (%q, %t)",
+			got,
+			gotLimited,
+			want,
+			wantLimited,
+		)
+	}
+	if pulls != 2 {
+		t.Fatalf("syntax span pulls = %d, want visible span plus boundary span", pulls)
+	}
+	if !stopped {
+		t.Fatal("syntax span iterator was not stopped")
+	}
+}
+
+func TestRenderSyntaxSpansPreservesBoundarySemantics(t *testing.T) {
+	raw := "abc"
+	number := lipgloss.NewStyle().Bold(true)
+	styles := semanticStyles{number: number}
+	for _, test := range []struct {
+		name    string
+		spans   []review.SyntaxSpan
+		want    string
+		limited bool
+	}{
+		{
+			name: "empty and reversed spans",
+			spans: []review.SyntaxSpan{
+				{Start: 0, End: 0, Kind: review.SyntaxNumber},
+				{Start: 2, End: 1, Kind: review.SyntaxNumber},
+				{Start: 2, End: 3, Kind: review.SyntaxNumber},
+			},
+			want: "ab" + number.Render("c"),
+		},
+		{
+			name: "overlapping span",
+			spans: []review.SyntaxSpan{
+				{Start: 0, End: 2, Kind: review.SyntaxNumber},
+				{Start: 1, End: 3, Kind: review.SyntaxString},
+			},
+			want: number.Render("ab") + "c",
+		},
+		{
+			name:    "span crosses end",
+			spans:   []review.SyntaxSpan{{Start: 2, End: 4, Kind: review.SyntaxNumber}},
+			want:    raw,
+			limited: true,
+		},
+		{
+			name:    "span starts at end",
+			spans:   []review.SyntaxSpan{{Start: 3, End: 4, Kind: review.SyntaxNumber}},
+			want:    raw,
+			limited: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, limited := renderSyntaxSpans(raw, func(yield func(review.SyntaxSpan) bool) {
+				for _, span := range test.spans {
+					if !yield(span) {
+						return
+					}
+				}
+			}, styles)
+			if got != test.want || limited != test.limited {
+				t.Fatalf(
+					"syntax render = (%q, %t), want (%q, %t)",
+					got,
+					limited,
+					test.want,
+					test.limited,
+				)
+			}
+		})
 	}
 }
 

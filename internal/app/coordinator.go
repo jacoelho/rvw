@@ -18,19 +18,20 @@ import (
 const (
 	MaxAcceptedOperations       = 64
 	MaxQueuedRequestBytes int64 = 32 << 20
-	// MaxRetainedResultBytes allows one search to retain one maximum patch plus
-	// bounded hits while a presentation patch may complete concurrently.
-	MaxRetainedResultBytes    int64 = 256 << 20
+	// MaxRetainedResultBytes bounds retained and in-construction operation results.
+	MaxRetainedResultBytes    int64 = 128 << 20
 	MaxIOWorkers                    = 8
 	MaxCPUWorkers                   = 8
 	MaxPresentationCacheBytes int64 = 128 << 20
 
-	reservedPublicationRequestBytes int64 = review.MaxPublicationBytes + review.MaxPendingReviewBytes
-	reservedPublicationResultBytes  int64 = review.MaxPublicationBytes
-	patchResultReservation          int64 = review.MaxPatchBytes +
-		review.MaxPatchLines*25 +
-		review.MaxHunks*12
-	reloadResultReservation int64 = review.MaxSourcePaths + review.MaxFiles*256
+	// Reconciliation can retain the captured response, one maximum decoded
+	// token, a response-implied duplicate-ID set, and bounded command error.
+	publicationResultReservation int64 = 4*review.MaxPublicationBytes +
+		source.MaxCommandErrorConstructionBytes
+	patchResultReservation             int64 = source.MaxPatchResultConstructionBytes
+	reloadResultReservation            int64 = MaxRetainedResultBytes
+	reloadAcquisitionResultReservation int64 = MaxRetainedResultBytes
+	fileTreeResultReservation          int64 = 16 << 20
 )
 
 // ErrCoordinatorClosed identifies an coordinator closed failure.
@@ -53,20 +54,6 @@ type PatchOutcome struct {
 	ID     review.OperationID
 }
 
-// SearchWork represents search work.
-type SearchWork struct {
-	Document *source.Document
-	Request  review.SearchRequest
-	ID       review.OperationID
-}
-
-// SearchOutcome describes search outcome.
-type SearchOutcome struct {
-	Err    error
-	Result review.SearchResult
-	ID     review.OperationID
-}
-
 // PublicationCheckOutcome describes publication check outcome.
 type PublicationCheckOutcome struct {
 	Err   error
@@ -76,20 +63,26 @@ type PublicationCheckOutcome struct {
 
 // PublicationCommitOutcome describes publication commit outcome.
 type PublicationCommitOutcome struct {
-	Publication review.PublicationResult
+	Err         error
+	Detail      review.OperationDetail
+	Publication review.PreparedPublicationResult
 	ID          review.OperationID
+	Disposition review.PublicationDisposition
 }
 
 // ReconciliationOutcome describes reconciliation outcome.
 type ReconciliationOutcome struct {
-	Reconciliation review.ReconciliationResult
+	Err            error
+	Detail         review.OperationDetail
+	Reconciliation review.PreparedReconciliationResult
 	ID             review.OperationID
+	Disposition    review.ReconciliationDisposition
 }
 
 // ExportWork represents export work.
 type ExportWork struct {
 	Templates   review.ExportTemplates
-	Input       review.ExportInput
+	Source      review.ExportSource
 	ID          review.OperationID
 	Options     review.ExportOptions
 	Format      review.ExportFormat
@@ -125,7 +118,6 @@ type Outcome interface {
 }
 
 func (PatchOutcome) coordinatorOutcome()                                 {}
-func (SearchOutcome) coordinatorOutcome()                                {}
 func (SyntaxOutcome) coordinatorOutcome()                                {}
 func (PublicationCheckOutcome) coordinatorOutcome()                      {}
 func (PublicationCommitOutcome) coordinatorOutcome()                     {}
@@ -138,7 +130,6 @@ func (ExportOutcome) coordinatorOutcome()                                {}
 func (DeliveryOutcome) coordinatorOutcome()                              {}
 func (Progress) coordinatorOutcome()                                     {}
 func (outcome PatchOutcome) operationID() review.OperationID             { return outcome.ID }
-func (outcome SearchOutcome) operationID() review.OperationID            { return outcome.ID }
 func (outcome SyntaxOutcome) operationID() review.OperationID            { return outcome.ID }
 func (outcome PublicationCheckOutcome) operationID() review.OperationID  { return outcome.ID }
 func (outcome PublicationCommitOutcome) operationID() review.OperationID { return outcome.ID }
@@ -180,11 +171,6 @@ type patchJob struct {
 	work PatchWork
 }
 
-type searchJob struct {
-	ctx  context.Context
-	work SearchWork
-}
-
 type reloadJob struct {
 	ctx  context.Context
 	work ReloadWork
@@ -220,12 +206,13 @@ type Coordinator struct {
 	stats                 atomic.Value
 	workContext           context.Context
 	workspaceIndexJobs    chan workspaceIndexJob
+	commentMutationJobs   chan commentMutationJob
 	progressStop          chan struct{}
 	reloadPreparationJobs chan reloadPreparationJob
 	done                  chan struct{}
 	cpuPermits            chan struct{}
 	accepted              map[review.OperationID]reservation
-	retireDocuments       chan *source.Document
+	retireCleanups        chan *source.Cleanup
 	service               *source.Service
 	reloadJobs            chan reloadJob
 	progress              map[review.OperationID]Progress
@@ -245,8 +232,10 @@ type Coordinator struct {
 	workers               sync.WaitGroup
 	reservedResult        int64
 	publicationActive     review.OperationID
+	collapseCapture       review.OperationID
 	cleanupOmitted        uint64
 	progressBytes         int64
+	collapseCaptureBytes  int64
 	requestBytes          int64
 	ioCount               int
 	cpuCount              int
@@ -284,9 +273,10 @@ func NewCoordinator(
 		reloadPreparationJobs: make(chan reloadPreparationJob, 1),
 		fileTreeJobs:          make(chan fileTreeJob, 1),
 		workspaceIndexJobs:    make(chan workspaceIndexJob, 1),
+		commentMutationJobs:   make(chan commentMutationJob, 1),
 		exportJobs:            make(chan exportJob, MaxAcceptedOperations),
 		deliveryJobs:          make(chan deliveryJob, 1),
-		retireDocuments:       make(chan *source.Document, MaxAcceptedOperations),
+		retireCleanups:        make(chan *source.Cleanup, MaxAcceptedOperations),
 		progressStop:          make(chan struct{}),
 		cpuPermits:            make(chan struct{}, cpuWorkers),
 		done:                  make(chan struct{}),
@@ -317,8 +307,8 @@ func (coordinator *Coordinator) SubmitReload(work ReloadWork) error {
 	}
 	return coordinator.submit(
 		work.ID,
-		128,
-		reloadResultReservation,
+		work.Options.RetainedBytes(),
+		reloadAcquisitionResultReservation,
 		func(ctx context.Context) bool {
 			select {
 			case coordinator.reloadJobs <- reloadJob{work: work, ctx: ctx}:
@@ -336,7 +326,12 @@ func (coordinator *Coordinator) SubmitReloadPreparation(work ReloadPreparationWo
 		work.Review.Snapshot().SourceID() == 0 {
 		return errors.New("invalid reload preparation work")
 	}
-	requestBytes := work.Review.RetainedCommentBytes() + 128
+	collapseBytes, err := work.Collapse.requestBytes()
+	if err != nil {
+		return err
+	}
+	requestBytes := work.Review.RetainedCommentBytes() + collapseBytes +
+		collapseRequestStateCharge
 	return coordinator.submit(
 		work.ID,
 		requestBytes,
@@ -358,15 +353,15 @@ func (coordinator *Coordinator) SubmitReloadPreparation(work ReloadPreparationWo
 // SubmitFileTree performs the submit file tree operation.
 func (coordinator *Coordinator) SubmitFileTree(work FileTreeWork) error {
 	if work.ID == 0 || work.Generation == 0 ||
-		work.Snapshot.SourceID() == 0 ||
+		len(work.Tree.nodes) == 0 || work.Tree.projection != nil ||
 		len(work.Files) > review.MaxFiles {
 		return errors.New("invalid file tree work")
 	}
-	requestBytes := int64(len(work.Files))*4 + 128
+	requestBytes := int64(cap(work.Files))*4 + 128
 	return coordinator.submit(
 		work.ID,
 		requestBytes,
-		reloadResultReservation,
+		fileTreeResultReservation,
 		func(ctx context.Context) bool {
 			select {
 			case coordinator.fileTreeJobs <- fileTreeJob{work: work, ctx: ctx}:
@@ -383,10 +378,18 @@ func (coordinator *Coordinator) SubmitWorkspaceIndex(work WorkspaceIndexWork) er
 	if work.ID == 0 || work.Snapshot.SourceID() == 0 {
 		return errors.New("invalid workspace index work")
 	}
+	resultBytes, err := workspaceIndexAllowance(work.Snapshot)
+	if err != nil {
+		return err
+	}
+	collapseBytes, err := work.Collapse.requestBytes()
+	if err != nil {
+		return err
+	}
 	return coordinator.submit(
 		work.ID,
-		128,
-		reloadResultReservation,
+		collapseBytes+collapseRequestStateCharge,
+		resultBytes,
 		func(ctx context.Context) bool {
 			select {
 			case coordinator.workspaceIndexJobs <- workspaceIndexJob{work: work, ctx: ctx}:
@@ -398,10 +401,55 @@ func (coordinator *Coordinator) SubmitWorkspaceIndex(work WorkspaceIndexWork) er
 	)
 }
 
-// ReleaseDocument performs the release document operation.
-func (coordinator *Coordinator) ReleaseDocument(document *source.Document) error {
-	if document == nil {
-		return errors.New("cannot release a nil source document")
+func (coordinator *Coordinator) reserveCollapseCapture(
+	id review.OperationID,
+	requestBytes int64,
+) error {
+	if id == 0 || requestBytes < 0 || requestBytes > MaxQueuedRequestBytes {
+		return errors.New("invalid collapse capture reservation")
+	}
+	coordinator.mu.Lock()
+	defer coordinator.mu.Unlock()
+	if coordinator.closed {
+		return ErrCoordinatorClosed
+	}
+	if coordinator.collapseCapture != 0 && coordinator.collapseCapture != id {
+		return ErrCoordinatorSaturated
+	}
+	if _, exists := coordinator.accepted[id]; exists {
+		return fmt.Errorf("operation %d is already accepted", id)
+	}
+	previous := coordinator.collapseCaptureBytes
+	if coordinator.collapseCapture == 0 && len(coordinator.accepted) >= MaxAcceptedOperations-1 ||
+		coordinator.requestBytes-previous+requestBytes > MaxQueuedRequestBytes {
+		return ErrCoordinatorSaturated
+	}
+	coordinator.collapseCapture = id
+	coordinator.collapseCaptureBytes = requestBytes
+	coordinator.requestBytes += requestBytes - previous
+	coordinator.updateStatsLocked()
+	return nil
+}
+
+func (coordinator *Coordinator) releaseCollapseCapture(id review.OperationID) {
+	if id == 0 {
+		return
+	}
+	coordinator.mu.Lock()
+	defer coordinator.mu.Unlock()
+	if coordinator.collapseCapture != id {
+		return
+	}
+	coordinator.requestBytes -= coordinator.collapseCaptureBytes
+	coordinator.collapseCapture = 0
+	coordinator.collapseCaptureBytes = 0
+	coordinator.updateStatsLocked()
+}
+
+// ReleaseCleanup admits detached source cleanup without retaining a document graph.
+func (coordinator *Coordinator) ReleaseCleanup(cleanup *source.Cleanup) error {
+	if cleanup == nil {
+		return errors.New("cannot release nil source cleanup")
 	}
 	coordinator.mu.Lock()
 	defer coordinator.mu.Unlock()
@@ -409,7 +457,7 @@ func (coordinator *Coordinator) ReleaseDocument(document *source.Document) error
 		return ErrCoordinatorClosed
 	}
 	select {
-	case coordinator.retireDocuments <- document:
+	case coordinator.retireCleanups <- cleanup:
 		return nil
 	default:
 		return ErrCoordinatorSaturated
@@ -437,49 +485,22 @@ func (coordinator *Coordinator) SubmitPatch(work PatchWork) error {
 	)
 }
 
-// SubmitSearch performs the submit search operation.
-func (coordinator *Coordinator) SubmitSearch(work SearchWork) error {
-	if work.ID == 0 || work.Document == nil ||
-		work.Request.Operation != work.ID ||
-		work.Request.Source == 0 ||
-		work.Request.Query == "" {
-		return errors.New("invalid search work")
-	}
-	if work.Request.Target.FileCount() == 0 {
-		return errors.New("invalid search work")
-	}
-	requestBytes := int64(len(work.Request.Query)) + work.Request.Target.RetainedBytes() + 128
-	return coordinator.submit(
-		work.ID,
-		requestBytes,
-		patchResultReservation+review.MaxSearchHitBytes,
-		func(ctx context.Context) bool {
-			select {
-			case coordinator.searchJobs <- searchJob{work: work, ctx: ctx}:
-				return true
-			default:
-				return false
-			}
-		},
-	)
-}
-
 // SubmitExport performs the submit export operation.
 func (coordinator *Coordinator) SubmitExport(work ExportWork) error {
 	if work.ID == 0 || work.Destination == 0 ||
-		!work.Input.Ready() ||
+		!work.Source.Ready() ||
 		work.Format != review.ExportMarkdown && work.Format != review.ExportJSON ||
 		work.Format == review.ExportMarkdown && !work.Templates.Ready() {
 		return errors.New("invalid export work")
 	}
-	requestBytes := work.Input.RetainedBytes()
+	requestBytes := work.Source.RetainedBytes()
 	if work.Format == review.ExportMarkdown {
 		requestBytes += work.Templates.RetainedBytes()
 	}
 	return coordinator.submit(
 		work.ID,
 		requestBytes,
-		review.MaxPreparedExportBytes,
+		work.Source.ConstructionBytes(),
 		func(ctx context.Context) bool {
 			select {
 			case coordinator.exportJobs <- exportJob{work: work, ctx: ctx}:
@@ -500,7 +521,8 @@ func (coordinator *Coordinator) SubmitDelivery(work DeliveryWork) error {
 	return coordinator.submit(
 		work.ID,
 		work.Prepared.Bytes(),
-		64<<10,
+		work.Prepared.Bytes()+delivery.MaxClipboardStdoutBytes+
+			delivery.MaxClipboardErrorConstructionBytes,
 		func(ctx context.Context) bool {
 			select {
 			case coordinator.deliveryJobs <- deliveryJob{work: work, ctx: ctx}:
@@ -528,13 +550,33 @@ func (coordinator *Coordinator) submit(
 	if _, exists := coordinator.accepted[id]; exists {
 		return fmt.Errorf("operation %d is already accepted", id)
 	}
+	captured := coordinator.collapseCapture == id
+	if captured && coordinator.collapseCaptureBytes != requestBytes {
+		return errors.New("collapse capture reservation does not match submitted work")
+	}
+	active := len(coordinator.accepted)
+	if coordinator.collapseCapture != 0 {
+		active++
+	}
+	requestIncrement := requestBytes
+	if captured {
+		requestIncrement = 0
+	}
 	// One slot remains reserved for publication or reconciliation.
-	if len(coordinator.accepted) >= MaxAcceptedOperations-1 ||
-		coordinator.requestBytes+requestBytes >
-			MaxQueuedRequestBytes-reservedPublicationRequestBytes ||
-		coordinator.reservedResult+resultBytes >
-			MaxRetainedResultBytes-reservedPublicationResultBytes {
+	if active >= MaxAcceptedOperations || !captured && active >= MaxAcceptedOperations-1 ||
+		coordinator.requestBytes+requestIncrement > MaxQueuedRequestBytes ||
+		coordinator.reservedResult+resultBytes > MaxRetainedResultBytes {
+		if captured {
+			coordinator.requestBytes -= coordinator.collapseCaptureBytes
+			coordinator.collapseCapture = 0
+			coordinator.collapseCaptureBytes = 0
+			coordinator.updateStatsLocked()
+		}
 		return ErrCoordinatorSaturated
+	}
+	if captured {
+		coordinator.collapseCapture = 0
+		coordinator.collapseCaptureBytes = 0
 	}
 	operationContext, cancel := context.WithCancel(coordinator.workContext)
 	coordinator.accepted[id] = reservation{
@@ -542,7 +584,7 @@ func (coordinator *Coordinator) submit(
 		resultBytes:  resultBytes,
 		cancel:       cancel,
 	}
-	coordinator.requestBytes += requestBytes
+	coordinator.requestBytes += requestIncrement
 	coordinator.reservedResult += resultBytes
 	coordinator.required.register(id)
 	if enqueue(operationContext) {
@@ -556,6 +598,33 @@ func (coordinator *Coordinator) submit(
 	cancel()
 	coordinator.updateStatsLocked()
 	return ErrCoordinatorSaturated
+}
+
+func (coordinator *Coordinator) growResultReservation(
+	id review.OperationID,
+	resultBytes int64,
+) error {
+	if id == 0 || resultBytes < 0 || resultBytes > MaxRetainedResultBytes {
+		return ErrCoordinatorSaturated
+	}
+	coordinator.mu.Lock()
+	defer coordinator.mu.Unlock()
+	accepted, exists := coordinator.accepted[id]
+	if !exists || accepted.completed {
+		return ErrCoordinatorClosed
+	}
+	if resultBytes <= accepted.resultBytes {
+		return nil
+	}
+	increment := resultBytes - accepted.resultBytes
+	if increment > MaxRetainedResultBytes-coordinator.reservedResult {
+		return ErrCoordinatorSaturated
+	}
+	accepted.resultBytes = resultBytes
+	coordinator.accepted[id] = accepted
+	coordinator.reservedResult += increment
+	coordinator.updateStatsLocked()
+	return nil
 }
 
 // Cancel performs the cancel operation.
@@ -630,7 +699,16 @@ func (coordinator *Coordinator) ClaimNext() (Outcome, bool) {
 func (coordinator *Coordinator) runPatchWorker() {
 	for job := range coordinator.patchJobs {
 		coordinator.required.wait(job.work.ID)
-		result, err := coordinator.service.LoadPatch(job.ctx, job.work.Document, job.work.Request)
+		acquisition, err := coordinator.service.AcquirePatch(
+			job.ctx,
+			job.work.Document,
+			job.work.Request,
+		)
+		var result review.PatchResult
+		if err == nil {
+			result, err = acquisition.Finish(job.ctx, coordinator.runCPU)
+		}
+		acquisition.Close()
 		coordinator.complete(PatchOutcome{
 			ID:     job.work.ID,
 			Result: result,
@@ -639,158 +717,10 @@ func (coordinator *Coordinator) runPatchWorker() {
 	}
 }
 
-func (coordinator *Coordinator) runSearchWorker() {
-	for job := range coordinator.searchJobs {
-		coordinator.required.wait(job.work.ID)
-		result, err := coordinator.executeSearch(job)
-		coordinator.complete(SearchOutcome{
-			ID:     job.work.ID,
-			Result: result,
-			Err:    err,
-		})
-	}
-}
-
-func (coordinator *Coordinator) executeSearch(job searchJob) (review.SearchResult, error) {
-	request := job.work.Request
-	snapshot := job.work.Document.Snapshot()
-	if snapshot.SourceID() != request.Source {
-		return review.SearchResult{}, errors.New("search source revision is stale")
-	}
-	query := review.PrepareSearchQuery(request.Query)
-	hits := make([]review.SearchHit, 0, 256)
-	var unavailable uint32
-	status := review.SearchComplete
-	total := request.Target.FileCount()
-	retainedBytes := int64(0)
-	fileIndex := 0
-	for fileID := range request.Target.Files() {
-		file, ok := snapshot.File(fileID)
-		if !ok {
-			return review.SearchResult{}, errors.New("search file is unavailable")
-		}
-		currentIndex := fileIndex
-		fileIndex++
-		coordinator.reportProgress(Progress{
-			ID:        job.work.ID,
-			Completed: uint64FromInt(currentIndex),
-			Total:     uint64FromInt(total),
-			Detail:    boundedOperationDetail("searching changed files"),
-		})
-		if err := context.Cause(job.ctx); err != nil {
-			status = review.SearchCancelled
-			hits = nil
-			break
-		}
-		patchResult, err := coordinator.service.LoadPatch(job.ctx, job.work.Document, review.PatchRequest{
-			Workspace: request.Workspace,
-			Handle:    file.PatchHandle(),
-			Context:   request.Context,
-		})
-		if err != nil {
-			if context.Cause(job.ctx) != nil {
-				status = review.SearchCancelled
-				hits = nil
-				break
-			}
-			unavailable++
-			continue
-		}
-		if patchResult.Status != review.PatchReady || patchResult.Prepared == nil {
-			if patchResult.Status == review.PatchCancelled {
-				status = review.SearchCancelled
-				hits = nil
-				break
-			}
-			unavailable++
-			continue
-		}
-		var cursor review.SearchCursor
-		for {
-			if err := context.Cause(job.ctx); err != nil {
-				status = review.SearchCancelled
-				hits = nil
-				break
-			}
-			if !coordinator.acquireCPU(job.ctx) {
-				status = review.SearchCancelled
-				hits = nil
-				break
-			}
-			batch := review.ScanSearchBatch(
-				patchResult.Prepared,
-				file.ID(),
-				query,
-				cursor,
-			)
-			coordinator.releaseCPU()
-			cursor = batch.Cursor
-			for _, hit := range batch.Hits {
-				hitBytes := hit.RetainedBytes()
-				if len(hits) == review.MaxSearchHits ||
-					retainedBytes+hitBytes > review.MaxSearchHitBytes {
-					status = review.SearchLimited
-					break
-				}
-				hits = append(hits, hit)
-				retainedBytes += hitBytes
-			}
-			coordinator.reportProgress(Progress{
-				ID:        job.work.ID,
-				Completed: uint64FromInt(currentIndex),
-				Total:     uint64FromInt(total),
-				Detail:    boundedOperationDetail(fmt.Sprintf("%d matches retained", len(hits))),
-			})
-			if batch.Done {
-				break
-			}
-			if status == review.SearchLimited {
-				break
-			}
-		}
-		if status == review.SearchCancelled || status == review.SearchLimited {
-			break
-		}
-	}
-	coordinator.reportProgress(Progress{
-		ID:        job.work.ID,
-		Completed: uint64FromInt(total),
-		Total:     uint64FromInt(total),
-		Detail:    boundedOperationDetail("search scan complete"),
-	})
-	return finishSearchResult(request, status, unavailable, hits)
-}
-
-func finishSearchResult(
-	request review.SearchRequest,
-	status review.SearchStatus,
-	unavailable uint32,
-	hits []review.SearchHit,
-) (review.SearchResult, error) {
-	var detail review.OperationDetail
-	switch {
-	case status == review.SearchCancelled:
-		detail = boundedOperationDetail("search cancelled")
-	case status == review.SearchLimited:
-		detail = boundedOperationDetail("search result capacity reached")
-	case unavailable != 0:
-		status = review.SearchPartial
-		detail = boundedOperationDetail(fmt.Sprintf("%d files unavailable", unavailable))
-	}
-	return review.TakeSearchResult(review.SearchResultDescriptor{
-		Operation:        request.Operation,
-		Workspace:        request.Workspace,
-		Source:           request.Source,
-		Status:           status,
-		UnavailableFiles: unavailable,
-		Detail:           detail,
-	}, hits)
-}
-
 func (coordinator *Coordinator) runReloadWorker() {
 	reloadJobs := coordinator.reloadJobs
-	retireDocuments := coordinator.retireDocuments
-	for reloadJobs != nil || retireDocuments != nil {
+	retireCleanups := coordinator.retireCleanups
+	for reloadJobs != nil || retireCleanups != nil {
 		select {
 		case job, ok := <-reloadJobs:
 			if !ok {
@@ -807,18 +737,19 @@ func (coordinator *Coordinator) runReloadWorker() {
 				job.ctx,
 				job.work.Document,
 				job.work.Options,
+				coordinator.runCPU,
 			)
 			coordinator.complete(ReloadAcquiredOutcome{
 				ID:       job.work.ID,
 				Document: document,
 				Err:      err,
 			})
-		case document, ok := <-retireDocuments:
+		case cleanup, ok := <-retireCleanups:
 			if !ok {
-				retireDocuments = nil
+				retireCleanups = nil
 				continue
 			}
-			if err := document.Close(); err != nil {
+			if err := cleanup.Close(); err != nil {
 				coordinator.mu.Lock()
 				if len(coordinator.cleanupErrors) < MaxAcceptedOperations {
 					coordinator.cleanupErrors = append(

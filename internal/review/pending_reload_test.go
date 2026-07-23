@@ -1,6 +1,9 @@
 package review
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestPendingReloadThreeWayMergesBodies(t *testing.T) {
 	tests := []struct {
@@ -18,7 +21,7 @@ func TestPendingReloadThreeWayMergesBodies(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			current, err := NewReview(pendingTestSnapshot(t))
+			current, err := NewReview(testReviewRequest(pendingTestSnapshot(t)))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -26,7 +29,7 @@ func TestPendingReloadThreeWayMergesBodies(t *testing.T) {
 			if test.local != "inline" {
 				current = editTestComment(t, current, inline.ID(), test.local)
 			}
-			replacement := pendingReloadSnapshot(t, test.remote, true)
+			replacement := pendingReloadSnapshot(t, test.remote, pendingInlineIncluded)
 			next, _, err := current.ReplaceSnapshot(replacement)
 			if err != nil {
 				t.Fatal(err)
@@ -43,19 +46,78 @@ func TestPendingReloadThreeWayMergesBodies(t *testing.T) {
 }
 
 func TestPendingReloadHandlesRemoteDeletionWithoutDiscardingLocalEdits(t *testing.T) {
-	current, err := NewReview(pendingTestSnapshot(t))
+	current, err := NewReview(testReviewRequest(pendingTestSnapshot(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	inline, _ := current.CommentAt(1)
 	current = editTestComment(t, current, inline.ID(), "local")
-	replacement := pendingReloadSnapshot(t, "", false)
+	replacement := pendingReloadSnapshot(t, "", pendingInlineOmitted)
 	next, _, err := current.ReplaceSnapshot(replacement)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if state := next.PendingBindingState(inline.ID()); state != PendingBindingConflict {
 		t.Fatalf("state=%s", state)
+	}
+}
+
+func TestPendingReloadUnavailablePreservesPendingConflictAndEditableDraft(t *testing.T) {
+	current, err := NewReview(testReviewRequest(pendingTestSnapshot(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inline, _ := current.CommentAt(1)
+	current = editTestComment(t, current, inline.ID(), "local")
+	current, _, err = current.ReplaceSnapshot(
+		pendingReloadSnapshot(t, "remote", pendingInlineIncluded),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.PendingBindingState(inline.ID()) != PendingBindingConflict {
+		t.Fatal("fixture did not establish a conflict")
+	}
+	summary, _ := current.CommentAt(0)
+	current, err = current.BeginEditComment(summary.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err = current.UpdateDraft("editable local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeBinding := current.pending.bindings[inline.ID()]
+	beforeDraft, _ := current.Draft()
+
+	replacement := testSnapshot(t, 3, "one.go")
+	replacement, err = replacement.WithPendingReviewStatus(
+		PendingReviewUnavailable,
+		mustOperationDetail("pending review response was unsafe"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, report, err := current.ReplaceSnapshot(replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterDraft, ok := next.Draft()
+	if !ok || afterDraft.Body() != beforeDraft.Body() || !report.DraftPreserved {
+		t.Fatalf("draft body %q present %t preserved %t", afterDraft.Body(), ok, report.DraftPreserved)
+	}
+	if editing, ok := afterDraft.EditingComment(); !ok || editing != summary.ID() {
+		t.Fatalf("editing comment %d present %t", editing, ok)
+	}
+	if state := next.PendingBindingState(inline.ID()); state != PendingBindingConflict {
+		t.Fatalf("binding state = %s", state)
+	}
+	afterBinding := next.pending.bindings[inline.ID()]
+	if !reflect.DeepEqual(afterBinding, beforeBinding) {
+		t.Fatalf("pending baseline/conflict changed: before %#v after %#v", beforeBinding, afterBinding)
+	}
+	if summary := next.PendingReviewSummary(); summary.Status != PendingReviewUnavailable || summary.Conflicts != 1 {
+		t.Fatalf("summary status %s conflicts %d", summary.Status, summary.Conflicts)
 	}
 }
 
@@ -72,13 +134,15 @@ func TestPendingConflictResolutionChoosesLocalRemoteOrBase(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			current, err := NewReview(pendingTestSnapshot(t))
+			current, err := NewReview(testReviewRequest(pendingTestSnapshot(t)))
 			if err != nil {
 				t.Fatal(err)
 			}
 			inline, _ := current.CommentAt(1)
 			current = editTestComment(t, current, inline.ID(), "local")
-			current, _, err = current.ReplaceSnapshot(pendingReloadSnapshot(t, "remote", true))
+			current, _, err = current.ReplaceSnapshot(
+				pendingReloadSnapshot(t, "remote", pendingInlineIncluded),
+			)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -98,7 +162,7 @@ func TestPendingConflictResolutionChoosesLocalRemoteOrBase(t *testing.T) {
 }
 
 func TestPendingConflictResolutionPreservesLocalDeletion(t *testing.T) {
-	current, err := NewReview(pendingTestSnapshot(t))
+	current, err := NewReview(testReviewRequest(pendingTestSnapshot(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +171,9 @@ func TestPendingConflictResolutionPreservesLocalDeletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	current, _, err = current.ReplaceSnapshot(pendingReloadSnapshot(t, "remote edit", true))
+	current, _, err = current.ReplaceSnapshot(
+		pendingReloadSnapshot(t, "remote edit", pendingInlineIncluded),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +190,7 @@ func TestPendingConflictResolutionPreservesLocalDeletion(t *testing.T) {
 }
 
 func TestPendingReloadRemovesCleanBindingsWhenReviewWasSubmittedElsewhere(t *testing.T) {
-	current, err := NewReview(pendingTestSnapshot(t))
+	current, err := NewReview(testReviewRequest(pendingTestSnapshot(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +209,7 @@ func TestPendingReloadRemovesCleanBindingsWhenReviewWasSubmittedElsewhere(t *tes
 }
 
 func TestPendingReloadAcceptsRemoteAbsenceAfterLocalDeletion(t *testing.T) {
-	current, err := NewReview(pendingTestSnapshot(t))
+	current, err := NewReview(testReviewRequest(pendingTestSnapshot(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +236,7 @@ func TestPendingReloadAcceptsRemoteAbsenceAfterLocalDeletion(t *testing.T) {
 }
 
 func TestPendingMissingReviewCanBecomeNewLocalDraftOnlyAfterResolution(t *testing.T) {
-	current, err := NewReview(pendingTestSnapshot(t))
+	current, err := NewReview(testReviewRequest(pendingTestSnapshot(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +269,7 @@ func TestPendingMissingReviewCanBecomeNewLocalDraftOnlyAfterResolution(t *testin
 }
 
 func TestPendingReloadRejectsChangedReviewIdentity(t *testing.T) {
-	current, err := NewReview(pendingTestSnapshot(t))
+	current, err := NewReview(testReviewRequest(pendingTestSnapshot(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +295,7 @@ func TestPendingReloadRejectsChangedReviewIdentity(t *testing.T) {
 }
 
 func TestPendingReloadBindsLocallyAddedDraftByStableMarker(t *testing.T) {
-	current, err := NewReview(pendingTestSnapshot(t))
+	current, err := NewReview(testReviewRequest(pendingTestSnapshot(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +316,7 @@ func TestPendingReloadBindsLocallyAddedDraftByStableMarker(t *testing.T) {
 	remoteAdded, err := NewPendingComment(PendingCommentDescriptor{
 		NodeID: remoteNode, DatabaseID: remoteDatabase,
 		Body: mutations[1].RemoteBody(baseline.NodeID(), ""), Target: mutations[1].Target(),
-		ViewerUpdate: true, ViewerDelete: true,
+		Capabilities: editablePendingCapabilities(t),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -279,7 +345,7 @@ func TestPendingReloadBindsLocallyAddedDraftByStableMarker(t *testing.T) {
 }
 
 func TestPendingConflictBaseDeletesMarkerBoundRemoteAddition(t *testing.T) {
-	current, err := NewReview(pendingTestSnapshot(t))
+	current, err := NewReview(testReviewRequest(pendingTestSnapshot(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +369,7 @@ func TestPendingConflictBaseDeletesMarkerBoundRemoteAddition(t *testing.T) {
 	remoteAdded, err := NewPendingComment(PendingCommentDescriptor{
 		NodeID: remoteNode, DatabaseID: remoteDatabase,
 		Body: joinPendingMarker("remote edit", marker), Target: mutations[1].Target(),
-		ViewerUpdate: true, ViewerDelete: true,
+		Capabilities: editablePendingCapabilities(t),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -348,7 +414,7 @@ func TestPendingConflictBaseDeletesMarkerBoundRemoteAddition(t *testing.T) {
 }
 
 func TestPendingReloadFoldsAppliedSummaryIntoReviewBody(t *testing.T) {
-	current, err := NewReview(pendingTestSnapshot(t))
+	current, err := NewReview(testReviewRequest(pendingTestSnapshot(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,12 +441,51 @@ func TestPendingReloadFoldsAppliedSummaryIntoReviewBody(t *testing.T) {
 	}
 }
 
-func pendingReloadSnapshot(t *testing.T, inlineBody string, includeInline bool) Snapshot {
+func TestPendingReloadKeepsUnappliedSummaryComments(t *testing.T) {
+	current, err := NewReview(testReviewRequest(pendingTestSnapshot(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	current = saveTestComment(t, current, ReviewCommentTarget(), "extra")
+	base, _ := pendingTestSnapshot(t).PendingReview()
+	remote, err := NewPendingReview(PendingReviewDescriptor{
+		NodeID: base.NodeID(), DatabaseID: base.DatabaseID(), Commit: base.Commit(),
+		Body: "different summary", Comments: base.Comments(0, base.CommentCount()),
+		ViewerUpdate: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := testSnapshot(t, 2, "one.go")
+	replacement, _ = replacement.WithPendingReview(remote)
+	next, _, err := current.ReplaceSnapshot(replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extra, exists := next.CommentAt(2)
+	if next.CommentCount() != 3 || !exists || extra.Body().String() != "extra" ||
+		extra.Target().Kind() != TargetReview {
+		t.Fatalf("comments=%d extra=%q exists=%t", next.CommentCount(), extra.Body().String(), exists)
+	}
+}
+
+type pendingInlineDisposition uint8
+
+const (
+	pendingInlineOmitted pendingInlineDisposition = iota + 1
+	pendingInlineIncluded
+)
+
+func pendingReloadSnapshot(
+	t *testing.T,
+	inlineBody string,
+	disposition pendingInlineDisposition,
+) Snapshot {
 	t.Helper()
 	base := pendingTestSnapshot(t)
 	pending, _ := base.PendingReview()
 	comments := pending.Comments(0, pending.CommentCount())
-	if includeInline {
+	if disposition == pendingInlineIncluded {
 		comments[0].body = inlineBody
 	} else {
 		comments = nil

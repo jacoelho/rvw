@@ -2,9 +2,32 @@ package review
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
+
+func TestTakeCheckedPublicationCancellableStopsBeforeEncoding(t *testing.T) {
+	base, _ := NewObjectID(strings.Repeat("1", 40))
+	head, _ := NewObjectID(strings.Repeat("2", 40))
+	target, _ := NewPublicationTarget(PublicationTargetDescriptor{
+		Repository: "owner/repository", PullRequest: 7, Base: base, Head: head,
+	})
+	marker, _ := NewPublicationMarker(
+		"<!-- rvw-publication:v1:0123456789abcdef0123456789abcdef -->",
+	)
+	policies, _ := NewPublicationPolicies()
+	options, _ := NewPublicationOptions(PublicationEventComment, policies)
+	cause := errors.New("cancel checked publication encoding")
+	_, err := TakeCheckedPublicationCancellable(
+		func() error { return cause },
+		CheckedPublicationDescriptor{Target: target, Marker: marker},
+		PreparedPublication{workspace: 1, source: 1, options: options},
+	)
+	if !errors.Is(err, cause) {
+		t.Fatalf("checked publication cancellation = %v, want %v", err, cause)
+	}
+}
 
 func TestTakeCheckedPublicationOwnsAndValidatesPayload(t *testing.T) {
 	base, _ := NewObjectID(strings.Repeat("1", 40))
@@ -24,7 +47,7 @@ func TestTakeCheckedPublicationOwnsAndValidatesPayload(t *testing.T) {
 		workspace: 1,
 		source:    1,
 		options:   options,
-		summary:   "summary",
+		summary:   summaryValue,
 		comments: []PublicationComment{{
 			path:      "file.go",
 			body:      "comment",
@@ -40,7 +63,17 @@ func TestTakeCheckedPublicationOwnsAndValidatesPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var payload publicationPayload
+	var payload struct {
+		CommitID string `json:"commit_id"`
+		Event    string `json:"event"`
+		Body     string `json:"body"`
+		Comments []struct {
+			Path      string `json:"path"`
+			Side      string `json:"side"`
+			StartLine uint32 `json:"start_line"`
+			Line      uint32 `json:"line"`
+		} `json:"comments"`
+	}
 	if err := json.Unmarshal([]byte(checked.Payload()), &payload); err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +99,7 @@ func TestTakeCheckedPublicationOwnsAndValidatesPayload(t *testing.T) {
 }
 
 func TestPreparePublicationRecordsEveryCommentDecision(t *testing.T) {
-	current, err := NewReview(testSnapshot(t, 1, "file.go"))
+	current, err := NewReview(testReviewRequest(testSnapshot(t, 1, "file.go")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +107,7 @@ func TestPreparePublicationRecordsEveryCommentDecision(t *testing.T) {
 	inlineTarget, _ := LineCommentTarget(0, LineNew, line, line)
 	fileTarget, _ := FileCommentTarget(0)
 	current = saveTestComment(t, current, inlineTarget, "inline")
-	current = saveTestComment(t, current, fileTarget, "summary")
+	current = saveTestComment(t, current, fileTarget, summaryValue)
 	current = saveTestComment(t, current, ReviewCommentTarget(), "excluded")
 	excluded := current.Comments()[2].ID()
 

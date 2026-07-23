@@ -24,7 +24,7 @@ func TestLoadPendingReviewAcquiresViewerDraftWith64BitIdentities(t *testing.T) {
 		`"in_reply_to_id":null}]]`, details.HeadOID.String(), details.HeadOID.String())
 	service := newPendingReviewTestService(t, reviewResponse, commentsResponse)
 
-	pending, status, detail := service.loadPendingReview(t.Context(), details)
+	pending, status, detail := service.loadPendingReview(t.Context(), details, directCPUAdmission)
 	if status != review.PendingReviewReady || !detail.IsEmpty() {
 		t.Fatalf("status=%s detail=%q", status, detail.String())
 	}
@@ -71,7 +71,7 @@ func TestLoadPendingReviewKeepsAbsenceAndAmbiguityDistinct(t *testing.T) {
 				pendingReviewResponseForTest(details, test.nodes),
 				`[]`,
 			)
-			_, status, detail := service.loadPendingReview(t.Context(), details)
+			_, status, detail := service.loadPendingReview(t.Context(), details, directCPUAdmission)
 			if status != test.status {
 				t.Fatalf("status=%s detail=%q", status, detail.String())
 			}
@@ -87,7 +87,7 @@ func TestLoadPendingReviewKeepsAbsenceAndAmbiguityDistinct(t *testing.T) {
 
 func TestLoadPendingReviewConsumesEveryValidatedPage(t *testing.T) {
 	details := remoteThreadDetailsForTest(t)
-	page := func(hasNext bool, cursor, nodes string) string {
+	page := func(disposition pendingPageDisposition, cursor, nodes string) string {
 		return fmt.Sprintf(
 			`{"errors":[],"data":{"viewer":{"login":"reviewer"},`+
 				`"repository":{"nameWithOwner":%q,"pullRequest":{`+
@@ -95,7 +95,7 @@ func TestLoadPendingReviewConsumesEveryValidatedPage(t *testing.T) {
 				`"reviews":{"pageInfo":{"hasNextPage":%t,"endCursor":%s},"nodes":%s}}}}}`,
 			details.Repository.String(), details.Number.Uint64(),
 			details.BaseOID.String(), details.HeadOID.String(),
-			hasNext, cursor, nodes,
+			disposition == pendingPageContinues, cursor, nodes,
 		)
 	}
 	other := `[{"id":"other","fullDatabaseId":"1","body":"other",` +
@@ -104,10 +104,10 @@ func TestLoadPendingReviewConsumesEveryValidatedPage(t *testing.T) {
 	owned := `[{"id":"owned","fullDatabaseId":"2","body":"",` +
 		`"state":"PENDING","viewerDidAuthor":true,"viewerCanUpdate":true,` +
 		`"commit":{"oid":"` + details.HeadOID.String() + `"}}]`
-	response := "[" + page(true, `"cursor-1"`, other) + "," +
-		page(false, "null", owned) + "]"
+	response := "[" + page(pendingPageContinues, `"cursor-1"`, other) + "," +
+		page(pendingPageFinal, "null", owned) + "]"
 	service := newPendingReviewTestService(t, response, `[[]]`)
-	pending, status, detail := service.loadPendingReview(t.Context(), details)
+	pending, status, detail := service.loadPendingReview(t.Context(), details, directCPUAdmission)
 	if status != review.PendingReviewReady || !detail.IsEmpty() ||
 		pending.DatabaseID().Uint64() != 2 {
 		t.Fatalf(
@@ -116,10 +116,10 @@ func TestLoadPendingReviewConsumesEveryValidatedPage(t *testing.T) {
 		)
 	}
 
-	incomplete := "[" + page(false, `"cursor-1"`, other) + "," +
-		page(false, "null", owned) + "]"
+	incomplete := "[" + page(pendingPageFinal, `"cursor-1"`, other) + "," +
+		page(pendingPageFinal, "null", owned) + "]"
 	service = newPendingReviewTestService(t, incomplete, `[[]]`)
-	_, status, detail = service.loadPendingReview(t.Context(), details)
+	_, status, detail = service.loadPendingReview(t.Context(), details, directCPUAdmission)
 	if status != review.PendingReviewUnavailable || detail.IsEmpty() {
 		t.Fatalf("incomplete status=%s detail=%q", status, detail.String())
 	}
@@ -147,7 +147,7 @@ func TestLoadPendingReviewRejectsCapabilityIdentityMismatch(t *testing.T) {
 		details.Repository.String(), details.Number.Uint64(),
 		details.BaseOID.String(), details.HeadOID.String(),
 	))
-	_, status, detail := service.loadPendingReview(t.Context(), details)
+	_, status, detail := service.loadPendingReview(t.Context(), details, directCPUAdmission)
 	if status != review.PendingReviewUnavailable || detail.IsEmpty() {
 		t.Fatalf("status=%s detail=%q", status, detail.String())
 	}
@@ -185,8 +185,7 @@ func TestPendingCommentPreservesOutdatedMultilineRange(t *testing.T) {
 		PullRequestReviewID: 1,
 		OriginalLine:        new(uint32(12)),
 		OriginalStartLine:   new(uint32(10)),
-		viewerUpdate:        true,
-		viewerDelete:        true,
+		capabilities:        pendingCapabilities(t),
 	}
 	comment, err := validatePendingComment(
 		value,
@@ -204,6 +203,25 @@ func TestPendingCommentPreservesOutdatedMultilineRange(t *testing.T) {
 			comment.Target().Outdated(), start, line, startSide, side,
 		)
 	}
+}
+
+type pendingPageDisposition uint8
+
+const (
+	pendingPageFinal pendingPageDisposition = iota + 1
+	pendingPageContinues
+)
+
+func pendingCapabilities(tb testing.TB) review.PendingCapabilities {
+	tb.Helper()
+	capabilities, err := review.NewPendingCapabilities(
+		review.PendingCapabilityUpdate,
+		review.PendingCapabilityDelete,
+	)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return capabilities
 }
 
 func TestPendingCommentRejectsExplicitZeroLine(t *testing.T) {
@@ -290,7 +308,7 @@ func TestDecodePendingReviewPagesRejectsInvalidEnvelopes(t *testing.T) {
 		[]byte(`[null]`),
 		{'[', '"', 0xff, '"', ']'},
 	} {
-		if _, err := decodePendingReviewPages(encoded); err == nil {
+		if err := validatePendingReviewPages(encoded); err == nil {
 			t.Fatalf("decode %q unexpectedly succeeded", strings.ToValidUTF8(string(encoded), "?"))
 		}
 	}

@@ -1,7 +1,6 @@
 package review
 
 import (
-	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -20,16 +19,23 @@ type Path struct {
 
 // NewPath constructs and validates path.
 func NewPath(raw []byte) (Path, error) {
+	return NewPathString(string(raw))
+}
+
+// NewPathString constructs a path from immutable string storage without a
+// second representation. The caller must pass an exact-size owned string, not
+// a substring that retains unrelated backing storage.
+func NewPathString(raw string) (Path, error) {
 	switch {
-	case len(raw) == 0:
+	case raw == "":
 		return Path{}, fmt.Errorf("%w: path is empty", ErrInvalidPath)
 	case int64(len(raw)) > MaxPathBytes:
 		return Path{}, fmt.Errorf("%w: path uses %d bytes; limit is %d", ErrInvalidPath, len(raw), MaxPathBytes)
-	case bytes.IndexByte(raw, 0) >= 0:
+	case strings.IndexByte(raw, 0) >= 0:
 		return Path{}, fmt.Errorf("%w: path contains NUL", ErrInvalidPath)
 	}
 
-	return Path{raw: string(raw)}, nil
+	return Path{raw: raw}, nil
 }
 
 // Raw returns the receiver's raw value.
@@ -47,7 +53,11 @@ func (path Path) UTF8() (string, bool) {
 
 // Display returns the receiver's display value.
 func (path Path) Display() string {
-	return escapePath(path.raw)
+	escaped, err := escapePathCancellable(nil, path.raw)
+	if err != nil {
+		panic("nil path-display cancellation returned an error")
+	}
+	return escaped
 }
 
 // Base64 returns the receiver's base64 value.
@@ -60,10 +70,20 @@ func (path Path) Equal(other Path) bool {
 	return path.raw == other.raw
 }
 
-func escapePath(raw string) string {
+func escapePathCancellable(cancelled func() error, raw string) (string, error) {
+	if err := cancellationError(cancelled); err != nil {
+		return "", err
+	}
 	var escaped strings.Builder
 	escaped.Grow(len(raw))
+	processed := 0
 	for raw != "" {
+		if processed >= 2_048 {
+			if err := cancellationError(cancelled); err != nil {
+				return "", err
+			}
+			processed = 0
+		}
 		r, size := utf8.DecodeRuneInString(raw)
 		switch {
 		case r == utf8.RuneError && size == 1:
@@ -82,8 +102,12 @@ func escapePath(raw string) string {
 			escaped.WriteRune(r)
 		}
 		raw = raw[size:]
+		processed += size
 	}
-	return escaped.String()
+	if err := cancellationError(cancelled); err != nil {
+		return "", err
+	}
+	return escaped.String(), nil
 }
 
 func isBidirectionalControl(r rune) bool {

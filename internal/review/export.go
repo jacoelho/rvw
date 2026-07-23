@@ -8,8 +8,12 @@ import (
 	"strings"
 )
 
-// MaxPreparedExportBytes defines the supported prepared export bytes limit.
-const MaxPreparedExportBytes int64 = 16 << 20
+const (
+	// MaxPreparedExportBytes defines the supported prepared export bytes limit.
+	MaxPreparedExportBytes int64 = 16 << 20
+	noteCommentKindLabel         = "note"
+	praiseCommentKindLabel       = "praise"
+)
 
 // ErrInvalidExport identifies an invalid export failure.
 var ErrInvalidExport = errors.New("invalid review export")
@@ -28,12 +32,88 @@ const (
 // publication state, and operation history.
 type ExportInput struct {
 	comments      []exportComment
+	kinds         CommentKinds
 	retainedBytes int64
 	ready         bool
 }
 
+// ExportSource is a narrow immutable view of the comments needed for export.
+type ExportSource struct {
+	comments commentSource
+}
+
+// ExportSource returns an O(1) immutable comment source for worker projection.
+func (review Review) ExportSource() ExportSource {
+	return ExportSource{comments: review.source()}
+}
+
+// Ready reports whether the export source was constructed by Review.
+func (source ExportSource) Ready() bool {
+	return source.comments.ready()
+}
+
+// RetainedBytes returns the immutable comment ownership prolonged by export.
+func (source ExportSource) RetainedBytes() int64 {
+	if !source.Ready() {
+		return 0
+	}
+	return source.comments.retainedBytes + 64
+}
+
+// ConstructionBytes returns a conservative simultaneous source, projected
+// input, and prepared-export charge for coordinator admission.
+func (source ExportSource) ConstructionBytes() int64 {
+	if !source.Ready() {
+		return 0
+	}
+	projected := source.comments.retainedBytes +
+		int64(len(source.comments.comments))*exportCommentMetadataBytes + 64
+	return source.RetainedBytes() + projected + 2*MaxPreparedExportBytes
+}
+
+// ProjectCancellable builds the export-owned projection off the event loop.
+func (source ExportSource) ProjectCancellable(cancelled func() error) (ExportInput, error) {
+	if !source.Ready() {
+		return ExportInput{}, ErrInvalidExport
+	}
+	comments := make([]exportComment, len(source.comments.comments))
+	retained := int64(cap(comments))*exportCommentMetadataBytes +
+		source.comments.kinds.retained()
+	for index, comment := range source.comments.comments {
+		if index%2_048 == 0 {
+			if err := cancellationError(cancelled); err != nil {
+				return ExportInput{}, err
+			}
+		}
+		target := comment.Target()
+		projectedTarget := exportCommentTarget{kind: target.Kind()}
+		if path, ok := target.AnchoredPath(); ok {
+			projectedTarget.path = path
+			projectedTarget.hasPath = true
+			retained += int64(len(path.raw))
+		}
+		projectedTarget.side, projectedTarget.start, projectedTarget.end, _ = target.Lines()
+		comments[index] = exportComment{
+			target:     projectedTarget,
+			body:       comment.Body(),
+			kind:       comment.Kind(),
+			stale:      comment.Stale(),
+			unmappable: comment.Unmappable(),
+		}
+		retained += int64(len(comments[index].body))
+	}
+	if err := cancellationError(cancelled); err != nil {
+		return ExportInput{}, err
+	}
+	return ExportInput{
+		comments: comments, kinds: source.comments.kinds,
+		retainedBytes: retained, ready: true,
+	}, nil
+}
+
 type exportComment struct {
 	body       CommentBody
+	kind       CommentKind
 	target     exportCommentTarget
 	stale      bool
 	unmappable bool
@@ -51,35 +131,16 @@ type exportCommentTarget struct {
 const (
 	// These conservative charges cover the projection element layouts on all
 	// supported targets. A test compares them with the compiled layouts.
-	exportCommentMetadataBytes int64 = 64
+	exportCommentMetadataBytes int64 = 72
 )
 
 // ExportInput returns the receiver's export input value.
 func (review Review) ExportInput() ExportInput {
-	comments := make([]exportComment, len(review.comments))
-	retained := int64(len(comments)) * exportCommentMetadataBytes
-	for index, comment := range review.comments {
-		target := comment.Target()
-		projectedTarget := exportCommentTarget{kind: target.Kind()}
-		if path, ok := target.AnchoredPath(); ok {
-			projectedTarget.path = path
-			projectedTarget.hasPath = true
-			retained += int64(len(path.raw))
-		}
-		projectedTarget.side, projectedTarget.start, projectedTarget.end, _ = target.Lines()
-		comments[index] = exportComment{
-			target:     projectedTarget,
-			body:       comment.Body(),
-			stale:      comment.Stale(),
-			unmappable: comment.Unmappable(),
-		}
-		retained += int64(len(comments[index].body))
+	input, err := review.ExportSource().ProjectCancellable(nil)
+	if err != nil {
+		panic("valid review export source failed synchronous projection")
 	}
-	return ExportInput{
-		comments:      comments,
-		retainedBytes: retained,
-		ready:         true,
-	}
+	return input
 }
 
 // RetainedBytes returns the receiver's retained bytes value.
@@ -98,21 +159,24 @@ func (input ExportInput) Ready() bool {
 // ExportOption represents export option.
 type ExportOption uint8
 
-// ExportUnmappable identifies a supported export unmappable value.
+// ExportNotes identifies note comments included in an export.
 const (
-	ExportUnmappable ExportOption = iota + 1
+	ExportNotes ExportOption = iota + 1
+	ExportPraise
+	ExportUnmappable
 )
 
 // ExportOptions describes export options.
 type ExportOptions struct {
-	bits uint8
+	bits        uint8
+	initialized bool
 }
 
 // NewExportOptions constructs and validates export options.
 func NewExportOptions(values ...ExportOption) (ExportOptions, error) {
-	var options ExportOptions
+	options := ExportOptions{initialized: true}
 	for _, value := range values {
-		if value != ExportUnmappable {
+		if value < ExportNotes || value > ExportUnmappable {
 			return ExportOptions{}, fmt.Errorf("%w: unknown option %d", ErrInvalidExport, value)
 		}
 		options.bits |= 1 << (value - 1)
@@ -120,15 +184,27 @@ func NewExportOptions(values ...ExportOption) (ExportOptions, error) {
 	return options, nil
 }
 
+// DefaultExportOptions returns the accepted interactive export selection.
+func DefaultExportOptions() ExportOptions {
+	options, err := NewExportOptions(ExportNotes, ExportPraise)
+	if err != nil {
+		panic("valid default export options were rejected")
+	}
+	return options
+}
+
+// Ready reports whether the options were explicitly constructed.
+func (options ExportOptions) Ready() bool { return options.valid() }
+
 // Has performs the has operation.
 func (options ExportOptions) Has(value ExportOption) bool {
-	return value == ExportUnmappable &&
+	return options.valid() && value >= ExportNotes && value <= ExportUnmappable &&
 		options.bits&(1<<(value-1)) != 0
 }
 
 // Toggle performs the toggle operation.
 func (options ExportOptions) Toggle(value ExportOption) (ExportOptions, error) {
-	if !options.valid() || value != ExportUnmappable {
+	if !options.valid() || value < ExportNotes || value > ExportUnmappable {
 		return options, fmt.Errorf("%w: unknown option %d", ErrInvalidExport, value)
 	}
 	options.bits ^= 1 << (value - 1)
@@ -137,7 +213,7 @@ func (options ExportOptions) Toggle(value ExportOption) (ExportOptions, error) {
 
 func (options ExportOptions) valid() bool {
 	const validBits = 1<<ExportUnmappable - 1
-	return options.bits&^validBits == 0
+	return options.initialized && options.bits&^validBits == 0
 }
 
 // ExportTemplateName represents export template name.
@@ -146,8 +222,11 @@ type ExportTemplateName uint8
 // TemplateComments identifies a supported template comments value.
 const (
 	TemplateComments ExportTemplateName = iota + 1
+	TemplateCommentTypes
 	TemplateCommentCount
 	TemplateIndex
+	TemplateKind
+	TemplateKindUpper
 	TemplateTarget
 	TemplatePath
 	TemplateLineOrRange
@@ -191,6 +270,7 @@ func CompileExportTemplates(markdown, comment string) (ExportTemplates, error) {
 	comment = strings.Clone(comment)
 	markdownTokens, err := compileTemplate(markdown, map[string]ExportTemplateName{
 		"comments":      TemplateComments,
+		"comment_types": TemplateCommentTypes,
 		"comment_count": TemplateCommentCount,
 	})
 	if err != nil {
@@ -201,6 +281,8 @@ func CompileExportTemplates(markdown, comment string) (ExportTemplates, error) {
 	}
 	commentTokens, err := compileTemplate(comment, map[string]ExportTemplateName{
 		"index":                 TemplateIndex,
+		"kind":                  TemplateKind,
+		"kind_upper":            TemplateKindUpper,
 		"target":                TemplateTarget,
 		"path":                  TemplatePath,
 		"line_or_range":         TemplateLineOrRange,
@@ -274,26 +356,34 @@ func (input ExportInput) PrepareMarkdownCancellable(
 	if !templates.Ready() {
 		return PreparedExport{}, fmt.Errorf("%w: export templates are empty", ErrInvalidExport)
 	}
-	selected := input.exportComments(options)
+	selected, err := input.exportCommentsCancellable(cancelled, options)
+	if err != nil {
+		return PreparedExport{}, err
+	}
+	commentTypes, err := input.commentTypesCancellable(cancelled, options)
+	if err != nil {
+		return PreparedExport{}, err
+	}
 	var commentBlockBytes int64
+	sizeWork := 0
 	for index, comment := range selected {
-		if index%256 == 0 {
-			if err := cancellationError(cancelled); err != nil {
-				return PreparedExport{}, err
-			}
+		values, valueErr := commentTemplateValuesCancellable(cancelled, comment, index+1)
+		if valueErr != nil {
+			return PreparedExport{}, valueErr
 		}
-		values := commentTemplateValues(comment, index+1)
 		separator := int64(0)
 		if index != 0 {
 			separator = 1
 		}
-		size, err := renderedTemplateSize(
+		size, renderErr := renderedTemplateSize(
 			templates.comment,
 			values,
 			MaxPreparedExportBytes-commentBlockBytes-separator,
+			cancelled,
+			&sizeWork,
 		)
-		if err != nil {
-			return PreparedExport{}, err
+		if renderErr != nil {
+			return PreparedExport{}, renderErr
 		}
 		commentBlockBytes += separator + size
 	}
@@ -302,59 +392,111 @@ func (input ExportInput) PrepareMarkdownCancellable(
 	}
 	values := map[ExportTemplateName]string{
 		TemplateCommentCount: strconv.Itoa(len(selected)),
+		TemplateCommentTypes: commentTypes,
 	}
 	bodyBytes, err := markdownExportSize(
 		templates.markdown,
 		values,
 		commentBlockBytes,
+		cancelled,
+		&sizeWork,
 	)
 	if err != nil {
 		return PreparedExport{}, err
 	}
-	var body strings.Builder
-	body.Grow(int(bodyBytes))
+	body, builderErr := newBoundedBuilder(MaxPreparedExportBytes, cancelled)
+	if builderErr != nil {
+		return PreparedExport{}, builderErr
+	}
+	if err := body.ReserveExact(bodyBytes); err != nil {
+		return PreparedExport{}, err
+	}
+	if err := renderMarkdownExportCancellable(
+		cancelled,
+		body,
+		templates,
+		selected,
+		values,
+	); err != nil {
+		return PreparedExport{}, err
+	}
+	finished, finishErr := body.Finish()
+	if finishErr != nil {
+		return PreparedExport{}, finishErr
+	}
+	if int64(len(finished)) != bodyBytes {
+		return PreparedExport{}, fmt.Errorf("%w: Markdown size pass diverged", ErrInvalidExport)
+	}
+	return PreparedExport{format: ExportMarkdown, body: finished}, nil
+}
+
+func renderMarkdownExportCancellable(
+	cancelled func() error,
+	body *boundedBuilder,
+	templates ExportTemplates,
+	selected []exportComment,
+	values map[ExportTemplateName]string,
+) error {
 	work := 0
 	for _, token := range templates.markdown {
 		if err := exportCancellation(cancelled, &work); err != nil {
-			return PreparedExport{}, err
+			return err
 		}
 		if token.name != TemplateComments {
-			writeExportToken(&body, token, values)
+			if err := writeExportToken(body, token, values); err != nil {
+				return err
+			}
 			continue
 		}
 		if len(selected) == 0 {
-			body.WriteString("_No comments._")
+			if err := body.WriteString("_No comments._"); err != nil {
+				return err
+			}
 			continue
 		}
 		for index, comment := range selected {
 			if err := exportCancellation(cancelled, &work); err != nil {
-				return PreparedExport{}, err
+				return err
 			}
 			if index != 0 {
-				body.WriteByte('\n')
+				if err := body.WriteString("\n"); err != nil {
+					return err
+				}
 			}
-			commentValues := commentTemplateValues(comment, index+1)
+			commentValues, valueErr := commentTemplateValuesCancellable(
+				cancelled,
+				comment,
+				index+1,
+			)
+			if valueErr != nil {
+				return valueErr
+			}
 			if err := writeExportTemplate(
-				&body,
+				body,
 				templates.comment,
 				commentValues,
 				cancelled,
 				&work,
 			); err != nil {
-				return PreparedExport{}, err
+				return err
 			}
 		}
 	}
-	return PreparedExport{format: ExportMarkdown, body: body.String()}, nil
+	return nil
 }
 
 func markdownExportSize(
 	tokens []exportToken,
 	values map[ExportTemplateName]string,
 	commentBytes int64,
+	cancelled func() error,
+	work *int,
 ) (int64, error) {
 	var size int64
 	for _, token := range tokens {
+		if err := exportCancellation(cancelled, work); err != nil {
+			return 0, err
+		}
 		addition := int64(len(token.literal))
 		if token.name == TemplateComments {
 			addition += commentBytes
@@ -377,9 +519,14 @@ func renderedTemplateSize(
 	tokens []exportToken,
 	values map[ExportTemplateName]string,
 	limit int64,
+	cancelled func() error,
+	work *int,
 ) (int64, error) {
 	var size int64
 	for _, token := range tokens {
+		if err := exportCancellation(cancelled, work); err != nil {
+			return 0, err
+		}
 		addition := int64(len(token.literal) + len(values[token.name]))
 		if addition > limit-size {
 			return 0, fmt.Errorf(
@@ -394,7 +541,7 @@ func renderedTemplateSize(
 }
 
 func writeExportTemplate(
-	body *strings.Builder,
+	body *boundedBuilder,
 	tokens []exportToken,
 	values map[ExportTemplateName]string,
 	cancelled func() error,
@@ -404,21 +551,22 @@ func writeExportTemplate(
 		if err := exportCancellation(cancelled, work); err != nil {
 			return err
 		}
-		writeExportToken(body, token, values)
+		if err := writeExportToken(body, token, values); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
 func writeExportToken(
-	body *strings.Builder,
+	body *boundedBuilder,
 	token exportToken,
 	values map[ExportTemplateName]string,
-) {
+) error {
 	if token.name == 0 {
-		body.WriteString(token.literal)
-	} else {
-		body.WriteString(values[token.name])
+		return body.WriteString(token.literal)
 	}
+	return body.WriteString(values[token.name])
 }
 
 func exportCancellation(cancelled func() error, work *int) error {
@@ -431,15 +579,82 @@ func exportCancellation(cancelled func() error, work *int) error {
 	return nil
 }
 
-func (input ExportInput) exportComments(options ExportOptions) []exportComment {
+func (input ExportInput) exportCommentsCancellable(
+	cancelled func() error,
+	options ExportOptions,
+) ([]exportComment, error) {
+	if err := cancellationError(cancelled); err != nil {
+		return nil, err
+	}
 	selected := make([]exportComment, 0, len(input.comments))
-	for _, comment := range input.comments {
-		if !options.Has(ExportUnmappable) && comment.unmappable {
+	for index, comment := range input.comments {
+		if index%256 == 0 {
+			if err := cancellationError(cancelled); err != nil {
+				return nil, err
+			}
+		}
+		if !includeExportComment(comment, options) {
 			continue
 		}
 		selected = append(selected, comment)
 	}
-	return selected
+	if err := cancellationError(cancelled); err != nil {
+		return nil, err
+	}
+	return selected, nil
+}
+
+func includeExportComment(comment exportComment, options ExportOptions) bool {
+	if !options.Has(ExportUnmappable) && comment.unmappable {
+		return false
+	}
+	switch comment.kind.label {
+	case noteCommentKindLabel:
+		return options.Has(ExportNotes)
+	case praiseCommentKindLabel:
+		return options.Has(ExportPraise)
+	default:
+		return true
+	}
+}
+
+func (input ExportInput) commentTypesCancellable(
+	cancelled func() error,
+	options ExportOptions,
+) (string, error) {
+	if err := cancellationError(cancelled); err != nil {
+		return "", err
+	}
+	labels := make([]string, 0, input.kinds.Len())
+	for index, kind := range input.kinds.values {
+		if index%32 == 0 {
+			if err := cancellationError(cancelled); err != nil {
+				return "", err
+			}
+		}
+		if kind.label == noteCommentKindLabel && !options.Has(ExportNotes) ||
+			kind.label == praiseCommentKindLabel && !options.Has(ExportPraise) {
+			continue
+		}
+		labels = append(labels, asciiUpper(kind.label))
+	}
+	return strings.Join(labels, ", "), cancellationError(cancelled)
+}
+
+func asciiUpper(value string) string {
+	first := strings.IndexFunc(value, func(character rune) bool {
+		return character >= 'a' && character <= 'z'
+	})
+	if first < 0 {
+		return value
+	}
+	result := []byte(value)
+	for index := first; index < len(result); index++ {
+		if result[index] >= 'a' && result[index] <= 'z' {
+			result[index] -= 'a' - 'A'
+		}
+	}
+	return string(result)
 }
 
 func compileTemplate(
@@ -478,30 +693,58 @@ func compileTemplate(
 	return slices.Clip(tokens), nil
 }
 
-func commentTemplateValues(comment exportComment, index int) map[ExportTemplateName]string {
-	target, path, lineRange := exportTarget(comment.target)
+func commentTemplateValuesCancellable(
+	cancelled func() error,
+	comment exportComment,
+	index int,
+) (map[ExportTemplateName]string, error) {
+	target, path, lineRange, err := exportTargetCancellable(cancelled, comment.target)
+	if err != nil {
+		return nil, err
+	}
+	target, err = markdownEscapeCancellable(cancelled, target)
+	if err != nil {
+		return nil, err
+	}
+	path, err = markdownEscapeCancellable(cancelled, path)
+	if err != nil {
+		return nil, err
+	}
+	body, err := markdownEscapeCancellable(cancelled, comment.body.String())
+	if err != nil {
+		return nil, err
+	}
 	return map[ExportTemplateName]string{
 		TemplateIndex:       strconv.Itoa(index),
-		TemplateTarget:      markdownEscape(target),
-		TemplatePath:        markdownEscape(path),
+		TemplateKind:        comment.kind.label,
+		TemplateKindUpper:   asciiUpper(comment.kind.label),
+		TemplateTarget:      target,
+		TemplatePath:        path,
 		TemplateLineOrRange: lineRange,
-		TemplateComment:     markdownEscape(comment.body.String()),
-	}
+		TemplateComment:     body,
+	}, nil
 }
 
-func exportTarget(target exportCommentTarget) (string, string, string) {
+func exportTargetCancellable(
+	cancelled func() error,
+	target exportCommentTarget,
+) (string, string, string, error) {
 	if target.kind == TargetReview {
-		return "review", "", ""
+		return "review", "", "", cancellationError(cancelled)
 	}
 	path := ""
 	if target.hasPath {
-		path = target.path.Display()
+		var err error
+		path, err = escapePathCancellable(cancelled, target.path.raw)
+		if err != nil {
+			return "", "", "", err
+		}
 	}
 	if target.kind == TargetFile {
-		return path, path, ""
+		return path, path, "", nil
 	}
 	if target.kind != TargetLine {
-		return path, path, ""
+		return path, path, "", nil
 	}
 	prefix := ""
 	if target.side == LineOld {
@@ -511,28 +754,58 @@ func exportTarget(target exportCommentTarget) (string, string, string) {
 	if target.start != target.end {
 		lineRange += "-" + strconv.FormatUint(uint64(target.end.Uint32()), 10)
 	}
-	return path + ":" + lineRange, path, lineRange
+	return path + ":" + lineRange, path, lineRange, cancellationError(cancelled)
 }
 
 func markdownEscape(value string) string {
+	escaped, err := markdownEscapeCancellable(nil, value)
+	if err != nil {
+		panic("nil Markdown cancellation returned an error")
+	}
+	return escaped
+}
+
+func markdownEscapeCancellable(cancelled func() error, value string) (string, error) {
 	const punctuation = `\` + "`*_{}[]()#+!|>"
-	var result strings.Builder
-	result.Grow(len(value))
+	if err := cancellationError(cancelled); err != nil {
+		return "", err
+	}
+	result, builderErr := newBoundedBuilder(MaxPreparedExportBytes, cancelled)
+	if builderErr != nil {
+		return "", builderErr
+	}
 	lineStart := 0
+	nextCancellation := 2_048
 	for offset, character := range value {
+		if offset >= nextCancellation {
+			if err := cancellationError(cancelled); err != nil {
+				return "", err
+			}
+			nextCancellation = offset + 2_048
+		}
 		if strings.ContainsRune(punctuation, character) ||
 			markdownStructuralPunctuation(value, lineStart, offset, character) {
-			result.WriteByte('\\')
+			if err := result.WriteString("\\"); err != nil {
+				return "", err
+			}
 		}
-		result.WriteRune(character)
+		if err := result.WriteString(string(character)); err != nil {
+			return "", err
+		}
 		if character == '\n' {
 			lineStart = offset + 1
 		}
 	}
-	return result.String()
+	if err := cancellationError(cancelled); err != nil {
+		return "", err
+	}
+	return result.Finish()
 }
 
 func markdownStructuralPunctuation(value string, lineStart, offset int, character rune) bool {
+	if offset-lineStart > 12 {
+		return false
+	}
 	prefix := value[lineStart:offset]
 	indent := 0
 	for indent < len(prefix) && prefix[indent] == ' ' {

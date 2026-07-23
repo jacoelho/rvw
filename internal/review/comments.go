@@ -3,9 +3,7 @@ package review
 import (
 	"errors"
 	"fmt"
-	"maps"
 	"strings"
-	"unicode/utf8"
 )
 
 // MaxComments defines the supported comments limit.
@@ -60,58 +58,53 @@ func targetCommentAnchor(target CommentTarget) (commentAnchor, bool) {
 	return commentAnchor{file: file, side: side, line: end}, true
 }
 
-func savedCommentAnchor(comment Comment) (commentAnchor, bool) {
-	if comment.stale || comment.unmappable {
-		return commentAnchor{}, false
-	}
-	return targetCommentAnchor(comment.target)
+type commentAnchorMembership struct {
+	anchor  commentAnchor
+	present bool
 }
 
-func replaceCommentAnchor(
-	anchors commentAnchorCounts,
-	before *Comment,
-	after *Comment,
-) commentAnchorCounts {
-	var (
-		oldAnchor commentAnchor
-		hasOld    bool
-		newAnchor commentAnchor
-		hasNew    bool
-	)
-	if before != nil {
-		oldAnchor, hasOld = savedCommentAnchor(*before)
+func (state *commentState) commentAnchorMembership(comment *Comment) commentAnchorMembership {
+	if comment == nil {
+		return commentAnchorMembership{}
 	}
-	if after != nil {
-		newAnchor, hasNew = savedCommentAnchor(*after)
+	if comment.flags.has(commentFlagStale) || comment.flags.has(commentFlagUnmappable) {
+		return commentAnchorMembership{}
 	}
-	if hasOld == hasNew && (!hasOld || oldAnchor == newAnchor) {
-		return anchors
-	}
-	next := maps.Clone(anchors)
-	if next == nil {
-		next = make(commentAnchorCounts)
-	}
-	if hasOld {
-		if next[oldAnchor] <= 1 {
-			delete(next, oldAnchor)
-		} else {
-			next[oldAnchor]--
+	if state.pending != nil {
+		if binding, bound := state.pending.bindings[comment.id]; bound && binding.deleted {
+			return commentAnchorMembership{}
 		}
 	}
-	if hasNew {
-		next[newAnchor]++
-	}
-	return next
+	anchor, present := targetCommentAnchor(comment.target)
+	return commentAnchorMembership{anchor: anchor, present: present}
 }
 
-func indexCommentAnchors(comments []Comment) commentAnchorCounts {
-	anchors := make(commentAnchorCounts, min(len(comments), MaxComments))
-	for index := range comments {
-		if anchor, ok := savedCommentAnchor(comments[index]); ok {
-			anchors[anchor]++
+func (state *commentState) commentAnchorMembershipByID(id CommentID) commentAnchorMembership {
+	index := commentIndex(state.comments, id)
+	if index < 0 {
+		return commentAnchorMembership{}
+	}
+	return state.commentAnchorMembership(&state.comments[index])
+}
+
+func (state *commentState) rebuildCommentAnchorsCancellable(cancelled func() error) error {
+	if err := cancellationError(cancelled); err != nil {
+		return err
+	}
+	anchors := make(commentAnchorCounts)
+	for index := range state.comments {
+		if index%256 == 0 {
+			if err := cancellationError(cancelled); err != nil {
+				return err
+			}
+		}
+		membership := state.commentAnchorMembership(&state.comments[index])
+		if membership.present {
+			anchors[membership.anchor]++
 		}
 	}
-	return anchors
+	state.commentAnchors = anchors
+	return nil
 }
 
 // TargetKind describes target kind.
@@ -210,8 +203,8 @@ type CommentBody string
 
 // NewCommentBody constructs and validates comment body.
 func NewCommentBody(value string) (CommentBody, error) {
-	if !utf8.ValidString(value) || int64(len(value)) > MaxCommentBodyBytes ||
-		strings.TrimSpace(value) == "" {
+	nonSpace, err := scanCommentText(nil, value)
+	if err != nil || !nonSpace {
 		return "", fmt.Errorf("%w: body must be non-whitespace UTF-8 of at most %d bytes", ErrInvalidComment, MaxCommentBodyBytes)
 	}
 	return CommentBody(strings.Clone(value)), nil
@@ -222,13 +215,52 @@ func (body CommentBody) String() string {
 	return string(body)
 }
 
+type commentFlag uint8
+
+const (
+	commentFlagStale commentFlag = iota + 1
+	commentFlagUnmappable
+)
+
+const commentFlagMask = 1<<commentFlagStale | 1<<commentFlagUnmappable
+
+type commentFlags struct {
+	bits uint8
+}
+
+func (flags commentFlags) valid() bool {
+	return flags.bits&^commentFlagMask == 0
+}
+
+func (flags commentFlags) has(value commentFlag) bool {
+	if !flags.valid() || value != commentFlagStale && value != commentFlagUnmappable {
+		return false
+	}
+	return flags.bits&(1<<value) != 0
+}
+
+func (flags commentFlags) markStale() commentFlags {
+	flags.bits |= 1 << commentFlagStale
+	return flags
+}
+
+func (flags commentFlags) markUnmappable() commentFlags {
+	flags.bits |= 1 << commentFlagUnmappable
+	return flags
+}
+
+func (flags commentFlags) clearUnmappable() commentFlags {
+	flags.bits &^= 1 << commentFlagUnmappable
+	return flags
+}
+
 // Comment represents comment.
 type Comment struct {
-	body       CommentBody
-	target     CommentTarget
-	id         CommentID
-	stale      bool
-	unmappable bool
+	body   CommentBody
+	kind   CommentKind
+	target CommentTarget
+	id     CommentID
+	flags  commentFlags
 }
 
 // ID returns the receiver's id value.
@@ -246,20 +278,26 @@ func (comment Comment) Body() CommentBody {
 	return comment.body
 }
 
+// Kind returns the comment's configured kind.
+func (comment Comment) Kind() CommentKind {
+	return comment.kind
+}
+
 // Stale reports the receiver's stale state.
 func (comment Comment) Stale() bool {
-	return comment.stale
+	return comment.flags.has(commentFlagStale)
 }
 
 // Unmappable reports the receiver's unmappable state.
 func (comment Comment) Unmappable() bool {
-	return comment.unmappable
+	return comment.flags.has(commentFlagUnmappable)
 }
 
 // Draft represents draft.
 type Draft struct {
 	editing *CommentID
 	body    string
+	kind    CommentKind
 	target  CommentTarget
 }
 
@@ -271,6 +309,11 @@ func (draft Draft) Target() CommentTarget {
 // Body returns the receiver's body value.
 func (draft Draft) Body() string {
 	return draft.body
+}
+
+// Kind returns the draft's configured kind.
+func (draft Draft) Kind() CommentKind {
+	return draft.kind
 }
 
 // EditingComment returns the receiver's editing comment value.

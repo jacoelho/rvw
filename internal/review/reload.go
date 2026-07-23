@@ -37,6 +37,80 @@ type PreparedReplacement struct {
 	valid         bool
 }
 
+// RetainedBytes returns the replacement-owned review state excluding the
+// candidate snapshot, which is accounted once by its containing result.
+func (prepared PreparedReplacement) RetainedBytes() int64 {
+	if !prepared.valid {
+		return 0
+	}
+	return prepared.next.retainedBytesWithoutSnapshot()
+}
+
+func (review Review) retainedBytesWithoutSnapshot() int64 {
+	retained := int64(512 + cap(review.comments)*128 + len(review.commentAnchors)*32 +
+		len(review.operations)*48 + cap(review.operationIDs)*8 +
+		cap(review.fileMarks.words)*8 + cap(review.hunkMarks.chunks)*8)
+	for _, comment := range review.comments {
+		retained += int64(len(comment.body.String()))
+		if path, ok := comment.target.AnchoredPath(); ok {
+			retained += int64(len(path.raw))
+		}
+	}
+	if review.draft != nil {
+		retained += int64(len(review.draft.body) + 128)
+		if path, ok := review.draft.target.AnchoredPath(); ok {
+			retained += int64(len(path.raw))
+		}
+	}
+	retained += review.patch.retainedBytes
+	for _, operation := range review.operations {
+		retained += operation.Detail.Bytes()
+	}
+	for _, chunk := range review.hunkMarks.chunks {
+		if chunk == nil {
+			continue
+		}
+		retained += int64(len(chunk)) * 32
+		for _, file := range chunk {
+			retained += int64(cap(file.words)) * 8
+		}
+	}
+	retained += int64(len(review.search.query)) + review.search.detail.Bytes() + review.search.hitBytes
+	retained += review.publication.detail.Bytes() + int64(
+		len(review.publication.marker)+len(review.publication.target.repository)+
+			len(review.publication.target.base)+len(review.publication.target.head),
+	)
+	retained += review.publication.checked.RetainedBytes()
+	if review.publication.continuation != nil {
+		retained += review.publication.continuation.checked.RetainedBytes()
+	}
+	return retained + review.pendingRetainedBytes()
+}
+
+func (review Review) pendingRetainedBytes() int64 {
+	return pendingStateRetainedBytes(review.pending)
+}
+
+// ReplacementConstructionBytes returns a conservative bound for the owned
+// replacement and the transient alias, remap, comment, and pending-merge
+// indexes used while constructing it. The candidate snapshot is excluded.
+func ReplacementConstructionBytes(current Review, candidate Snapshot) int64 {
+	oldFiles := int64(current.snapshot.FileCount())
+	newFiles := int64(candidate.FileCount())
+	comments := int64(len(current.comments))
+	pendingBytes := int64(0)
+	pendingComments := int64(0)
+	if candidate.pendingReview != nil {
+		pendingBytes = candidate.pendingReview.retainedBytes()
+		pendingComments = int64(len(candidate.pendingReview.comments))
+	}
+	result := current.retainedBytesWithoutSnapshot() + pendingBytes*2 + 1_024
+	aliasScratch := (oldFiles + newFiles) * 320
+	remapScratch := min(oldFiles, newFiles) * 48
+	commentScratch := (comments + pendingComments) * 320
+	return result + aliasScratch + remapScratch + commentScratch
+}
+
 // PrepareReplacement prepares replacement.
 func PrepareReplacement(review Review, snapshot Snapshot) (PreparedReplacement, error) {
 	return PrepareReplacementCancellable(nil, review, snapshot)
@@ -60,21 +134,38 @@ func PrepareReplacementCancellable(
 		preparation.mergePendingReview,
 		preparation.preserveDraft,
 	} {
-		if err := step(); err != nil {
-			return PreparedReplacement{}, err
+		if stepErr := step(); stepErr != nil {
+			return PreparedReplacement{}, stepErr
 		}
 	}
-	preparation.next.active = remapActive(
+	err = preparation.next.rebuildCommentAnchorsCancellable(cancelled)
+	if err != nil {
+		return PreparedReplacement{}, err
+	}
+	active, hasActive, err := remapActive(
+		cancelled,
 		review.active,
 		preparation.remapped,
 		snapshot,
 		&preparation.report,
 	)
+	if err != nil {
+		return PreparedReplacement{}, err
+	}
+	preparation.next.active = nil
+	if hasActive {
+		preparation.next.active = new(active)
+	}
 	preparation.next.selected = remapSelection(
 		review.selected,
 		preparation.remapped,
 		preparation.next.active,
 	)
+	preparation.next.revision = review.revision + 1
+	preparation.next.activeMutation = 0
+	preparation.next.mutationKind = 0
+	preparation.next.publication.pendingRefresh = false
+	preparation.next.refresh()
 	return PreparedReplacement{
 		baseWorkspace: review.workspace,
 		baseSource:    review.snapshot.SourceID(),
@@ -86,13 +177,15 @@ func PrepareReplacementCancellable(
 }
 
 type replacementPreparation struct {
-	cancelled func() error
-	aliases   map[string]File
-	remapped  map[FileID]FileID
-	snapshot  Snapshot
-	original  Review
-	next      Review
-	report    ReloadReport
+	cancelled      func() error
+	aliases        map[string]FileID
+	remapped       map[FileID]FileID
+	commentIndexes map[CommentID]int
+	pendingFiles   remotePathProjection
+	snapshot       Snapshot
+	original       Review
+	next           Review
+	report         ReloadReport
 }
 
 func newReplacementPreparation(
@@ -119,16 +212,17 @@ func newReplacementPreparation(
 	next.snapshot = snapshot
 	next.fileMarks = fileMarkSet{}
 	next.hunkMarks = hunkMarkSet{}
-	next.patches = make(map[FileID]PatchState)
+	next.patch = presentationPatch{}
 	next.operations = maps.Clone(review.operations)
 	next.search = searchState{status: SearchIdle}
 	return &replacementPreparation{
-		cancelled: cancelled,
-		aliases:   aliases,
-		remapped:  remapped,
-		original:  review,
-		next:      next,
-		snapshot:  snapshot,
+		cancelled:    cancelled,
+		aliases:      aliases,
+		remapped:     remapped,
+		pendingFiles: snapshot.remotePathMappings(),
+		original:     review,
+		next:         next,
+		snapshot:     snapshot,
 		report: ReloadReport{
 			FilesPreserved: uint32FromInt(len(remapped)),
 			FilesRemoved:   uint32FromInt(review.snapshot.FileCount() - len(remapped)),
@@ -156,7 +250,7 @@ func remapReplacementFiles(
 	cancelled func() error,
 	oldSnapshot Snapshot,
 	newSnapshot Snapshot,
-	newAliases map[string]File,
+	newAliases map[string]FileID,
 ) (map[FileID]FileID, error) {
 	remapped := make(map[FileID]FileID, min(oldSnapshot.FileCount(), newSnapshot.FileCount()))
 	count := 0
@@ -167,13 +261,13 @@ func remapReplacementFiles(
 			}
 		}
 		count++
-		var matched *File
+		var matched *FileID
 		for _, path := range fileAliases(oldFile) {
 			newFile, exists := newAliases[path]
 			if !exists {
 				continue
 			}
-			if matched != nil && matched.ID() != newFile.ID() {
+			if matched != nil && *matched != newFile {
 				return nil, fmt.Errorf(
 					"%w: old file aliases map to multiple replacements",
 					ErrInvalidReload,
@@ -183,7 +277,7 @@ func remapReplacementFiles(
 			matched = &matchedCopy
 		}
 		if matched != nil {
-			remapped[oldFile.ID()] = matched.ID()
+			remapped[oldFile.ID()] = *matched
 		}
 	}
 	return remapped, nil
@@ -269,6 +363,7 @@ func (preparation *replacementPreparation) preserveFileMarks() error {
 
 func (preparation *replacementPreparation) remapComments() error {
 	preparation.next.comments = slices.Clone(preparation.original.comments)
+	preparation.commentIndexes = make(map[CommentID]int, len(preparation.next.comments))
 	for index := range preparation.next.comments {
 		if index%2_048 == 0 {
 			if err := cancellationError(preparation.cancelled); err != nil {
@@ -276,6 +371,7 @@ func (preparation *replacementPreparation) remapComments() error {
 			}
 		}
 		comment := &preparation.next.comments[index]
+		preparation.commentIndexes[comment.id] = index
 		if comment.target.Kind() == TargetReview {
 			continue
 		}
@@ -288,25 +384,28 @@ func (preparation *replacementPreparation) remapComments() error {
 			}
 			path = oldFile.IdentityPath()
 		}
-		newFile, exists := preparation.aliases[path.raw]
+		newFileID, exists := preparation.aliases[path.raw]
 		if !exists {
 			comment.target = comment.target.withoutFileMapping()
-			comment.unmappable = true
+			comment.flags = comment.flags.markUnmappable()
 			preparation.report.CommentsUnmappable++
 			continue
+		}
+		newFile, exists := preparation.snapshot.File(newFileID)
+		if !exists {
+			return fmt.Errorf("%w: replacement alias has no file", ErrInvalidReload)
 		}
 		oldFileID, oldFileMapped := comment.target.FileID()
 		oldFile, oldFileExists := preparation.original.snapshot.File(oldFileID)
 		comment.target = comment.target.remap(newFile.ID(), newFile.IdentityPath())
-		comment.unmappable = false
+		comment.flags = comment.flags.clearUnmappable()
 		if comment.target.Kind() == TargetLine &&
 			(!oldFileMapped || !oldFileExists ||
 				!sameLineSideContentIdentity(oldFile, newFile, comment.target.side)) {
-			comment.stale = true
+			comment.flags = comment.flags.markStale()
 			preparation.report.CommentsStale++
 		}
 	}
-	preparation.next.commentAnchors = indexCommentAnchors(preparation.next.comments)
 	return nil
 }
 
@@ -320,9 +419,13 @@ func (preparation *replacementPreparation) preserveDraft() error {
 		if !exists {
 			return fmt.Errorf("%w: active draft target has no path identity", ErrInvalidReload)
 		}
-		newFile, exists := preparation.aliases[path.raw]
+		newFileID, exists := preparation.aliases[path.raw]
 		if !exists {
 			return fmt.Errorf("%w: active draft target no longer exists", ErrInvalidReload)
+		}
+		newFile, exists := preparation.snapshot.File(newFileID)
+		if !exists {
+			return fmt.Errorf("%w: replacement alias has no file", ErrInvalidReload)
 		}
 		if draft.target.Kind() == TargetLine {
 			oldFileID, oldFileMapped := draft.target.FileID()
@@ -390,8 +493,8 @@ func (review Review) ReplaceSnapshot(snapshot Snapshot) (Review, ReloadReport, e
 func uniqueFilesByAlias(
 	cancelled func() error,
 	snapshot Snapshot,
-) (map[string]File, error) {
-	files := make(map[string]File, snapshot.FileCount()*2)
+) (map[string]FileID, error) {
+	files := make(map[string]FileID, snapshot.FileCount()*2)
 	count := 0
 	for file := range snapshot.AllFiles() {
 		if count%2_048 == 0 {
@@ -401,10 +504,10 @@ func uniqueFilesByAlias(
 		}
 		count++
 		for _, path := range fileAliases(file) {
-			if existing, exists := files[path]; exists && existing.ID() != file.ID() {
+			if existing, exists := files[path]; exists && existing != file.ID() {
 				return nil, fmt.Errorf("%w: path identity is ambiguous", ErrInvalidReload)
 			}
-			files[path] = file
+			files[path] = file.ID()
 		}
 	}
 	return files, nil
@@ -430,28 +533,36 @@ func fileAliases(file File) []string {
 }
 
 func remapActive(
+	cancelled func() error,
 	active *FileID,
 	remapped map[FileID]FileID,
 	snapshot Snapshot,
 	report *ReloadReport,
-) *FileID {
+) (FileID, bool, error) {
 	if active != nil {
 		if id, exists := remapped[*active]; exists {
 			report.ActivePreserved = true
-			return new(id)
+			return id, true, nil
 		}
 	}
+	count := 0
 	for file := range snapshot.AllFiles() {
+		if count%2_048 == 0 {
+			if err := cancellationError(cancelled); err != nil {
+				return 0, false, err
+			}
+		}
+		count++
 		if !file.Flags().Hidden() {
 			id := file.ID()
-			return new(id)
+			return id, true, nil
 		}
 	}
 	if snapshot.FileCount() != 0 {
 		id := snapshot.files[0].ID()
-		return new(id)
+		return id, true, nil
 	}
-	return nil
+	return 0, false, nil
 }
 
 func remapSelection(

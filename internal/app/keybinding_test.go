@@ -23,21 +23,26 @@ func TestRuntimeKeybindingMatrixRoutesAndRendersEveryDeclaredPair(t *testing.T) 
 				t.Run(name, func(t *testing.T) {
 					const chord = KeyChord("rvw-contract")
 					model := modelForKeyContext(context)
-					model.settings.keybindings = []Keybinding{{
+					setModelKeybindings(t, model, Keybinding{
 						Context: context,
 						Focus:   focus,
 						Chord:   chord,
 						Action:  action,
-					}}
+					})
 					if focus != KeyFocusNone {
 						model.focus = focusOwner(focus)
 					}
 					if got := model.keyContext(); got != context {
 						t.Fatalf("model context = %q, want %q", got, context)
 					}
-					resolved, exact, prefix := model.resolveAction([]string{chord.String()})
-					if !exact || prefix || resolved != action {
-						t.Fatalf("resolved action = %q exact=%v prefix=%v, want %q/true/false", resolved, exact, prefix, action)
+					resolution := model.resolveAction([]string{chord.String()})
+					if !resolution.exact() || resolution.prefix() || resolution.action != action {
+						t.Fatalf(
+							"resolved action = %q kind=%v, want %q/exact",
+							resolution.action,
+							resolution.kind,
+							action,
+						)
 					}
 					visible := model.bindingSummary(context)
 					if !strings.Contains(visible, chord.String()) || !strings.Contains(visible, action.String()) {
@@ -84,7 +89,7 @@ func TestCommentEditorTabFallsThroughUnlessExplicitlyBound(t *testing.T) {
 		}
 	}
 
-	model.settings.keybindings = append(model.settings.keybindings, Keybinding{
+	setModelKeybindings(t, model, Keybinding{
 		Context: KeyContextCommentEdit,
 		Chord:   "Tab",
 		Action:  KeyActionInsertNewline,
@@ -100,7 +105,7 @@ func TestRepeatedInterruptDoesNotCrossIntoConfirmationContext(t *testing.T) {
 	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	settleModelWork(t, model, coordinator)
 	_, _ = model.Update(tea.WindowSizeMsg{Width: normalWidth, Height: 24})
-	model.settings.keybindings = append(model.settings.keybindings, Keybinding{
+	setModelKeybindings(t, model, Keybinding{
 		Context: KeyContextConfirm,
 		Chord:   "ctrl-c",
 		Action:  KeyActionInterrupt,
@@ -147,11 +152,11 @@ func TestRepeatedNavigationRemainsAvailable(t *testing.T) {
 
 func TestModalContextsExecuteSequentialMultiStrokeBindings(t *testing.T) {
 	testCases := []struct {
+		inputValue func(*Model) string
 		name       string
 		context    KeyContext
 		mode       InteractionMode
 		overlay    Overlay
-		inputValue func(*Model) string
 	}{
 		{
 			name:    "comment edit",
@@ -186,11 +191,11 @@ func TestModalContextsExecuteSequentialMultiStrokeBindings(t *testing.T) {
 			model.commandContext = context.Background()
 			model.mode = testCase.mode
 			model.overlay = testCase.overlay
-			model.settings.keybindings = []Keybinding{{
+			setModelKeybindings(t, model, Keybinding{
 				Context: testCase.context,
 				Chord:   "g x",
 				Action:  KeyActionCancel,
-			}}
+			})
 
 			_, _ = model.Update(keyMessage("g"))
 			if len(model.chord.strokes) != 1 || model.chord.strokes[0] != "g" {
@@ -227,11 +232,11 @@ func TestCompletedOrAbandonedChordTimeoutDoesNotClearLaterRepeat(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 			settleModelWork(t, model, coordinator)
-			model.settings.keybindings = []Keybinding{{
+			setModelKeybindings(t, model, Keybinding{
 				Context: KeyContextNormal,
 				Chord:   "g g",
 				Action:  KeyActionToggleWrap,
-			}}
+			})
 
 			_, _ = model.Update(keyMessage("g"))
 			staleGeneration := model.chord.generation
@@ -251,11 +256,11 @@ func TestCompletedOrAbandonedChordTimeoutDoesNotClearLaterRepeat(t *testing.T) {
 func TestReloadPreparationRoutesMultiStrokeQuit(t *testing.T) {
 	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	settleModelWork(t, model, coordinator)
-	model.settings.keybindings = []Keybinding{{
+	setModelKeybindings(t, model, Keybinding{
 		Context: KeyContextNormal,
 		Chord:   "g q",
 		Action:  KeyActionQuit,
-	}}
+	})
 	model.foreground.reload = reloadFlow{
 		phase:     reloadPreparing,
 		operation: 10_000,
@@ -277,10 +282,10 @@ func TestReloadPreparationActionConsumesPriorRepeat(t *testing.T) {
 	_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
 	model.focus = FocusFileTree
 	model.commentsVisible = true
-	model.settings.keybindings = []Keybinding{
-		{Context: KeyContextNormal, Focus: KeyFocusFileTree, Chord: "g c", Action: KeyActionCancel},
-		{Context: KeyContextNormal, Focus: KeyFocusFileTree, Chord: "j", Action: KeyActionFocusNextPane},
-	}
+	setModelKeybindings(t, model,
+		Keybinding{Context: KeyContextNormal, Focus: KeyFocusFileTree, Chord: "g c", Action: KeyActionInterrupt},
+		Keybinding{Context: KeyContextNormal, Focus: KeyFocusFileTree, Chord: "j", Action: KeyActionFocusNextPane},
+	)
 	model.foreground.reload = reloadFlow{phase: reloadAcquiring, operation: 10_000}
 
 	_, _ = model.Update(keyMessage("5"))
@@ -307,10 +312,10 @@ func TestDisallowedReloadPreparationActionConsumesPriorRepeat(t *testing.T) {
 	_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
 	model.focus = FocusFileTree
 	model.commentsVisible = true
-	model.settings.keybindings = []Keybinding{
-		{Context: KeyContextNormal, Focus: KeyFocusFileTree, Chord: "g x", Action: KeyActionToggleWrap},
-		{Context: KeyContextNormal, Focus: KeyFocusFileTree, Chord: "j", Action: KeyActionFocusNextPane},
-	}
+	setModelKeybindings(t, model,
+		Keybinding{Context: KeyContextNormal, Focus: KeyFocusFileTree, Chord: "g x", Action: KeyActionToggleWrap},
+		Keybinding{Context: KeyContextNormal, Focus: KeyFocusFileTree, Chord: "j", Action: KeyActionFocusNextPane},
+	)
 	model.foreground.reload = reloadFlow{phase: reloadAcquiring, operation: 10_000}
 	initialWrap := model.settings.wrap
 
@@ -334,8 +339,8 @@ func TestDisallowedReloadPreparationActionConsumesPriorRepeat(t *testing.T) {
 
 func TestPendingChordCannotCrossFocusOwner(t *testing.T) {
 	for _, testCase := range []struct {
-		name                   string
 		changeFocusAwayAndBack func(*Model)
+		name                   string
 	}{
 		{
 			name: "mouse",
@@ -363,14 +368,14 @@ func TestPendingChordCannotCrossFocusOwner(t *testing.T) {
 			settleModelWork(t, model, coordinator)
 			_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
 			model.focus = FocusFileTree
-			model.settings.keybindings = []Keybinding{
-				{
+			setModelKeybindings(t, model,
+				Keybinding{
 					Context: KeyContextNormal,
 					Focus:   KeyFocusFileTree,
 					Chord:   "x t",
 					Action:  KeyActionToggleWrap,
 				},
-			}
+			)
 			initialWrap := model.settings.wrap
 
 			_, _ = model.Update(keyMessage("5"))
@@ -403,10 +408,10 @@ func TestAbandonedChordClearsNumericRepeat(t *testing.T) {
 		_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
 		model.focus = FocusFileTree
 		model.commentsVisible = true
-		model.settings.keybindings = []Keybinding{
-			{Context: KeyContextNormal, Focus: KeyFocusFileTree, Chord: "g g", Action: KeyActionToggleWrap},
-			{Context: KeyContextNormal, Focus: KeyFocusFileTree, Chord: "j", Action: KeyActionFocusNextPane},
-		}
+		setModelKeybindings(t, model,
+			Keybinding{Context: KeyContextNormal, Focus: KeyFocusFileTree, Chord: "g g", Action: KeyActionToggleWrap},
+			Keybinding{Context: KeyContextNormal, Focus: KeyFocusFileTree, Chord: "j", Action: KeyActionFocusNextPane},
+		)
 
 		_, _ = model.Update(keyMessage("5"))
 		_, _ = model.Update(keyMessage("g"))
@@ -419,10 +424,10 @@ func TestAbandonedChordClearsNumericRepeat(t *testing.T) {
 	t.Run("mismatch to new prefix", func(t *testing.T) {
 		model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 		settleModelWork(t, model, coordinator)
-		model.settings.keybindings = []Keybinding{
-			{Context: KeyContextNormal, Chord: "g g", Action: KeyActionToggleWrap},
-			{Context: KeyContextNormal, Chord: "j j", Action: KeyActionToggleWrap},
-		}
+		setModelKeybindings(t, model,
+			Keybinding{Context: KeyContextNormal, Chord: "g g", Action: KeyActionToggleWrap},
+			Keybinding{Context: KeyContextNormal, Chord: "j j", Action: KeyActionToggleWrap},
+		)
 
 		_, _ = model.Update(keyMessage("5"))
 		_, _ = model.Update(keyMessage("g"))

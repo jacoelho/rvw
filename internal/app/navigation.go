@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 
@@ -11,6 +12,12 @@ import (
 )
 
 const maxFileRecordsPerUpdate = 2_048
+
+const (
+	fileOrderRetainedCharge = 4
+	pathIndexRetainedCharge = 48
+	ambiguousRetainedCharge = 32
+)
 
 type fileFilterBuild struct {
 	query      string
@@ -22,42 +29,72 @@ type fileFilterBuild struct {
 
 // FileTreeWork represents file tree work.
 type FileTreeWork struct {
+	// Files transfers exclusive ownership to the coordinator after successful submission.
 	Files      []review.FileID
-	Snapshot   review.Snapshot
+	Tree       fileTree
 	ID         review.OperationID
 	Generation uint64
 }
 
 // FileTreeOutcome describes file tree outcome.
 type FileTreeOutcome struct {
-	Tree       fileTree
-	Err        error
+	Err error
+	// Files returns the unchanged work backing for transfer into model state.
 	Files      []review.FileID
+	Projection treeProjection
 	ID         review.OperationID
 	Generation uint64
 }
 
 // WorkspaceIndexWork represents workspace index work.
 type WorkspaceIndexWork struct {
+	Collapse collapseSnapshot
 	Snapshot review.Snapshot
 	ID       review.OperationID
 }
 
 // WorkspaceIndexOutcome describes workspace index outcome.
 type WorkspaceIndexOutcome struct {
-	AllFileTree     fileTree
-	VisibleFileTree fileTree
-	Err             error
-	PathFiles       map[string]review.FileID
-	AmbiguousPaths  map[string]struct{}
-	AllFiles        []review.FileID
-	VisibleFiles    []review.FileID
-	ID              review.OperationID
+	PathFiles         map[string]review.FileID
+	AmbiguousPaths    map[string]struct{}
+	AllFiles          []review.FileID
+	VisibleFiles      []review.FileID
+	Err               error
+	FileTree          fileTree
+	VisibleProjection treeProjection
+	Collapsed         collapsedTreeState
+	ID                review.OperationID
+}
+
+func workspaceIndexAllowance(snapshot review.Snapshot) (int64, error) {
+	retained := snapshot.RetainedBytes()
+	if retained < 0 || retained > MaxRetainedResultBytes {
+		return 0, fmt.Errorf(
+			"%w: snapshot retains %d bytes; limit is %d",
+			ErrRetainedResultLimited,
+			retained,
+			MaxRetainedResultBytes,
+		)
+	}
+	return MaxRetainedResultBytes - retained, nil
 }
 
 func buildWorkspaceIndex(
 	ctx context.Context,
 	snapshot review.Snapshot,
+) (WorkspaceIndexOutcome, error) {
+	ledger, err := newRetainedLedger(MaxRetainedResultBytes, snapshot.RetainedBytes())
+	if err != nil {
+		return WorkspaceIndexOutcome{}, err
+	}
+	return buildWorkspaceIndexWithLedger(ctx, snapshot, collapseSnapshot{}, ledger)
+}
+
+func buildWorkspaceIndexWithLedger(
+	ctx context.Context,
+	snapshot review.Snapshot,
+	collapse collapseSnapshot,
+	ledger *retainedLedger,
 ) (WorkspaceIndexOutcome, error) {
 	var outcome WorkspaceIndexOutcome
 	var err error
@@ -65,27 +102,56 @@ func buildWorkspaceIndex(
 		outcome.VisibleFiles,
 		outcome.PathFiles,
 		outcome.AmbiguousPaths,
-		err = buildFileIndexesContext(ctx, snapshot)
+		err = buildFileIndexesWithLedger(ctx, snapshot, ledger)
 	if err != nil {
 		return WorkspaceIndexOutcome{}, err
 	}
-	outcome.AllFileTree, err = buildFileTreeContext(ctx, snapshot, outcome.AllFiles)
+	outcome.FileTree, err = buildFileTreeWithLedger(ctx, snapshot, outcome.AllFiles, ledger)
 	if err != nil {
 		return WorkspaceIndexOutcome{}, err
 	}
 	if len(outcome.VisibleFiles) == len(outcome.AllFiles) {
-		outcome.VisibleFileTree = outcome.AllFileTree
+		outcome.VisibleProjection = nil
 	} else {
-		outcome.VisibleFileTree, err = buildFileTreeContext(
+		outcome.VisibleProjection, err = outcome.FileTree.projectWithLedger(
 			ctx,
-			snapshot,
 			outcome.VisibleFiles,
+			ledger,
 		)
 		if err != nil {
 			return WorkspaceIndexOutcome{}, err
 		}
 	}
+	outcome.Collapsed, err = buildCollapsedTreeState(ctx, outcome.FileTree, collapse, ledger)
+	if err != nil {
+		return WorkspaceIndexOutcome{}, err
+	}
+	allowance, err := workspaceIndexAllowance(snapshot)
+	if err != nil {
+		return WorkspaceIndexOutcome{}, err
+	}
+	if outcome.RetainedBytes() > allowance {
+		return WorkspaceIndexOutcome{}, fmt.Errorf(
+			"%w: workspace index retains %d bytes; limit is %d",
+			ErrRetainedResultLimited,
+			outcome.RetainedBytes(),
+			allowance,
+		)
+	}
 	return outcome, nil
+}
+
+// RetainedBytes returns the workspace index ownership, excluding its borrowed
+// source snapshot.
+func (outcome WorkspaceIndexOutcome) RetainedBytes() int64 {
+	return retainedWorkspaceIndexBytes(
+		outcome.FileTree,
+		outcome.VisibleProjection,
+		outcome.AllFiles,
+		outcome.VisibleFiles,
+		outcome.PathFiles,
+		outcome.AmbiguousPaths,
+	) + outcome.Collapsed.retainedBytes()
 }
 
 func (model *Model) move(delta int) tea.Cmd {
@@ -197,12 +263,9 @@ func (model *Model) moveFirst() {
 func (model *Model) moveLast() {
 	if model.focus == FocusFileTree {
 		tree := model.currentFileTree()
-		if len(tree.nodes) != 0 {
-			index := len(tree.nodes) - 1
-			for parent := tree.nodes[index].parent; parent >= 0; parent = tree.nodes[parent].parent {
-				if _, hidden := model.collapsedTrees[tree.nodes[parent].identity.path]; hidden {
-					index = parent
-				}
+		if index, ok := tree.lastIndex(); ok {
+			if collapsed, hidden := model.collapsedTree.outermostContaining(index); hidden {
+				index = collapsed
 			}
 			model.selectTreeNode(tree.nodes[index].identity)
 		}
@@ -368,30 +431,22 @@ func (model *Model) configFocus() KeyFocus {
 	}
 }
 
-func (model *Model) requestWorkspaceIndex() {
+func (model *Model) requestWorkspaceIndex() tea.Cmd {
 	operationID, err := review.NewOperationID(model.nextOperation)
 	if err != nil {
 		model.notice = &Notice{Kind: NoticeError, Text: operationIdentityExhausted}
-		return
+		return nil
 	}
 	model.nextOperation++
-	if err := model.coordinator.SubmitWorkspaceIndex(WorkspaceIndexWork{
-		ID:       operationID,
-		Snapshot: model.review.Snapshot(),
-	}); err != nil {
-		model.notice = &Notice{
-			Kind: NoticeError,
-			Text: NoticeText("prepare review workspace: " + err.Error()),
-		}
-		return
-	}
-	model.workspaceIndex = operationID
-	model.notice = &Notice{Kind: NoticeInformation, Text: "preparing review workspace"}
+	return model.beginCollapseCapture(workspaceCollapseCaptureIntent{
+		id:       operationID,
+		snapshot: model.review.Snapshot(),
+	})
 }
 
-func (model *Model) applyWorkspaceIndex(outcome WorkspaceIndexOutcome) {
+func (model *Model) applyWorkspaceIndex(outcome WorkspaceIndexOutcome) tea.Cmd {
 	if outcome.ID == 0 || outcome.ID != model.workspaceIndex {
-		return
+		return nil
 	}
 	model.workspaceIndex = 0
 	if outcome.Err != nil {
@@ -399,22 +454,28 @@ func (model *Model) applyWorkspaceIndex(outcome WorkspaceIndexOutcome) {
 			Kind: NoticeError,
 			Text: NoticeText("prepare review workspace: " + outcome.Err.Error()),
 		}
-		return
+		return nil
+	}
+	if outcome.Collapsed.generation != model.collapsedTree.generation {
+		return model.requestWorkspaceIndex()
 	}
 	model.allFileOrder = outcome.AllFiles
 	model.visibleFileOrder = outcome.VisibleFiles
-	model.allFileTree = outcome.AllFileTree
-	model.visibleFileTree = outcome.VisibleFileTree
+	model.allFileTree = outcome.FileTree
+	model.visibleFileTree = outcome.FileTree.withProjection(outcome.VisibleProjection)
 	model.pathFiles = outcome.PathFiles
 	model.ambiguousPaths = outcome.AmbiguousPaths
+	model.collapsedTree = outcome.Collapsed
 	model.selectFileOrder()
 	model.notice = nil
 	model.requestActivePatch()
+	return nil
 }
 
-func buildFileIndexesContext(
+func buildFileIndexesWithLedger(
 	ctx context.Context,
 	snapshot review.Snapshot,
+	ledger *retainedLedger,
 ) (
 	[]review.FileID,
 	[]review.FileID,
@@ -422,9 +483,14 @@ func buildFileIndexesContext(
 	map[string]struct{},
 	error,
 ) {
+	maximum := int64(snapshot.FileCount())
+	if err := ledger.reserve(maximum * (2*fileOrderRetainedCharge +
+		pathIndexRetainedCharge + ambiguousRetainedCharge)); err != nil {
+		return nil, nil, nil, nil, err
+	}
 	allFiles := make([]review.FileID, 0, snapshot.FileCount())
 	visibleFiles := make([]review.FileID, 0, snapshot.FileCount())
-	paths := make(map[string]review.FileID, snapshot.FileCount())
+	paths := make(map[string]review.FileID)
 	ambiguous := make(map[string]struct{})
 	count := 0
 	for file := range snapshot.AllFiles() {
@@ -443,13 +509,27 @@ func buildFileIndexesContext(
 			continue
 		}
 		if existing, exists := paths[path]; exists && existing != file.ID() {
-			delete(paths, path)
 			ambiguous[path] = struct{}{}
 		} else if _, exists := ambiguous[path]; !exists {
 			paths[path] = file.ID()
 		}
 	}
 	return allFiles, visibleFiles, paths, ambiguous, nil
+}
+
+func retainedWorkspaceIndexBytes(
+	tree fileTree,
+	visible treeProjection,
+	allFiles, visibleFiles []review.FileID,
+	paths map[string]review.FileID,
+	ambiguous map[string]struct{},
+) int64 {
+	return tree.retainedBytes() + int64(
+		cap(visible)*8+
+			(cap(allFiles)+cap(visibleFiles))*fileOrderRetainedCharge+
+			len(paths)*pathIndexRetainedCharge+
+			len(ambiguous)*ambiguousRetainedCharge,
+	)
 }
 
 func (model *Model) selectFileOrder() {
@@ -581,7 +661,7 @@ func (model *Model) advanceFileFilter(message fileFilterChunkMsg) tea.Cmd {
 	}
 	model.filterBuild = nil
 	model.filterTreeGeneration = build.generation
-	model.filterTreeFiles = slices.Clone(build.result)
+	model.filterTreeFiles = build.result
 	if model.filterTreeBuilding {
 		return nil
 	}
@@ -600,11 +680,12 @@ func (model *Model) startFileFilterTree() tea.Cmd {
 		return nil
 	}
 	model.nextOperation++
+	files := model.filterTreeFiles
 	err = model.coordinator.SubmitFileTree(FileTreeWork{
 		ID:         operationID,
 		Generation: model.filterTreeGeneration,
-		Snapshot:   model.review.Snapshot(),
-		Files:      slices.Clone(model.filterTreeFiles),
+		Tree:       model.allFileTree,
+		Files:      files,
 	})
 	if err != nil {
 		model.filterTreeGeneration = 0
@@ -615,6 +696,7 @@ func (model *Model) startFileFilterTree() tea.Cmd {
 		}
 		return nil
 	}
+	model.filterTreeFiles = nil
 	model.filterTreeBuilding = true
 	model.filterTreeOperation = operationID
 	return nil
@@ -635,7 +717,8 @@ func (model *Model) applyFileFilterTree(outcome FileTreeOutcome) tea.Cmd {
 	if outcome.Err == nil && outcome.Generation == model.filterGeneration &&
 		outcome.Generation == model.filterTreeGeneration {
 		model.fileOrder = outcome.Files
-		model.filteredFileTree = &outcome.Tree
+		filtered := model.allFileTree.withProjection(outcome.Projection)
+		model.filteredFileTree = &filtered
 		model.filterTreeGeneration = 0
 		model.filterTreeFiles = nil
 		model.selectFileOrder()

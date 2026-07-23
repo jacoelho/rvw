@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 
@@ -17,29 +18,65 @@ type diffRecord struct {
 	newOID    *review.ObjectID
 	oldMode   review.FileMode
 	newMode   review.FileMode
-	oldPath   []byte
-	newPath   []byte
+	oldPath   string
+	newPath   string
 	additions uint32
 	deletions uint32
 	status    byte
 	binary    bool
 }
 
-type numstatRecord struct {
-	oldPath   []byte
-	newPath   []byte
-	additions uint32
-	deletions uint32
-	binary    bool
+// diffRecordConstructionCharge covers the record, two heap-resident object-ID
+// headers and SHA-256 string backings, and the two mode string backings.
+const diffRecordConstructionCharge int64 = 320
+
+type diffRecordBuilder struct {
+	ledger      *sourceLedger
+	records     []diffRecord
+	pathBytes   int64
+	pathLimit   int64
+	recordLimit int
+}
+
+func (builder *diffRecordBuilder) ensureCapacity() error {
+	if len(builder.records) == cap(builder.records) {
+		capacity := max(16, cap(builder.records)*2)
+		capacity = min(capacity, builder.recordLimit)
+		allocation := int64(capacity) * diffRecordConstructionCharge
+		if err := builder.ledger.reserve(allocation); err != nil {
+			return err
+		}
+		grown := make([]diffRecord, len(builder.records), capacity)
+		copy(grown, builder.records)
+		builder.ledger.release(int64(cap(builder.records)) * diffRecordConstructionCharge)
+		builder.records = grown
+	}
+	return nil
+}
+
+func (builder *diffRecordBuilder) reservePath(pathBytes int) error {
+	if int64(pathBytes) > builder.pathLimit-builder.pathBytes {
+		return fmt.Errorf("source path bytes exceed %d", builder.pathLimit)
+	}
+	if err := builder.ledger.reserve(int64(pathBytes)); err != nil {
+		return err
+	}
+	builder.pathBytes += int64(pathBytes)
+	return nil
+}
+
+func (builder *diffRecordBuilder) add(record diffRecord) {
+	builder.records = append(builder.records, record)
 }
 
 func (service *Service) diffMetadata(
 	ctx context.Context,
-	repository RepositoryPath,
+	repository *rootedRepository,
 	environment map[string]string,
 	base, head review.ObjectID,
+	runCPU CPUAdmission,
 ) ([]diffRecord, error) {
-	if err := service.checkRenameCandidates(ctx, repository, environment, base, head); err != nil {
+	if err := service.checkRenameCandidates(ctx, repository, environment, base, head, runCPU); err != nil {
 		return nil, err
 	}
 	common := []string{
@@ -59,16 +96,17 @@ func (service *Service) diffMetadata(
 	rawArguments = append(rawArguments[:8], append([]string{gitRaw}, rawArguments[8:]...)...)
 	numstatArguments := append([]string{}, common...)
 	numstatArguments = append(numstatArguments[:8], append([]string{"--numstat"}, numstatArguments[8:]...)...)
-	return service.readDiffMetadata(ctx, repository, environment, rawArguments, numstatArguments)
+	return service.readDiffMetadata(ctx, repository, environment, rawArguments, numstatArguments, runCPU)
 }
 
 func (service *Service) diffIndexMetadata(
 	ctx context.Context,
-	repository RepositoryPath,
+	repository *rootedRepository,
 	environment map[string]string,
 	base review.ObjectID,
+	runCPU CPUAdmission,
 ) ([]diffRecord, error) {
-	if err := service.checkIndexRenameCandidates(ctx, repository, environment, base); err != nil {
+	if err := service.checkIndexRenameCandidates(ctx, repository, environment, base, runCPU); err != nil {
 		return nil, err
 	}
 	common := []string{
@@ -85,222 +123,327 @@ func (service *Service) diffIndexMetadata(
 	}
 	rawArguments := append([]string{gitDiff, gitCached, gitRaw}, common[2:]...)
 	numstatArguments := append([]string{gitDiff, gitCached, "--numstat"}, common[2:]...)
-	return service.readDiffMetadata(ctx, repository, environment, rawArguments, numstatArguments)
+	return service.readDiffMetadata(ctx, repository, environment, rawArguments, numstatArguments, runCPU)
 }
 
 func (service *Service) readDiffMetadata(
 	ctx context.Context,
-	repository RepositoryPath,
+	repository *rootedRepository,
 	environment map[string]string,
 	rawArguments, numstatArguments []string,
+	runCPU CPUAdmission,
 ) ([]diffRecord, error) {
-	rawResult, err := service.runGit(
+	rawSpool, err := service.runGitToSpoolIn(
 		ctx,
-		repository.String(),
+		repository.gitDirectory(),
 		environment,
 		rawArguments,
-		nil,
-		64<<20,
+		rawDiffWireLimit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("read Git path metadata: %w", err)
 	}
-	raw, err := parseRawDiff(rawResult.Stdout)
+	ledger, err := newSourceLedger(MaxCommandErrorConstructionBytes + maxSourceProtocolToken)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := parseRawDiffStreamWithLedgerCPU(ctx, rawSpool.Reader(), ledger, runCPU)
+	err = errors.Join(err, rawSpool.Close())
 	if err != nil {
 		return nil, err
 	}
 
-	numstatResult, err := service.runGit(
+	numstatSpool, err := service.runGitToSpoolIn(
 		ctx,
-		repository.String(),
+		repository.gitDirectory(),
 		environment,
 		numstatArguments,
-		nil,
-		64<<20,
+		numstatWireLimit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("read Git change counts: %w", err)
 	}
-	numstat, err := parseNumstat(numstatResult.Stdout)
+	err = mergeNumstatStreamContextCPU(ctx, numstatSpool.Reader(), raw, ledger, runCPU)
+	err = errors.Join(err, numstatSpool.Close())
 	if err != nil {
 		return nil, err
-	}
-	if len(raw) != len(numstat) {
-		return nil, fmt.Errorf("git metadata streams disagree: raw=%d numstat=%d", len(raw), len(numstat))
-	}
-	for index := range raw {
-		if !matchingNumstatPath(raw[index], numstat[index]) {
-			return nil, fmt.Errorf("git metadata streams disagree at file %d", index)
-		}
-		raw[index].additions = numstat[index].additions
-		raw[index].deletions = numstat[index].deletions
-		raw[index].binary = numstat[index].binary
 	}
 	return raw, nil
 }
 
 func (service *Service) checkRenameCandidates(
 	ctx context.Context,
-	repository RepositoryPath,
+	repository *rootedRepository,
 	environment map[string]string,
 	base, head review.ObjectID,
+	runCPU CPUAdmission,
 ) error {
-	result, err := service.runGit(
+	spool, err := service.runGitToSpoolIn(
 		ctx,
-		repository.String(),
+		repository.gitDirectory(),
 		environment,
 		[]string{
 			"diff-tree", "--no-commit-id", "-r", "-z", gitRaw,
 			gitNoRenames, gitNoExtDiff, gitNoTextconv,
 			base.String(), head.String(),
 		},
-		nil,
-		64<<20,
+		rawDiffWireLimit,
 	)
 	if err != nil {
 		return fmt.Errorf("count Git rename candidates: %w", err)
 	}
-	records, err := parseRawDiff(result.Stdout)
-	if err != nil {
-		return err
-	}
-	var candidates uint32
-	for _, record := range records {
-		if record.status == 'A' || record.status == 'D' {
-			candidates++
-			if candidates > 1_000 {
-				return &LimitError{Resource: LimitRenameCandidates, Limit: 1_000}
-			}
-		}
-	}
-	return nil
+	err = enforceRenameCandidateLimitStreamContextCPU(ctx, spool.Reader(), runCPU)
+	err = errors.Join(err, spool.Close())
+	return err
 }
 
 func (service *Service) checkIndexRenameCandidates(
 	ctx context.Context,
-	repository RepositoryPath,
+	repository *rootedRepository,
 	environment map[string]string,
 	base review.ObjectID,
+	runCPU CPUAdmission,
 ) error {
-	result, err := service.runGit(
+	spool, err := service.runGitToSpoolIn(
 		ctx,
-		repository.String(),
+		repository.gitDirectory(),
 		environment,
 		[]string{
 			gitDiff, gitCached, gitRaw, gitNoAbbrev, "-z",
 			gitNoRenames, gitNoExtDiff, gitNoTextconv,
 			base.String(),
 		},
-		nil,
-		64<<20,
+		rawDiffWireLimit,
 	)
 	if err != nil {
 		return fmt.Errorf("count staged Git rename candidates: %w", err)
 	}
-	return enforceRenameCandidateLimit(result.Stdout)
+	err = enforceRenameCandidateLimitStreamContextCPU(ctx, spool.Reader(), runCPU)
+	return errors.Join(err, spool.Close())
 }
 
-func enforceRenameCandidateLimit(value []byte) error {
-	records, err := parseRawDiff(value)
-	if err != nil {
-		return err
-	}
+func enforceRenameCandidateLimitStream(input io.Reader) error {
+	return enforceRenameCandidateLimitStreamContext(context.Background(), input)
+}
+
+func enforceRenameCandidateLimitStreamContext(ctx context.Context, input io.Reader) error {
+	tokens := newNULTokenReaderContext(ctx, input)
 	var candidates uint32
-	for _, record := range records {
-		if record.status == 'A' || record.status == 'D' {
+	for count := 0; ; count++ {
+		header, err := tokens.Next()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read Git raw diff header: %w", err)
+		}
+		if count == review.MaxFiles {
+			return fmt.Errorf("changed files exceed %d", review.MaxFiles)
+		}
+		parsed, err := parseRawDiffHeader(header)
+		if err != nil {
+			return err
+		}
+		pathCount := 1
+		if parsed.status == 'R' || parsed.status == 'C' {
+			pathCount = 2
+		}
+		for pathIndex := range pathCount {
+			path, pathErr := tokens.Next()
+			if pathErr != nil {
+				return fmt.Errorf("read Git raw diff path %d: %w", pathIndex+1, pathErr)
+			}
+			if pathErr = validateRawPath(path); pathErr != nil {
+				return pathErr
+			}
+		}
+		if parsed.status == 'A' || parsed.status == 'D' {
 			candidates++
 			if candidates > 1_000 {
 				return &LimitError{Resource: LimitRenameCandidates, Limit: 1_000}
 			}
 		}
 	}
-	return nil
 }
 
 func parseRawDiff(value []byte) ([]diffRecord, error) {
-	var records []diffRecord
-	for len(value) > 0 {
-		header, remaining, ok := nextNULTerminated(value)
-		if !ok {
-			return nil, errors.New("git raw diff has an unterminated header")
+	return parseRawDiffStream(bytes.NewReader(value))
+}
+
+func parseRawDiffStream(input io.Reader) ([]diffRecord, error) {
+	return parseRawDiffStreamContext(context.Background(), input)
+}
+
+func parseRawDiffStreamContext(
+	ctx context.Context,
+	input io.Reader,
+) ([]diffRecord, error) {
+	ledger, err := newSourceLedger(0)
+	if err != nil {
+		return nil, err
+	}
+	return parseRawDiffStreamWithLedger(ctx, input, ledger)
+}
+
+func parseRawDiffStreamWithLedger(
+	ctx context.Context,
+	input io.Reader,
+	ledger *sourceLedger,
+) ([]diffRecord, error) {
+	return parseRawDiffStreamWithLedgerLimits(
+		ctx,
+		input,
+		ledger,
+		review.MaxFiles,
+		review.MaxSourcePaths,
+	)
+}
+
+func parseRawDiffStreamWithLedgerLimits(
+	ctx context.Context,
+	input io.Reader,
+	ledger *sourceLedger,
+	recordLimit int,
+	pathLimit int64,
+) ([]diffRecord, error) {
+	if recordLimit < 0 || recordLimit > review.MaxFiles ||
+		pathLimit < 0 || pathLimit > review.MaxSourcePaths {
+		return nil, errors.New("source diff limits are invalid")
+	}
+	builder := diffRecordBuilder{
+		ledger: ledger, recordLimit: recordLimit, pathLimit: pathLimit,
+	}
+	tokens := newNULTokenReaderContext(ctx, input)
+	for {
+		header, err := tokens.Next()
+		if errors.Is(err, io.EOF) {
+			return builder.records, nil
 		}
-		value = remaining
-		fields := bytes.Fields(header)
-		if len(fields) != 5 || len(fields[0]) != 7 || fields[0][0] != ':' {
-			return nil, fmt.Errorf("invalid Git raw diff header %q", boundedText(string(header), 256))
-		}
-		oldMode, err := review.NewFileMode(string(fields[0][1:]))
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("read Git raw diff header: %w", err)
 		}
-		newMode, err := review.NewFileMode(string(fields[1]))
-		if err != nil {
-			return nil, err
+		if len(builder.records) == builder.recordLimit {
+			return nil, fmt.Errorf("changed files exceed %d", builder.recordLimit)
 		}
-		if len(fields[2]) != len(fields[3]) {
-			return nil, errors.New("git raw diff mixes object ID formats")
+		if capacityErr := builder.ensureCapacity(); capacityErr != nil {
+			return nil, capacityErr
 		}
-		oldOIDValue, hasOldOID, err := rawObjectID(fields[2])
-		if err != nil {
-			return nil, err
-		}
-		newOIDValue, hasNewOID, err := rawObjectID(fields[3])
+		parsed, err := parseRawDiffHeader(header)
 		if err != nil {
 			return nil, err
 		}
 		var oldOID, newOID *review.ObjectID
-		if hasOldOID {
-			oldOID = new(oldOIDValue)
+		if parsed.hasOldOID {
+			oldOID = new(parsed.oldOID)
 		}
-		if hasNewOID {
-			newOID = new(newOIDValue)
+		if parsed.hasNewOID {
+			newOID = new(parsed.newOID)
 		}
-		if !validRawStatus(fields[4]) {
-			return nil, fmt.Errorf("unsupported Git path status %q", fields[4])
-		}
-		status := fields[4][0]
-		path, remaining, ok := nextNULTerminated(value)
-		if !ok {
-			return nil, errors.New("git raw diff has an unterminated path")
-		}
-		value = remaining
-		if err := validateRawPath(path); err != nil {
-			return nil, err
-		}
-
 		record := diffRecord{
-			oldMode: oldMode,
-			newMode: newMode,
+			oldMode: parsed.oldMode,
+			newMode: parsed.newMode,
 			oldOID:  oldOID,
 			newOID:  newOID,
-			status:  status,
+			status:  parsed.status,
 		}
-		switch status {
-		case 'A':
-			record.newPath = bytes.Clone(path)
-		case 'D':
-			record.oldPath = bytes.Clone(path)
-		case 'R', 'C':
-			newPath, rest, ok := nextNULTerminated(value)
-			if !ok {
-				return nil, errors.New("git raw rename/copy has an unterminated new path")
-			}
-			value = rest
-			if err := validateRawPath(newPath); err != nil {
-				return nil, err
-			}
-			record.oldPath = bytes.Clone(path)
-			record.newPath = bytes.Clone(newPath)
-		default:
-			record.oldPath = bytes.Clone(path)
-			record.newPath = bytes.Clone(path)
+		if err := assignRawDiffPaths(tokens, &builder, &record); err != nil {
+			return nil, err
 		}
-		records = append(records, record)
-		if len(records) > review.MaxFiles {
-			return nil, fmt.Errorf("changed files exceed %d", review.MaxFiles)
-		}
+		builder.add(record)
 	}
-	return records, nil
+}
+
+type rawDiffHeader struct {
+	oldOID    review.ObjectID
+	newOID    review.ObjectID
+	oldMode   review.FileMode
+	newMode   review.FileMode
+	status    byte
+	hasOldOID bool
+	hasNewOID bool
+}
+
+func parseRawDiffHeader(header []byte) (rawDiffHeader, error) {
+	fields := bytes.Fields(header)
+	if len(fields) != 5 || len(fields[0]) != 7 || fields[0][0] != ':' {
+		return rawDiffHeader{}, fmt.Errorf(
+			"invalid Git raw diff header %q",
+			boundedText(string(header), 256),
+		)
+	}
+	oldMode, err := review.NewFileMode(string(fields[0][1:]))
+	if err != nil {
+		return rawDiffHeader{}, err
+	}
+	newMode, err := review.NewFileMode(string(fields[1]))
+	if err != nil {
+		return rawDiffHeader{}, err
+	}
+	if len(fields[2]) != len(fields[3]) {
+		return rawDiffHeader{}, errors.New("git raw diff mixes object ID formats")
+	}
+	oldOID, hasOldOID, err := rawObjectID(fields[2])
+	if err != nil {
+		return rawDiffHeader{}, err
+	}
+	newOID, hasNewOID, err := rawObjectID(fields[3])
+	if err != nil {
+		return rawDiffHeader{}, err
+	}
+	if !validRawStatus(fields[4]) {
+		return rawDiffHeader{}, fmt.Errorf("unsupported Git path status %q", fields[4])
+	}
+	return rawDiffHeader{
+		oldMode: oldMode, newMode: newMode, oldOID: oldOID, newOID: newOID,
+		status: fields[4][0], hasOldOID: hasOldOID, hasNewOID: hasNewOID,
+	}, nil
+}
+
+func assignRawDiffPaths(
+	tokens *nulTokenReader,
+	builder *diffRecordBuilder,
+	record *diffRecord,
+) error {
+	path, err := tokens.Next()
+	if err != nil {
+		return fmt.Errorf("read Git raw diff path: %w", err)
+	}
+	if err := validateRawPath(path); err != nil {
+		return err
+	}
+	switch record.status {
+	case 'A':
+		if err := builder.reservePath(len(path)); err != nil {
+			return err
+		}
+		record.newPath = string(path)
+	case 'D':
+		if err := builder.reservePath(len(path)); err != nil {
+			return err
+		}
+		record.oldPath = string(path)
+	case 'R', 'C':
+		newPath, err := tokens.Next()
+		if err != nil {
+			return fmt.Errorf("read Git raw rename/copy path: %w", err)
+		}
+		if err := validateRawPath(newPath); err != nil {
+			return err
+		}
+		if err := builder.reservePath(len(path) + len(newPath)); err != nil {
+			return err
+		}
+		record.oldPath = string(path)
+		record.newPath = string(newPath)
+	default:
+		if err := builder.reservePath(len(path)); err != nil {
+			return err
+		}
+		owned := string(path)
+		record.oldPath = owned
+		record.newPath = owned
+	}
+	return nil
 }
 
 func validRawStatus(value []byte) bool {
@@ -314,14 +457,30 @@ func validRawStatus(value []byte) bool {
 	return err == nil && score <= 100
 }
 
-func parseNumstat(value []byte) ([]numstatRecord, error) {
-	var records []numstatRecord
-	for len(value) > 0 {
-		token, remaining, ok := nextNULTerminated(value)
-		if !ok {
-			return nil, errors.New("git numstat has an unterminated record")
+func mergeNumstatStream(input io.Reader, records []diffRecord) error {
+	return mergeNumstatStreamContext(context.Background(), input, records)
+}
+
+func mergeNumstatStreamContext(
+	ctx context.Context,
+	input io.Reader,
+	records []diffRecord,
+) error {
+	tokens := newNULTokenReaderContext(ctx, input)
+	for index := 0; ; index++ {
+		token, err := tokens.Next()
+		if errors.Is(err, io.EOF) {
+			if index != len(records) {
+				return fmt.Errorf("git metadata streams disagree: raw=%d numstat=%d", len(records), index)
+			}
+			return nil
 		}
-		value = remaining
+		if err != nil {
+			return fmt.Errorf("read Git numstat record: %w", err)
+		}
+		if index >= len(records) {
+			return fmt.Errorf("git metadata streams disagree: raw=%d numstat>%d", len(records), index)
+		}
 		firstTab := bytes.IndexByte(token, '\t')
 		secondTab := -1
 		if firstTab >= 0 {
@@ -331,81 +490,167 @@ func parseNumstat(value []byte) ([]numstatRecord, error) {
 			}
 		}
 		if firstTab <= 0 || secondTab <= firstTab+1 {
-			return nil, fmt.Errorf("invalid Git numstat record %q", boundedText(string(token), 256))
+			return fmt.Errorf("invalid Git numstat record %q", boundedText(string(token), 256))
 		}
-		additions, binaryA, err := parseCount(token[:firstTab], review.MaxAdditions)
+		additions, binaryA, err := parseCount(token[:firstTab])
 		if err != nil {
-			return nil, err
+			return err
 		}
-		deletions, binaryD, err := parseCount(token[firstTab+1:secondTab], review.MaxDeletions)
+		deletions, binaryD, err := parseCount(token[firstTab+1 : secondTab])
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if binaryA != binaryD {
-			return nil, errors.New("git numstat has inconsistent binary counts")
+			return errors.New("git numstat has inconsistent binary counts")
 		}
 
-		record := numstatRecord{additions: additions, deletions: deletions, binary: binaryA}
+		var oldPath, newPath []byte
 		path := token[secondTab+1:]
 		if len(path) == 0 {
-			oldPath, rest, ok := nextNULTerminated(value)
-			if !ok {
-				return nil, errors.New("git numstat rename has an unterminated old path")
+			oldPath, err = tokens.Next()
+			if err != nil {
+				return fmt.Errorf("read Git numstat old path: %w", err)
 			}
-			newPath, rest, ok := nextNULTerminated(rest)
-			if !ok {
-				return nil, errors.New("git numstat rename has an unterminated new path")
+			newPath, err = tokens.Next()
+			if err != nil {
+				return fmt.Errorf("read Git numstat new path: %w", err)
 			}
-			value = rest
 			if err := validateRawPath(oldPath); err != nil {
-				return nil, err
+				return err
 			}
 			if err := validateRawPath(newPath); err != nil {
-				return nil, err
+				return err
 			}
-			record.oldPath = bytes.Clone(oldPath)
-			record.newPath = bytes.Clone(newPath)
 		} else {
 			if err := validateRawPath(path); err != nil {
-				return nil, err
+				return err
 			}
-			record.oldPath = bytes.Clone(path)
-			record.newPath = bytes.Clone(path)
+			oldPath = path
+			newPath = path
 		}
-		records = append(records, record)
-		if len(records) > review.MaxFiles {
-			return nil, fmt.Errorf("changed files exceed %d", review.MaxFiles)
+		raw := &records[index]
+		var matches bool
+		switch raw.status {
+		case 'A':
+			matches = raw.newPath == string(newPath)
+		case 'D':
+			matches = raw.oldPath == string(oldPath)
+		default:
+			matches = raw.oldPath == string(oldPath) && raw.newPath == string(newPath)
 		}
+		if !matches {
+			return fmt.Errorf("git metadata streams disagree at file %d", index)
+		}
+		raw.additions = additions
+		raw.deletions = deletions
+		raw.binary = binaryA
 	}
-	return records, nil
 }
 
 func (service *Service) snapshot(
 	ctx context.Context,
+	runCPU CPUAdmission,
 	sourceID review.SourceID,
-	repository RepositoryPath,
+	repository *rootedRepository,
 	environment map[string]string,
 	records []diffRecord,
 	options OpenOptions,
 ) (review.Snapshot, error) {
-	builder, err := review.NewSnapshotBuilder(sourceID, len(records))
+	var recordBytes int64
+	if err := runCPU(ctx, func() error {
+		recordBytes = sourceSnapshotRecordBytes(records) + options.RetainedBytes()
+		return context.Cause(ctx)
+	}); err != nil {
+		return review.Snapshot{}, err
+	}
+	ledger, err := newSourceLedger(recordBytes)
 	if err != nil {
 		return review.Snapshot{}, err
+	}
+	projectionBytes := int64(len(records)) * 4
+	if reserveErr := ledger.reserve(projectionBytes); reserveErr != nil {
+		return review.Snapshot{}, reserveErr
 	}
 	gitignore := skipGitignore
 	if options.Gitignore {
 		gitignore = useGitignore
 	}
-	ignored, err := service.gitignored(ctx, repository, environment, records, gitignore)
+	ignored, err := service.gitignored(
+		ctx,
+		runCPU,
+		repository,
+		environment,
+		records,
+		gitignore,
+		ledger,
+	)
 	if err != nil {
 		return review.Snapshot{}, err
 	}
-	filters, err := newFilterSet(repository, options)
+	var rules []ignoreRule
+	if options.RVWIgnore && options.IgnoreFile != "" {
+		contents, readErr := readIgnoreRuleContents(repository, options.IgnoreFile)
+		if readErr != nil {
+			return review.Snapshot{}, readErr
+		}
+		if err := runCPU(ctx, func() error {
+			rules, readErr = parseIgnoreRules(ctx, options.IgnoreFile, contents)
+			return readErr
+		}); err != nil {
+			return review.Snapshot{}, err
+		}
+	}
+	var filters filterProjection
+	if err := runCPU(ctx, func() error {
+		var filterErr error
+		filters, filterErr = buildFilterProjection(
+			ctx,
+			options,
+			records,
+			ignored,
+			rules,
+			ledger,
+		)
+		return filterErr
+	}); err != nil {
+		return review.Snapshot{}, err
+	}
+	var snapshot review.Snapshot
+	if err := runCPU(ctx, func() error {
+		var buildErr error
+		snapshot, buildErr = buildSnapshot(ctx, sourceID, records, filters, ledger)
+		return buildErr
+	}); err != nil {
+		return review.Snapshot{}, err
+	}
+	return snapshot, nil
+}
+
+func buildSnapshot(
+	ctx context.Context,
+	sourceID review.SourceID,
+	records []diffRecord,
+	filters filterProjection,
+	ledger *sourceLedger,
+) (review.Snapshot, error) {
+	if len(filters.flags) != len(records) {
+		return review.Snapshot{}, errors.New("snapshot filter projection is incomplete")
+	}
+	builderBytes := review.SnapshotBuilderConstructionBytes(len(records))
+	if reserveErr := ledger.reserve(builderBytes); reserveErr != nil {
+		return review.Snapshot{}, reserveErr
+	}
+	builder, err := review.NewSnapshotBuilder(sourceID, len(records))
 	if err != nil {
 		return review.Snapshot{}, err
 	}
 
 	for index, record := range records {
+		if index%filterCancellationRecords == 0 {
+			if err := context.Cause(ctx); err != nil {
+				return review.Snapshot{}, err
+			}
+		}
 		oldPathValue, hasOldPath, err := reviewPath(record.oldPath)
 		if err != nil {
 			return review.Snapshot{}, fmt.Errorf("file %d old path: %w", index, err)
@@ -425,14 +670,7 @@ func (service *Service) snapshot(
 		if err != nil {
 			return review.Snapshot{}, fmt.Errorf("file %d change: %w", index, err)
 		}
-		match := notGitignored
-		if ignored[index] {
-			match = gitignored
-		}
-		flags, err := filters.flagsFor(record, match)
-		if err != nil {
-			return review.Snapshot{}, fmt.Errorf("file %d flags: %w", index, err)
-		}
+		flags := filters.flags[index]
 		var contentValues []review.FileContent
 		if record.oldOID != nil && objectKind(record.oldMode) == review.ObjectBlob {
 			contentValues = append(contentValues, review.OldFileContent(*record.oldOID))
@@ -454,18 +692,18 @@ func (service *Service) snapshot(
 			return review.Snapshot{}, fmt.Errorf("file %d: %w", index, err)
 		}
 	}
-	return builder.Finish()
+	return builder.FinishCancellable(func() error { return context.Cause(ctx) })
 }
 
-func matchingNumstatPath(raw diffRecord, numstat numstatRecord) bool {
-	switch raw.status {
-	case 'A':
-		return bytes.Equal(raw.newPath, numstat.newPath)
-	case 'D':
-		return bytes.Equal(raw.oldPath, numstat.oldPath)
-	default:
-		return bytes.Equal(raw.oldPath, numstat.oldPath) && bytes.Equal(raw.newPath, numstat.newPath)
+func sourceSnapshotRecordBytes(records []diffRecord) int64 {
+	retained := int64(cap(records)) * diffRecordConstructionCharge
+	for _, record := range records {
+		retained += int64(len(record.oldPath))
+		if record.newPath != record.oldPath {
+			retained += int64(len(record.newPath))
+		}
 	}
+	return retained
 }
 
 func changeFromDiff(record diffRecord) (review.Change, error) {
@@ -519,11 +757,11 @@ func pathKind(status byte) (review.ChangeKind, error) {
 	}
 }
 
-func reviewPath(raw []byte) (review.Path, bool, error) {
-	if raw == nil {
+func reviewPath(raw string) (review.Path, bool, error) {
+	if raw == "" {
 		return review.Path{}, false, nil
 	}
-	path, err := review.NewPath(raw)
+	path, err := review.NewPathString(raw)
 	if err != nil {
 		return review.Path{}, false, err
 	}
@@ -560,7 +798,7 @@ func rawObjectID(raw []byte) (review.ObjectID, bool, error) {
 	return id, true, nil
 }
 
-func parseCount(value []byte, maximum int) (uint32, bool, error) {
+func parseCount(value []byte) (uint32, bool, error) {
 	if bytes.Equal(value, []byte("-")) {
 		return 0, true, nil
 	}
@@ -569,12 +807,9 @@ func parseCount(value []byte, maximum int) (uint32, bool, error) {
 			return 0, false, fmt.Errorf("invalid git count %q", value)
 		}
 	}
-	if maximum < 0 {
-		return 0, false, errors.New("git count maximum is negative")
-	}
 	count, err := strconv.ParseUint(string(value), 10, 32)
-	if err != nil || count > uint64(maximum) {
-		return 0, false, fmt.Errorf("git count %q exceeds %d", value, maximum)
+	if err != nil || count > uint64(review.MaxAdditions) {
+		return 0, false, fmt.Errorf("git count %q exceeds %d", value, review.MaxAdditions)
 	}
 	return uint32(count), false, nil
 }

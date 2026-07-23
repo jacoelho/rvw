@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -77,6 +78,9 @@ func validate(config *Config, environment map[string]string) error {
 	if filterErr := validateFilters(&config.filter); filterErr != nil {
 		return filterErr
 	}
+	if commentErr := validateComments(&config.comments); commentErr != nil {
+		return commentErr
+	}
 	if config.github.SubmitDefault != SubmitComment &&
 		config.github.SubmitDefault != SubmitDraft &&
 		config.github.SubmitDefault != SubmitApprove &&
@@ -89,7 +93,9 @@ func validate(config *Config, environment map[string]string) error {
 	if templateErr := validateTemplate(
 		config.export.MarkdownTemplate,
 		"export.markdown_template",
-		map[string]bool{"comments": true, "comment_count": true},
+		map[string]bool{
+			"comments": true, "comment_types": true, "comment_count": true,
+		},
 	); templateErr != nil {
 		return templateErr
 	}
@@ -97,7 +103,7 @@ func validate(config *Config, environment map[string]string) error {
 		config.export.CommentTemplate,
 		"export.comment_template",
 		map[string]bool{
-			"index": true, "target": true,
+			"index": true, "kind": true, "kind_upper": true, "target": true,
 			"path": true, "line_or_range": true, "comment": true,
 		},
 	); templateErr != nil {
@@ -108,6 +114,44 @@ func validate(config *Config, environment map[string]string) error {
 		return err
 	}
 	config.ui.Keybindings = effective
+	return nil
+}
+
+func validateComments(comments *Comments) error {
+	if len(comments.Kinds) == 0 || len(comments.Kinds) > 32 {
+		return fmt.Errorf("%w: comments.kinds must contain 1 through 32 labels", ErrInvalidConfig)
+	}
+	for index, label := range comments.Kinds {
+		label = strings.TrimSpace(label)
+		if label == "" || len(label) > 256 || !utf8.ValidString(label) {
+			return fmt.Errorf(
+				"%w: comments.kinds[%d] must be nonempty UTF-8 of at most 256 bytes",
+				ErrInvalidConfig,
+				index,
+			)
+		}
+		for _, character := range label {
+			if unicode.IsControl(character) {
+				return fmt.Errorf(
+					"%w: comments.kinds[%d] contains a control character",
+					ErrInvalidConfig,
+					index,
+				)
+			}
+		}
+		comments.Kinds[index] = strings.Clone(label)
+	}
+	slices.Sort(comments.Kinds)
+	for index := 1; index < len(comments.Kinds); index++ {
+		if comments.Kinds[index] == comments.Kinds[index-1] {
+			return fmt.Errorf(
+				"%w: comments.kinds contains duplicate label %q",
+				ErrInvalidConfig,
+				comments.Kinds[index],
+			)
+		}
+	}
+	comments.Kinds = slices.Clip(comments.Kinds)
 	return nil
 }
 
@@ -457,6 +501,8 @@ func defaultKeybindings() []Keybinding {
 		binding(KeyContextCommentEdit, "", "Ctrl-c", KeyActionInterrupt),
 		binding(KeyContextCommentEdit, "", "Esc", KeyActionCancel),
 		binding(KeyContextCommentEdit, "", "Ctrl-s", KeyActionSaveComment),
+		binding(KeyContextCommentEdit, "", "Tab", KeyActionNextCommentKind),
+		binding(KeyContextCommentEdit, "", "Shift-Tab", KeyActionPreviousCommentKind),
 		binding(KeyContextSearch, "", "Ctrl-c", KeyActionInterrupt),
 		binding(KeyContextSearch, "", "Esc", KeyActionCancel),
 		binding(KeyContextSearch, "", "Enter", "accept"),
@@ -495,6 +541,8 @@ func defaultKeybindings() []Keybinding {
 		binding(KeyContextExportPicker, "", "Ctrl-c", KeyActionInterrupt),
 		binding(KeyContextExportPicker, "", "Esc", KeyActionCancel),
 		binding(KeyContextExportPicker, "", "u", KeyActionToggleExportUnmap),
+		binding(KeyContextExportPicker, "", "n", KeyActionToggleExportNotes),
+		binding(KeyContextExportPicker, "", "p", KeyActionToggleExportPraise),
 		binding(KeyContextExportPicker, "", "Enter", "export-selected"),
 		binding(KeyContextSubmit, "", "Ctrl-c", KeyActionInterrupt),
 		binding(KeyContextSubmit, "", "Esc", KeyActionCancel),
@@ -537,10 +585,10 @@ var keyActions = stringSet[KeyAction](
 	KeyActionSearchVisible, KeyActionFindFile,
 	KeyActionNextSearchScope, KeyActionPreviousSearchScope,
 	"open-submit", KeyActionCancel, KeyActionInterrupt, "delete-backward", "confirm-yes", "confirm-no",
-	"save-comment", "insert-newline",
+	"next-comment-kind", "previous-comment-kind", "save-comment", "insert-newline",
 	"extend-up", "extend-down", "next-help-page", "previous-help-page", "help-line-up",
 	"help-line-down", "help-page-up", "help-page-down", "help-home", "help-end",
-	"toggle-export-unmappable",
+	"toggle-export-notes", "toggle-export-praise", "toggle-export-unmappable",
 	"export-selected", "copy-markdown", "export-markdown", "export-json",
 	"submit-recheck", "toggle-stale-head-override", "toggle-submit-exclusion",
 	"toggle-submit-summary", "submit-review", "reload", "toggle-file-panel",
@@ -569,7 +617,8 @@ var contextActions = map[KeyContext]map[KeyAction]bool{
 		"extend-up", "extend-down", "comment-selection",
 	),
 	"comment-edit": stringSet[KeyAction](
-		KeyActionCancel, KeyActionInterrupt, "delete-backward", "save-comment", "insert-newline",
+		KeyActionCancel, KeyActionInterrupt, "delete-backward", "next-comment-kind",
+		"previous-comment-kind", "save-comment", "insert-newline",
 	),
 	"search": stringSet[KeyAction](
 		KeyActionCancel, KeyActionInterrupt, "accept", "delete-backward",
@@ -590,7 +639,8 @@ var contextActions = map[KeyContext]map[KeyAction]bool{
 		KeyActionCancel, KeyActionInterrupt, "confirm-yes", "confirm-no",
 	),
 	"export-picker": stringSet[KeyAction](
-		KeyActionCancel, KeyActionInterrupt, "toggle-export-unmappable", "export-selected",
+		KeyActionCancel, KeyActionInterrupt, "toggle-export-notes", "toggle-export-praise",
+		"toggle-export-unmappable", "export-selected",
 	),
 	"submit-preflight": stringSet[KeyAction](
 		KeyActionCancel, KeyActionInterrupt, "submit-recheck", "toggle-stale-head-override",

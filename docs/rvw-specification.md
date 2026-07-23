@@ -1,16 +1,22 @@
 # rvw specification
 
-**Status:** Accepted.
+**Status:** Draft candidate for explicit acceptance.
 
 **Scope:** Product behavior, architecture, source handling, runtime lifecycle, terminal presentation,
 resource bounds, failure semantics, and verification for `rvw`.
 
 This specification is standalone. It does not incorporate another document, implementation file,
-commit, plan, or historical decision.
+commit, plan, or historical decision. Its exact content remains a proposal until explicitly
+accepted.
+
+**Reconciliation provenance:** This Go-native revision was reconciled from the Rust draft at
+`../rvw-rewrite/docs/rvw-specification.md`. The source draft's SHA-256 digest is
+`ae2dea93fa1e3b2562250c1df91637ee4554ad2b20c1c20a203d77222c1bfb80`. The digest identifies input
+evidence only; the Rust draft is neither an accepted contract nor an implementation blueprint.
 
 ## 1. Interpretation
 
-`MUST`, `MUST NOT`, `SHOULD`, and `MAY` identify normative requirements.
+`MUST`, `MUST NOT`, `SHOULD`, and `MAY` identify proposed normative requirements.
 
 The following rules resolve ambiguity:
 
@@ -42,11 +48,9 @@ It has exactly three output modes:
 
 Linux and macOS are supported. Windows and WebAssembly are not supported.
 
-The performance target is a review with at least 1,000 changed files of at least 10,000 lines each,
-plus hundreds of comments. File metadata for the source may be retained, but patch, blob, and
-syntax text MUST be materialized lazily and bounded to current work rather than loaded for every
-file. Memory, concurrent work, retained data, queues, per-tick work, frame construction, and
-rendering MUST remain bounded.
+The product MUST remain usable with at least 1,000 changed files, files of at least 10,000 lines,
+and hundreds of comments. Memory, concurrent work, retained data, queues, per-tick work, frame
+construction, and rendering MUST remain bounded.
 
 Patch or stdin-patch sources, additional output modes, review persistence, tabs, chat, agents,
 plugins, and generic source registries are outside the product.
@@ -107,20 +111,6 @@ repositories, missing values, unknown options, and invalid configuration MUST fa
 or terminal composition. Help exits successfully. Other startup failures write terminal-safe text
 prefixed by `rvw:` to stderr and exit with status 1.
 
-After command-line parsing and the help fast path, default interactive mode requires both stdin and
-stdout to pass a termios query (`TCGETS` on Linux and `TIOCGETA` on macOS). They need not identify
-the same terminal or the controlling terminal, and stderr may be redirected. Missing either
-capability fails before signal ownership, configuration, repository discovery, Git, GitHub, or
-terminal composition with exactly:
-
-```text
-interactive mode requires terminal stdin and stdout; use --stdout or --json for noninteractive output
-```
-
-The command does not select another output mode automatically. Command-line errors take precedence,
-help bypasses terminal admission, terminal admission precedes configuration and source failures,
-and `--stdout` and `--json` do not require terminal streams.
-
 ### 4. Configuration and themes
 
 #### 4.1 Precedence and schema
@@ -162,26 +152,35 @@ ignore_file = ".rvwignore"
 include = ["src/**"]
 exclude = ["**/*.generated.rs"]
 
+[comments]
+kinds = ["issue", "note", "praise", "suggestion"]
+type_prefix_for_github = true
+
 [github]
-submit_default = "draft" # draft, comment, approve, or request-changes
+submit_default = "comment" # comment, draft, approve, or request-changes
 fetch_threads = true
 
 [export]
 markdown_template = "# Review ({{comment_count}})\n\n{{comments}}"
-comment_template = "## {{target}}\n\n{{comment}}"
+comment_template = "## {{kind_upper}} — {{target}}\n\n{{comment}}"
 ```
 
-`include` and `exclude` each accept either one string or an array of strings.
+`include`, `exclude`, and `kinds` each accept either one string or an array of strings.
 
 Defaults are mouse enabled, wrapping enabled, unified view, three context lines, untracked files
 included, built-in filtering enabled, `.gitignore` enabled, `.rvwignore` enabled, remote threads
-fetched, and submission event `draft`.
+fetched, GitHub kind prefixes enabled, submission event `comment`, and comment kinds `issue`,
+`note`, `praise`, and `suggestion` in lexical order.
 
 Filter patterns are nonempty, contain no NUL, and are at most 4,096 UTF-8 bytes each. At most 4,096
 include/exclude patterns are accepted across the merged configuration and command line.
 `context_lines` is an integer from 0 through 10,000. `ignore_file`, when set, is a single path
 component that cannot escape the repository root. Independent hidden reasons accumulate.
 Filtering changes presentation, not membership of the source snapshot.
+
+Comment kinds are distinct and stored in lexical label order regardless of configuration order.
+There may be 1 through 32 kinds. Each trimmed label is nonempty, contains no control character, and
+is at most 256 UTF-8 bytes.
 
 Export templates use `{{name}}` placeholders, are each at most 256 KiB, and compile to at most 4,096
 literal-or-placeholder tokens. Invalid, unknown, unmatched, or unterminated placeholders fail
@@ -191,11 +190,13 @@ configuration rather than rendering literally.
 
 - `comments`: selected comments rendered by `comment_template`, separated by newlines, or
   `_No comments._` when none are selected;
+- `comment_types`: included configured kind labels, uppercased in ASCII and comma-separated;
 - `comment_count`: the number of selected comments.
 
 `comment_template` accepts:
 
 - `index`: one-based selected-comment index;
+- `kind` and `kind_upper`: the kind label as stored or uppercased in ASCII;
 - `target`: `review`, an escaped file path, or `<path>:<line-or-range>`;
 - `path`: the escaped target path, empty for a review-level comment;
 - `line_or_range`: a new-side line or inclusive range, or the same prefixed by `~` for the old
@@ -205,8 +206,8 @@ configuration rather than rendering literally.
 The defaults are:
 
 ```toml
-markdown_template = "I reviewed your code and have the following comments. Please address them.\n\n{{comments}}\n"
-comment_template = "{{index}}. `{{target}}` - {{comment}}"
+markdown_template = "I reviewed your code and have the following comments. Please address them.\n\nComment types: {{comment_types}}\n\n{{comments}}\n"
+comment_template = "{{index}}. **[{{kind_upper}}]** `{{target}}` - {{comment}}"
 ```
 
 #### 4.2 Keybindings
@@ -247,10 +248,11 @@ align-top, align-center, align-bottom, toggle-directory, expand-directory,
 collapse-directory, visual-line, visual-lines, visual-hunk,
 comment-selection, command, filter, help, status-details, search,
 open-submit, cancel, interrupt, delete-backward, confirm-yes, confirm-no,
-save-comment, insert-newline,
+next-comment-kind, previous-comment-kind, save-comment, insert-newline,
 extend-up, extend-down, next-help-page, previous-help-page, help-line-up,
 help-line-down, help-page-up, help-page-down, help-home, help-end,
-toggle-export-unmappable, export-selected, copy-markdown, export-markdown, export-json,
+toggle-export-notes, toggle-export-praise, toggle-export-unmappable,
+export-selected, copy-markdown, export-markdown, export-json,
 submit-recheck, toggle-stale-head-override, toggle-submit-exclusion,
 toggle-submit-summary, submit-review, reload, toggle-file-panel,
 toggle-comments, toggle-hidden-files
@@ -300,7 +302,8 @@ The optional keys are:
 
 ```text
 diff_add_bg, diff_del_bg, diff_hunk_header, file_modified, file_renamed,
-branch_name, message_warning_fg, message_warning_bg, syntax_theme
+comment_note, comment_suggestion, branch_name, message_warning_fg,
+message_warning_bg, syntax_theme
 ```
 
 Colors are `#RRGGBB` or one of:
@@ -507,15 +510,15 @@ The interactive application uses:
 - `charm.land/bubbles/v2` at `v2.1.1`;
 - `charm.land/lipgloss/v2` at `v2.0.5`.
 
-The three versions above form the specified dependency baseline. A dependency upgrade is an
-architecture change and MUST reverify the version-specific lifecycle and signal contracts in
-sections 10 and 11.
+The resolved module graph in `go.sum` is part of the accepted dependency baseline. A dependency
+upgrade is an architecture change and MUST reverify the version-specific lifecycle and signal
+contracts in sections 10 and 11.
 
 The pinned upstream modules declare `github.com/charmbracelet/x/windows` in their module metadata.
 `rvw` does not import that package, compile its Windows files, add Windows behavior, or support a
 Windows target. Requiring Bubble Tea v2 makes that unreachable transitive module metadata
-unavoidable. The Linux/macOS-only constraint forbids direct or runtime Windows code and
-dependencies; it does not require rewriting the upstream module graph.
+unavoidable. Acceptance of this document interprets the Linux/macOS-only constraint as forbidding
+direct or runtime Windows code and dependencies, not as rewriting the upstream module graph.
 
 The Go ownership boundaries are:
 
@@ -573,8 +576,8 @@ abstraction requires a current producer and consumer. Compatibility facades, dup
 paths, generic source registries, generic effect systems, component registries, and a second event
 loop are forbidden.
 
-Go source files and packages MUST be cohesive. Line count alone is neither a conformance limit nor
-justification for splitting one cohesive implementation into shallow files.
+No Go source file may exceed 1,000 lines. Splitting one cohesive implementation into shallow files
+only to satisfy that ceiling is nonconforming.
 
 ### 7. Review model
 
@@ -584,7 +587,7 @@ One review owns:
 - active file and navigation state;
 - per-file and per-hunk reviewed marks;
 - review-, file-, and line-anchored comments;
-- comment drafts;
+- comment drafts and configured kinds;
 - reload, search, export, and publication state;
 - explicit notices and failure states.
 
@@ -615,41 +618,6 @@ synthesized tree for the worktree and includes untracked files by default. Stage
 that base with the index tree. Range review compares the supplied base and head. Pull-request review
 resolves immutable base/head object IDs and metadata through `gh`.
 
-At the worktree acquisition boundary, raw Git records are grouped by validated path in first-seen
-order. One concrete record is accepted. One unmerged record plus one concrete record, in either
-order, uses the concrete record. A lone unmerged record with a nonzero new mode reads the filesystem
-object, while a zero new mode removes the path. Duplicate unmerged records, duplicate concrete
-records, and groups of three or more are invalid. Consequently a worktree conflict represents the
-actual synthesized filesystem tree relative to `HEAD`: it can be modified, added, deleted, or
-absent from the resulting diff. A staged unmerged entry remains one modified file whose patch is
-explicitly unavailable.
-
-Untracked inventory records are parsed before reconciliation. An exact trailing slash is Git's
-embedded-repository marker and synthesizes a gitlink from that repository's validated `HEAD`
-commit; an unborn or non-commit `HEAD` is invalid. Ordinary and marker forms of the same canonical
-path, duplicate records, and malformed records are rejected rather than silently collapsed. When
-the parent index has tracked descendants and Git therefore reports ordinary child records, `.git`
-ancestor discovery validates the candidate with a non-executing Git query, then collapses the
-shallowest embedded repository to one gitlink and removes its descendant candidates. An incidental
-or invalid `.git` marker remains ordinary content. Inventory parsing enforces the file-count limit
-while retaining records.
-
-Readable worktree objects are stably opened and read with a 128 MiB per-file limit. Raw bytes are
-staged and hashed sequentially in normal batches of at most 16 MiB, 256 entries, and 1 MiB of
-`hash-object --stdin-paths` input. A file above 16 MiB forms one isolated batch. Every batch must
-return exactly one valid object ID per entry, and every raw staging file is deleted on success,
-failure, or cancellation. There is no lifetime aggregate raw-byte rejection. Hashed objects remain
-in the lifecycle-owned private object database; the private index is not created or updated until
-raw batches, gitlinks, filter checks, and live inventory verification succeed. Regular-file copies
-use one fixed 64 KiB buffer, preserve cancellation causes, and recheck descriptor and live-path
-identity, mode, size, and modification time before accepting the hash input.
-
-Worktree filter inspection uses exact per-path `check-attr` response accounting. The special
-attribute states `unspecified` and `unset` are distinguished from literal driver names by a bounded
-configuration-name query followed by a bounded explicit-attribute query. A genuinely absent or
-reset attribute does not inherit an unrelated driver named `unspecified`; an explicit state that
-Git cannot distinguish from a same-named driver is rejected as ambiguous without executing it.
-
 External bytes are validated at acquisition boundaries. Paths preserve raw byte identity and have
 a separately escaped display form. Object IDs, modes, refs, URLs, process results, GitHub payloads,
 diff structure, and remote comment data are validated before entering review semantics.
@@ -677,16 +645,9 @@ Context changes serialize behind active search work that uses the same patch acq
 
 ### 9. Export and publication
 
-Markdown and JSON export are prepared from an immutable review snapshot. Every comment is eligible
-for export except that unmappable comments require the explicit export option. Comment-export JSON
-objects contain `target`, `binding`, and `comment`; there is no category or type field. Preparation
-is bounded and cancellable.
-
-An interactive stdout handoff retains the prepared format through terminal restoration. Markdown
-uses terminal-display escapes for invalid UTF-8, controls, and bidirectional characters. JSON uses
-JSON `\uXXXX` escapes, is validated before and after transformation, and therefore remains valid
-and semantically equivalent. The terminal-safe transformed body is preflighted against the 16 MiB
-limit before one write.
+Markdown and JSON export are prepared from an immutable review snapshot. Export options select
+whether notes, praise, and unmappable comments are included. Preparation is bounded and
+cancellable.
 
 Interactive copy/write actions are in-session deliveries, not additional top-level output modes.
 
@@ -704,41 +665,6 @@ GitHub submission always uses an explicit preflight that shows:
 - unmappable-comment policy;
 - source/head staleness;
 - any explicit stale-head override.
-
-Interactive pull-request sources also acquire the authenticated viewer's pending review before
-the TUI is constructed. Noninteractive output does not make this additional request. Acquisition
-fully paginates pending reviews, accepts exactly one viewer-authored `PENDING` review, and retains
-absence, unavailability, resource limits, and multiple-match ambiguity as distinct states. A
-limited, unavailable, or ambiguous result remains visible and blocks GitHub writes; it never
-falls back to creating another review.
-
-When a pending review exists, its review body and draft comments are imported as editable local
-comments. GraphQL node IDs and REST 64-bit database IDs remain separate identity domains. Existing
-comment targets are immutable: editing changes only the body, and deletion creates an explicit
-tombstone. Pending comments are removed from the read-only remote-thread projection so they are
-not displayed twice. Bindings are shown as `draft`, `modified`, `deleted`, or `conflict`; new local
-comments are shown as `new`.
-
-`draft` is the default event. With no pending review it creates one using the existing single
-create-review request and omits the GitHub event. With an existing pending review it synchronizes
-body edits, comment edits, deletions, and new line or file threads without submitting the review.
-The other events perform the same synchronization and then submit that review as `COMMENT`,
-`APPROVE`, or `REQUEST_CHANGES`. Existing GitHub drafts cannot be excluded from their review;
-they must be retained or explicitly deleted.
-
-Pending-review synchronization is serial and off the terminal event loop. A GraphQL mutation
-batch contains at most 32 effects and at most 1 MiB of encoded input. Started failures are
-reconciled against a fresh, fully acquired pending review: exact desired state is committed,
-exact base state is retryable once, and any third value is unknown and fences retry. New comments
-carry a stable exact terminal marker so a successful add can be recognized without duplicating
-it. The review body carries the per-attempt publication marker. No local binding is rebased until
-the synchronized pending review has been acquired again.
-
-Reload uses a three-way merge of captured base, local edit, and fresh pending review. Remote-only
-edits are adopted, local-only edits are retained, equal edits become clean, and divergent edits
-become explicit conflicts. `:resolve-draft local`, `:resolve-draft remote`, and
-`:resolve-draft base` resolve the selected conflict. Missing or externally submitted reviews do
-not silently create a replacement while bound local edits remain.
 
 Publication distinguishes:
 
@@ -764,7 +690,7 @@ unavailable data, malformed remote data, or an ambiguous match leaves the attemp
 
 #### 9.1 Publication restart scope
 
-This specification provides **process-lifetime publication safety**:
+This draft proposes **process-lifetime publication safety**:
 
 - Publication attempt identity, commit-boundary state, unknown-result fencing, and reconciliation
   state exist only for the lifetime of one `rvw` process.
@@ -778,10 +704,11 @@ This specification provides **process-lifetime publication safety**:
   confirming equivalent content.
 - No durable publication journal is created.
 
-Durable cross-process fencing is outside this specification and MUST NOT be added implicitly.
-Adding it requires an explicit contract for storage location, private permissions, interprocess
-locking, atomicity and directory durability, versioning, corruption, bounded retention, privacy,
-and cleanup.
+Explicit acceptance of this exact document accepts that restart limitation. Until then GitHub
+publication implementation is blocked. Durable cross-process fencing would require a separate
+accepted contract for storage location, private permissions, interprocess locking, atomicity and
+directory durability, versioning, corruption, bounded retention, privacy, and cleanup. It MUST NOT
+be added implicitly.
 
 ## Interactive runtime and lifecycle
 
@@ -893,9 +820,8 @@ Program and work cancellation scopes are distinct. Controlled shutdown is:
 5. call the coordinator's one bounded shutdown/join operation, which settles retained outcomes,
    escalates owned subprocess groups through `internal/subprocess`, and reaps every directly owned
    child;
-6. write an immutable, format-tagged pending stdout export, then diagnostics, only after the
-   Program is no longer active. The output boundary preflights terminal escaping and size before
-   writing; JSON escaping must preserve valid, semantically equivalent JSON.
+6. write an immutable pending stdout export, then diagnostics, only after the Program is no longer
+   active.
 
 No acknowledgement, grace wait, worker join, pipe drain, child `Wait`, or output write blocks
 `Update`, `View`, or the active terminal. The application reports failure when a worker, direct
@@ -936,10 +862,7 @@ Main default controls are:
 | `] f` / `[ f` | Next/previous file |
 | `] h` / `[ h` | Next/previous hunk |
 | `] c` / `[ c` | Next/previous comment |
-| `/` | Find text in the current file |
-| `g /` | Find text in the visible review |
-| `Ctrl-p` | Find a visible file by path |
-| `n` / `N` | Next/previous accepted text-search result |
+| `/`, `n`, `N` | Search; next/previous result |
 | `c` / `C` | Comment at cursor/on active file |
 | `v` / `V` | Select a line range/hunk |
 | `e` / `d d` | Edit/delete focused comment |
@@ -952,48 +875,11 @@ Main default controls are:
 | `:` | Open command prompt |
 | `q` / `Ctrl-c` | Quit/interrupt |
 
-Comment editing uses `Ctrl-s` to save and `Esc` to cancel. An explicitly configured valid binding
-takes precedence; otherwise `Tab` and `Shift-Tab` are delivered to the focused textarea.
-Every accepted textarea update, including bracketed paste, is synchronized into the domain draft
-before the next message. A rejected byte or domain limit restores the prior editor contents and
-logical cursor while preserving the textarea's returned command. A paste above 64 KiB is rejected
-before widget update, and a minimum-size or blocking overlay suppresses paste mutation of hidden
-editors. Find and command inputs apply the same pre-widget paste bound and transactional byte
-limit.
+Comment editing uses `Ctrl-s` to save, `Tab` and `Shift-Tab` to change kind, and `Esc` to cancel.
 Multi-key chords time out after 750 milliseconds. Numeric repeats range from 1 through 9,999.
 Chord/repeat state resets on context changes, invalid continuation, or timeout. Effective help
-reflects user overrides. Text-find and command input are each limited to 64 KiB; file-find input is
-limited to 4 KiB. Reaching a limit is visible and accepts no further input until the user deletes
-content or cancels.
-Command entry replaces the normal status row with one focused footer input while preserving the
-title and review workspace. `Enter` executes the command and `Esc` restores the normal status row.
-
-Find is one workspace-composited palette with `Current`, `Review`, and `Files` scopes. `/`, `g /`,
-and `Ctrl-p` open those scopes directly; `Tab` and `Shift-Tab` switch scope without discarding the
-query. `Current` searches the active file's changed patch lines. `Review` searches the ordered
-visible-file projection captured when the palette opens, so active filters and hidden-file state
-remain stable for that invocation. Both text scopes use literal, case-sensitive UTF-8 matching and
-start only when `Enter` is pressed. `Files` incrementally fuzzy-matches display paths from the same
-captured projection after a short debounce. It does not invoke `fzf` or another subprocess.
-
-The palette overlays the workspace in a centered bordered panel at 48 by 12 cells or larger and
-uses the whole available canvas below that threshold. Only result rows in its viewport are
-materialized. File matching examines at most 256 files and 64 KiB of display paths per update and
-retains at most the best 256 results; text-search results retain bounded excerpts and preserve
-limited, partial, cancelled, and failed outcomes explicitly. Arrow keys or `Ctrl-p`/`Ctrl-n`
-preview results. For text scopes, the first `Enter` starts a changed-patch search and a later
-`Enter` accepts the selected result. For file scope, `Enter` accepts the selected file. `Esc`
-cancels active work, closes the palette, and restores the exact file, selection, focus, and diff
-viewport from before the palette opened; accepted navigation remains active.
-
-In the comments pane, `j` and `k` change only the selected comment. `Enter` activates that
-selection. `] c` and `[ c` select and activate the next or previous comment in one operation,
-clamping at the first and last comment; they remain available when the comments pane is hidden.
-Activation focuses the diff and reveals the comment's mapped file and line. A range targets its
-inclusive end line. File comments reveal the file at its first patch row. Review comments and
-unmappable or ambiguously mapped remote comments preserve the current diff and report why no jump
-is possible. Stale local comments and outdated remote threads reveal the mapped file at its first
-patch row and report that the exact line cannot be selected.
+reflects user overrides. Search and command-prompt input are each limited to 64 KiB; reaching the
+limit is visible and accepts no further input until the user deletes content or cancels.
 
 The command prompt accepts:
 
@@ -1006,9 +892,6 @@ The command prompt accepts:
 :export
 :json
 :submit
-:resolve-draft local
-:resolve-draft remote
-:resolve-draft base
 :ack-submit
 :help
 :filter <pattern>
@@ -1052,15 +935,6 @@ least 24 columns and a visible comments pane at least 32 columns. Optional label
 secondary metadata, comments, and the tree are removed in that order before the diff falls below
 its useful geometry. Hidden panes retain selection, focus-return target, and scroll identity.
 
-Old-side and new-side line numbers each have a fixed adjacent comment-anchor cell. The cell shows
-`●` exactly when that source line has at least one saved, mapped comment: non-stale local line or
-range comments and non-outdated remote line threads, including resolved threads. Range comments
-anchor at their inclusive end. Drafts, file and review comments, stale local comments, outdated
-remote threads, and missing or ambiguous remote mappings do not produce a line anchor. Wrapped
-continuation rows reserve the cells but leave them blank. Anchor emphasis remains visible without
-color. These fixed cells are rendering chrome and do not count toward the 60- and 100-column
-content-width requirements.
-
 ### 13. Rendering
 
 Frame construction and rendering are proportional to viewport cells plus fixed overscan, not total
@@ -1076,10 +950,7 @@ The renderer:
 - clips before expensive text processing;
 - never emits raw control, escape, or bidirectional-override text from external data;
 - treats invalid UTF-8 paths as displayable escaped bytes while preserving identity;
-- expands tabs to the next four-cell stop;
-- preserves printable UTF-8, including wide characters, combining marks, and grapheme clusters;
-- renders invalid bytes and ASCII controls as visible uppercase `\xNN` escapes and non-ASCII
-  controls and bidirectional overrides as visible uppercase `\u{NNNN}` escapes;
+- handles tabs, wide characters, combining marks, and grapheme boundaries deterministically;
 - bounds work for a single pathological grapheme or line;
 - keeps unified and side-by-side line identity, old/new numbers, hunks, gaps, comments, review
   state, and selections unambiguous;
@@ -1109,8 +980,6 @@ Default externally relevant limits are:
 | Changed files per source | 100,000 |
 | Bytes per path | 4,096 |
 | Total raw path bytes per source | 64 MiB |
-| One raw worktree file | 128 MiB |
-| Normal raw worktree hash batch | 16 MiB, 256 entries, and 1 MiB path input |
 | Patch bytes per file | 64 MiB |
 | Blob bytes per file | 16 MiB |
 | Patch hunks per source operation | 100,000 |
@@ -1207,8 +1076,8 @@ Conformance requires all of the following:
 | Source | Git/GitHub fixture tests, hostile external data, process limits, cancellation, direct-child reaping, contained-group and escaped-descendant outcomes, lazy materialization, and publication reconciliation |
 | Runtime | Admission/claim/cancel/complete races, byte-credit release, readiness/receiver closure, deadlines, late results, retained-outcome settlement, delivery fencing, panic policy, and shutdown ordering |
 | Terminal | Root/child model retention, command capture, key/help ownership, complete `tea.View` fields, every responsive boundary, viewport bounds, Unicode/path safety, monochrome semantics, signal ownership, startup-release fallback, and PTY restoration |
-| Architecture | Go package dependency edges, effect ownership, pure-review imports, public-surface discipline, forbidden duplicate paths, supported-platform checks, dependency pins, and cohesive ownership |
-| Scale | A combined 1,000-file by 10,000-line lazy-materialization fixture, counter-based tests for viewport-proportional work, and retained large-file, large-tree, many-comment, search, and syntax benchmarks |
+| Architecture | Go package dependency edges, effect ownership, pure-review imports, public-surface discipline, forbidden duplicate paths, supported-platform checks, dependency pins, and source-file cohesion |
+| Scale | Counter-based tests for viewport-proportional work plus retained large-file, large-tree, many-comment, search, and syntax benchmarks |
 
 Performance checks require fixed fixtures, recorded environment metadata, repeated samples, and
 reported absolute results. A relative regression threshold is not meaningful without a named
@@ -1217,5 +1086,7 @@ baseline and therefore is not part of this specification.
 `make check` MUST run formatting verification, `go test ./...`, `go test -race ./...`,
 `go vet ./...`, `go build ./cmd/rvw`, and the architecture tests on the host. Linux and macOS
 release evidence additionally requires the platform-specific process and PTY contracts on both
-systems. Release validation MUST run `make check` and `git diff --check` after edits stop. A check
-is reported as passed only when the command ran and exited successfully.
+systems. Before G1 creates the real `cmd/rvw` vertical slice, `make check-g0` runs every listed host
+check except that impossible build; it MUST NOT be satisfied by a placeholder command. Release
+validation MUST run `make check` and `git diff --check` after edits stop. A check is reported as
+passed only when the command ran and exited successfully.

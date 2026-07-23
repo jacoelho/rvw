@@ -4,96 +4,151 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
-	"unicode/utf8"
 
 	"github.com/jacoelho/rvw/internal/review"
 	"github.com/jacoelho/rvw/internal/subprocess"
 )
 
-// CheckPublication performs the check publication operation.
-func (service *Service) CheckPublication(
+// PublicationCheckAcquisition is the validated network phase of preflight.
+type PublicationCheckAcquisition struct {
+	target    review.PublicationTarget
+	fresh     review.PendingReview
+	staleHead bool
+	hasFresh  bool
+	valid     bool
+}
+
+// PublicationCheckMode states whether preflight must reacquire an existing
+// pending review before local preparation can be finalized.
+type PublicationCheckMode uint8
+
+const (
+	// PublicationCheckNew checks a publication with no captured pending review.
+	PublicationCheckNew PublicationCheckMode = iota + 1
+	// PublicationCheckPendingContinuation reacquires the captured pending review.
+	PublicationCheckPendingContinuation
+)
+
+// FreshPending returns the immutable pending capture requiring CPU reconciliation.
+func (acquisition PublicationCheckAcquisition) FreshPending() (review.PendingReview, bool) {
+	return acquisition.fresh, acquisition.valid && acquisition.hasFresh
+}
+
+// AcquirePublicationCheck performs only network acquisition and validation.
+func (service *Service) AcquirePublicationCheck(
 	ctx context.Context,
-	document *Document,
-	prepared review.PreparedPublication,
-) (*review.CheckedPublication, error) {
-	if document == nil || prepared.Source() != document.Snapshot().SourceID() {
-		return nil, sourceFailure(
+	target PublicationTarget,
+	options review.PublicationOptions,
+	mode PublicationCheckMode,
+	runCPU CPUAdmission,
+) (PublicationCheckAcquisition, error) {
+	if mode != PublicationCheckNew && mode != PublicationCheckPendingContinuation {
+		return PublicationCheckAcquisition{}, sourceFailure(
+			OperationCheckPublication,
+			errors.New("publication check mode is invalid"),
+		)
+	}
+	if runCPU == nil {
+		return PublicationCheckAcquisition{}, sourceFailure(
+			OperationCheckPublication,
+			errors.New("publication check CPU admission is unavailable"),
+		)
+	}
+	if target.source == 0 {
+		return PublicationCheckAcquisition{}, sourceFailure(
 			OperationCheckPublication,
 			errors.New("publication source revision is stale"),
 		)
 	}
-	expected, ok := document.PullRequest()
-	if !ok {
-		return nil, sourceFailure(
-			OperationCheckPublication,
-			errors.New("publication is available only for a GitHub pull request"),
-		)
-	}
-	current, err := service.pullRequestMetadata(ctx, expected.Repository, expected.Number)
+	current, err := service.pullRequestMetadata(ctx, target.repository, target.number, runCPU)
 	if err != nil {
-		return nil, sourceFailure(OperationCheckPublication, err)
+		return PublicationCheckAcquisition{}, sourceFailure(OperationCheckPublication, err)
 	}
 	currentDetails, err := validatePullRequestPayload(
-		expected.Repository,
-		expected.Number,
+		target.repository,
+		target.number,
 		current,
 	)
 	if err != nil {
-		return nil, sourceFailure(OperationCheckPublication, err)
+		return PublicationCheckAcquisition{}, sourceFailure(OperationCheckPublication, err)
 	}
-	if currentDetails.Repository != expected.Repository ||
-		currentDetails.Number != expected.Number {
-		return nil, sourceFailure(
+	if currentDetails.Repository != target.repository ||
+		currentDetails.Number != target.number {
+		return PublicationCheckAcquisition{}, sourceFailure(
 			OperationCheckPublication,
 			errors.New("GitHub publication target identity changed"),
 		)
 	}
-	staleHead := currentDetails.BaseOID != expected.BaseOID ||
-		currentDetails.HeadOID != expected.HeadOID
+	staleHead := currentDetails.BaseOID != target.base ||
+		currentDetails.HeadOID != target.head
 	if staleHead &&
-		!prepared.Options().Policies().Has(review.PublicationAllowStaleHead) {
-		return nil, sourceFailure(
+		!options.Policies().Has(review.PublicationAllowStaleHead) {
+		return PublicationCheckAcquisition{}, sourceFailure(
 			OperationCheckPublication,
 			errors.New("GitHub pull request revision changed before publication"),
 		)
 	}
-	if _, continuing := prepared.PendingPublication(); continuing {
-		fresh, status, detail := service.loadPendingReview(ctx, currentDetails)
+	acquisition := PublicationCheckAcquisition{
+		staleHead: staleHead,
+		valid:     true,
+	}
+	checkedTarget, err := review.NewPublicationTarget(review.PublicationTargetDescriptor{
+		Repository:  target.repository.String(),
+		PullRequest: target.number.Uint64(),
+		Base:        target.base,
+		Head:        target.head,
+	})
+	if err != nil {
+		return PublicationCheckAcquisition{}, sourceFailure(OperationCheckPublication, err)
+	}
+	acquisition.target = checkedTarget
+	if mode == PublicationCheckPendingContinuation {
+		fresh, status, detail := service.loadPendingReview(ctx, currentDetails, runCPU)
+		if cancellationErr := context.Cause(ctx); cancellationErr != nil {
+			return PublicationCheckAcquisition{}, sourceFailure(OperationCheckPublication, cancellationErr)
+		}
 		if status != review.PendingReviewReady {
 			message := "GitHub pending review is " + status.String()
 			if !detail.IsEmpty() {
 				message += ": " + detail.String()
 			}
-			return nil, sourceFailure(OperationCheckPublication, errors.New(message))
+			return PublicationCheckAcquisition{}, sourceFailure(OperationCheckPublication, errors.New(message))
 		}
-		prepared, err = prepared.ReconcilePendingPublication(fresh)
-		if err != nil {
-			return nil, sourceFailure(OperationCheckPublication, err)
-		}
+		acquisition.fresh = fresh
+		acquisition.hasFresh = true
 	}
-	target, err := review.NewPublicationTarget(review.PublicationTargetDescriptor{
-		Repository:  expected.Repository.String(),
-		PullRequest: expected.Number.Uint64(),
-		Base:        expected.BaseOID,
-		Head:        expected.HeadOID,
-	})
-	if err != nil {
-		return nil, sourceFailure(OperationCheckPublication, err)
+	return acquisition, nil
+}
+
+// FinishPublicationCheck binds CPU-reconciled preparation to the acquired target.
+func FinishPublicationCheck(
+	acquisition PublicationCheckAcquisition,
+	prepared review.PreparedPublication,
+) (*review.CheckedPublication, error) {
+	return FinishPublicationCheckCancellable(nil, acquisition, prepared)
+}
+
+// FinishPublicationCheckCancellable binds CPU-reconciled preparation to the
+// acquired target while keeping payload encoding cancellable.
+func FinishPublicationCheckCancellable(
+	cancelled func() error,
+	acquisition PublicationCheckAcquisition,
+	prepared review.PreparedPublication,
+) (*review.CheckedPublication, error) {
+	if !acquisition.valid || prepared.Source() == 0 {
+		return nil, sourceFailure(OperationCheckPublication, errors.New("publication preflight is invalid"))
 	}
 	marker, err := newPublicationMarker()
 	if err != nil {
 		return nil, sourceFailure(OperationCheckPublication, err)
 	}
-	checked, err := review.TakeCheckedPublication(review.CheckedPublicationDescriptor{
-		Target:    target,
+	checked, err := review.TakeCheckedPublicationCancellable(cancelled, review.CheckedPublicationDescriptor{
+		Target:    acquisition.target,
 		Marker:    marker,
-		StaleHead: staleHead,
+		StaleHead: acquisition.staleHead,
 	}, prepared)
 	if err != nil {
 		return nil, sourceFailure(OperationCheckPublication, err)
@@ -101,22 +156,51 @@ func (service *Service) CheckPublication(
 	return checked, nil
 }
 
+// CheckPublication performs the compatibility preflight path synchronously.
+func (service *Service) CheckPublication(
+	ctx context.Context,
+	target PublicationTarget,
+	prepared review.PreparedPublication,
+) (*review.CheckedPublication, error) {
+	mode := PublicationCheckNew
+	if prepared.ContinuesPendingPublication() {
+		mode = PublicationCheckPendingContinuation
+	}
+	acquisition, err := service.AcquirePublicationCheck(
+		ctx,
+		target,
+		prepared.Options(),
+		mode,
+		directCPUAdmission,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if fresh, ok := acquisition.FreshPending(); ok {
+		prepared, err = prepared.ReconcilePendingPublication(fresh)
+		if err != nil {
+			return nil, sourceFailure(OperationCheckPublication, err)
+		}
+	}
+	return FinishPublicationCheck(acquisition, prepared)
+}
+
 func newPublicationMarker() (review.PublicationMarker, error) {
 	var attempt [16]byte
 	if _, err := rand.Read(attempt[:]); err != nil {
 		return "", fmt.Errorf("generate publication identity: %w", err)
 	}
-	return review.NewPublicationMarker(
-		"<!-- rvw-publication:v1:" + hex.EncodeToString(attempt[:]) + " -->",
-	)
+	return review.NewPublicationMarkerFromAttempt(attempt), nil
 }
 
 // PublicationCommit represents publication commit.
 type PublicationCommit struct {
-	Pending      *review.PendingReview
-	Detail       review.OperationDetail
-	RemoteReview uint64
-	Disposition  review.PublicationDisposition
+	Pending        *review.PendingReview
+	Detail         review.OperationDetail
+	RemoteReview   uint64
+	Disposition    review.PublicationDisposition
+	PendingPhase   review.PendingPublicationPhase
+	PendingRefresh review.PendingRefreshAcquisition
 }
 
 // Publish performs the publish operation.
@@ -131,7 +215,34 @@ func (service *Service) Publish(
 		}
 	}
 	if checked.Pending() {
-		return service.publishPendingReview(ctx, checked)
+		execution, err := PreparePendingPublicationExecution(ctx, checked)
+		if err != nil {
+			return PublicationCommit{
+				Disposition: review.PublicationDispositionFailedBeforeCommit,
+				Detail:      boundedOperationDetail(err.Error()),
+			}
+		}
+		defer execution.Close()
+		step := service.AcquirePendingPublication(ctx, execution, directCPUAdmission)
+		for {
+			switch step.Kind() {
+			case PendingPublicationStepAcquired:
+				step = step.Finish(ctx)
+			case PendingPublicationStepContinue:
+				if err := step.Advance(); err != nil {
+					return unknownPendingMutation(err)
+				}
+				step = service.AcquirePendingPublication(ctx, execution, directCPUAdmission)
+			case PendingPublicationStepTerminal:
+				commit, err := step.TakeCommit()
+				if err != nil {
+					return unknownPendingMutation(err)
+				}
+				return commit
+			default:
+				return unknownPendingMutation(errors.New("pending publication step is invalid"))
+			}
+		}
 	}
 	target := checked.Target()
 	endpoint := "repos/" + target.Repository() + "/pulls/" +
@@ -148,7 +259,7 @@ func (service *Service) Publish(
 		Env:             map[string]string{localeAllKey: "C", localeLanguageKey: "C", ghPromptDisabled: "1"},
 		Stdin:           []byte(checked.Payload()),
 		StdoutLimit:     1 << 20,
-		StderrLimit:     1 << 20,
+		StderrLimit:     MaxCommandStderrBytes,
 		OperationDetail: "gh api publication",
 	})
 	if err != nil {
@@ -161,29 +272,126 @@ func (service *Service) Publish(
 			Detail:      boundedOperationDetail(err.Error()),
 		}
 	}
-	if !utf8.Valid(result.Stdout) {
+	reviewID, err := decodePublicationReviewID(ctx, result.Stdout)
+	if err != nil {
 		return PublicationCommit{
 			Disposition: review.PublicationDispositionUnknown,
-			Detail:      boundedOperationDetail("GitHub publication response is not valid UTF-8"),
-		}
-	}
-	var response struct {
-		ID uint64 `json:"id"`
-	}
-	if err := json.Unmarshal(result.Stdout, &response); err != nil || response.ID == 0 {
-		detail := "GitHub publication response has no review identity"
-		if err != nil {
-			detail = "decode GitHub publication response: " + err.Error()
-		}
-		return PublicationCommit{
-			Disposition: review.PublicationDispositionUnknown,
-			Detail:      boundedOperationDetail(detail),
+			Detail:      boundedOperationDetail("decode GitHub publication response: " + err.Error()),
 		}
 	}
 	return PublicationCommit{
 		Disposition:  review.PublicationDispositionCommitted,
-		RemoteReview: response.ID,
+		RemoteReview: reviewID,
 	}
+}
+
+type publicationReviewResponseCollector struct {
+	scope      *jsonDecodeScope
+	path       jsonPathTracker
+	duplicates jsonDuplicateGuard
+	id         uint64
+	root       bool
+	hasID      bool
+}
+
+func decodePublicationReviewID(ctx context.Context, encoded []byte) (uint64, error) {
+	ledger, err := newSourceLedger(int64(cap(encoded)))
+	if err != nil {
+		return 0, err
+	}
+	metrics, err := inspectJSONWithCPU(
+		ctx,
+		bytes.NewReader(encoded),
+		maxGitHubJSONTokenBytes,
+		directCPUAdmission,
+		ledger,
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer metrics.release(ledger)
+	scope, err := newJSONDecodeScope(ledger)
+	if err != nil {
+		return 0, err
+	}
+	if err := scope.reserve(jsonDecodedCollectorBytes); err != nil {
+		scope.Close()
+		return 0, err
+	}
+	collector := publicationReviewResponseCollector{scope: scope}
+	defer collector.close()
+	if err := walkJSONFrames(
+		ctx,
+		bytes.NewReader(encoded),
+		directCPUAdmission,
+		ledger,
+		metrics,
+		collector.consume,
+	); err != nil {
+		return 0, err
+	}
+	if !collector.root || !collector.hasID || collector.id == 0 || collector.path.depth != 0 {
+		return 0, errors.New("GitHub publication response has no review identity")
+	}
+	return collector.id, nil
+}
+
+func (collector *publicationReviewResponseCollector) consume(frame jsonFrame) error {
+	switch frame.Kind {
+	case jsonObjectKey:
+		if err := collector.path.keyFrame(collector.scope, frame); err != nil {
+			return err
+		}
+		return collector.duplicates.key(&collector.path)
+	case jsonObjectStart:
+		if err := collector.path.start(frame.Kind, 0); err != nil {
+			return err
+		}
+		collector.duplicates.startObject(collector.path.depth)
+		if collector.path.depth == 1 {
+			collector.root = true
+		}
+		if collector.path.depth == 2 && collector.path.stack[1].name == "id" {
+			return errors.New("GitHub publication review identity is not a scalar")
+		}
+		return nil
+	case jsonArrayStart:
+		if err := collector.path.start(frame.Kind, frame.Count); err != nil {
+			return err
+		}
+		if collector.path.depth == 1 ||
+			collector.path.depth == 2 && collector.path.stack[1].name == "id" {
+			return errors.New("GitHub publication response has an invalid structure")
+		}
+		return nil
+	case jsonObjectEnd:
+		collector.duplicates.endObject(collector.path.depth)
+		return collector.path.end(frame.Kind)
+	case jsonArrayEnd:
+		return collector.path.end(frame.Kind)
+	default:
+		return collector.path.scalar(func(value jsonPathValue) error {
+			if collector.path.depth != 1 || value.name != "id" {
+				return nil
+			}
+			id, err := jsonUint64Value(frame)
+			if err != nil {
+				return err
+			}
+			collector.id = id
+			collector.hasID = true
+			return nil
+		})
+	}
+}
+
+func (collector *publicationReviewResponseCollector) close() {
+	if collector == nil {
+		return
+	}
+	collector.path.close()
+	collector.scope.Close()
+	collector.scope = nil
 }
 
 // ReconcilePublication performs the reconcile publication operation.
@@ -191,163 +399,77 @@ func (service *Service) ReconcilePublication(
 	ctx context.Context,
 	request review.ReconciliationRequest,
 ) review.ReconciliationResult {
-	result := review.ReconciliationResult{
-		Operation:   request.Operation,
-		Workspace:   request.Workspace,
-		Source:      request.Source,
-		Disposition: review.ReconciliationStillUnknown,
+	if _, _, ok := request.PendingContinuation(); ok {
+		acquisition, err := service.AcquirePendingPublicationReconciliation(
+			ctx,
+			request,
+			directCPUAdmission,
+		)
+		if err != nil {
+			return failedReconciliation(request, err)
+		}
+		defer acquisition.Close()
+		return acquisition.Finish(ctx)
+	}
+	acquisition, err := service.AcquirePublicationReconciliation(ctx, request)
+	if err != nil {
+		return failedReconciliation(request, err)
+	}
+	return acquisition.Finish(ctx, directCPUAdmission)
+}
+
+// PublicationReconciliationAcquisition owns one bounded GitHub history spool
+// awaiting cancellable CPU validation.
+type PublicationReconciliationAcquisition struct {
+	spool   *commandSpool
+	request review.ReconciliationRequest
+}
+
+// AcquirePublicationReconciliation performs only the non-pending network
+// acquisition phase.
+func (service *Service) AcquirePublicationReconciliation(
+	ctx context.Context,
+	request review.ReconciliationRequest,
+) (*PublicationReconciliationAcquisition, error) {
+	if _, _, pending := request.PendingContinuation(); pending || request.Operation == 0 ||
+		request.Workspace == 0 || request.Source == 0 || request.Marker == "" {
+		return nil, errors.New("publication reconciliation request is invalid")
 	}
 	target := request.Target
 	endpoint := "repos/" + target.Repository() + "/pulls/" +
 		strconv.FormatUint(target.PullRequest(), 10) + "/reviews"
-	command, err := service.runGH(
+	spool, err := service.runGHToSpool(
 		ctx,
 		[]string{ghAPI, endpoint, ghPaginate, ghSlurp},
 		review.MaxPublicationBytes,
 	)
 	if err != nil {
-		result.Detail = boundedOperationDetail(err.Error())
-		return result
+		return nil, err
 	}
-	if !utf8.Valid(command.Stdout) {
-		result.Detail = boundedOperationDetail("GitHub review history is not valid UTF-8")
-		return result
-	}
-	bodies, err := decodeReviewBodies(command.Stdout)
-	if err != nil {
-		result.Detail = boundedOperationDetail(err.Error())
-		return result
-	}
-	matches := 0
-	for _, body := range bodies {
-		matches += strings.Count(body, request.Marker.String())
-		if matches > 1 {
-			result.Detail = boundedOperationDetail("publication marker is ambiguous in GitHub review history")
-			return result
-		}
-	}
-	if matches == 1 {
-		result.Disposition = review.ReconciliationCommitted
-		result.Detail = boundedOperationDetail("publication marker confirmed")
-	} else {
-		result.Disposition = review.ReconciliationNotCommitted
-		result.Detail = boundedOperationDetail("publication marker confirmed absent")
-	}
-	return result
+	return &PublicationReconciliationAcquisition{spool: spool, request: request}, nil
 }
 
-func decodeReviewBodies(value []byte) ([]string, error) {
-	var pages [][]reviewHistoryItem
-	if err := json.Unmarshal(value, &pages); err != nil {
-		return nil, fmt.Errorf("decode GitHub review history: %w", err)
+// Close releases an unfinished reconciliation acquisition.
+func (acquisition *PublicationReconciliationAcquisition) Close() error {
+	if acquisition == nil || acquisition.spool == nil {
+		return nil
 	}
-	if len(pages) == 0 {
-		return nil, errors.New("GitHub review history contains no pagination result")
-	}
-	bodies := make([]string, 0)
-	seen := make(map[uint64]struct{})
-	for pageIndex, page := range pages {
-		if page == nil {
-			return nil, fmt.Errorf(
-				"GitHub review history page %d is null",
-				pageIndex+1,
-			)
-		}
-		for itemIndex, item := range page {
-			if item.id == nil {
-				return nil, fmt.Errorf(
-					"GitHub review history page %d item %d has no identity",
-					pageIndex+1,
-					itemIndex+1,
-				)
-			}
-			var id uint64
-			if err := json.Unmarshal(item.id, &id); err != nil || id == 0 {
-				return nil, fmt.Errorf(
-					"GitHub review history page %d item %d has an invalid identity",
-					pageIndex+1,
-					itemIndex+1,
-				)
-			}
-			if _, exists := seen[id]; exists {
-				return nil, fmt.Errorf("GitHub review history repeats review %d", id)
-			}
-			seen[id] = struct{}{}
-
-			if item.body == nil {
-				return nil, fmt.Errorf(
-					"GitHub review history page %d item %d has no body",
-					pageIndex+1,
-					itemIndex+1,
-				)
-			}
-			rawBody := bytes.TrimSpace(item.body)
-			if len(rawBody) == 0 || rawBody[0] != '"' {
-				return nil, fmt.Errorf(
-					"GitHub review history page %d item %d has an invalid body",
-					pageIndex+1,
-					itemIndex+1,
-				)
-			}
-			var body string
-			if err := json.Unmarshal(rawBody, &body); err != nil {
-				return nil, fmt.Errorf(
-					"GitHub review history page %d item %d has an invalid body",
-					pageIndex+1,
-					itemIndex+1,
-				)
-			}
-			bodies = append(bodies, body)
-		}
-	}
-	return bodies, nil
+	err := acquisition.spool.Close()
+	acquisition.spool = nil
+	return err
 }
 
-type reviewHistoryItem struct {
-	id   json.RawMessage
-	body json.RawMessage
-}
-
-// UnmarshalJSON performs the unmarshal json operation.
-func (item *reviewHistoryItem) UnmarshalJSON(value []byte) error {
-	decoder := json.NewDecoder(bytes.NewReader(value))
-	token, err := decoder.Token()
-	if err != nil {
-		return err
+func failedReconciliation(
+	request review.ReconciliationRequest,
+	err error,
+) review.ReconciliationResult {
+	return review.ReconciliationResult{
+		Operation:   request.Operation,
+		Workspace:   request.Workspace,
+		Source:      request.Source,
+		Disposition: review.ReconciliationStillUnknown,
+		Detail:      boundedOperationDetail(err.Error()),
 	}
-	delimiter, ok := token.(json.Delim)
-	if !ok || delimiter != '{' {
-		return errors.New("GitHub review history item is not an object")
-	}
-	seen := make(map[string]struct{})
-	for decoder.More() {
-		fieldToken, tokenErr := decoder.Token()
-		if tokenErr != nil {
-			return tokenErr
-		}
-		name, ok := fieldToken.(string)
-		if !ok {
-			return errors.New("GitHub review history item key is not a string")
-		}
-		if _, duplicate := seen[name]; duplicate {
-			return fmt.Errorf("GitHub review history item repeats field %q", name)
-		}
-		seen[name] = struct{}{}
-		var raw json.RawMessage
-		if decodeErr := decoder.Decode(&raw); decodeErr != nil {
-			return decodeErr
-		}
-		switch name {
-		case "id":
-			item.id = raw
-		case graphqlBody:
-			item.body = raw
-		}
-	}
-	if token, err = decoder.Token(); err != nil || token != json.Delim('}') {
-		return errors.New("GitHub review history item is not terminated")
-	}
-	return nil
 }
 
 func boundedOperationDetail(value string) review.OperationDetail {

@@ -1,7 +1,9 @@
 package source
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -43,6 +45,27 @@ func TestDecodeRemoteThreadPagesRequiresExactUTF8SlurpedEnvelope(t *testing.T) {
 	}
 }
 
+func TestDecodeRemoteThreadPagesRejectsNonObjectAfterValidPage(t *testing.T) {
+	valid := `{"data":{},"errors":[]}`
+	for _, suffix := range []string{"null", "[]", "true"} {
+		if _, err := decodeRemoteThreadPages([]byte("[" + valid + "," + suffix + "]")); err == nil {
+			t.Fatalf("non-object page %s after a valid page was accepted", suffix)
+		}
+	}
+}
+
+func TestDecodeRemoteThreadPagesAllowsSparseRootBeyondNestedLimit(t *testing.T) {
+	page := `{"data":{},"errors":[]}`
+	encoded := "[" + strings.Repeat(page+",", 100) + page + "]"
+	pages, err := decodeRemoteThreadPages([]byte(encoded))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pages) != 101 {
+		t.Fatalf("pages = %d, want 101", len(pages))
+	}
+}
+
 func TestRemoteThreadTargetRejectsGraphQLErrorsAndRevisionDrift(t *testing.T) {
 	details := remoteThreadDetailsForTest(t)
 	var page remoteThreadPage
@@ -55,7 +78,7 @@ func TestRemoteThreadTargetRejectsGraphQLErrorsAndRevisionDrift(t *testing.T) {
 	if err := validateRemoteThreadTarget(page, details); err != nil {
 		t.Fatal(err)
 	}
-	page.Errors = []json.RawMessage{json.RawMessage(`{"message":"partial"}`)}
+	page.Errors = make(githubErrors, 1)
 	if err := validateRemoteThreadTarget(page, details); err == nil {
 		t.Fatal("GraphQL errors unexpectedly accepted")
 	}
@@ -98,6 +121,59 @@ func TestLoadRemoteThreadsFetchesAllPagesOfNestedComments(t *testing.T) {
 	comments := thread.Comments(0, thread.CommentCount())
 	if comments[0].ID() != "comment-1" || comments[1].ID() != "comment-2" {
 		t.Fatalf("comment IDs = %q, %q", comments[0].ID(), comments[1].ID())
+	}
+}
+
+func TestLoadRemoteThreadsDefersContinuationIOUntilAfterCPUAdmission(t *testing.T) {
+	details := remoteThreadDetailsForTest(t)
+	topLevel := remoteThreadResponseForTest(
+		details,
+		`{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[`+
+			`{"id":"thread-1","isResolved":false,"isOutdated":false,`+
+			`"path":"reviewed.go","line":12,"startLine":null,"diffSide":"RIGHT",`+
+			`"comments":{"pageInfo":{"hasNextPage":true,"endCursor":"comments-1"},`+
+			`"nodes":[`+remoteCommentJSONForTest("comment-1", "first")+`]}}]}`,
+	)
+	nested := remoteCommentResponseForTest(
+		details,
+		"thread-1",
+		`{"hasNextPage":false,"endCursor":null}`,
+		`[`+remoteCommentJSONForTest("comment-2", "second")+`]`,
+	)
+	service := newRemoteThreadTestService(t, topLevel, nested)
+	marker := filepath.Join(t.TempDir(), "cpu-active")
+	t.Setenv("RVW_CPU_MARKER", marker)
+	active := false
+	admit := func(ctx context.Context, work func() error) error {
+		if active {
+			return errors.New("CPU admission re-entered")
+		}
+		if err := context.Cause(ctx); err != nil {
+			return err
+		}
+		active = true
+		if err := os.WriteFile(marker, nil, 0o600); err != nil {
+			return err
+		}
+		defer func() {
+			active = false
+			_ = os.Remove(marker)
+		}()
+		return work()
+	}
+	ledger, err := newSourceLedger(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	threads, err := service.loadRemoteThreadsWithLedgerCPU(t.Context(), details, ledger, admit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(threads) != 1 {
+		t.Fatalf("threads = %d, want 1", len(threads))
+	}
+	if threads[0].CommentCount() != 2 {
+		t.Fatalf("comments = %d, want 2", threads[0].CommentCount())
 	}
 }
 
@@ -252,7 +328,7 @@ func TestLoadRemainingRemoteCommentsRejectsRepeatedCursor(t *testing.T) {
 	service := newRemoteThreadTestService(t, "", nested)
 	hasNextPage := true
 	endCursor := "comments-1"
-	initialComments := []remoteCommentNode{}
+	initialComments := remoteCommentNodes{}
 	initial := &remoteCommentConnection{
 		PageInfo: &remotePageInfo{
 			HasNextPage: &hasNextPage,
@@ -261,15 +337,312 @@ func TestLoadRemainingRemoteCommentsRejectsRepeatedCursor(t *testing.T) {
 		Nodes: &initialComments,
 	}
 
+	ledger, err := newSourceLedger(0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err := service.loadRemainingRemoteComments(
 		t.Context(),
 		details,
 		"thread-1",
 		initial,
 		review.MaxRemoteThreadBytes,
+		ledger,
+		directCPUAdmission,
 	); err == nil || !strings.Contains(err.Error(), "cursor repeated") {
 		t.Fatalf("repeated cursor error = %v", err)
 	}
+}
+
+func TestRemoteCommentPagesShareOneConstructionLedger(t *testing.T) {
+	details := remoteThreadDetailsForTest(t)
+	first := remoteCommentPageForTest(
+		t,
+		remoteCommentResponsePageForTest(
+			details,
+			"thread-1",
+			`{"hasNextPage":true,"endCursor":"comments-2"}`,
+			`[`+remoteCommentJSONForTest("comment-2", "second")+`]`,
+		),
+	)
+	second := remoteCommentPageForTest(
+		t,
+		remoteCommentResponsePageForTest(
+			details,
+			"thread-1",
+			`{"hasNextPage":false,"endCursor":null}`,
+			`[`+remoteCommentJSONForTest("comment-3", "third")+`]`,
+		),
+	)
+	retainedBytes := remoteCommentPayloadBytes(*first.Data.Node.Comments.Nodes) +
+		remoteCommentPayloadBytes(*second.Data.Node.Comments.Nodes)
+	wantRetained := int64(16)*remoteCommentPayloadMetadataBytes + retainedBytes
+	exact := wantRetained + int64(64+len("comments-2"))
+
+	for _, test := range []struct {
+		name    string
+		limit   int64
+		wantErr bool
+	}{
+		{name: "exact", limit: exact},
+		{name: "one over", limit: exact - 1, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ledger, err := newSourceLedgerWithLimit(test.limit, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			comments := make(remoteCommentNodes, 0)
+			seen := make(map[string]struct{})
+			retained := int64(0)
+			storage := int64(0)
+			charge, err := collectRemoteCommentPage(
+				first,
+				remotePageIntermediate,
+				details,
+				"thread-1",
+				&comments,
+				seen,
+				ledger,
+				&storage,
+				&retained,
+			)
+			if err == nil {
+				err = ledger.reserve(charge)
+				retained += remoteCommentPayloadBytes(*first.Data.Node.Comments.Nodes)
+			}
+			if err == nil {
+				charge, err = collectRemoteCommentPage(
+					second,
+					remotePageFinal,
+					details,
+					"thread-1",
+					&comments,
+					seen,
+					ledger,
+					&storage,
+					&retained,
+				)
+				if err == nil {
+					err = ledger.reserve(charge)
+					retained += remoteCommentPayloadBytes(*second.Data.Node.Comments.Nodes)
+				}
+			}
+			if test.wantErr != (err != nil) {
+				t.Fatalf("error = %v, want error %v", err, test.wantErr)
+			}
+			if !test.wantErr && (ledger.used != exact || retained != exact) {
+				t.Fatalf(
+					"used=%d retained=%d, want %d and %d",
+					ledger.used,
+					retained,
+					exact,
+					exact,
+				)
+			}
+		})
+	}
+}
+
+func TestRemoteThreadConstructionAccountingStopsNearEnd(t *testing.T) {
+	node := remoteThreadNodeForCancellationTest(513)
+	cause := errors.New("stop remote thread accounting")
+	for _, cancelAt := range []int{3, 4} {
+		checks := 0
+		domainBytes, identityBytes, err := remoteThreadNodeConstructionBytes(func() error {
+			checks++
+			if checks == cancelAt {
+				return cause
+			}
+			return nil
+		}, node)
+		if !errors.Is(err, cause) {
+			t.Fatalf("cancel at %d error = %v", cancelAt, err)
+		}
+		if checks != cancelAt || domainBytes != 0 || identityBytes != 0 {
+			t.Fatalf(
+				"cancel at %d: checks=%d domain=%d identities=%d",
+				cancelAt,
+				checks,
+				domainBytes,
+				identityBytes,
+			)
+		}
+	}
+}
+
+func TestRemoteThreadDTOValidationStopsBeforeLastComment(t *testing.T) {
+	node := remoteThreadNodeForCancellationTest(3)
+	cause := errors.New("stop remote thread DTO validation")
+	for _, cancelAt := range []int{4, 5} {
+		checks := 0
+		thread, err := validateRemoteThreadCancellable(func() error {
+			checks++
+			if checks == cancelAt {
+				return cause
+			}
+			return nil
+		}, node)
+		if !errors.Is(err, cause) {
+			t.Fatalf("cancel at %d error = %v", cancelAt, err)
+		}
+		if checks != cancelAt || thread.CommentCount() != 0 {
+			t.Fatalf(
+				"cancel at %d: checks=%d comments=%d",
+				cancelAt,
+				checks,
+				thread.CommentCount(),
+			)
+		}
+	}
+}
+
+func TestRemoteThreadGlobalIdentityInsertionStopsAtFinalCheck(t *testing.T) {
+	thread, err := validateRemoteThread(remoteThreadNodeForCancellationTest(3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	collector := remoteThreadCollector{
+		ctx:        t.Context(),
+		threadIDs:  make(map[string]struct{}),
+		commentIDs: make(map[string]struct{}),
+	}
+	cause := errors.New("stop remote thread identity insertion")
+	checks := 0
+	err = collector.installIdentities(func() error {
+		checks++
+		if checks == 4 {
+			return cause
+		}
+		return nil
+	}, thread)
+	if !errors.Is(err, cause) {
+		t.Fatalf("cancellation error = %v", err)
+	}
+	if checks != 4 {
+		t.Fatalf("cancellation checks = %d, want 4", checks)
+	}
+}
+
+func TestRemoteThreadInstallationAccountingStopsNearEnd(t *testing.T) {
+	thread, err := validateRemoteThread(remoteThreadNodeForCancellationTest(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	threads := make([]review.RemoteThread, 513)
+	for index := range threads {
+		threads[index] = thread
+	}
+	cause := errors.New("stop remote thread installation accounting")
+	for _, cancelAt := range []int{3, 4} {
+		checks := 0
+		scratch, retained, err := remoteThreadInstallationBytesCancellable(
+			func() error {
+				checks++
+				if checks == cancelAt {
+					return cause
+				}
+				return nil
+			},
+			review.Snapshot{},
+			threads,
+		)
+		if !errors.Is(err, cause) {
+			t.Fatalf("cancel at %d error = %v", cancelAt, err)
+		}
+		if checks != cancelAt || scratch != 0 || retained != 0 {
+			t.Fatalf(
+				"cancel at %d: checks=%d scratch=%d retained=%d",
+				cancelAt,
+				checks,
+				scratch,
+				retained,
+			)
+		}
+	}
+}
+
+func TestRemoteThreadCollectorDiscardsStateAndCheckpointRollsBack(t *testing.T) {
+	const initialBytes = int64(17)
+	ledger, err := newSourceLedgerWithLimit(maxSourceConstructionBytes, initialBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := ledger.checkpoint()
+	collector := remoteThreadCollector{
+		ctx:        t.Context(),
+		threadIDs:  make(map[string]struct{}),
+		commentIDs: map[string]struct{}{"comment-1": {}},
+		ledger:     ledger,
+		runCPU:     directCPUAdmission,
+	}
+	err = collector.addNode(remoteThreadNodeForCancellationTest(2))
+	checkpoint.rollback()
+	if err == nil || !strings.Contains(err.Error(), "duplicate identity") {
+		t.Fatalf("collector error = %v", err)
+	}
+	if !collector.poisoned || collector.domainBytes != 0 || len(collector.threads) != 0 {
+		t.Fatalf(
+			"poisoned=%t domain=%d threads=%d",
+			collector.poisoned,
+			collector.domainBytes,
+			len(collector.threads),
+		)
+	}
+	if ledger.used != initialBytes {
+		t.Fatalf("ledger used = %d, want %d", ledger.used, initialBytes)
+	}
+}
+
+func TestRemoteCommentRejectsOversizedTimestampAndURLBeforeParsing(t *testing.T) {
+	comment := (*remoteThreadNodeForCancellationTest(1).Comments.Nodes)[0]
+	comment.CreatedAt = strings.Repeat("x", int(review.MaxPathBytes)+1)
+	if _, err := validateRemoteComment(comment); err == nil ||
+		!strings.Contains(err.Error(), "timestamp") {
+		t.Fatalf("oversized timestamp error = %v", err)
+	}
+
+	comment = (*remoteThreadNodeForCancellationTest(1).Comments.Nodes)[0]
+	comment.URL = strings.Repeat("x", (16<<10)+1)
+	if _, err := validateRemoteComment(comment); err == nil ||
+		!strings.Contains(err.Error(), "URL") {
+		t.Fatalf("oversized URL error = %v", err)
+	}
+}
+
+func remoteThreadNodeForCancellationTest(commentCount int) remoteThreadNode {
+	resolved := false
+	outdated := false
+	hasNextPage := false
+	comments := make(remoteCommentNodes, commentCount)
+	for index := range comments {
+		comments[index] = remoteCommentNode{
+			ID:        fmt.Sprintf("comment-%d", index),
+			Body:      new("body"),
+			CreatedAt: "2026-07-20T12:00:00Z",
+			URL:       "https://github.com/owner/repository/pull/7#discussion_r1",
+		}
+	}
+	return remoteThreadNode{
+		IsResolved: &resolved,
+		IsOutdated: &outdated,
+		Comments: &remoteCommentConnection{
+			PageInfo: &remotePageInfo{HasNextPage: &hasNextPage},
+			Nodes:    &comments,
+		},
+		ID:       "thread",
+		Path:     "reviewed.go",
+		DiffSide: githubSideRight,
+	}
+}
+
+func remoteCommentPageForTest(t *testing.T, encoded string) remoteCommentPage {
+	t.Helper()
+	var page remoteCommentPage
+	if err := json.Unmarshal([]byte(encoded), &page); err != nil {
+		t.Fatal(err)
+	}
+	return page
 }
 
 func TestRemoteCommentTargetRejectsRevisionOrThreadDrift(t *testing.T) {
@@ -418,6 +791,10 @@ func newRemoteThreadTestService(
 	binaryDirectory := t.TempDir()
 	binary := filepath.Join(binaryDirectory, "gh")
 	script := `#!/bin/sh
+if [ -n "$RVW_CPU_MARKER" ] && [ -e "$RVW_CPU_MARKER" ]; then
+	echo 'gh invoked during CPU admission' >&2
+	exit 97
+fi
 for argument in "$@"; do
 	if [ "$argument" = "id=thread-1" ]; then
 		printf '%s' "$RVW_THREAD_NESTED_RESPONSE"

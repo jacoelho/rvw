@@ -3,10 +3,110 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/source"
 )
+
+func TestReloadAcquisitionAndPreparationCommitAtomicallyOffUpdate(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{"a.txt": "changed\n"})
+	waitContext, cancelWait := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelWait()
+	if state := coordinator.WaitReady(waitContext); state != ReadyAvailable {
+		t.Fatalf("patch ready state = %d", state)
+	}
+	_, _ = model.Update(outcomeReadyMsg{state: ReadyAvailable})
+
+	local, ok := model.document.Local()
+	if !ok || local.Repo == nil {
+		t.Fatal("test document has no local repository")
+	}
+	if err := os.WriteFile(
+		filepath.Join(local.Repo.String(), "b.txt"),
+		[]byte("untracked\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	oldSource := model.review.Snapshot().SourceID()
+	oldWorkspace := model.review.WorkspaceRevision()
+	model.startReload()
+	if model.foreground.reloadOperation() == 0 || model.foreground.reloadIsPreparing() {
+		t.Fatalf(
+			"reload acquisition state = operation %d preparing %v",
+			model.foreground.reloadOperation(),
+			model.foreground.reloadIsPreparing(),
+		)
+	}
+
+	for attempts := 0; !model.foreground.reloadIsPreparing() && attempts < 8; attempts++ {
+		if state := coordinator.WaitReady(waitContext); state != ReadyAvailable {
+			t.Fatalf("reload acquisition ready state = %d", state)
+		}
+		outcome, ok := coordinator.ClaimNext()
+		if !ok {
+			t.Fatal("reload acquisition outcome was not claimable")
+		}
+		runCollapseCaptureCommands(t, model, model.applyOutcome(outcome))
+	}
+	if !model.foreground.reloadIsPreparing() {
+		t.Fatal("reload did not enter off-loop reconciliation")
+	}
+	if model.review.Snapshot().SourceID() != oldSource {
+		t.Fatal("source became observable before prepared replacement committed")
+	}
+	var err error
+	model.review, err = model.review.ToggleFileReviewed(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for attempts := 0; model.foreground.reloadOperation() != 0 && attempts < 8; attempts++ {
+		if state := coordinator.WaitReady(waitContext); state != ReadyAvailable {
+			t.Fatalf("reload preparation ready state = %d", state)
+		}
+		outcome, ok := coordinator.ClaimNext()
+		if !ok {
+			t.Fatal("reload preparation outcome was not claimable")
+		}
+		runCollapseCaptureCommands(t, model, model.applyOutcome(outcome))
+	}
+	if model.foreground.reloadOperation() != 0 || model.foreground.reloadIsPreparing() {
+		t.Fatalf(
+			"reload did not settle: operation %d preparing %v",
+			model.foreground.reloadOperation(),
+			model.foreground.reloadIsPreparing(),
+		)
+	}
+	if model.review.Snapshot().SourceID() == oldSource ||
+		model.review.WorkspaceRevision().Uint64() != oldWorkspace.Uint64()+1 ||
+		model.review.Snapshot().FileCount() != 2 {
+		t.Fatalf(
+			"replacement = source %d workspace %d files %d",
+			model.review.Snapshot().SourceID(),
+			model.review.WorkspaceRevision(),
+			model.review.Snapshot().FileCount(),
+		)
+	}
+	if len(model.allFileOrder) != 2 {
+		t.Fatalf("prepared file order length = %d", len(model.allFileOrder))
+	}
+	if !model.review.FileReviewed(0) {
+		t.Fatal("reload retry lost review state changed during preparation")
+	}
+}
+
+func TestSourceConstructionLimitMapsToLimitedOperation(t *testing.T) {
+	err := fmt.Errorf("construction: %w", source.ErrSourceLimited)
+	if status := operationStatusForWorkError(err); status != review.OperationLimited {
+		t.Fatalf("operation status = %s", status)
+	}
+}
 
 func TestPatchAndReloadAdmissionFailureLeaveNoPhantomOperations(t *testing.T) {
 	t.Run("patch", func(t *testing.T) {
@@ -135,7 +235,7 @@ func TestDeferredReloadRejectionResumesSearchAgainstOldReview(t *testing.T) {
 	}
 }
 
-func TestReloadFailureRestoresConcurrentSearchAndPatchAdmission(t *testing.T) {
+func TestReloadFailureRestoresSearchThenPatchAdmission(t *testing.T) {
 	t.Run("acquisition failure", func(t *testing.T) {
 		model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 		settleModelWork(t, model, coordinator)
@@ -154,7 +254,7 @@ func TestReloadFailureRestoresConcurrentSearchAndPatchAdmission(t *testing.T) {
 		model.review = next
 
 		model.failReload(reloadID, nil, errors.New("reload acquisition failed"))
-		assertConcurrentRestoredSearchAndPatch(t, model, coordinator, pending)
+		assertSerializedRestoredSearchAndPatch(t, model, coordinator, pending)
 		settleModelWork(t, model, coordinator)
 	})
 
@@ -170,10 +270,56 @@ func TestReloadFailureRestoresConcurrentSearchAndPatchAdmission(t *testing.T) {
 		}
 
 		model.beginReload(reloadStart)
-		assertConcurrentRestoredSearchAndPatch(t, model, coordinator, pending)
+		assertSerializedRestoredSearchAndPatch(t, model, coordinator, pending)
 		coordinator.complete(SearchOutcome{ID: fillerID})
 		settleModelWork(t, model, coordinator)
 	})
+}
+
+func TestReloadPreparedOutcomeCountsAggregateOwnershipOnce(t *testing.T) {
+	fixture := newSourceFixture(t, map[string]string{"alpha.txt": "changed\n"})
+	current, err := review.NewReview(testReviewRequest(fixture.document.Snapshot()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := fixture.service.Reload(
+		t.Context(),
+		fixture.document,
+		fixture.document.Options(),
+		func(_ context.Context, work func() error) error { return work() },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := document.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	snapshot := document.Snapshot()
+	replacement, err := review.PrepareReplacement(current, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err := buildWorkspaceIndex(t.Context(), snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome := ReloadPreparedOutcome{
+		Document:          document,
+		Replacement:       replacement,
+		AllFiles:          index.AllFiles,
+		VisibleFiles:      index.VisibleFiles,
+		FileTree:          index.FileTree,
+		VisibleProjection: index.VisibleProjection,
+		Collapsed:         index.Collapsed,
+		PathFiles:         index.PathFiles,
+		AmbiguousPaths:    index.AmbiguousPaths,
+	}
+	want := snapshot.RetainedBytes() + replacement.RetainedBytes() + index.RetainedBytes()
+	if got := outcome.RetainedBytes(); got != want {
+		t.Fatalf("reload retained bytes = %d, want aggregate %d", got, want)
+	}
 }
 
 func prepareDeferredReloadState(
@@ -211,21 +357,22 @@ func prepareDeferredReloadState(
 	return pending, reloadStart
 }
 
-func assertConcurrentRestoredSearchAndPatch(
+func assertSerializedRestoredSearchAndPatch(
 	t *testing.T,
 	model *Model,
 	coordinator *Coordinator,
 	pending pendingSearch,
 ) {
 	t.Helper()
-	if model.foreground.searchOperation() == 0 || model.foreground.patchCount() != 1 {
+	if model.foreground.searchOperation() == 0 || model.foreground.patchCount() != 0 ||
+		model.foreground.search.continuation.kind != searchContinuationPatch {
 		t.Fatalf("restored foreground ownership = %+v", model.foreground)
 	}
 	if summary := model.review.SearchSummary(); summary.Status != review.SearchActive ||
 		summary.Query != pending.query {
 		t.Fatalf("restored search summary = %+v", summary)
 	}
-	if stats := coordinator.Stats(); stats.Accepted < 2 {
-		t.Fatalf("restored coordinator admission = %+v, want search and patch", stats)
+	if stats := coordinator.Stats(); stats.Accepted < 1 {
+		t.Fatalf("restored coordinator admission = %+v, want active serialized search", stats)
 	}
 }

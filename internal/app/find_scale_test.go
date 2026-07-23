@@ -178,7 +178,7 @@ func findScaleFixture(
 	if err != nil {
 		tb.Fatal(err)
 	}
-	current, err := review.NewReview(snapshot)
+	current, err := review.NewReview(testReviewRequest(snapshot))
 	if err != nil {
 		tb.Fatal(err)
 	}

@@ -45,7 +45,7 @@ func TestFileTreeWindowMaterializationIsViewportBounded(t *testing.T) {
 	}
 	for _, height := range []int{1, 17, 80} {
 		materialized := 0
-		for range tree.window(cursor, height, nil) {
+		for range tree.window(cursor, height, collapsedTreeState{}) {
 			materialized++
 		}
 		if materialized != height {

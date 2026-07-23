@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/jacoelho/rvw/internal/review"
 )
@@ -49,6 +50,74 @@ func TestSearchReplacementAndClearSettleDeterministically(t *testing.T) {
 	})
 }
 
+func TestCancellingSearchDeferredBehindSyntaxRestartsSyntaxWhenEligible(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{
+		"alpha.txt": "changed\n",
+		"beta.txt":  "changed\n",
+	})
+	settleModelWork(t, model, coordinator)
+	model.size = TerminalSize{Width: normalWidth, Height: 24, Known: true}
+	restoredFile, ok := model.review.ActiveFile()
+	if !ok {
+		t.Fatal("missing restored file")
+	}
+	model.overlay = OverlayFind
+	model.find = findPalette{
+		phase:       findSearching,
+		returnState: model.captureFindReturnState(),
+	}
+	previewFile := restoredFile
+	for _, file := range model.fileOrder {
+		if file != restoredFile {
+			previewFile = file
+			break
+		}
+	}
+	if previewFile == restoredFile || !model.activateFile(previewFile) {
+		t.Fatal("missing preview file")
+	}
+	oldSyntax, _ := review.NewOperationID(model.nextOperation + 100)
+	model.syntaxOperation = oldSyntax
+	model.syntaxFile = previewFile
+
+	startTestSearch(t, model, "changed")
+	if model.searchAfterSyntax == nil {
+		t.Fatal("search did not wait for active syntax")
+	}
+	model.cancelSearch()
+	if model.searchAfterSyntax != nil || !model.syntaxDeferred {
+		t.Fatal("deferred search cancellation did not preserve syntax restart")
+	}
+	model.applySyntaxOutcome(SyntaxOutcome{ID: oldSyntax, Err: context.Canceled})
+	if model.syntaxOperation != 0 || !model.syntaxDeferred {
+		t.Fatal("ineligible overlay consumed deferred syntax restart")
+	}
+
+	model.closeFind(findCloseCancel)
+	if active, _ := model.review.ActiveFile(); active != restoredFile {
+		t.Fatalf("cancelled find restored file %d, want %d", active, restoredFile)
+	}
+	if model.syntaxOperation != 0 || !model.syntaxDeferred {
+		t.Fatal("syntax restarted before the restored patch was ready")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	for model.syntaxOperation == 0 {
+		if state := coordinator.WaitReady(ctx); state != ReadyAvailable {
+			t.Fatalf("restored patch readiness = %v", state)
+		}
+		_, _ = model.Update(outcomeReadyMsg{state: ReadyAvailable})
+	}
+	if model.syntaxOperation == oldSyntax || model.syntaxFile != restoredFile || model.syntaxDeferred {
+		t.Fatalf(
+			"syntax restart = operation %d file %d deferred %t",
+			model.syntaxOperation,
+			model.syntaxFile,
+			model.syntaxDeferred,
+		)
+	}
+}
+
 func TestSearchAdmissionFailureLeavesNoPhantomOperation(t *testing.T) {
 	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	settleModelWork(t, model, coordinator)
@@ -73,8 +142,8 @@ func TestSearchSaturationLeavesNoPhantomOperation(t *testing.T) {
 	filler, _ := review.NewOperationID(10_000)
 	if err := coordinator.submit(
 		filler,
-		MaxQueuedRequestBytes-reservedPublicationRequestBytes,
-		MaxRetainedResultBytes-reservedPublicationResultBytes,
+		MaxQueuedRequestBytes,
+		MaxRetainedResultBytes-publicationResultReservation,
 		func(context.Context) bool { return true },
 	); err != nil {
 		t.Fatal(err)
@@ -122,9 +191,5 @@ func TestStaleSearchOutcomeDoesNotConsumeActiveSearch(t *testing.T) {
 
 func startTestSearch(t *testing.T, model *Model, query string) {
 	t.Helper()
-	target, err := review.NewSearchTarget(model.review.Snapshot(), model.fileOrder)
-	if err != nil {
-		t.Fatal(err)
-	}
-	model.startSearch(query, target)
+	model.startSearch(query, model.fileOrder)
 }

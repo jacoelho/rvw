@@ -1,9 +1,6 @@
 package review
 
-import (
-	"slices"
-	"strings"
-)
+import "strings"
 
 func (preparation *replacementPreparation) mergePendingReview() error {
 	status := preparation.snapshot.PendingReviewSummary().Status
@@ -13,11 +10,19 @@ func (preparation *replacementPreparation) mergePendingReview() error {
 			return nil
 		}
 		preparation.next.pending = nil
-		merged, err := importPendingReview(preparation.next)
+		merged, err := importPendingReviewCancellable(preparation.next, preparation.cancelled)
 		if err != nil {
 			return err
 		}
 		preparation.next = merged
+		indexes, err := indexPendingCommentsCancellable(
+			preparation.cancelled,
+			preparation.next.comments,
+		)
+		if err != nil {
+			return err
+		}
+		preparation.commentIndexes = indexes
 		return nil
 	}
 	if status != PendingReviewReady {
@@ -35,43 +40,79 @@ func (preparation *replacementPreparation) mergePendingReview() error {
 		remote.databaseID != preparation.original.pending.databaseID {
 		return ErrInvalidPendingReview
 	}
-	return preparation.mergeReadyPendingReview(remote)
+	state, err := preparePendingCommentStateCancellable(
+		preparation.cancelled,
+		preparation.original.pending,
+		preparation.next.commentState,
+		preparation.pendingFiles,
+		remote,
+	)
+	if err != nil {
+		return err
+	}
+	preparation.next.commentState = state
+	indexes, err := indexPendingCommentsCancellable(preparation.cancelled, state.comments)
+	if err != nil {
+		return err
+	}
+	preparation.commentIndexes = indexes
+	return nil
 }
 
 func (preparation *replacementPreparation) mergeMissingPendingReview() error {
-	state := preparation.original.pending.clone()
+	original := preparation.original.pending
+	state := *original
+	state.bindings = make(map[CommentID]pendingBinding)
+	state.byNode = make(map[CommentNodeID]CommentID)
 	removed := make(map[CommentID]struct{})
-	for id, binding := range state.bindings {
-		comment, exists := preparation.next.commentByID(id)
+	count := 0
+	for id, binding := range original.bindings {
+		if count%256 == 0 {
+			if err := cancellationError(preparation.cancelled); err != nil {
+				return err
+			}
+		}
+		count++
+		if binding.conflict != nil {
+			conflict := *binding.conflict
+			binding.conflict = new(conflict)
+		}
+		comment, exists := preparation.comment(id)
 		if !exists {
+			state.bindings[id] = binding
+			if binding.kind == pendingBindingComment {
+				state.byNode[binding.remoteNode] = id
+			}
 			continue
 		}
 		if binding.deleted {
 			removed[id] = struct{}{}
-			delete(state.bindings, id)
-			delete(state.byNode, binding.remoteNode)
 			continue
 		}
-		localChanged := binding.deleted || comment.body.String() != binding.baseline
+		local := commentContentFrom(comment)
+		localChanged := binding.deleted || local != binding.baseline
 		if !localChanged && binding.conflict == nil {
 			removed[id] = struct{}{}
-			delete(state.bindings, id)
-			delete(state.byNode, binding.remoteNode)
 			continue
 		}
 		binding.conflict = &pendingConflict{
-			base:   binding.baseline,
-			local:  comment.body.String(),
-			remote: "",
+			base:   cloneCommentContent(binding.baseline),
+			local:  cloneCommentContent(local),
+			remote: commentContent{kind: binding.baseline.kind},
 		}
 		state.bindings[id] = binding
+		if binding.kind == pendingBindingComment {
+			state.byNode[binding.remoteNode] = id
+		}
 	}
-	removePendingComments(&preparation.next, removed)
+	if err := preparation.removePendingComments(removed); err != nil {
+		return err
+	}
 	if len(state.bindings) == 0 {
 		preparation.next.pending = nil
 	} else {
 		state.bodyID = pendingBodyID(state.bindings)
-		preparation.next.pending = state
+		preparation.next.pending = &state
 	}
 	return nil
 }
@@ -81,8 +122,8 @@ func (preparation *replacementPreparation) mergeReadyPendingReview(
 ) error {
 	original := preparation.original.pending
 	state := &pendingReviewState{
-		bindings:   make(map[CommentID]pendingBinding, len(original.bindings)+remote.CommentCount()+1),
-		byNode:     make(map[CommentNodeID]CommentID, remote.CommentCount()),
+		bindings:   make(map[CommentID]pendingBinding),
+		byNode:     make(map[CommentNodeID]CommentID),
 		nodeID:     remote.nodeID,
 		databaseID: remote.databaseID,
 		commit:     remote.commit,
@@ -92,56 +133,108 @@ func (preparation *replacementPreparation) mergeReadyPendingReview(
 	seenRemote := make(map[CommentNodeID]struct{}, remote.CommentCount())
 
 	remoteBody, remoteBodyMarker := splitPendingMarker(remote.body, publicationMarkerPrefix)
-	for id := range preparation.pendingSummaryCommentsApplied(remoteBody) {
+	remoteBodyContent := commentContent{
+		kind: preparation.next.commentKinds.first(), body: remoteBody,
+	}
+	if remoteBodyMarker != "" {
+		remoteBodyContent = decodeOwnedCommentWire(remoteBody, preparation.next.commentKinds)
+	}
+	applied, err := preparation.pendingSummaryCommentsApplied(remoteBody)
+	if err != nil {
+		return err
+	}
+	count := 0
+	for id := range applied {
+		if count%256 == 0 {
+			if err := cancellationError(preparation.cancelled); err != nil {
+				return err
+			}
+		}
+		count++
 		removed[id] = struct{}{}
 	}
 	if original.bodyID != nil {
 		id := *original.bodyID
 		binding := original.bindings[id]
 		if len(removed) != 0 {
-			if err := replacePendingCommentBody(&preparation.next, id, remoteBody); err != nil {
+			if err := preparation.replacePendingComment(id, remoteBodyContent); err != nil {
 				return err
 			}
 		}
-		if err := preparation.mergePendingBinding(
+		if err := preparation.mergePendingBody(
 			state,
 			id,
 			binding,
+			remoteBodyContent,
 			remoteBody,
 			remoteBodyMarker,
-			PendingCommentTarget{},
-			remote.viewerUpdate,
-			false,
-			true,
 			removed,
 		); err != nil {
 			return err
 		}
 	} else if strings.TrimSpace(remoteBody) != "" {
-		id, err := appendPendingComment(
-			&preparation.next,
-			remoteBody,
+		id, err := preparation.appendPendingComment(
+			remoteBodyContent,
 			ReviewCommentTarget(),
-			false,
-			false,
+			commentFlags{},
 		)
 		if err != nil {
 			return err
 		}
 		state.bodyID = new(id)
 		state.bindings[id] = pendingBinding{
-			kind: pendingBindingBody, baseline: strings.Clone(remoteBody),
-			marker: strings.Clone(remoteBodyMarker), canUpdate: remote.viewerUpdate,
+			kind: pendingBindingBody, baseline: cloneCommentContent(remoteBodyContent),
+			wireBaseline: strings.Clone(remoteBody), marker: strings.Clone(remoteBodyMarker),
 		}
 	}
 	state.bodyBase = strings.Clone(remoteBody)
 	state.bodyMarker = strings.Clone(remoteBodyMarker)
 
-	remoteByNode := make(map[CommentNodeID]PendingComment, remote.CommentCount())
-	for _, comment := range remote.comments {
-		remoteByNode[comment.nodeID] = comment
+	remoteByNode, mapErr := preparation.pendingCommentsByNode(remote)
+	if mapErr != nil {
+		return mapErr
 	}
+	if err := preparation.mergeExistingPendingComments(
+		state,
+		original,
+		remoteByNode,
+		seenRemote,
+		removed,
+	); err != nil {
+		return err
+	}
+	if err := preparation.mergeNewPendingComments(
+		state,
+		original,
+		remote,
+		seenRemote,
+		removed,
+	); err != nil {
+		return err
+	}
+	if err := preparation.removePendingComments(removed); err != nil {
+		return err
+	}
+	state.bodyID = pendingBodyID(state.bindings)
+	preparation.next.pending = state
+	return nil
+}
+
+func (preparation *replacementPreparation) mergeExistingPendingComments(
+	state *pendingReviewState,
+	original *pendingReviewState,
+	remoteByNode map[CommentNodeID]PendingComment,
+	seenRemote map[CommentNodeID]struct{},
+	removed map[CommentID]struct{},
+) error {
+	count := 0
 	for node, id := range original.byNode {
+		if count%256 == 0 {
+			if err := cancellationError(preparation.cancelled); err != nil {
+				return err
+			}
+		}
+		count++
 		binding, exists := original.bindings[id]
 		if !exists {
 			return ErrInvalidPendingReview
@@ -155,34 +248,39 @@ func (preparation *replacementPreparation) mergeReadyPendingReview(
 		}
 		seenRemote[node] = struct{}{}
 		body, marker := splitPendingMarker(remoteComment.body, draftCommentMarkerPrefix)
-		if err := preparation.mergePendingBinding(
+		content := commentContent{kind: preparation.next.commentKinds.first(), body: body}
+		if marker != "" {
+			content = decodeOwnedCommentWire(body, preparation.next.commentKinds)
+		}
+		if err := preparation.mergePendingComment(
 			state,
 			id,
 			binding,
+			remoteComment,
+			content,
 			body,
 			marker,
-			remoteComment.target,
-			remoteComment.viewerUpdate,
-			remoteComment.viewerDelete,
-			false,
 			removed,
 		); err != nil {
 			return err
 		}
 	}
-	if err := preparation.mergeNewPendingComments(
-		state,
-		original,
-		remote,
-		seenRemote,
-		removed,
-	); err != nil {
-		return err
-	}
-	removePendingComments(&preparation.next, removed)
-	state.bodyID = pendingBodyID(state.bindings)
-	preparation.next.pending = state
 	return nil
+}
+
+func (preparation *replacementPreparation) pendingCommentsByNode(
+	remote PendingReview,
+) (map[CommentNodeID]PendingComment, error) {
+	comments := make(map[CommentNodeID]PendingComment, remote.CommentCount())
+	for index, comment := range remote.comments {
+		if index%256 == 0 {
+			if err := cancellationError(preparation.cancelled); err != nil {
+				return nil, err
+			}
+		}
+		comments[comment.nodeID] = comment
+	}
+	return comments, nil
 }
 
 func (preparation *replacementPreparation) mergeNewPendingComments(
@@ -192,40 +290,48 @@ func (preparation *replacementPreparation) mergeNewPendingComments(
 	seenRemote map[CommentNodeID]struct{},
 	removed map[CommentID]struct{},
 ) error {
-	localMarkers := preparation.pendingLocalCommentMarkers(remote.nodeID, original, removed)
-	for _, remoteComment := range remote.comments {
+	localMarkers, err := preparation.pendingLocalCommentMarkers(remote.nodeID, original, removed)
+	if err != nil {
+		return err
+	}
+	for index, remoteComment := range remote.comments {
+		if index%256 == 0 {
+			if err := cancellationError(preparation.cancelled); err != nil {
+				return err
+			}
+		}
 		if _, seen := seenRemote[remoteComment.nodeID]; seen {
 			continue
 		}
 		body, marker := splitPendingMarker(remoteComment.body, draftCommentMarkerPrefix)
+		content := commentContent{kind: preparation.next.commentKinds.first(), body: body}
+		if marker != "" {
+			content = decodeOwnedCommentWire(body, preparation.next.commentKinds)
+		}
 		if localID, matched := localMarkers[marker]; matched && marker != "" {
-			local, exists := preparation.next.commentByID(localID)
+			local, exists := preparation.comment(localID)
 			if !exists {
 				return ErrInvalidPendingReview
 			}
 			binding := pendingBinding{
-				kind:       pendingBindingComment,
-				remoteNode: remoteComment.nodeID,
-				remoteID:   remoteComment.databaseID,
-				target:     remoteComment.target,
-				baseline:   strings.Clone(body),
-				marker:     strings.Clone(marker),
-				canUpdate:  remoteComment.viewerUpdate,
-				canDelete:  remoteComment.viewerDelete,
+				kind:         pendingBindingComment,
+				remoteNode:   remoteComment.nodeID,
+				remoteID:     remoteComment.databaseID,
+				target:       remoteComment.target,
+				baseline:     cloneCommentContent(content),
+				wireBaseline: strings.Clone(body),
+				marker:       strings.Clone(marker),
+				capabilities: remoteComment.capabilities,
 			}
-			if local.body.String() != body {
+			if commentContentFrom(local) != content {
 				binding.conflict = &pendingConflict{
-					base: "", local: local.body.String(), remote: body,
+					base:   commentContent{kind: local.kind},
+					local:  cloneCommentContent(commentContentFrom(local)),
+					remote: cloneCommentContent(content),
 				}
 			} else {
-				target, stale, unmappable := projectPendingTarget(preparation.snapshot, remoteComment.target)
-				if err := replacePendingCommentTarget(
-					&preparation.next,
-					localID,
-					target,
-					stale,
-					unmappable,
-				); err != nil {
+				target, flags := preparation.projectPendingTarget(remoteComment.target)
+				if err := preparation.replacePendingCommentTarget(localID, target, flags); err != nil {
 					return err
 				}
 			}
@@ -233,20 +339,20 @@ func (preparation *replacementPreparation) mergeNewPendingComments(
 			state.byNode[remoteComment.nodeID] = localID
 			continue
 		}
-		target, stale, unmappable := projectPendingTarget(preparation.snapshot, remoteComment.target)
-		id, err := appendPendingComment(&preparation.next, body, target, stale, unmappable)
+		target, flags := preparation.projectPendingTarget(remoteComment.target)
+		id, err := preparation.appendPendingComment(content, target, flags)
 		if err != nil {
 			return err
 		}
 		state.bindings[id] = pendingBinding{
-			kind:       pendingBindingComment,
-			remoteNode: remoteComment.nodeID,
-			remoteID:   remoteComment.databaseID,
-			target:     remoteComment.target,
-			baseline:   strings.Clone(body),
-			marker:     strings.Clone(marker),
-			canUpdate:  remoteComment.viewerUpdate,
-			canDelete:  remoteComment.viewerDelete,
+			kind:         pendingBindingComment,
+			remoteNode:   remoteComment.nodeID,
+			remoteID:     remoteComment.databaseID,
+			target:       remoteComment.target,
+			baseline:     cloneCommentContent(content),
+			wireBaseline: strings.Clone(body),
+			marker:       strings.Clone(marker),
+			capabilities: remoteComment.capabilities,
 		}
 		state.byNode[remoteComment.nodeID] = id
 	}
@@ -255,52 +361,98 @@ func (preparation *replacementPreparation) mergeNewPendingComments(
 
 func (preparation *replacementPreparation) pendingSummaryCommentsApplied(
 	remoteBody string,
-) map[CommentID]struct{} {
-	consumed := make(map[CommentID]struct{})
-	desired := ""
+) (map[CommentID]struct{}, error) {
+	consumed := make([]CommentID, 0)
+	offset := 0
+	wrote := false
+	matches := true
+	match := func(body string) {
+		if wrote {
+			matches = matches && len(remoteBody)-offset >= 2 && remoteBody[offset:offset+2] == "\n\n"
+			offset += min(2, len(remoteBody)-offset)
+		}
+		matches = matches && len(remoteBody)-offset >= len(body) &&
+			remoteBody[offset:offset+min(len(body), len(remoteBody)-offset)] == body
+		offset += min(len(body), len(remoteBody)-offset)
+		wrote = true
+	}
 	if preparation.original.pending.bodyID != nil {
-		if body, ok := preparation.next.commentByID(*preparation.original.pending.bodyID); ok &&
-			!preparation.original.pending.bindings[body.id].deleted {
-			desired = body.body.String()
+		if comment, ok := preparation.comment(*preparation.original.pending.bodyID); ok {
+			binding := preparation.original.pending.bindings[comment.id]
+			if !binding.deleted {
+				wire := binding.wireBaseline
+				if commentContentFrom(comment) != binding.baseline {
+					var err error
+					wire, err = encodePublicationSummaryWire(
+						commentContentFrom(comment), comment.target,
+						preparation.next.commentPolicies,
+					)
+					if err != nil {
+						return nil, err
+					}
+				}
+				match(wire)
+			}
 		}
 	}
-	for _, comment := range preparation.next.comments {
+	for index, comment := range preparation.next.comments {
+		if index%256 == 0 {
+			if err := cancellationError(preparation.cancelled); err != nil {
+				return nil, err
+			}
+		}
 		if _, bound := preparation.original.pending.bindings[comment.id]; bound ||
 			comment.target.Kind() != TargetReview {
 			continue
 		}
-		if desired != "" {
-			desired += "\n\n"
+		wire, err := encodePublicationSummaryWire(
+			commentContentFrom(comment), comment.target, preparation.next.commentPolicies,
+		)
+		if err != nil {
+			return nil, err
 		}
-		desired += comment.body.String()
-		consumed[comment.id] = struct{}{}
+		match(wire)
+		consumed = append(consumed, comment.id)
 	}
-	if len(consumed) == 0 || desired != remoteBody {
-		return nil
+	if len(consumed) == 0 || !matches || offset != len(remoteBody) {
+		return map[CommentID]struct{}{}, nil
 	}
-	return consumed
+	applied := make(map[CommentID]struct{})
+	for _, id := range consumed {
+		applied[id] = struct{}{}
+	}
+	return applied, nil
 }
 
 func (preparation *replacementPreparation) pendingLocalCommentMarkers(
 	reviewID ReviewNodeID,
 	original *pendingReviewState,
 	removed map[CommentID]struct{},
-) map[string]CommentID {
+) (map[string]CommentID, error) {
 	markers := make(map[string]CommentID)
 	duplicates := make(map[string]struct{})
 	options := PublicationOptions{event: PublicationEventDraft}
-	for _, comment := range preparation.next.comments {
+	for index, comment := range preparation.next.comments {
+		if index%256 == 0 {
+			if err := cancellationError(preparation.cancelled); err != nil {
+				return nil, err
+			}
+		}
 		if _, bound := original.bindings[comment.id]; bound {
 			continue
 		}
 		if _, remove := removed[comment.id]; remove {
 			continue
 		}
-		mutation, decision, summary := prepareNewPendingComment(
+		mutation, decision, summary, prepareErr := prepareNewPendingComment(
 			comment,
 			options,
 			original.commit,
+			preparation.next.commentPolicies,
 		)
+		if prepareErr != nil {
+			return nil, prepareErr
+		}
 		if summary != "" || decision != PublicationIncludedInline {
 			continue
 		}
@@ -313,73 +465,119 @@ func (preparation *replacementPreparation) pendingLocalCommentMarkers(
 	for marker := range duplicates {
 		delete(markers, marker)
 	}
-	return markers
+	return markers, nil
 }
 
-func (preparation *replacementPreparation) mergePendingBinding(
+type pendingTextMergeDisposition uint8
+
+const (
+	pendingTextProjectRemote pendingTextMergeDisposition = iota + 1
+	pendingTextPreserveLocal
+	pendingTextRemoved
+)
+
+type pendingTextMerge struct {
+	binding     pendingBinding
+	disposition pendingTextMergeDisposition
+}
+
+func (preparation *replacementPreparation) mergePendingBody(
 	state *pendingReviewState,
 	id CommentID,
 	binding pendingBinding,
-	remoteBody, remoteMarker string,
-	remoteTarget PendingCommentTarget,
-	canUpdate, canDelete, bodyBinding bool,
+	remoteContent commentContent,
+	remoteWire, remoteMarker string,
 	removed map[CommentID]struct{},
 ) error {
-	comment, exists := preparation.next.commentByID(id)
-	if !exists {
-		return ErrInvalidPendingReview
+	merged, err := preparation.mergePendingText(id, binding, remoteContent, remoteWire, removed)
+	if err != nil || merged.disposition == pendingTextRemoved {
+		return err
 	}
-	localBody := comment.body.String()
-	localChanged := binding.deleted || localBody != binding.baseline || binding.conflict != nil
-	remoteChanged := remoteBody != binding.baseline
-	if !localChanged && remoteChanged {
-		if strings.TrimSpace(remoteBody) == "" {
-			removed[id] = struct{}{}
-			return nil
-		}
-		if err := replacePendingCommentBody(&preparation.next, id, remoteBody); err != nil {
+	binding = merged.binding
+	binding.marker = strings.Clone(remoteMarker)
+	binding.kind = pendingBindingBody
+	state.bodyID = new(id)
+	state.bindings[id] = binding
+	return nil
+}
+
+func (preparation *replacementPreparation) mergePendingComment(
+	state *pendingReviewState,
+	id CommentID,
+	binding pendingBinding,
+	remote PendingComment,
+	remoteContent commentContent,
+	remoteWire, remoteMarker string,
+	removed map[CommentID]struct{},
+) error {
+	merged, err := preparation.mergePendingText(id, binding, remoteContent, remoteWire, removed)
+	if err != nil || merged.disposition == pendingTextRemoved {
+		return err
+	}
+	binding = merged.binding
+	binding.marker = strings.Clone(remoteMarker)
+	binding.kind = pendingBindingComment
+	binding.target = remote.target
+	binding.capabilities = remote.capabilities
+	state.byNode[binding.remoteNode] = id
+	if merged.disposition == pendingTextProjectRemote {
+		target, flags := preparation.projectPendingTarget(remote.target)
+		if err := preparation.replacePendingCommentTarget(id, target, flags); err != nil {
 			return err
 		}
-		localBody = remoteBody
+	}
+	state.bindings[id] = binding
+	return nil
+}
+
+func (preparation *replacementPreparation) mergePendingText(
+	id CommentID,
+	binding pendingBinding,
+	remoteContent commentContent,
+	remoteWire string,
+	removed map[CommentID]struct{},
+) (pendingTextMerge, error) {
+	comment, exists := preparation.comment(id)
+	if !exists {
+		return pendingTextMerge{}, ErrInvalidPendingReview
+	}
+	localContent := commentContentFrom(comment)
+	localChanged := binding.deleted || localContent != binding.baseline || binding.conflict != nil
+	remoteChanged := remoteContent != binding.baseline
+	if !localChanged && remoteChanged {
+		if strings.TrimSpace(remoteContent.body) == "" {
+			removed[id] = struct{}{}
+			return pendingTextMerge{binding: binding, disposition: pendingTextRemoved}, nil
+		}
+		if err := preparation.replacePendingComment(id, remoteContent); err != nil {
+			return pendingTextMerge{}, err
+		}
+		localContent = remoteContent
 	}
 	if localChanged && remoteChanged {
-		if !binding.deleted && localBody == remoteBody {
+		if !binding.deleted && localContent == remoteContent {
 			binding.conflict = nil
-			binding.deleted = false
 		} else {
 			binding.conflict = &pendingConflict{
-				base:         binding.baseline,
-				local:        localBody,
-				remote:       remoteBody,
+				base:         cloneCommentContent(binding.baseline),
+				local:        cloneCommentContent(localContent),
+				remote:       cloneCommentContent(remoteContent),
 				localDeleted: binding.deleted,
 			}
 		}
 	}
 	preserveConflict := !remoteChanged && binding.conflict != nil &&
-		binding.conflict.remote == remoteBody
-	if !preserveConflict && (!localChanged || localBody == remoteBody) {
+		binding.conflict.remote == remoteContent
+	if !preserveConflict && (!localChanged || localContent == remoteContent) {
 		binding.conflict = nil
 	}
-	binding.baseline = strings.Clone(remoteBody)
-	binding.marker = strings.Clone(remoteMarker)
-	binding.canUpdate = canUpdate
-	binding.canDelete = canDelete
-	if bodyBinding {
-		binding.kind = pendingBindingBody
-		state.bodyID = new(id)
-	} else {
-		binding.kind = pendingBindingComment
-		binding.target = remoteTarget
-		state.byNode[binding.remoteNode] = id
-		if !localChanged {
-			target, stale, unmappable := projectPendingTarget(preparation.snapshot, remoteTarget)
-			if err := replacePendingCommentTarget(&preparation.next, id, target, stale, unmappable); err != nil {
-				return err
-			}
-		}
+	binding.baseline = cloneCommentContent(remoteContent)
+	binding.wireBaseline = strings.Clone(remoteWire)
+	disposition := pendingTextProjectRemote
+	if localChanged {
+		disposition = pendingTextPreserveLocal
 	}
-	state.bindings[id] = binding
-	return nil
+	return pendingTextMerge{binding: binding, disposition: disposition}, nil
 }
 
 func (preparation *replacementPreparation) mergeDeletedRemoteComment(
@@ -388,73 +586,129 @@ func (preparation *replacementPreparation) mergeDeletedRemoteComment(
 	binding pendingBinding,
 	removed map[CommentID]struct{},
 ) error {
-	comment, exists := preparation.next.commentByID(id)
+	comment, exists := preparation.comment(id)
 	if !exists {
 		return ErrInvalidPendingReview
 	}
-	if binding.deleted || comment.body.String() == binding.baseline && binding.conflict == nil {
+	local := commentContentFrom(comment)
+	if binding.deleted || local == binding.baseline && binding.conflict == nil {
 		removed[id] = struct{}{}
 		return nil
 	}
 	binding.conflict = &pendingConflict{
-		base:   binding.baseline,
-		local:  comment.body.String(),
-		remote: "",
+		base:   cloneCommentContent(binding.baseline),
+		local:  cloneCommentContent(local),
+		remote: commentContent{kind: binding.baseline.kind},
 	}
 	state.bindings[id] = binding
 	return nil
 }
 
-func replacePendingCommentBody(current *Review, id CommentID, body string) error {
-	validated, err := NewCommentBody(body)
+func (preparation *replacementPreparation) comment(id CommentID) (Comment, bool) {
+	index, exists := preparation.commentIndexes[id]
+	if !exists || index < 0 || index >= len(preparation.next.comments) ||
+		preparation.next.comments[index].id != id {
+		return Comment{}, false
+	}
+	return preparation.next.comments[index], true
+}
+
+func (preparation *replacementPreparation) replacePendingComment(
+	id CommentID,
+	content commentContent,
+) error {
+	validated, err := NewCommentBody(content.body)
 	if err != nil {
 		return err
 	}
-	index := slices.IndexFunc(current.comments, func(comment Comment) bool { return comment.id == id })
-	if index < 0 || current.commentBody-int64(len(current.comments[index].body))+int64(len(body)) >
-		MaxCommentBodyTotal {
+	index, exists := preparation.commentIndexes[id]
+	if !exists || index < 0 || index >= len(preparation.next.comments) ||
+		preparation.next.comments[index].id != id ||
+		preparation.next.commentBody-int64(len(preparation.next.comments[index].body))+
+			int64(len(validated)) > MaxCommentBodyTotal {
 		return ErrInvalidPendingReview
 	}
-	current.comments = slices.Clone(current.comments)
-	current.commentBody -= int64(len(current.comments[index].body))
-	current.comments[index].body = validated
-	current.commentBody += int64(len(validated))
+	preparation.next.commentBody -= int64(len(preparation.next.comments[index].body))
+	preparation.next.comments[index].body = validated
+	preparation.next.comments[index].kind = content.kind
+	preparation.next.commentBody += int64(len(validated))
 	return nil
 }
 
-func replacePendingCommentTarget(
-	current *Review,
+func (preparation *replacementPreparation) replacePendingCommentTarget(
 	id CommentID,
 	target CommentTarget,
-	stale, unmappable bool,
+	flags commentFlags,
 ) error {
-	index := slices.IndexFunc(current.comments, func(comment Comment) bool { return comment.id == id })
-	if index < 0 {
+	index, exists := preparation.commentIndexes[id]
+	if !exists || index < 0 || index >= len(preparation.next.comments) ||
+		preparation.next.comments[index].id != id || !flags.valid() {
 		return ErrInvalidPendingReview
 	}
-	current.comments = slices.Clone(current.comments)
-	current.comments[index].target = target
-	current.comments[index].stale = stale
-	current.comments[index].unmappable = unmappable
+	preparation.next.comments[index].target = target
+	preparation.next.comments[index].flags = flags
 	return nil
 }
 
-func removePendingComments(current *Review, removed map[CommentID]struct{}) {
-	if len(removed) == 0 {
-		current.commentAnchors = indexCommentAnchors(current.comments)
-		return
+func (preparation *replacementPreparation) appendPendingComment(
+	content commentContent,
+	target CommentTarget,
+	flags commentFlags,
+) (CommentID, error) {
+	validated, err := NewCommentBody(content.body)
+	if err != nil || len(preparation.next.comments) >= MaxComments ||
+		preparation.next.nextComment >= MaxComments ||
+		preparation.next.commentBody+int64(len(validated)) > MaxCommentBodyTotal ||
+		!flags.valid() {
+		return 0, ErrInvalidPendingReview
 	}
-	retained := make([]Comment, 0, len(current.comments)-len(removed))
-	current.commentBody = 0
-	for _, comment := range current.comments {
+	id := CommentID(preparation.next.nextComment)
+	preparation.commentIndexes[id] = len(preparation.next.comments)
+	preparation.next.comments = append(preparation.next.comments, Comment{
+		id: id, target: target, body: validated,
+		kind: content.kind, flags: flags,
+	})
+	preparation.next.commentBody += int64(len(validated))
+	preparation.next.nextComment++
+	return id, nil
+}
+
+func (preparation *replacementPreparation) removePendingComments(
+	removed map[CommentID]struct{},
+) error {
+	if len(removed) == 0 {
+		return nil
+	}
+	retained := preparation.next.comments[:0]
+	preparation.next.commentBody = 0
+	count := 0
+	for _, comment := range preparation.next.comments {
+		if count%256 == 0 {
+			if err := cancellationError(preparation.cancelled); err != nil {
+				return err
+			}
+		}
+		count++
 		if _, remove := removed[comment.id]; remove {
 			continue
 		}
 		retained = append(retained, comment)
-		current.commentBody += int64(len(comment.body))
+		preparation.next.commentBody += int64(len(comment.body))
 	}
-	current.comments = retained
-	current.commentAnchors = indexCommentAnchors(current.comments)
+	clear(preparation.next.comments[len(retained):])
+	preparation.next.comments = retained
+	indexes, err := indexPendingCommentsCancellable(preparation.cancelled, retained)
+	if err != nil {
+		return err
+	}
+	preparation.commentIndexes = indexes
+	return nil
+}
+
+func (preparation *replacementPreparation) projectPendingTarget(
+	target PendingCommentTarget,
+) (CommentTarget, commentFlags) {
+	return projectPendingTargetWithMappings(preparation.pendingFiles, target)
 }
 
 func pendingBodyID(bindings map[CommentID]pendingBinding) *CommentID {
@@ -466,19 +720,21 @@ func pendingBodyID(bindings map[CommentID]pendingBinding) *CommentID {
 	return nil
 }
 
-func rebasePendingCapture(current Review, remote PendingReview) (Review, error) {
-	snapshot, err := current.snapshot.WithPendingReview(remote)
-	if err != nil {
-		return current, err
+func indexPendingCommentsCancellable(
+	cancelled func() error,
+	comments []Comment,
+) (map[CommentID]int, error) {
+	if err := cancellationError(cancelled); err != nil {
+		return nil, err
 	}
-	preparation := replacementPreparation{
-		original: current,
-		next:     current.clone(),
-		snapshot: snapshot,
+	indexes := make(map[CommentID]int, len(comments))
+	for index, comment := range comments {
+		if index%256 == 0 {
+			if err := cancellationError(cancelled); err != nil {
+				return nil, err
+			}
+		}
+		indexes[comment.id] = index
 	}
-	preparation.next.snapshot = snapshot
-	if err := preparation.mergeReadyPendingReview(remote); err != nil {
-		return current, err
-	}
-	return preparation.next, nil
+	return indexes, nil
 }

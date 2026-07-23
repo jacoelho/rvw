@@ -10,9 +10,12 @@ import (
 
 // MaxRemoteThreads defines the supported remote threads limit.
 const (
-	MaxRemoteThreads           = 100_000
-	MaxRemoteComments          = 100_000
-	MaxRemoteThreadBytes int64 = 64 << 20
+	MaxRemoteThreads                = 100_000
+	MaxRemoteComments               = 100_000
+	MaxRemoteThreadBytes      int64 = 64 << 20
+	remoteThreadStorageBytes        = 96
+	remoteCommentStorageBytes       = 96
+	remoteAnchorStorageBytes        = 32
 )
 
 // ErrInvalidRemoteThread identifies an invalid remote thread failure.
@@ -72,6 +75,18 @@ type RemoteCommentDescriptor struct {
 
 // NewRemoteComment constructs and validates remote comment.
 func NewRemoteComment(descriptor RemoteCommentDescriptor) (RemoteComment, error) {
+	return newRemoteComment(descriptor, cloneRemoteThreads)
+}
+
+// TakeRemoteComment consumes validated immutable descriptor strings.
+func TakeRemoteComment(descriptor RemoteCommentDescriptor) (RemoteComment, error) {
+	return newRemoteComment(descriptor, takeRemoteThreads)
+}
+
+func newRemoteComment(
+	descriptor RemoteCommentDescriptor,
+	ownership remoteThreadOwnership,
+) (RemoteComment, error) {
 	if descriptor.ID == "" || int64(len(descriptor.ID)) > MaxPathBytes ||
 		int64(len(descriptor.Author)) > MaxPathBytes ||
 		int64(len(descriptor.Body)) > MaxCommentBodyBytes ||
@@ -84,12 +99,18 @@ func NewRemoteComment(descriptor RemoteCommentDescriptor) (RemoteComment, error)
 		!utf8.ValidString(descriptor.URL) {
 		return RemoteComment{}, ErrInvalidRemoteThread
 	}
+	if ownership == cloneRemoteThreads {
+		descriptor.ID = strings.Clone(descriptor.ID)
+		descriptor.Author = strings.Clone(descriptor.Author)
+		descriptor.Body = strings.Clone(descriptor.Body)
+		descriptor.CreatedAt = strings.Clone(descriptor.CreatedAt)
+		descriptor.URL = strings.Clone(descriptor.URL)
+	} else if ownership != takeRemoteThreads {
+		return RemoteComment{}, ErrInvalidRemoteThread
+	}
 	return RemoteComment{
-		id:        strings.Clone(descriptor.ID),
-		author:    strings.Clone(descriptor.Author),
-		body:      strings.Clone(descriptor.Body),
-		createdAt: strings.Clone(descriptor.CreatedAt),
-		url:       strings.Clone(descriptor.URL),
+		id: descriptor.ID, author: descriptor.Author, body: descriptor.Body,
+		createdAt: descriptor.CreatedAt, url: descriptor.URL,
 	}, nil
 }
 
@@ -109,11 +130,11 @@ func (comment RemoteComment) CreatedAt() string { return comment.createdAt }
 func (comment RemoteComment) URL() string { return comment.url }
 
 func (comment RemoteComment) retainedBytes() int64 {
-	return int64(
-		len(comment.id) +
-			len(comment.author) +
-			len(comment.body) +
-			len(comment.createdAt) +
+	return 96 + int64(
+		len(comment.id)+
+			len(comment.author)+
+			len(comment.body)+
+			len(comment.createdAt)+
 			len(comment.url),
 	)
 }
@@ -154,22 +175,61 @@ type RemoteThreadDescriptor struct {
 
 // NewRemoteThread constructs and validates remote thread.
 func NewRemoteThread(descriptor RemoteThreadDescriptor) (RemoteThread, error) {
+	return newRemoteThreadCancellable(nil, descriptor, cloneRemoteThreads)
+}
+
+// TakeRemoteThread consumes the descriptor's immutable path, strings, and
+// comments after complete validation succeeds.
+func TakeRemoteThread(descriptor RemoteThreadDescriptor) (RemoteThread, error) {
+	return TakeRemoteThreadCancellable(nil, descriptor)
+}
+
+// TakeRemoteThreadCancellable consumes the descriptor's immutable path,
+// strings, and comments after complete validation succeeds.
+func TakeRemoteThreadCancellable(
+	cancelled func() error,
+	descriptor RemoteThreadDescriptor,
+) (RemoteThread, error) {
+	return newRemoteThreadCancellable(cancelled, descriptor, takeRemoteThreads)
+}
+
+func newRemoteThreadCancellable(
+	cancelled func() error,
+	descriptor RemoteThreadDescriptor,
+	ownership remoteThreadOwnership,
+) (RemoteThread, error) {
 	if descriptor.ID == "" || int64(len(descriptor.ID)) > MaxPathBytes ||
 		!utf8.ValidString(descriptor.ID) ||
 		descriptor.Side != LineOld && descriptor.Side != LineNew ||
 		len(descriptor.Comments) > MaxRemoteComments {
 		return RemoteThread{}, ErrInvalidRemoteThread
 	}
-	path, err := NewPath(descriptor.Path.Raw())
+	if err := cancellationError(cancelled); err != nil {
+		return RemoteThread{}, err
+	}
+	pathValue := descriptor.Path.raw
+	if ownership == cloneRemoteThreads {
+		pathValue = strings.Clone(pathValue)
+		descriptor.ID = strings.Clone(descriptor.ID)
+	} else if ownership != takeRemoteThreads {
+		return RemoteThread{}, ErrInvalidRemoteThread
+	}
+	path, err := NewPathString(pathValue)
 	if err != nil || path.raw == "" {
 		return RemoteThread{}, ErrInvalidRemoteThread
 	}
 	if descriptor.Line != nil && *descriptor.Line == 0 {
 		return RemoteThread{}, ErrInvalidRemoteThread
 	}
-	comments := slices.Clone(descriptor.Comments)
+	comments := descriptor.Comments
+	if ownership == cloneRemoteThreads {
+		comments = slices.Clone(comments)
+	}
 	seen := make(map[string]struct{}, len(comments))
 	for _, comment := range comments {
+		if err := cancellationError(cancelled); err != nil {
+			return RemoteThread{}, err
+		}
 		if comment.id == "" {
 			return RemoteThread{}, ErrInvalidRemoteThread
 		}
@@ -182,12 +242,15 @@ func NewRemoteThread(descriptor RemoteThreadDescriptor) (RemoteThread, error) {
 		}
 		seen[comment.id] = struct{}{}
 	}
+	if err := cancellationError(cancelled); err != nil {
+		return RemoteThread{}, err
+	}
 	var line *LineNumber
 	if descriptor.Line != nil {
 		line = new(*descriptor.Line)
 	}
 	return RemoteThread{
-		id:       strings.Clone(descriptor.ID),
+		id:       descriptor.ID,
 		resolved: descriptor.Resolved,
 		outdated: descriptor.Outdated,
 		path:     path,
@@ -239,16 +302,56 @@ func (thread RemoteThread) Comments(start, count int) []RemoteComment {
 	return slices.Clone(thread.comments[start:min(start+count, len(thread.comments))])
 }
 
-func (thread RemoteThread) retainedBytes() int64 {
-	total := int64(len(thread.id)) + int64(len(thread.path.raw))
-	for _, comment := range thread.comments {
-		total += comment.retainedBytes()
+// Comment returns one immutable remote comment without cloning the collection.
+func (thread RemoteThread) Comment(index int) (RemoteComment, bool) {
+	if index < 0 || index >= len(thread.comments) {
+		return RemoteComment{}, false
 	}
-	return total
+	return thread.comments[index], true
 }
+
+type remoteThreadOwnership uint8
+
+const (
+	cloneRemoteThreads remoteThreadOwnership = iota + 1
+	takeRemoteThreads
+)
 
 // WithRemoteThreads performs the with remote threads operation.
 func (snapshot Snapshot) WithRemoteThreads(threads []RemoteThread) (Snapshot, error) {
+	return snapshot.withRemoteThreads(threads, cloneRemoteThreads)
+}
+
+// TakeRemoteThreads consumes an already constructed immutable thread slice.
+// The caller must not retain or mutate the slice after this call.
+func (snapshot Snapshot) TakeRemoteThreads(threads []RemoteThread) (Snapshot, error) {
+	return snapshot.withRemoteThreads(threads, takeRemoteThreads)
+}
+
+// TakeRemoteThreadsCancellable consumes an immutable thread slice while
+// bounding validation and projection cancellation latency.
+func (snapshot Snapshot) TakeRemoteThreadsCancellable(
+	cancelled func() error,
+	threads []RemoteThread,
+) (Snapshot, error) {
+	return snapshot.withRemoteThreadsCancellable(cancelled, threads, takeRemoteThreads)
+}
+
+func (snapshot Snapshot) withRemoteThreads(
+	threads []RemoteThread,
+	ownership remoteThreadOwnership,
+) (Snapshot, error) {
+	return snapshot.withRemoteThreadsCancellable(nil, threads, ownership)
+}
+
+func (snapshot Snapshot) withRemoteThreadsCancellable(
+	cancelled func() error,
+	threads []RemoteThread,
+	ownership remoteThreadOwnership,
+) (Snapshot, error) {
+	if err := cancellationError(cancelled); err != nil {
+		return Snapshot{}, err
+	}
 	if len(threads) > MaxRemoteThreads {
 		return Snapshot{}, fmt.Errorf(
 			"%w: remote thread count exceeds %d",
@@ -256,71 +359,118 @@ func (snapshot Snapshot) WithRemoteThreads(threads []RemoteThread) (Snapshot, er
 			MaxRemoteThreads,
 		)
 	}
-	owned := slices.Clone(threads)
+	owned := threads
+	if ownership == cloneRemoteThreads {
+		owned = slices.Clone(threads)
+	} else if ownership != takeRemoteThreads {
+		return Snapshot{}, ErrInvalidRemoteThread
+	}
 	pathMappings := snapshot.remotePathMappings()
-	anchors := make(map[commentAnchor]struct{}, min(len(owned), MaxRemoteThreads))
-	threadIDs := make(map[string]struct{}, len(owned))
-	commentIDs := make(map[string]struct{})
-	var retained int64
+	anchors := make(map[commentAnchor]struct{})
+	retained, validationErr := validateRemoteThreadsCancellable(cancelled, owned)
+	if validationErr != nil {
+		return Snapshot{}, validationErr
+	}
+	if err := cancellationError(cancelled); err != nil {
+		return Snapshot{}, err
+	}
 	for index, thread := range owned {
-		validated, err := NewRemoteThread(RemoteThreadDescriptor{
-			ID:       thread.id,
-			Resolved: thread.resolved,
-			Outdated: thread.outdated,
-			Path:     thread.path,
-			Line:     thread.line,
-			Side:     thread.side,
-			Comments: thread.comments,
-		})
-		if err != nil {
-			return Snapshot{}, err
+		if index%256 == 0 {
+			if err := cancellationError(cancelled); err != nil {
+				return Snapshot{}, err
+			}
 		}
-		if _, exists := threadIDs[validated.id]; exists {
-			return Snapshot{}, fmt.Errorf(
+		mapping, exists := pathMappings.lookup(thread.path.raw)
+		if !exists {
+			mapping.status = RemoteMappingMissing
+		}
+		thread.mapping = mapping.status
+		thread.file = mapping.file
+		if thread.mapping == RemoteMappingMapped && !thread.outdated && thread.line != nil {
+			anchors[commentAnchor{
+				file: thread.file,
+				side: thread.side,
+				line: *thread.line,
+			}] = struct{}{}
+		}
+		owned[index] = thread
+	}
+	if err := cancellationError(cancelled); err != nil {
+		return Snapshot{}, err
+	}
+	next := snapshot
+	next.remoteThreads = owned
+	next.remoteCommentAnchors = anchors
+	next.remoteThreadStatus = RemoteThreadsReady
+	next.remoteThreadDetail = EmptyOperationDetail()
+	retained += int64(len(anchors)) * remoteAnchorStorageBytes
+	updated, retainedErr := next.withRemoteRetainedBytes(retained, ErrInvalidRemoteThread)
+	if retainedErr != nil {
+		return Snapshot{}, retainedErr
+	}
+	if err := cancellationError(cancelled); err != nil {
+		return Snapshot{}, err
+	}
+	return updated, nil
+}
+
+func validateRemoteThreadsCancellable(
+	cancelled func() error,
+	threads []RemoteThread,
+) (int64, error) {
+	threadIDs := make(map[string]struct{}, len(threads))
+	commentIDs := make(map[string]struct{})
+	retained := int64(cap(threads)-len(threads)) * remoteThreadStorageBytes
+	for index, thread := range threads {
+		if index%256 == 0 {
+			if err := cancellationError(cancelled); err != nil {
+				return 0, err
+			}
+		}
+		if thread.id == "" || thread.path.raw == "" ||
+			thread.side != LineOld && thread.side != LineNew ||
+			len(thread.comments) > MaxRemoteComments {
+			return 0, ErrInvalidRemoteThread
+		}
+		if _, exists := threadIDs[thread.id]; exists {
+			return 0, fmt.Errorf(
 				"%w: duplicate remote thread %q",
 				ErrInvalidRemoteThread,
-				validated.id,
+				thread.id,
 			)
 		}
-		threadIDs[validated.id] = struct{}{}
-		for _, comment := range validated.comments {
+		threadIDs[thread.id] = struct{}{}
+		threadRetained := int64(remoteThreadStorageBytes+len(thread.id)+len(thread.path.raw)) +
+			int64(cap(thread.comments)-len(thread.comments))*remoteCommentStorageBytes
+		for _, comment := range thread.comments {
+			if err := cancellationError(cancelled); err != nil {
+				return 0, err
+			}
+			if comment.id == "" || !utf8.ValidString(comment.id) ||
+				!utf8.ValidString(comment.author) || !utf8.ValidString(comment.body) ||
+				!utf8.ValidString(comment.createdAt) || !utf8.ValidString(comment.url) {
+				return 0, ErrInvalidRemoteThread
+			}
 			if _, exists := commentIDs[comment.id]; exists {
-				return Snapshot{}, fmt.Errorf(
+				return 0, fmt.Errorf(
 					"%w: duplicate remote comment %q",
 					ErrInvalidRemoteThread,
 					comment.id,
 				)
 			}
 			commentIDs[comment.id] = struct{}{}
+			threadRetained += comment.retainedBytes()
 		}
-		retained += validated.retainedBytes()
+		retained += threadRetained
 		if retained > MaxRemoteThreadBytes ||
 			len(threadIDs)+len(commentIDs) > MaxRemoteThreads {
-			return Snapshot{}, fmt.Errorf(
+			return 0, fmt.Errorf(
 				"%w: remote thread data exceeds its retained bound",
 				ErrInvalidRemoteThread,
 			)
 		}
-		mapping, exists := pathMappings[validated.path.raw]
-		if !exists {
-			mapping.status = RemoteMappingMissing
-		}
-		validated.mapping = mapping.status
-		validated.file = mapping.file
-		if validated.mapping == RemoteMappingMapped && !validated.outdated && validated.line != nil {
-			anchors[commentAnchor{
-				file: validated.file,
-				side: validated.side,
-				line: *validated.line,
-			}] = struct{}{}
-		}
-		owned[index] = validated
 	}
-	snapshot.remoteThreads = owned
-	snapshot.remoteCommentAnchors = anchors
-	snapshot.remoteThreadStatus = RemoteThreadsReady
-	snapshot.remoteThreadDetail = EmptyOperationDetail()
-	return snapshot, nil
+	return retained, nil
 }
 
 // WithRemoteThreadFailure performs the with remote thread failure operation.
@@ -332,11 +482,12 @@ func (snapshot Snapshot) WithRemoteThreadFailure(
 		detail.IsEmpty() {
 		return Snapshot{}, ErrInvalidRemoteThread
 	}
-	snapshot.remoteThreads = nil
-	snapshot.remoteCommentAnchors = nil
-	snapshot.remoteThreadStatus = status
-	snapshot.remoteThreadDetail = detail
-	return snapshot, nil
+	next := snapshot
+	next.remoteThreads = nil
+	next.remoteCommentAnchors = nil
+	next.remoteThreadStatus = status
+	next.remoteThreadDetail = detail
+	return next.withRemoteRetainedBytes(detail.Bytes(), ErrInvalidRemoteThread)
 }
 
 type remotePathMapping struct {
@@ -344,23 +495,21 @@ type remotePathMapping struct {
 	file   FileID
 }
 
-func (snapshot Snapshot) remotePathMappings() map[string]remotePathMapping {
-	mappings := make(map[string]remotePathMapping, snapshot.FileCount()*2)
-	for file := range snapshot.AllFiles() {
-		for _, path := range fileAliases(file) {
-			mapping, exists := mappings[path]
-			switch {
-			case !exists:
-				mappings[path] = remotePathMapping{
-					status: RemoteMappingMapped,
-					file:   file.ID(),
-				}
-			case mapping.status == RemoteMappingMapped && mapping.file != file.ID():
-				mappings[path] = remotePathMapping{status: RemoteMappingAmbiguous}
-			}
-		}
+func (snapshot Snapshot) remotePathMappings() remotePathProjection {
+	mappings, err := snapshot.remotePathMappingsCancellable(nil)
+	if err != nil {
+		panic("nil cancellation callback returned an error")
 	}
 	return mappings
+}
+
+func (snapshot Snapshot) remotePathMappingsCancellable(
+	cancelled func() error,
+) (remotePathProjection, error) {
+	if err := cancellationError(cancelled); err != nil {
+		return remotePathProjection{}, err
+	}
+	return snapshot.pathProjection, nil
 }
 
 // RemoteThreadSummary returns the receiver's remote thread summary value.
@@ -379,6 +528,14 @@ func (snapshot Snapshot) RemoteThreadSummary() RemoteThreadSummary {
 // RemoteThreadCount returns the receiver's remote thread count value.
 func (snapshot Snapshot) RemoteThreadCount() int {
 	return len(snapshot.remoteThreads)
+}
+
+// RemoteThread returns one immutable remote thread without cloning the collection.
+func (snapshot Snapshot) RemoteThread(index int) (RemoteThread, bool) {
+	if index < 0 || index >= len(snapshot.remoteThreads) {
+		return RemoteThread{}, false
+	}
+	return snapshot.remoteThreads[index], true
 }
 
 // RemoteThreads performs the remote threads operation.

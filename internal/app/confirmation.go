@@ -36,6 +36,7 @@ func (model *Model) forceQuit() tea.Cmd {
 
 func (model *Model) quit() tea.Cmd {
 	model.quitting = true
+	model.abandonCollapseCapture()
 	model.coordinator.StopAdmissionAndCancel()
 	return tea.Quit
 }

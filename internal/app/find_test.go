@@ -14,7 +14,7 @@ import (
 func TestDefaultFindShortcutsOpenTheirScopes(t *testing.T) {
 	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	settleModelWork(t, model, coordinator)
-	model.settings.keybindings = append(model.settings.keybindings,
+	setModelKeybindings(t, model,
 		Keybinding{Context: KeyContextNormal, Chord: "/", Action: KeyActionSearch},
 		Keybinding{Context: KeyContextNormal, Chord: "g /", Action: KeyActionSearchVisible},
 		Keybinding{Context: KeyContextNormal, Chord: "Ctrl-p", Action: KeyActionFindFile},
@@ -22,15 +22,31 @@ func TestDefaultFindShortcutsOpenTheirScopes(t *testing.T) {
 
 	_, _ = model.Update(keyMessage("/"))
 	assertFindScope(t, model, findCurrent)
-	model.closeFind(false)
+	model.closeFind(findCloseCancel)
 
 	_, _ = model.Update(keyMessage("g"))
 	_, _ = model.Update(keyMessage("/"))
 	assertFindScope(t, model, findReview)
-	model.closeFind(false)
+	model.closeFind(findCloseCancel)
 
 	_, _ = model.Update(tea.KeyPressMsg(tea.Key{Code: 'p', Mod: tea.ModCtrl}))
 	assertFindScope(t, model, findFiles)
+}
+
+func TestOpenFindBorrowsImmutableSortedFileOrder(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{
+		"alpha.txt": "one\n",
+		"beta.txt":  "two\n",
+	})
+	settleModelWork(t, model, coordinator)
+	_ = model.openFind(findFiles)
+	if len(model.fileOrder) == 0 || len(model.find.candidates) == 0 ||
+		&model.fileOrder[0] != &model.find.candidates[0] {
+		t.Fatal("file find copied its immutable candidate order")
+	}
+	if !slices.IsSorted(model.find.candidates) {
+		t.Fatal("file find candidates are not sorted by file identity")
+	}
 }
 
 func TestFindScopeSwitchPreservesQuery(t *testing.T) {
@@ -181,7 +197,7 @@ func TestFindPaletteCompositesWorkspaceAtNormalAndMinimumSizes(t *testing.T) {
 		if lines := strings.Count(plain, "\n") + 1; lines != size.Height {
 			t.Fatalf("%dx%d rendered %d lines", size.Width, size.Height, lines)
 		}
-		model.closeFind(false)
+		model.closeFind(findCloseCancel)
 	}
 }
 
@@ -220,13 +236,13 @@ func TestFindEscapeRestoresPreviewedNavigation(t *testing.T) {
 	originalTree := model.treeCursor
 	_ = model.openFind(findFiles)
 	model.find.cursor = slices.Index(model.find.candidates, beta)
-	model.previewFindSelection(false)
+	model.previewFindSelection(findSelectionPreview)
 	settleModelWork(t, model, coordinator)
 	if active, _ := model.review.ActiveFile(); active != beta {
 		t.Fatalf("preview active file = %d, want beta %d", active, beta)
 	}
 
-	model.closeFind(false)
+	model.closeFind(findCloseCancel)
 	settleModelWork(t, model, coordinator)
 	active, _ := model.review.ActiveFile()
 	if active != alpha || model.diffCursor != 2 || model.diffTop != 1 ||

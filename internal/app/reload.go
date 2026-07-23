@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strconv"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/jacoelho/rvw/internal/review"
 	"github.com/jacoelho/rvw/internal/source"
 )
@@ -36,6 +38,7 @@ type ReloadWork struct {
 // ReloadPreparationWork represents reload preparation work.
 type ReloadPreparationWork struct {
 	Document *source.Document
+	Collapse collapseSnapshot
 	Review   review.Review
 	ID       review.OperationID
 }
@@ -49,20 +52,38 @@ type ReloadAcquiredOutcome struct {
 
 // ReloadPreparedOutcome describes reload prepared outcome.
 type ReloadPreparedOutcome struct {
-	AllFileTree     fileTree
-	VisibleFileTree fileTree
-	Err             error
-	Document        *source.Document
-	PathFiles       map[string]review.FileID
-	AmbiguousPaths  map[string]struct{}
-	AllFiles        []review.FileID
-	VisibleFiles    []review.FileID
-	Replacement     review.PreparedReplacement
-	ID              review.OperationID
+	Err               error
+	Document          *source.Document
+	PathFiles         map[string]review.FileID
+	AmbiguousPaths    map[string]struct{}
+	AllFiles          []review.FileID
+	VisibleFiles      []review.FileID
+	FileTree          fileTree
+	VisibleProjection treeProjection
+	Collapsed         collapsedTreeState
+	Replacement       review.PreparedReplacement
+	ID                review.OperationID
+}
+
+// RetainedBytes returns the complete reload result ownership. The candidate
+// snapshot is counted once even though the replacement and tree refer to it.
+func (outcome ReloadPreparedOutcome) RetainedBytes() int64 {
+	if outcome.Document == nil {
+		return 0
+	}
+	return outcome.Document.Snapshot().RetainedBytes() + outcome.Replacement.RetainedBytes() +
+		retainedWorkspaceIndexBytes(
+			outcome.FileTree,
+			outcome.VisibleProjection,
+			outcome.AllFiles,
+			outcome.VisibleFiles,
+			outcome.PathFiles,
+			outcome.AmbiguousPaths,
+		) + outcome.Collapsed.retainedBytes()
 }
 
 func (model *Model) startReload() {
-	if len(model.cleanupDocuments) >= MaxAcceptedOperations {
+	if len(model.cleanupSources) >= MaxAcceptedOperations {
 		model.notice = &Notice{
 			Kind: NoticeError,
 			Text: "reload is disabled because source cleanup capacity is exhausted",
@@ -146,49 +167,58 @@ func (model *Model) rejectReloadStart(start foregroundStart) {
 	model.applyForegroundEffect(effect)
 }
 
-func (model *Model) applyReloadAcquired(outcome ReloadAcquiredOutcome) {
+func (model *Model) applyReloadAcquired(outcome ReloadAcquiredOutcome) tea.Cmd {
 	if !model.foreground.reloadAcquired(outcome.ID) {
 		model.releaseReloadDocument(outcome.Document)
 		model.notice = &Notice{Kind: NoticeWarning, Text: "stale reload outcome"}
-		return
+		return nil
 	}
 	if outcome.Err != nil {
 		model.failReload(outcome.ID, outcome.Document, outcome.Err)
-		return
+		return nil
 	}
 	if outcome.Document == nil {
 		model.failReload(outcome.ID, nil, errors.New("reload acquired no source document"))
-		return
+		return nil
 	}
-	if err := model.coordinator.SubmitReloadPreparation(ReloadPreparationWork{
-		ID:       outcome.ID,
-		Review:   model.review,
-		Document: outcome.Document,
-	}); err != nil {
-		model.failReload(outcome.ID, outcome.Document, err)
-		return
-	}
-	if !model.foreground.reloadPreparationAdmitted(outcome.ID) {
-		model.coordinator.Cancel(outcome.ID)
+	if !model.foreground.reloadCaptureStarted(outcome.ID) {
 		model.failReload(
 			outcome.ID,
 			outcome.Document,
-			errors.New("foreground reload preparation invariant violated"),
+			errors.New("foreground reload capture invariant violated"),
 		)
-		return
+		return nil
 	}
-	model.notice = &Notice{Kind: NoticeInformation, Text: "reconciling reloaded source"}
+	return model.beginCollapseCapture(reloadCollapseCaptureIntent{
+		id:       outcome.ID,
+		document: outcome.Document,
+		review:   model.review,
+		detail:   "reconciling reloaded source",
+	})
 }
 
-func (model *Model) applyReloadPrepared(outcome ReloadPreparedOutcome) {
+func (model *Model) applyReloadPrepared(outcome ReloadPreparedOutcome) tea.Cmd {
 	if !model.foreground.reloadPrepared(outcome.ID) {
 		model.releaseReloadDocument(outcome.Document)
 		model.notice = &Notice{Kind: NoticeWarning, Text: "stale reload outcome"}
-		return
+		return nil
 	}
+	if model.reloadPreparationDocument != nil &&
+		model.reloadPreparationDocument != outcome.Document {
+		expected := model.reloadPreparationDocument
+		model.reloadPreparationDocument = nil
+		model.releaseReloadDocument(outcome.Document)
+		model.failReload(
+			outcome.ID,
+			expected,
+			errors.New("reload preparation returned a different source document"),
+		)
+		return nil
+	}
+	model.reloadPreparationDocument = nil
 	if outcome.Err != nil {
 		model.failReload(outcome.ID, outcome.Document, outcome.Err)
-		return
+		return nil
 	}
 	if outcome.Document == nil ||
 		len(outcome.AllFiles) != outcome.Document.Snapshot().FileCount() {
@@ -197,11 +227,14 @@ func (model *Model) applyReloadPrepared(outcome ReloadPreparedOutcome) {
 			outcome.Document,
 			errors.New("reload preparation is incomplete"),
 		)
-		return
+		return nil
 	}
-	committed, report, ok := model.commitReloadReplacement(outcome)
+	if outcome.Collapsed.generation != model.collapsedTree.generation {
+		return model.retryReloadPreparation(outcome, "tree collapse changed during reload")
+	}
+	committed, report, command, ok := model.commitReloadReplacement(outcome)
 	if !ok {
-		return
+		return command
 	}
 	committed, err := committed.ResolveOperation(
 		outcome.ID,
@@ -210,7 +243,7 @@ func (model *Model) applyReloadPrepared(outcome ReloadPreparedOutcome) {
 	)
 	if err != nil {
 		model.failReload(outcome.ID, outcome.Document, err)
-		return
+		return nil
 	}
 	viewport := model.preservedReloadViewport(committed, report)
 	_, hadNewActive := committed.ActiveFile()
@@ -229,7 +262,7 @@ func (model *Model) applyReloadPrepared(outcome ReloadPreparedOutcome) {
 			Kind: NoticeError,
 			Text: "foreground reload completion invariant violated",
 		}
-		return
+		return nil
 	}
 
 	oldDocument := model.installReloadState(outcome, committed, viewport)
@@ -239,42 +272,56 @@ func (model *Model) applyReloadPrepared(outcome ReloadPreparedOutcome) {
 	} else {
 		model.applyForegroundEffect(effect)
 	}
+	return nil
 }
 
 func (model *Model) commitReloadReplacement(
 	outcome ReloadPreparedOutcome,
-) (review.Review, review.ReloadReport, bool) {
+) (review.Review, review.ReloadReport, tea.Cmd, bool) {
 	committed, report, err := model.review.CommitReplacement(outcome.Replacement)
 	if err == nil {
-		return committed, report, true
+		return committed, report, nil, true
 	}
 	if errors.Is(err, review.ErrStaleReloadPreparation) &&
 		model.foreground.reloadPreparationAttempts() < maxReloadPreparationTries {
-		submitErr := model.coordinator.SubmitReloadPreparation(ReloadPreparationWork{
-			ID:       outcome.ID,
-			Review:   model.review,
-			Document: outcome.Document,
-		})
-		if submitErr == nil {
-			if !model.foreground.reloadPreparationRetryAdmitted(outcome.ID) {
-				model.coordinator.Cancel(outcome.ID)
-				model.failReload(
-					outcome.ID,
-					outcome.Document,
-					errors.New("foreground reload retry invariant violated"),
-				)
-				return review.Review{}, review.ReloadReport{}, false
-			}
-			model.notice = &Notice{
-				Kind: NoticeInformation,
-				Text: "review changed during reload; reconciling latest state",
-			}
-			return review.Review{}, review.ReloadReport{}, false
-		}
-		err = submitErr
+		command := model.retryReloadPreparation(
+			outcome,
+			"review changed during reload; reconciling latest state",
+		)
+		return review.Review{}, review.ReloadReport{}, command, false
 	}
 	model.failReload(outcome.ID, outcome.Document, err)
-	return review.Review{}, review.ReloadReport{}, false
+	return review.Review{}, review.ReloadReport{}, nil, false
+}
+
+func (model *Model) retryReloadPreparation(
+	outcome ReloadPreparedOutcome,
+	detail NoticeText,
+) tea.Cmd {
+	if model.foreground.reloadPreparationAttempts() >= maxReloadPreparationTries {
+		model.failReload(
+			outcome.ID,
+			outcome.Document,
+			errors.New("reload preparation did not reach a stable collapse generation"),
+		)
+		return nil
+	}
+	attempts := model.foreground.reloadPreparationAttempts()
+	if !model.foreground.reloadCaptureStarted(outcome.ID) {
+		model.failReload(
+			outcome.ID,
+			outcome.Document,
+			errors.New("foreground reload retry capture invariant violated"),
+		)
+		return nil
+	}
+	return model.beginCollapseCapture(reloadCollapseCaptureIntent{
+		id:       outcome.ID,
+		document: outcome.Document,
+		review:   model.review,
+		detail:   detail,
+		attempts: attempts,
+	})
 }
 
 func (model *Model) preservedReloadViewport(
@@ -310,10 +357,11 @@ func (model *Model) installReloadState(
 	model.resetSyntax()
 	model.allFileOrder = outcome.AllFiles
 	model.visibleFileOrder = outcome.VisibleFiles
-	model.allFileTree = outcome.AllFileTree
-	model.visibleFileTree = outcome.VisibleFileTree
+	model.allFileTree = outcome.FileTree
+	model.visibleFileTree = outcome.FileTree.withProjection(outcome.VisibleProjection)
 	model.pathFiles = outcome.PathFiles
 	model.ambiguousPaths = outcome.AmbiguousPaths
+	model.collapsedTree = outcome.Collapsed
 	model.filterQuery = ""
 	model.filterGeneration++
 	model.filterBuild = nil
@@ -344,8 +392,9 @@ func (model *Model) finishReloadDocument(
 	oldDocument *source.Document,
 	report review.ReloadReport,
 ) {
-	if err := model.coordinator.ReleaseDocument(oldDocument); err != nil {
-		model.retainDocumentForCleanup(oldDocument)
+	cleanup := oldDocument.DetachCleanup()
+	if err := model.coordinator.ReleaseCleanup(cleanup); err != nil {
+		model.retainCleanup(cleanup)
 		model.notice = &Notice{
 			Kind: NoticeError,
 			Text: NoticeText("reload committed but old source cleanup was not admitted: " + err.Error()),
@@ -419,11 +468,14 @@ func (model *Model) resumeActivePatchAfterReloadFailure() {
 }
 
 func (model *Model) releaseReloadDocument(document *source.Document) {
-	if document == nil {
+	if document == nil || document == model.document ||
+		document == model.reloadPreparationDocument ||
+		model.collapseCaptureOwnsDocument(document) {
 		return
 	}
-	if err := model.coordinator.ReleaseDocument(document); err != nil {
-		model.retainDocumentForCleanup(document)
+	cleanup := document.DetachCleanup()
+	if err := model.coordinator.ReleaseCleanup(cleanup); err != nil {
+		model.retainCleanup(cleanup)
 		model.notice = &Notice{
 			Kind: NoticeError,
 			Text: NoticeText("release reload document: " + err.Error()),
@@ -431,14 +483,14 @@ func (model *Model) releaseReloadDocument(document *source.Document) {
 	}
 }
 
-func (model *Model) retainDocumentForCleanup(document *source.Document) {
-	if document == nil {
+func (model *Model) retainCleanup(cleanup *source.Cleanup) {
+	if cleanup == nil {
 		return
 	}
-	if slices.Contains(model.cleanupDocuments, document) {
+	if slices.Contains(model.cleanupSources, cleanup) {
 		return
 	}
-	model.cleanupDocuments = append(model.cleanupDocuments, document)
+	model.cleanupSources = append(model.cleanupSources, cleanup)
 }
 
 func resolveRejectedOperation(
@@ -464,8 +516,7 @@ func operationStatusForWorkError(err error) review.OperationStatus {
 	case errors.Is(err, ErrCoordinatorSaturated), errors.Is(err, source.ErrSourceLimited):
 		return review.OperationLimited
 	default:
-		var failure *source.FailureError
-		if errors.As(err, &failure) {
+		if failure, ok := errors.AsType[*source.FailureError](err); ok {
 			switch failure.Kind {
 			case source.FailureUnavailable,
 				source.FailureStale,

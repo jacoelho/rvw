@@ -10,6 +10,10 @@ import (
 )
 
 func (model *Model) openExportPicker(selection exportSelection) {
+	if !selection.options.Ready() {
+		model.notice = &Notice{Kind: NoticeWarning, Text: "invalid export options"}
+		return
+	}
 	if selection.destination != delivery.DestinationClipboard &&
 		selection.destination != delivery.DestinationStdout {
 		model.notice = &Notice{Kind: NoticeWarning, Text: "invalid export destination"}
@@ -31,6 +35,10 @@ func (model *Model) applyExportPickerAction(action KeyAction) {
 		model.overlay = OverlayNone
 	case KeyActionToggleExportUnmap:
 		model.toggleExportOption(review.ExportUnmappable)
+	case KeyActionToggleExportNotes:
+		model.toggleExportOption(review.ExportNotes)
+	case KeyActionToggleExportPraise:
+		model.toggleExportOption(review.ExportPraise)
 	case KeyActionExportSelected:
 		selection := model.exportPicker
 		model.overlay = OverlayNone
@@ -62,7 +70,7 @@ func (model *Model) startExport(selection exportSelection) {
 	}
 	if err := model.coordinator.SubmitExport(ExportWork{
 		ID:          operationID,
-		Input:       model.review.ExportInput(),
+		Source:      model.review.ExportSource(),
 		Templates:   model.settings.exportTemplates,
 		Options:     selection.options,
 		Format:      selection.format,
@@ -111,6 +119,8 @@ func (model *Model) exportPickerView(width, height int) string {
 		"format       " + format,
 		"destination  " + destination,
 		"",
+		checked(review.ExportNotes) + " include notes",
+		checked(review.ExportPraise) + " include praise",
 		checked(review.ExportUnmappable) + " include unmappable comments",
 		"",
 		model.bindingSummary(KeyContextExportPicker),

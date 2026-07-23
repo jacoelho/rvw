@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -14,12 +13,12 @@ import (
 	"unicode/utf8"
 
 	"github.com/jacoelho/rvw/internal/review"
-	"github.com/jacoelho/rvw/internal/subprocess"
 )
 
 const (
-	maxFilterFileBytes     int64 = 256 << 10
-	maxGitIgnoreBatchBytes int64 = 8 << 20
+	maxFilterFileBytes        int64 = 256 << 10
+	maxGitIgnoreBatchBytes    int64 = 8 << 20
+	filterCancellationRecords       = 2_048
 )
 
 type gitignoreMode uint8
@@ -30,125 +29,189 @@ const (
 )
 
 type ignoreRule struct {
-	pattern *regexp.Regexp
+	pattern string
 	negated bool
 }
 
-type filterSet struct {
-	include []*regexp.Regexp
-	exclude []*regexp.Regexp
-	rvw     []ignoreRule
-	options OpenOptions
+type filterProjection struct {
+	flags []review.Flags
 }
 
-func newFilterSet(repository RepositoryPath, options OpenOptions) (filterSet, error) {
-	set := filterSet{options: options}
-	var err error
-	set.include, err = compilePatterns(options.Include)
-	if err != nil {
-		return filterSet{}, fmt.Errorf("compile include patterns: %w", err)
+type filterPathEncoding uint8
+
+const (
+	filterPathInvalidUTF8 filterPathEncoding = iota
+	filterPathValidUTF8
+)
+
+type filterGitignoreMatch uint8
+
+const (
+	filterNotGitignored filterGitignoreMatch = iota
+	filterGitignored
+)
+
+type filterPathFacts struct {
+	encoding  filterPathEncoding
+	gitignore filterGitignoreMatch
+}
+
+func buildFilterProjection(
+	ctx context.Context,
+	options OpenOptions,
+	records []diffRecord,
+	ignored []bool,
+	rules []ignoreRule,
+	ledger *sourceLedger,
+) (filterProjection, error) {
+	if len(ignored) != len(records) || ledger == nil {
+		return filterProjection{}, errors.New("filter projection ownership is invalid")
 	}
-	set.exclude, err = compilePatterns(options.Exclude)
+	matcher, err := newCompiledFilterSet(ctx, ledger, options.Include, options.Exclude, rules)
 	if err != nil {
-		return filterSet{}, fmt.Errorf("compile exclude patterns: %w", err)
+		return filterProjection{}, err
 	}
-	if options.RVWIgnore && options.IgnoreFile != "" {
-		set.rvw, err = readIgnoreRules(repository, options.IgnoreFile)
+	defer matcher.Close()
+	projection := filterProjection{flags: make([]review.Flags, len(records))}
+	for index, record := range records {
+		if index%filterCancellationRecords == 0 {
+			if err := context.Cause(ctx); err != nil {
+				return filterProjection{}, err
+			}
+		}
+		path := primaryPath(record)
+		encoding := filterPathInvalidUTF8
+		if utf8.ValidString(path) {
+			encoding = filterPathValidUTF8
+		}
+		match, err := matcher.matchPrepared(path, encoding)
 		if err != nil {
-			return filterSet{}, err
+			return filterProjection{}, err
+		}
+		gitignore := filterNotGitignored
+		if ignored[index] {
+			gitignore = filterGitignored
+		}
+		projection.flags[index], err = filterFlags(
+			path,
+			filterPathFacts{encoding: encoding, gitignore: gitignore},
+			options,
+			match,
+		)
+		if err != nil {
+			return filterProjection{}, err
 		}
 	}
-	return set, nil
+	return projection, nil
 }
 
 func (service *Service) gitignored(
 	ctx context.Context,
-	repository RepositoryPath,
+	runCPU CPUAdmission,
+	repository *rootedRepository,
 	environment map[string]string,
 	records []diffRecord,
 	mode gitignoreMode,
+	ledger *sourceLedger,
 ) ([]bool, error) {
 	ignored := make([]bool, len(records))
 	if mode != useGitignore || len(records) == 0 {
 		return ignored, nil
 	}
+	scratchBytes := gitignoreScratchBytes(len(records))
+	if err := ledger.reserve(scratchBytes); err != nil {
+		return nil, err
+	}
+	defer ledger.release(scratchBytes)
 
 	for start := 0; start < len(records); {
 		var input bytes.Buffer
-		pathToIndexes := make(map[string][]int)
+		var pathToIndexes map[string][]int
 		end := start
-		for end < len(records) {
-			path := primaryPath(records[end])
-			if input.Len() != 0 &&
-				int64(input.Len())+int64(len(path))+1 > maxGitIgnoreBatchBytes {
-				break
+		if err := runCPU(ctx, func() error {
+			pathToIndexes = make(map[string][]int)
+			for end < len(records) {
+				if cancellationErr := context.Cause(ctx); cancellationErr != nil {
+					return cancellationErr
+				}
+				path := primaryPath(records[end])
+				if input.Len() != 0 &&
+					int64(input.Len())+int64(len(path))+1 > maxGitIgnoreBatchBytes {
+					break
+				}
+				input.WriteString(path)
+				input.WriteByte(0)
+				pathToIndexes[path] = append(pathToIndexes[path], end)
+				end++
 			}
-			input.Write(path)
-			input.WriteByte(0)
-			pathToIndexes[string(path)] = append(pathToIndexes[string(path)], end)
-			end++
+			return nil
+		}); err != nil {
+			return nil, err
 		}
-		result, err := service.runner.Run(ctx, subprocessRequest(
-			repository,
+		result, err := service.runGitWithInputIn(
+			ctx,
+			repository.gitDirectory(),
 			environment,
 			[]string{"check-ignore", "--no-index", "-z", gitStdin},
 			input.Bytes(),
 			[]int{0, 1},
-		))
+			maxGitIgnoreBatchBytes,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("evaluate .gitignore: %w", err)
 		}
-		for output := result.Stdout; len(output) > 0; {
-			path, remaining, ok := nextNULTerminated(output)
-			if !ok {
-				return nil, errors.New("git check-ignore returned an unterminated path")
+		if err := runCPU(ctx, func() error {
+			for output := result.Stdout; len(output) > 0; {
+				path, remaining, ok, splitErr := nextNULTerminatedCancellable(ctx, output)
+				if splitErr != nil {
+					return splitErr
+				}
+				if !ok {
+					return errors.New("git check-ignore returned an unterminated path")
+				}
+				output = remaining
+				indexes, exists := pathToIndexes[string(path)]
+				if !exists {
+					return errors.New("git check-ignore returned an unknown path")
+				}
+				for _, index := range indexes {
+					ignored[index] = true
+				}
 			}
-			output = remaining
-			indexes, exists := pathToIndexes[string(path)]
-			if !exists {
-				return nil, fmt.Errorf("git check-ignore returned an unknown path")
-			}
-			for _, index := range indexes {
-				ignored[index] = true
-			}
+			return nil
+		}); err != nil {
+			return nil, err
 		}
 		start = end
 	}
 	return ignored, nil
 }
 
-func subprocessRequest(
-	repository RepositoryPath,
-	environment map[string]string,
-	arguments []string,
-	stdin []byte,
-	acceptedExits []int,
-) subprocess.Request {
-	merged := baseGitEnvironment()
-	maps.Copy(merged, environment)
-	return subprocess.Request{
-		Name:            "git",
-		Args:            arguments,
-		Dir:             repository.String(),
-		Env:             merged,
-		Stdin:           stdin,
-		AcceptedExits:   acceptedExits,
-		OperationDetail: "git check-ignore",
+func nextNULTerminatedCancellable(
+	ctx context.Context,
+	value []byte,
+) ([]byte, []byte, bool, error) {
+	index, err := indexSourceByteCancellable(ctx, value, 0)
+	if err != nil {
+		return nil, value, false, err
 	}
+	if index < 0 {
+		return nil, value, false, nil
+	}
+	return value[:index], value[index+1:], true, nil
 }
 
-type gitignoreMatch uint8
-
-const (
-	notGitignored gitignoreMatch = iota
-	gitignored
-)
-
-func (set filterSet) flagsFor(record diffRecord, ignored gitignoreMatch) (review.Flags, error) {
-	rawPath := primaryPath(record)
-	path, validUTF8 := string(rawPath), utf8.Valid(rawPath)
+func filterFlags(
+	path string,
+	facts filterPathFacts,
+	options OpenOptions,
+	match filterMatchFlags,
+) (review.Flags, error) {
+	if !match.valid() {
+		return review.Flags{}, errors.New("filter match flags are invalid")
+	}
 	generated, vendored, lockFile, minified := false, false, false, false
-	if validUTF8 {
+	if facts.encoding == filterPathValidUTF8 {
 		lower := strings.ToLower(path)
 		base := strings.ToLower(filepath.Base(path))
 		generated = strings.Contains(lower, "/generated/") ||
@@ -164,19 +227,19 @@ func (set filterSet) flagsFor(record diffRecord, ignored gitignoreMatch) (review
 	}
 
 	var reasons []review.HiddenReason
-	if set.options.BuiltinDefaults && (generated || vendored || lockFile || minified) {
+	if options.BuiltinDefaults && (generated || vendored || lockFile || minified) {
 		reasons = append(reasons, review.HiddenBuiltinDefault)
 	}
-	if ignored == gitignored {
+	if facts.gitignore == filterGitignored {
 		reasons = append(reasons, review.HiddenGitignore)
 	}
-	if validUTF8 && matchesIgnoreRules(set.rvw, path) {
+	if match.Has(filterMatchIgnore) {
 		reasons = append(reasons, review.HiddenRVWIgnore)
 	}
-	if len(set.include) != 0 && (!validUTF8 || !matchesAny(set.include, path)) {
+	if len(options.Include) != 0 && !match.Has(filterMatchInclude) {
 		reasons = append(reasons, review.HiddenInclude)
 	}
-	if validUTF8 && matchesAny(set.exclude, path) {
+	if match.Has(filterMatchExclude) {
 		reasons = append(reasons, review.HiddenExclude)
 	}
 	traitValues := make([]review.FileTrait, 0, 4)
@@ -203,18 +266,27 @@ func (set filterSet) flagsFor(record diffRecord, ignored gitignoreMatch) (review
 	return review.NewFlags(traits, hidden)
 }
 
+func gitignoreScratchBytes(records int) int64 {
+	return 2*maxGitIgnoreBatchBytes + int64(records)*80 +
+		MaxCommandErrorConstructionBytes + maxSourceProtocolToken
+}
+
 func readIgnoreRules(
-	repository RepositoryPath,
+	repository *rootedRepository,
 	name IgnoreFile,
-) (rules []ignoreRule, returnErr error) {
-	root, err := os.OpenRoot(repository.String())
+) ([]ignoreRule, error) {
+	contents, err := readIgnoreRuleContents(repository, name)
 	if err != nil {
-		return nil, fmt.Errorf("open repository root: %w", err)
+		return nil, err
 	}
-	defer func() {
-		returnErr = errors.Join(returnErr, root.Close())
-	}()
-	file, err := root.Open(name.String())
+	return parseIgnoreRules(context.Background(), name, contents)
+}
+
+func readIgnoreRuleContents(
+	repository *rootedRepository,
+	name IgnoreFile,
+) (contents []byte, returnErr error) {
+	file, err := repository.filesystem.Open(name.String())
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -224,18 +296,41 @@ func readIgnoreRules(
 	defer func() {
 		returnErr = errors.Join(returnErr, file.Close())
 	}()
-	contents, err := io.ReadAll(io.LimitReader(file, maxFilterFileBytes+1))
+	contents, err = io.ReadAll(io.LimitReader(file, maxFilterFileBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", name, err)
 	}
 	if int64(len(contents)) > maxFilterFileBytes {
 		return nil, fmt.Errorf("%s exceeds %d bytes", name, maxFilterFileBytes)
 	}
+	return contents, nil
+}
+
+func parseIgnoreRules(
+	ctx context.Context,
+	name IgnoreFile,
+	contents []byte,
+) ([]ignoreRule, error) {
 	if !utf8.Valid(contents) {
 		return nil, fmt.Errorf("%s is not valid UTF-8", name)
 	}
-
-	for line := range strings.Lines(string(contents)) {
+	rules := make([]ignoreRule, 0, 16)
+	for len(contents) > 0 {
+		lineEnd, err := indexSourceByteCancellable(ctx, contents, '\n')
+		if err != nil {
+			return nil, err
+		}
+		lineBytes := contents
+		if lineEnd >= 0 {
+			lineBytes = contents[:lineEnd]
+			contents = contents[lineEnd+1:]
+		} else {
+			contents = nil
+		}
+		if len(lineBytes) > 4_096 {
+			return nil, fmt.Errorf("%s contains a pattern exceeding 4096 bytes", name)
+		}
+		line := string(lineBytes)
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
@@ -247,28 +342,12 @@ func readIgnoreRules(
 		if line == "" {
 			return nil, fmt.Errorf("%s contains an empty negation pattern", name)
 		}
-		compiled, err := compileGlob(line)
-		if err != nil {
-			return nil, fmt.Errorf("%s pattern %q: %w", name, line, err)
-		}
-		rules = append(rules, ignoreRule{pattern: compiled, negated: negated})
+		rules = append(rules, ignoreRule{pattern: line, negated: negated})
 		if len(rules) > 4_096 {
 			return nil, fmt.Errorf("%s contains more than 4096 patterns", name)
 		}
 	}
 	return rules, nil
-}
-
-func compilePatterns(patterns []FilterPattern) ([]*regexp.Regexp, error) {
-	compiled := make([]*regexp.Regexp, len(patterns))
-	for index, pattern := range patterns {
-		value, err := compileGlob(pattern.String())
-		if err != nil {
-			return nil, fmt.Errorf("pattern %q: %w", pattern, err)
-		}
-		compiled[index] = value
-	}
-	return compiled, nil
 }
 
 func compileGlob(pattern string) (*regexp.Regexp, error) {
@@ -339,27 +418,8 @@ func compileGlob(pattern string) (*regexp.Regexp, error) {
 	return compiled, nil
 }
 
-func matchesAny(patterns []*regexp.Regexp, path string) bool {
-	for _, pattern := range patterns {
-		if pattern.MatchString(path) {
-			return true
-		}
-	}
-	return false
-}
-
-func matchesIgnoreRules(rules []ignoreRule, path string) bool {
-	matched := false
-	for _, rule := range rules {
-		if rule.pattern.MatchString(path) {
-			matched = !rule.negated
-		}
-	}
-	return matched
-}
-
-func primaryPath(record diffRecord) []byte {
-	if record.newPath != nil {
+func primaryPath(record diffRecord) string {
+	if record.newPath != "" {
 		return record.newPath
 	}
 	return record.oldPath

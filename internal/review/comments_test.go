@@ -6,6 +6,31 @@ import (
 	"unsafe"
 )
 
+func TestCommentMetadataChargesCoverCompiledLayouts(t *testing.T) {
+	if compiled := int64(unsafe.Sizeof(Comment{})); compiled > commentMetadataBytes {
+		t.Fatalf("comment metadata charge = %d, compiled size = %d", commentMetadataBytes, compiled)
+	}
+	if compiled := int64(unsafe.Sizeof(Draft{})); compiled > draftMetadataBytes {
+		t.Fatalf("draft metadata charge = %d, compiled size = %d", draftMetadataBytes, compiled)
+	}
+}
+
+func TestCommentFlagsRejectUnknownMembersAndBits(t *testing.T) {
+	flags := commentFlags{}.markStale().markUnmappable()
+	if !flags.valid() || !flags.has(commentFlagStale) || !flags.has(commentFlagUnmappable) {
+		t.Fatal("closed comment flag mutations produced an invalid set")
+	}
+	if flags.clearUnmappable().has(commentFlagUnmappable) {
+		t.Fatal("unmappable flag was not cleared")
+	}
+	if flags.has(commentFlag(99)) {
+		t.Fatal("unknown comment flag query was accepted")
+	}
+	if flags := (commentFlags{bits: 1 << 7}); flags.valid() {
+		t.Fatal("comment flags with unknown bits were accepted")
+	}
+}
+
 func TestSavedCommentAnchorsAreImmutableAndCounted(t *testing.T) {
 	base := testReview(t, testSnapshot(t, 1, "one.go"))
 	start, _ := NewLineNumber(3)
@@ -84,7 +109,7 @@ func TestValidatedCommentStringsOwnTheirBacking(t *testing.T) {
 }
 
 func TestDraftBodyOwnsValidatedBacking(t *testing.T) {
-	current, err := NewReview(testSnapshot(t, 1, "one.go"))
+	current, err := NewReview(testReviewRequest(testSnapshot(t, 1, "one.go")))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,6 +1,7 @@
 package review
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"unsafe"
@@ -8,7 +9,9 @@ import (
 
 func TestRemoteThreadMappingOwnsMarkersAndNavigationIdentity(t *testing.T) {
 	line, _ := NewLineNumber(9)
-	thread := testRemoteThread(t, "thread", "before.go", LineOld, &line, true, false)
+	thread := testRemoteThread(t, "thread", "before.go", LineOld, &line, remoteThreadOptions{
+		resolved: true,
+	})
 	snapshot, err := testRenamedSnapshot(t, 1, "before.go", "after.go").WithRemoteThreads(
 		[]RemoteThread{thread},
 	)
@@ -28,7 +31,7 @@ func TestRemoteThreadMappingOwnsMarkersAndNavigationIdentity(t *testing.T) {
 
 func TestRemoteThreadMappingRejectsAmbiguityAndExcludesOutdatedLines(t *testing.T) {
 	line, _ := NewLineNumber(5)
-	ambiguous := testRemoteThread(t, "ambiguous", "same.go", LineNew, &line, false, false)
+	ambiguous := testRemoteThread(t, "ambiguous", "same.go", LineNew, &line, remoteThreadOptions{})
 	snapshot, err := testSnapshot(t, 1, "same.go", "same.go").WithRemoteThreads(
 		[]RemoteThread{ambiguous},
 	)
@@ -44,7 +47,9 @@ func TestRemoteThreadMappingRejectsAmbiguityAndExcludesOutdatedLines(t *testing.
 		t.Fatal("ambiguous remote thread created a marker")
 	}
 
-	outdated := testRemoteThread(t, "outdated", "one.go", LineNew, &line, false, true)
+	outdated := testRemoteThread(t, "outdated", "one.go", LineNew, &line, remoteThreadOptions{
+		outdated: true,
+	})
 	snapshot, err = testSnapshot(t, 2, "one.go").WithRemoteThreads([]RemoteThread{outdated})
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +65,7 @@ func TestRemoteThreadMappingRejectsAmbiguityAndExcludesOutdatedLines(t *testing.
 
 func TestRemoteThreadFailureClearsDerivedMappingsAndMarkers(t *testing.T) {
 	line, _ := NewLineNumber(3)
-	thread := testRemoteThread(t, "thread", "one.go", LineNew, &line, false, false)
+	thread := testRemoteThread(t, "thread", "one.go", LineNew, &line, remoteThreadOptions{})
 	snapshot, err := testSnapshot(t, 1, "one.go").WithRemoteThreads([]RemoteThread{thread})
 	if err != nil {
 		t.Fatal(err)
@@ -76,12 +81,108 @@ func TestRemoteThreadFailureClearsDerivedMappingsAndMarkers(t *testing.T) {
 	}
 }
 
+func TestRemoteThreadReturnsBoundedPointAccess(t *testing.T) {
+	snapshot := testSnapshotWithRemoteComment(t)
+	for _, test := range []struct {
+		name  string
+		index int
+		ok    bool
+	}{
+		{name: "negative", index: -1},
+		{name: "present", index: 0, ok: true},
+		{name: "exact end", index: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			thread, ok := snapshot.RemoteThread(test.index)
+			if ok != test.ok {
+				t.Fatalf("RemoteThread(%d) present = %t, want %t", test.index, ok, test.ok)
+			}
+			if ok && thread.ID() != "thread" {
+				t.Fatalf("RemoteThread(%d) ID = %q, want thread", test.index, thread.ID())
+			}
+		})
+	}
+}
+
+func TestRemoteThreadPointAccessPreservesImmutableOwnership(t *testing.T) {
+	snapshot := testSnapshotWithRemoteComment(t)
+	thread, ok := snapshot.RemoteThread(0)
+	if !ok || thread.ID() != "thread" {
+		t.Fatal("remote thread is unavailable")
+	}
+
+	threads := snapshot.RemoteThreads(0, 1)
+	threads[0] = RemoteThread{}
+	thread, _ = snapshot.RemoteThread(0)
+	if thread.ID() != "thread" {
+		t.Fatal("mutating the ranged thread copy changed snapshot ownership")
+	}
+	comments := thread.Comments(0, 1)
+	comments[0] = RemoteComment{}
+	comment, ok := thread.Comment(0)
+	if !ok || comment.ID() != "comment" {
+		t.Fatal("mutating the ranged comment copy changed thread ownership")
+	}
+}
+
+func TestRemoteThreadPointAccessAllocatesNothing(t *testing.T) {
+	snapshot := testSnapshotWithRemoteComment(t)
+	var (
+		thread  RemoteThread
+		comment RemoteComment
+	)
+	allocations := testing.AllocsPerRun(1_000, func() {
+		var threadOK, commentOK bool
+		thread, threadOK = snapshot.RemoteThread(0)
+		comment, commentOK = thread.Comment(0)
+		if !threadOK || !commentOK {
+			panic("remote point access is unavailable")
+		}
+	})
+	if allocations != 0 {
+		t.Fatalf("remote thread plus comment point access allocations = %g, want 0", allocations)
+	}
+	if thread.ID() != "thread" || comment.ID() != "comment" {
+		t.Fatalf("point access = thread %q comment %q", thread.ID(), comment.ID())
+	}
+}
+
+func testSnapshotWithRemoteComment(t *testing.T) Snapshot {
+	t.Helper()
+	comment, err := NewRemoteComment(RemoteCommentDescriptor{
+		ID: "comment", Author: "reviewer", Body: "body",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := NewPath([]byte("one.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	thread, err := NewRemoteThread(RemoteThreadDescriptor{
+		ID: "thread", Path: path, Side: LineNew, Comments: []RemoteComment{comment},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := testSnapshot(t, 1, "one.go").WithRemoteThreads([]RemoteThread{thread})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
+}
+
+type remoteThreadOptions struct {
+	resolved bool
+	outdated bool
+}
+
 func testRemoteThread(
 	t *testing.T,
 	id, pathValue string,
 	side LineSide,
 	line *LineNumber,
-	resolved, outdated bool,
+	options remoteThreadOptions,
 ) RemoteThread {
 	t.Helper()
 	path, err := NewPath([]byte(pathValue))
@@ -89,7 +190,7 @@ func testRemoteThread(
 		t.Fatal(err)
 	}
 	thread, err := NewRemoteThread(RemoteThreadDescriptor{
-		ID: id, Resolved: resolved, Outdated: outdated,
+		ID: id, Resolved: options.resolved, Outdated: options.outdated,
 		Path: path, Line: line, Side: side,
 	})
 	if err != nil {
@@ -159,4 +260,104 @@ func assertOwnedRemoteString(t *testing.T, name, got, source string) {
 	if unsafe.StringData(got) == unsafe.StringData(source) {
 		t.Fatalf("%s retained caller backing", name)
 	}
+}
+
+func TestTakeRemoteThreadCancellableStopsNearEndAndTransfersOnlyOnSuccess(t *testing.T) {
+	path, err := NewPath([]byte("one.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	comments := testRemoteComments(t, 3)
+	descriptor := RemoteThreadDescriptor{
+		ID:       "thread",
+		Path:     path,
+		Side:     LineNew,
+		Comments: comments,
+	}
+	cause := errors.New("stop remote thread construction")
+	for _, cancelAt := range []int{4, 5} {
+		checks := 0
+		thread, cancelErr := TakeRemoteThreadCancellable(func() error {
+			checks++
+			if checks == cancelAt {
+				return cause
+			}
+			return nil
+		}, descriptor)
+		if !errors.Is(cancelErr, cause) {
+			t.Fatalf("cancel at %d error = %v", cancelAt, cancelErr)
+		}
+		if checks != cancelAt || thread.CommentCount() != 0 {
+			t.Fatalf(
+				"cancel at %d: checks=%d comments=%d",
+				cancelAt,
+				checks,
+				thread.CommentCount(),
+			)
+		}
+	}
+	if descriptor.Comments[2].ID() != "comment-2" {
+		t.Fatal("cancelled take mutated caller-owned comments")
+	}
+
+	thread, err := TakeRemoteThread(descriptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unsafe.SliceData(thread.comments) != unsafe.SliceData(comments) {
+		t.Fatal("successful synchronous take did not consume comment backing")
+	}
+}
+
+func TestTakeRemoteThreadsCancellableChecksFinalCommentValidationBeforeMapping(t *testing.T) {
+	path, err := NewPath([]byte("one.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	thread, err := TakeRemoteThread(RemoteThreadDescriptor{
+		ID:       "thread",
+		Path:     path,
+		Side:     LineNew,
+		Comments: testRemoteComments(t, 3),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	threads := []RemoteThread{thread}
+	cause := errors.New("stop final remote comment validation")
+	checks := 0
+	next, err := testSnapshot(t, 1, "one.go").TakeRemoteThreadsCancellable(func() error {
+		checks++
+		if checks == 6 {
+			return cause
+		}
+		return nil
+	}, threads)
+	if !errors.Is(err, cause) {
+		t.Fatalf("cancellation error = %v", err)
+	}
+	if checks != 6 || next.RemoteThreadCount() != 0 {
+		t.Fatalf("checks=%d threads=%d, want 6 and 0", checks, next.RemoteThreadCount())
+	}
+	if threads[0].mapping != 0 {
+		t.Fatal("cancelled content validation partially installed path mapping")
+	}
+}
+
+func testRemoteComments(t *testing.T, count int) []RemoteComment {
+	t.Helper()
+	comments := make([]RemoteComment, count)
+	for index := range comments {
+		comment, err := TakeRemoteComment(RemoteCommentDescriptor{
+			ID:        "comment-" + string(rune('0'+index)),
+			Body:      "body",
+			CreatedAt: "created",
+			URL:       "https://github.com/comment",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		comments[index] = comment
+	}
+	return comments
 }

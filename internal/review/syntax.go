@@ -18,6 +18,7 @@ const (
 	MaxSyntaxSpans           = 16_384
 	MaxSyntaxBytes     int64 = 1 << 20
 	MaxSyntaxLineBytes       = 256 << 10
+	syntaxPollBytes          = 16 << 10
 )
 
 // ErrInvalidSyntax identifies an invalid syntax failure.
@@ -179,10 +180,26 @@ type SyntaxSpan struct {
 
 // PreparedSyntax represents prepared syntax.
 type PreparedSyntax struct {
-	lines    map[LineNumber][]SyntaxSpan
 	identity SyntaxIdentity
+	lines    []syntaxLineIndex
+	spans    []SyntaxSpan
 	bytes    int64
+	peak     int64
 }
+
+type syntaxLineIndex struct {
+	line  LineNumber
+	first uint32
+	last  uint32
+}
+
+const (
+	preparedSyntaxMetadataBytes int64 = 96
+	syntaxLineIndexBytes        int64 = 12
+	syntaxSpanBytes             int64 = 12
+	syntaxDemandMetadataBytes   int64 = 64
+	syntaxRequestMetadataBytes  int64 = 56
+)
 
 // Identity returns the receiver's identity value.
 func (prepared *PreparedSyntax) Identity() SyntaxIdentity {
@@ -194,10 +211,11 @@ func (prepared *PreparedSyntax) Identity() SyntaxIdentity {
 
 // Spans performs the spans operation.
 func (prepared *PreparedSyntax) Spans(line LineNumber) iter.Seq[SyntaxSpan] {
-	if prepared == nil || len(prepared.lines[line]) == 0 {
+	entry, ok := prepared.line(line)
+	if !ok || entry.first == entry.last {
 		return nil
 	}
-	spans := prepared.lines[line]
+	spans := prepared.spans[entry.first:entry.last]
 	return func(yield func(SyntaxSpan) bool) {
 		for _, span := range spans {
 			if !yield(span) {
@@ -209,11 +227,32 @@ func (prepared *PreparedSyntax) Spans(line LineNumber) iter.Seq[SyntaxSpan] {
 
 // Covers performs the covers operation.
 func (prepared *PreparedSyntax) Covers(line LineNumber) bool {
+	_, ok := prepared.line(line)
+	return ok
+}
+
+func (prepared *PreparedSyntax) line(line LineNumber) (syntaxLineIndex, bool) {
 	if prepared == nil {
-		return false
+		return syntaxLineIndex{}, false
 	}
-	_, exists := prepared.lines[line]
-	return exists
+	index, found := slices.BinarySearchFunc(
+		prepared.lines,
+		line,
+		func(entry syntaxLineIndex, target LineNumber) int {
+			switch {
+			case entry.line < target:
+				return -1
+			case entry.line > target:
+				return 1
+			default:
+				return 0
+			}
+		},
+	)
+	if !found {
+		return syntaxLineIndex{}, false
+	}
+	return prepared.lines[index], true
 }
 
 // RetainedBytes returns the receiver's retained bytes value.
@@ -222,6 +261,29 @@ func (prepared *PreparedSyntax) RetainedBytes() int64 {
 		return 0
 	}
 	return prepared.bytes
+}
+
+// ConstructionBytes returns the maximum simultaneous retained and temporary
+// storage used while preparing this result, excluding the caller-owned blob.
+func (prepared *PreparedSyntax) ConstructionBytes() int64 {
+	if prepared == nil {
+		return 0
+	}
+	return prepared.peak
+}
+
+// RetainedBytes returns the complete request ownership prolonged by a syntax
+// worker, including slice capacities and identity strings.
+func (request SyntaxRequest) RetainedBytes() int64 {
+	if request.Operation == 0 || request.Source == 0 {
+		return 0
+	}
+	total := syntaxRequestMetadataBytes + int64(cap(request.Demands))*syntaxDemandMetadataBytes
+	for _, demand := range request.Demands {
+		total += int64(cap(demand.Lines))*4 +
+			int64(len(demand.Identity.content)+len(demand.Identity.selector))
+	}
+	return total
 }
 
 // PrepareSyntax prepares syntax.
@@ -253,13 +315,18 @@ func PrepareSyntaxCancellable(
 	}
 	prepared := &PreparedSyntax{
 		identity: identity,
-		lines:    make(map[LineNumber][]SyntaxSpan, len(requested)),
+		lines:    make([]syntaxLineIndex, 0, len(requested)),
+	}
+	requestedBytes := int64(cap(requested)) * 4
+	prepared.refreshRetainedBytes()
+	prepared.peak = prepared.bytes + requestedBytes
+	if prepared.bytes > MaxSyntaxBytes {
+		return nil, fmt.Errorf("%w: result capacity reached", ErrSyntaxLimited)
 	}
 	var (
 		lineNumber   uint32 = 1
 		offset              = 0
 		requestIndex        = 0
-		spanCount           = 0
 	)
 	work := 0
 	for requestIndex < len(requested) && offset <= len(blob) {
@@ -271,7 +338,10 @@ func PrepareSyntaxCancellable(
 		work++
 		target := requested[requestIndex].Uint32()
 		if lineNumber < target {
-			next := bytes.IndexByte(blob[offset:], '\n')
+			next, scanErr := indexSyntaxByteCancellable(cancelled, blob[offset:], '\n')
+			if scanErr != nil {
+				return nil, scanErr
+			}
 			if next < 0 {
 				break
 			}
@@ -283,7 +353,11 @@ func PrepareSyntaxCancellable(
 			return nil, ErrInvalidSyntax
 		}
 		end := len(blob)
-		if next := bytes.IndexByte(blob[offset:], '\n'); next >= 0 {
+		next, scanErr := indexSyntaxByteCancellable(cancelled, blob[offset:], '\n')
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		if next >= 0 {
 			end = offset + next
 		}
 		line := blob[offset:end]
@@ -294,13 +368,16 @@ func PrepareSyntaxCancellable(
 				MaxSyntaxLineBytes,
 			)
 		}
-		spans := syntaxSpans(line)
-		spanCount += len(spans)
-		prepared.bytes += int64(len(spans) * 12)
-		if spanCount > MaxSyntaxSpans || prepared.bytes > MaxSyntaxBytes {
-			return nil, fmt.Errorf("%w: result capacity reached", ErrSyntaxLimited)
+		first := len(prepared.spans)
+		spanErr := appendSyntaxSpansCancellable(cancelled, prepared, requestedBytes, line)
+		if spanErr != nil {
+			return nil, spanErr
 		}
-		prepared.lines[requested[requestIndex]] = spans
+		prepared.lines = append(prepared.lines, syntaxLineIndex{
+			line:  requested[requestIndex],
+			first: uint32FromInt(first),
+			last:  uint32FromInt(len(prepared.spans)),
+		})
 		requestIndex++
 		if end == len(blob) {
 			break
@@ -308,72 +385,189 @@ func PrepareSyntaxCancellable(
 		offset = end + 1
 		lineNumber++
 	}
+	prepared.refreshRetainedBytes()
+	prepared.peak = max(prepared.peak, prepared.bytes+requestedBytes)
 	return prepared, nil
 }
 
-func syntaxSpans(line []byte) []SyntaxSpan {
-	spans := make([]SyntaxSpan, 0, 8)
+func (prepared *PreparedSyntax) refreshRetainedBytes() {
+	prepared.bytes = preparedSyntaxMetadataBytes +
+		int64(len(prepared.identity.content)+len(prepared.identity.selector)) +
+		int64(cap(prepared.lines))*syntaxLineIndexBytes +
+		int64(cap(prepared.spans))*syntaxSpanBytes
+}
+
+func (prepared *PreparedSyntax) appendSpan(span SyntaxSpan, requestedBytes int64) error {
+	if len(prepared.spans) == MaxSyntaxSpans {
+		return fmt.Errorf("%w: result capacity reached", ErrSyntaxLimited)
+	}
+	if len(prepared.spans) == cap(prepared.spans) {
+		next := min(max(cap(prepared.spans)*2, 8), MaxSyntaxSpans)
+		fixed := preparedSyntaxMetadataBytes +
+			int64(len(prepared.identity.content)+len(prepared.identity.selector)) +
+			int64(cap(prepared.lines))*syntaxLineIndexBytes
+		if fixed+int64(next)*syntaxSpanBytes > MaxSyntaxBytes {
+			next = int((MaxSyntaxBytes - fixed) / syntaxSpanBytes)
+		}
+		if next <= cap(prepared.spans) {
+			return fmt.Errorf("%w: result capacity reached", ErrSyntaxLimited)
+		}
+		prepared.peak = max(
+			prepared.peak,
+			fixed+requestedBytes+int64(cap(prepared.spans)+next)*syntaxSpanBytes,
+		)
+		replacement := make([]SyntaxSpan, len(prepared.spans), next)
+		copy(replacement, prepared.spans)
+		prepared.spans = replacement
+	}
+	prepared.spans = append(prepared.spans, span)
+	prepared.refreshRetainedBytes()
+	prepared.peak = max(prepared.peak, prepared.bytes+requestedBytes)
+	return nil
+}
+
+func indexSyntaxByteCancellable(
+	cancelled func() error,
+	value []byte,
+	target byte,
+) (int, error) {
+	for start := 0; start < len(value); start += syntaxPollBytes {
+		if err := cancellationError(cancelled); err != nil {
+			return -1, err
+		}
+		end := min(start+syntaxPollBytes, len(value))
+		if index := bytes.IndexByte(value[start:end], target); index >= 0 {
+			return start + index, nil
+		}
+	}
+	return -1, cancellationError(cancelled)
+}
+
+func appendSyntaxSpansCancellable(
+	cancelled func() error,
+	prepared *PreparedSyntax,
+	requestedBytes int64,
+	line []byte,
+) error {
+	first := len(prepared.spans)
+	nextPoll := 0
+	check := func(index int) error {
+		if index < nextPoll {
+			return nil
+		}
+		nextPoll = index + syntaxPollBytes
+		return cancellationError(cancelled)
+	}
 	for index := 0; index < len(line); {
+		if err := check(index); err != nil {
+			return err
+		}
 		switch {
 		case index+1 < len(line) && line[index] == '/' && line[index+1] == '/':
-			spans = append(spans, SyntaxSpan{
+			if err := prepared.appendSpan(SyntaxSpan{
 				Start: uint32(index),
 				End:   uint32FromInt(len(line)),
 				Kind:  SyntaxComment,
-			})
-			return spans
+			}, requestedBytes); err != nil {
+				return err
+			}
+			return nil
 		case line[index] == '"' || line[index] == '\'' || line[index] == '`':
-			quote := line[index]
-			start := index
-			index++
-			for index < len(line) {
-				if line[index] == '\\' && quote != '`' && index+1 < len(line) {
-					index += 2
-					continue
-				}
-				value := line[index]
-				index++
-				if value == quote {
-					break
-				}
+			next, err := prepared.appendStringSpan(line, index, requestedBytes, check)
+			if err != nil {
+				return err
 			}
-			spans = append(spans, SyntaxSpan{
-				Start: uint32(start),
-				End:   uint32(index),
-				Kind:  SyntaxString,
-			})
+			index = next
 		case line[index] >= '0' && line[index] <= '9':
-			start := index
-			for index < len(line) &&
-				(line[index] >= '0' && line[index] <= '9' ||
-					strings.ContainsRune("abcdefABCDEFxXoObB._", rune(line[index]))) {
-				index++
+			next, err := prepared.appendNumberSpan(line, index, requestedBytes, check)
+			if err != nil {
+				return err
 			}
-			spans = append(spans, SyntaxSpan{
-				Start: uint32(start),
-				End:   uint32(index),
-				Kind:  SyntaxNumber,
-			})
+			index = next
 		case asciiIdentifierStart(line[index]):
-			start := index
-			for index < len(line) && asciiIdentifierContinue(line[index]) {
-				index++
+			next, err := prepared.appendIdentifierSpan(line, index, requestedBytes, check)
+			if err != nil {
+				return err
 			}
-			if syntaxKeywords[string(line[start:index])] {
-				spans = append(spans, SyntaxSpan{
-					Start: uint32(start),
-					End:   uint32(index),
-					Kind:  SyntaxKeyword,
-				})
-			}
+			index = next
 		default:
 			index++
 		}
-		if len(spans) == 256 {
-			return spans
+		if len(prepared.spans)-first == 256 {
+			return nil
 		}
 	}
-	return spans
+	return cancellationError(cancelled)
+}
+
+type syntaxCancelCheck func(int) error
+
+func (prepared *PreparedSyntax) appendStringSpan(
+	line []byte,
+	start int,
+	requestedBytes int64,
+	check syntaxCancelCheck,
+) (int, error) {
+	quote := line[start]
+	index := start + 1
+	for index < len(line) {
+		if err := check(index); err != nil {
+			return 0, err
+		}
+		if line[index] == '\\' && quote != '`' && index+1 < len(line) {
+			index += 2
+			continue
+		}
+		value := line[index]
+		index++
+		if value == quote {
+			break
+		}
+	}
+	return index, prepared.appendSpan(SyntaxSpan{
+		Start: uint32FromInt(start), End: uint32FromInt(index), Kind: SyntaxString,
+	}, requestedBytes)
+}
+
+func (prepared *PreparedSyntax) appendNumberSpan(
+	line []byte,
+	start int,
+	requestedBytes int64,
+	check syntaxCancelCheck,
+) (int, error) {
+	index := start
+	for index < len(line) &&
+		(line[index] >= '0' && line[index] <= '9' ||
+			strings.ContainsRune("abcdefABCDEFxXoObB._", rune(line[index]))) {
+		index++
+		if err := check(index); err != nil {
+			return 0, err
+		}
+	}
+	return index, prepared.appendSpan(SyntaxSpan{
+		Start: uint32FromInt(start), End: uint32FromInt(index), Kind: SyntaxNumber,
+	}, requestedBytes)
+}
+
+func (prepared *PreparedSyntax) appendIdentifierSpan(
+	line []byte,
+	start int,
+	requestedBytes int64,
+	check syntaxCancelCheck,
+) (int, error) {
+	index := start
+	for index < len(line) && asciiIdentifierContinue(line[index]) {
+		index++
+		if err := check(index); err != nil {
+			return 0, err
+		}
+	}
+	if !syntaxKeywords[string(line[start:index])] {
+		return index, nil
+	}
+	return index, prepared.appendSpan(SyntaxSpan{
+		Start: uint32FromInt(start), End: uint32FromInt(index), Kind: SyntaxKeyword,
+	}, requestedBytes)
 }
 
 func asciiIdentifierStart(value byte) bool {

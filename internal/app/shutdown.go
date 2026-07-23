@@ -22,6 +22,9 @@ func (coordinator *Coordinator) StopAdmissionAndCancel() {
 	coordinator.progressOrder = nil
 	coordinator.progressBytes = 0
 	coordinator.progressDirty = false
+	coordinator.requestBytes -= coordinator.collapseCaptureBytes
+	coordinator.collapseCapture = 0
+	coordinator.collapseCaptureBytes = 0
 	for _, reservation := range coordinator.accepted {
 		if reservation.cancelOperation != nil {
 			reservation.cancelOperation()
@@ -36,9 +39,11 @@ func (coordinator *Coordinator) StopAdmissionAndCancel() {
 	close(coordinator.reloadPreparationJobs)
 	close(coordinator.fileTreeJobs)
 	close(coordinator.workspaceIndexJobs)
+	close(coordinator.commentMutationJobs)
 	close(coordinator.exportJobs)
 	close(coordinator.deliveryJobs)
-	close(coordinator.retireDocuments)
+	close(coordinator.retireCleanups)
+	coordinator.updateStatsLocked()
 	coordinator.closeReadyIfFinishedLocked()
 }
 
@@ -130,6 +135,8 @@ func (coordinator *Coordinator) ShutdownWithSettlement(
 	}
 	coordinator.accepted = make(map[review.OperationID]reservation)
 	coordinator.publicationActive = 0
+	coordinator.collapseCapture = 0
+	coordinator.collapseCaptureBytes = 0
 	coordinator.outcomes = nil
 	coordinator.requestBytes = 0
 	coordinator.reservedResult = 0
@@ -154,12 +161,12 @@ func (coordinator *Coordinator) shutdownSettlementLocked(
 		switch outcome := outcome.(type) {
 		case PublicationCommitOutcome:
 			id = outcome.ID
-			disposition = outcome.Publication.Disposition
-			detail = outcome.Publication.Detail
+			disposition = outcome.Disposition
+			detail = outcome.Detail
 		case ReconciliationOutcome:
 			id = outcome.ID
-			reconciliation = outcome.Reconciliation.Disposition
-			detail = outcome.Reconciliation.Detail
+			reconciliation = outcome.Disposition
+			detail = outcome.Detail
 		default:
 			continue
 		}

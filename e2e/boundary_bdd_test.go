@@ -208,7 +208,7 @@ func TestLifecycleAndScaleContract(t *testing.T) {
 				w.pty.awaitScreen(t, "workspace after Ctrl-c", containsScreen("staged contents"))
 				w.pty.send(t, "q")
 				w.pty.awaitExit(t)
-				assertTerminalLifecycle(t, w.pty, true)
+				assertTerminalLifecycle(t, w.pty)
 			})
 		})
 
@@ -233,7 +233,7 @@ func TestLifecycleAndScaleContract(t *testing.T) {
 				w.pty.awaitExit(t)
 			})
 			scenario.Then("the terminal lifecycle remains complete", func(t testing.TB, w *world) {
-				assertTerminalLifecycle(t, w.pty, true)
+				assertTerminalLifecycle(t, w.pty)
 			})
 		})
 

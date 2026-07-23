@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"iter"
-	"slices"
 )
 
 // ErrInvalidSnapshot identifies an invalid snapshot failure.
@@ -422,25 +421,47 @@ type Snapshot struct {
 	pendingReviewDetail  OperationDetail
 	files                []File
 	remoteThreads        []RemoteThread
+	pathProjection       remotePathProjection
 	sourceID             SourceID
+	retainedBytes        int64
+	remoteRetainedBytes  int64
+	pendingRetainedBytes int64
 	remoteThreadStatus   RemoteThreadStatus
 	pendingReviewStatus  PendingReviewStatus
 }
 
 // NewSnapshot constructs and validates snapshot.
 func NewSnapshot(sourceID SourceID, files []File) (Snapshot, error) {
+	owned := make([]File, len(files))
+	copy(owned, files)
+	return newSnapshotCancellable(nil, sourceID, owned)
+}
+
+func newSnapshotCancellable(
+	cancelled func() error,
+	sourceID SourceID,
+	owned []File,
+) (Snapshot, error) {
+	if err := cancellationError(cancelled); err != nil {
+		return Snapshot{}, err
+	}
 	if sourceID == 0 {
 		return Snapshot{}, fmt.Errorf("%w: source ID must be positive", ErrInvalidSnapshot)
 	}
-	if len(files) > MaxFiles {
-		return Snapshot{}, fmt.Errorf("%w: %d files exceed limit %d", ErrInvalidSnapshot, len(files), MaxFiles)
+	if len(owned) > MaxFiles {
+		return Snapshot{}, fmt.Errorf("%w: %d files exceed limit %d", ErrInvalidSnapshot, len(owned), MaxFiles)
 	}
 
 	var pathBytes int64
+	aliases := make([]remotePathAlias, 0, len(owned)*2)
 	objectIDWidth := 0
-	patchIDs := make(map[PatchID]bool, len(files))
-	owned := slices.Clone(files)
+	patchIDs := make(map[PatchID]bool, len(owned))
 	for index, file := range owned {
+		if index%16 == 0 {
+			if err := cancellationError(cancelled); err != nil {
+				return Snapshot{}, err
+			}
+		}
 		if uint32(file.ID()) != uint32(index) {
 			return Snapshot{}, fmt.Errorf("%w: file ID %d is not sequential index %d", ErrInvalidSnapshot, file.ID(), index)
 		}
@@ -462,15 +483,135 @@ func NewSnapshot(sourceID SourceID, files []File) (Snapshot, error) {
 		}
 		if path, ok := file.OldPath(); ok {
 			pathBytes += int64(len(path.raw))
+			aliases = append(aliases, remotePathAlias{
+				path: path.raw, file: file.ID(), status: RemoteMappingMapped,
+			})
 		}
 		if path, ok := file.NewPath(); ok {
 			pathBytes += int64(len(path.raw))
+			if old, oldOK := file.OldPath(); !oldOK || old.raw != path.raw {
+				aliases = append(aliases, remotePathAlias{
+					path: path.raw, file: file.ID(), status: RemoteMappingMapped,
+				})
+			}
 		}
 		if pathBytes > MaxSourcePaths {
 			return Snapshot{}, fmt.Errorf("%w: raw paths exceed %d bytes", ErrInvalidSnapshot, MaxSourcePaths)
 		}
 	}
-	return Snapshot{sourceID: sourceID, files: owned}, nil
+	projection, err := newRemotePathProjectionCancellable(cancelled, aliases)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	snapshot := Snapshot{
+		sourceID:       sourceID,
+		files:          owned,
+		pathProjection: projection,
+		retainedBytes:  int64(cap(owned))*256 + pathBytes + projection.metadataBytes,
+	}
+	if snapshot.RetainedBytes() > MaxBaseSnapshotRetainedBytes {
+		return Snapshot{}, fmt.Errorf(
+			"%w: snapshot exceeds %d retained bytes",
+			ErrInvalidSnapshot,
+			MaxBaseSnapshotRetainedBytes,
+		)
+	}
+	return snapshot, nil
+}
+
+const (
+	// MaxBaseSnapshotRetainedBytes bounds files and paths before remote state.
+	MaxBaseSnapshotRetainedBytes int64 = MaxSourcePaths +
+		MaxFiles*256 + 2*MaxFiles*remotePathAliasStorageBytes
+	// MaxSnapshotRetainedBytes bounds one complete source snapshot, including
+	// remote threads, pending review state, anchors, and acquisition details.
+	MaxSnapshotRetainedBytes int64 = 96 << 20
+)
+
+// SnapshotBuilderConstructionBytes returns the file and cached-path-projection
+// ownership simultaneously retained while a builder is finished.
+func SnapshotBuilderConstructionBytes(fileCount int) int64 {
+	if fileCount < 0 || fileCount > MaxFiles {
+		return 0
+	}
+	return int64(fileCount) * (256 + 2*remotePathAliasStorageBytes)
+}
+
+// RetainedBytes returns the conservative retained size of the complete snapshot.
+func (snapshot Snapshot) RetainedBytes() int64 {
+	return snapshot.retainedBytes
+}
+
+func (snapshot Snapshot) withRemoteRetainedBytes(
+	retained int64,
+	cause error,
+) (Snapshot, error) {
+	next := snapshot
+	total, err := replaceSnapshotRetainedComponent(
+		next.retainedBytes,
+		next.remoteRetainedBytes,
+		retained,
+		cause,
+	)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	next.retainedBytes = total
+	next.remoteRetainedBytes = retained
+	return next.validateRetainedBytes(cause)
+}
+
+func (snapshot Snapshot) withPendingRetainedBytes(
+	retained int64,
+	cause error,
+) (Snapshot, error) {
+	next, err := snapshot.stagePendingRetainedBytes(retained, cause)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	return next.validateRetainedBytes(cause)
+}
+
+func (snapshot Snapshot) stagePendingRetainedBytes(
+	retained int64,
+	cause error,
+) (Snapshot, error) {
+	next := snapshot
+	total, err := replaceSnapshotRetainedComponent(
+		next.retainedBytes,
+		next.pendingRetainedBytes,
+		retained,
+		cause,
+	)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	next.retainedBytes = total
+	next.pendingRetainedBytes = retained
+	return next, nil
+}
+
+func replaceSnapshotRetainedComponent(
+	total int64,
+	previous int64,
+	next int64,
+	cause error,
+) (int64, error) {
+	if total < 0 || previous < 0 || next < 0 || total < previous {
+		return 0, fmt.Errorf("%w: snapshot retained cache is invalid", cause)
+	}
+	return total - previous + next, nil
+}
+
+func (snapshot Snapshot) validateRetainedBytes(cause error) (Snapshot, error) {
+	if snapshot.retainedBytes <= MaxSnapshotRetainedBytes {
+		return snapshot, nil
+	}
+	return Snapshot{}, fmt.Errorf(
+		"%w: complete snapshot exceeds %d retained bytes",
+		cause,
+		MaxSnapshotRetainedBytes,
+	)
 }
 
 func fileObjectIDs(file File) []ObjectID {
@@ -599,13 +740,21 @@ func (builder *SnapshotBuilder) AddFileWithContents(
 
 // Finish returns the receiver's finish value.
 func (builder *SnapshotBuilder) Finish() (Snapshot, error) {
+	return builder.FinishCancellable(nil)
+}
+
+// FinishCancellable consumes the builder while bounding validation and
+// projection-sort cancellation latency.
+func (builder *SnapshotBuilder) FinishCancellable(
+	cancelled func() error,
+) (Snapshot, error) {
 	if builder == nil || builder.finished {
 		return Snapshot{}, ErrInvalidSnapshot
 	}
 	builder.finished = true
-	snapshot, err := NewSnapshot(builder.sourceID, builder.files)
+	files := builder.files
 	builder.files = nil
-	return snapshot, err
+	return newSnapshotCancellable(cancelled, builder.sourceID, files)
 }
 
 func clonePath(path *Path) *Path {

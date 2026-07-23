@@ -1,9 +1,9 @@
 package review
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
+	"math/bits"
 	"slices"
 	"strings"
 	"unicode"
@@ -11,7 +11,11 @@ import (
 )
 
 // MaxPublicationBytes defines the supported publication bytes limit.
-const MaxPublicationBytes = 16 << 20
+const (
+	MaxPublicationBytes                       = 16 << 20
+	MaxCheckedPublicationBytes          int64 = 2 * MaxPublicationBytes
+	checkedPublicationContinuationBytes       = 512
+)
 
 // ErrInvalidPublication identifies an invalid publication failure.
 var ErrInvalidPublication = errors.New("invalid publication transition")
@@ -101,9 +105,81 @@ func (policies PublicationPolicies) valid() bool {
 
 // PublicationOptions describes publication options.
 type PublicationOptions struct {
-	excluded []CommentID
-	event    PublicationEvent
-	policies PublicationPolicies
+	exclusions PublicationExclusions
+	event      PublicationEvent
+	policies   PublicationPolicies
+}
+
+const publicationExclusionWords = MaxComments / 64
+
+const publicationOptionsBytes int64 = publicationExclusionWords*8 + 16
+
+// PublicationExclusions is the bounded set of comments omitted from publication.
+type PublicationExclusions struct {
+	words [publicationExclusionWords]uint64
+	count uint16
+}
+
+// NewPublicationExclusions constructs a validated exclusion set.
+func NewPublicationExclusions(comments []CommentID) (PublicationExclusions, error) {
+	if len(comments) > MaxComments {
+		return PublicationExclusions{}, ErrInvalidPublication
+	}
+	var exclusions PublicationExclusions
+	for _, id := range comments {
+		if id.Uint32() >= MaxComments || exclusions.Contains(id) {
+			return PublicationExclusions{}, ErrInvalidPublication
+		}
+		exclusions.words[id.Uint32()/64] |= uint64(1) << (id.Uint32() % 64)
+		exclusions.count++
+	}
+	return exclusions, nil
+}
+
+// Toggle returns the set with id membership toggled.
+func (exclusions PublicationExclusions) Toggle(id CommentID) (PublicationExclusions, error) {
+	if !exclusions.valid() || id.Uint32() >= MaxComments {
+		return PublicationExclusions{}, ErrInvalidPublication
+	}
+	word := id.Uint32() / 64
+	bit := uint64(1) << (id.Uint32() % 64)
+	if exclusions.words[word]&bit == 0 {
+		exclusions.words[word] |= bit
+		exclusions.count++
+	} else {
+		exclusions.words[word] &^= bit
+		exclusions.count--
+	}
+	return exclusions, nil
+}
+
+// Contains reports whether id is excluded.
+func (exclusions PublicationExclusions) Contains(id CommentID) bool {
+	return id.Uint32() < MaxComments &&
+		exclusions.words[id.Uint32()/64]&(uint64(1)<<(id.Uint32()%64)) != 0
+}
+
+// Count returns the exclusion count.
+func (exclusions PublicationExclusions) Count() int { return int(exclusions.count) }
+
+func (exclusions PublicationExclusions) valid() bool {
+	count := 0
+	for _, word := range exclusions.words {
+		count += bits.OnesCount64(word)
+	}
+	return count == int(exclusions.count)
+}
+
+func (exclusions PublicationExclusions) comments() []CommentID {
+	comments := make([]CommentID, 0, exclusions.Count())
+	for wordIndex, word := range exclusions.words {
+		for word != 0 {
+			bit := bits.TrailingZeros64(word)
+			comments = append(comments, CommentID(uint32FromInt(wordIndex*64+bit)))
+			word &^= uint64(1) << bit
+		}
+	}
+	return comments
 }
 
 // NewPublicationOptions constructs and validates publication options.
@@ -122,39 +198,48 @@ func NewPublicationOptions(
 func (options PublicationOptions) WithExcludedComments(
 	comments []CommentID,
 ) (PublicationOptions, error) {
-	if !options.valid() || len(comments) > MaxComments {
+	if !options.valid() {
 		return PublicationOptions{}, fmt.Errorf(
 			"%w: excluded comments exceed %d",
 			ErrInvalidPublication,
 			MaxComments,
 		)
 	}
-	owned := slices.Clone(comments)
-	slices.Sort(owned)
-	for index, id := range owned {
-		if id.Uint32() >= MaxComments {
-			return PublicationOptions{}, fmt.Errorf(
-				"%w: excluded comment identity is invalid",
-				ErrInvalidPublication,
-			)
-		}
-		if index == 0 {
-			continue
-		}
-		if owned[index] == owned[index-1] {
-			return PublicationOptions{}, fmt.Errorf(
-				"%w: excluded comments contain a duplicate",
-				ErrInvalidPublication,
-			)
-		}
+	exclusions, err := NewPublicationExclusions(comments)
+	if err != nil {
+		return PublicationOptions{}, err
 	}
-	options.excluded = owned
+	options.exclusions = exclusions
 	return options, nil
 }
 
 // ExcludedComments returns the receiver's excluded comments value.
 func (options PublicationOptions) ExcludedComments() []CommentID {
-	return slices.Clone(options.excluded)
+	return options.exclusions.comments()
+}
+
+// WithExclusions replaces the exclusions without boundary conversion.
+func (options PublicationOptions) WithExclusions(
+	exclusions PublicationExclusions,
+) (PublicationOptions, error) {
+	if !options.valid() || !exclusions.valid() {
+		return PublicationOptions{}, ErrInvalidPublication
+	}
+	options.exclusions = exclusions
+	return options, nil
+}
+
+// Exclusions returns the fixed exclusion value.
+func (options PublicationOptions) Exclusions() PublicationExclusions {
+	return options.exclusions
+}
+
+// RetainedBytes returns the fixed immutable options ownership.
+func (options PublicationOptions) RetainedBytes() int64 {
+	if !options.valid() {
+		return 0
+	}
+	return publicationOptionsBytes
 }
 
 // Event returns the receiver's event value.
@@ -170,7 +255,7 @@ func (options PublicationOptions) Policies() PublicationPolicies {
 func (options PublicationOptions) valid() bool {
 	return options.event >= PublicationEventComment &&
 		options.event <= PublicationEventRequestChanges &&
-		options.policies.valid()
+		options.policies.valid() && options.exclusions.valid()
 }
 
 // PublicationTarget represents publication target.
@@ -311,7 +396,7 @@ func (decision PublicationDecision) String() string {
 	case PublicationIncludedInline:
 		return inlineValue
 	case PublicationIncludedSummary:
-		return "summary"
+		return summaryValue
 	case PublicationExcludedManual:
 		return "excluded manually"
 	case PublicationExcludedStale:
@@ -354,15 +439,143 @@ type PreparedPublication struct {
 	excluded  uint32
 }
 
+// PublicationSource is the narrow immutable input needed to prepare either a
+// new review or a continuation of one captured pending review.
+type PublicationSource struct {
+	state         *pendingReviewState
+	baseline      PendingReview
+	comments      commentSource
+	workspace     WorkspaceRevision
+	source        SourceID
+	retainedBytes int64
+	status        PendingReviewStatus
+}
+
+const publicationSourceMetadataBytes int64 = 208
+
+// PublicationSource returns an O(1) worker source independent of presentation,
+// search, operation, and publication state.
+func (review Review) PublicationSource() PublicationSource {
+	if review.publication.pendingRefresh {
+		return PublicationSource{}
+	}
+	var baseline PendingReview
+	hasBaseline := review.snapshot.pendingReview != nil
+	if hasBaseline {
+		baseline = *review.snapshot.pendingReview
+	}
+	retained := review.retainedBytes - draftRetainedBytes(review.draft)
+	if hasBaseline {
+		retained += review.snapshot.pendingRetainedBytes
+	}
+	return PublicationSource{
+		state:         review.pending,
+		comments:      review.source(),
+		baseline:      baseline,
+		status:        review.snapshot.PendingReviewSummary().Status,
+		workspace:     review.workspace,
+		source:        review.snapshot.SourceID(),
+		retainedBytes: retained + publicationSourceMetadataBytes,
+	}
+}
+
+// Ready reports whether the source was captured from a valid review.
+func (source PublicationSource) Ready() bool {
+	return source.comments.ready() && source.workspace != 0 && source.source != 0 &&
+		source.retainedBytes >= publicationSourceMetadataBytes
+}
+
+// Workspace returns the captured workspace revision.
+func (source PublicationSource) Workspace() WorkspaceRevision { return source.workspace }
+
+// Source returns the captured source identity.
+func (source PublicationSource) Source() SourceID { return source.source }
+
+// RetainedBytes returns the immutable review ownership prolonged by preparation.
+func (source PublicationSource) RetainedBytes() int64 {
+	if !source.Ready() {
+		return 0
+	}
+	return source.retainedBytes
+}
+
+// ConstructionBytes returns a conservative simultaneous source, result, and
+// scratch charge for publication preparation.
+func (source PublicationSource) ConstructionBytes() int64 {
+	if !source.Ready() {
+		return 0
+	}
+	comments := int64(len(source.comments.comments) + 1)
+	return source.retainedBytes + 2*MaxPublicationBytes +
+		comments*(64+8+16+256+MaxEncodedCommentKindPrefixBytes) + 1_024
+}
+
+func (prepared PreparedPublication) retainedBytes() int64 {
+	total := int64(len(prepared.summary)) + int64(cap(prepared.comments))*64 +
+		int64(cap(prepared.decisions))*8 + publicationExclusionWords*8 + 64
+	for _, comment := range prepared.comments {
+		total += int64(len(comment.path) + len(comment.body))
+	}
+	if prepared.pending == nil {
+		return total
+	}
+	total += prepared.pending.baseline.retainedBytes()
+	total += int64(len(prepared.pending.desiredBody)) +
+		int64(cap(prepared.pending.mutations))*256
+	for _, mutation := range prepared.pending.mutations {
+		total += int64(
+			len(mutation.nodeID) + len(mutation.body) + len(mutation.marker) +
+				len(mutation.baseline) + len(mutation.target.path.raw) +
+				len(mutation.target.commit) + len(mutation.target.originalCommit) +
+				len(mutation.target.replyTo),
+		)
+	}
+	return total
+}
+
+// RetainedBytes returns the complete immutable prepared-publication ownership.
+func (prepared PreparedPublication) RetainedBytes() int64 {
+	if prepared.workspace == 0 || prepared.source == 0 || !prepared.options.valid() {
+		return 0
+	}
+	return prepared.retainedBytes()
+}
+
 // PreparePublication prepares publication.
 func (review Review) PreparePublication(options PublicationOptions) (PreparedPublication, error) {
-	if !options.valid() {
+	return review.PublicationSource().PreparePublicationCancellable(nil, options)
+}
+
+// PreparePublicationCancellable prepares publication from a review source.
+func (review Review) PreparePublicationCancellable(
+	cancelled func() error,
+	options PublicationOptions,
+) (PreparedPublication, error) {
+	return review.PublicationSource().PreparePublicationCancellable(cancelled, options)
+}
+
+// PreparePublication prepares publication synchronously from an immutable source.
+func (source PublicationSource) PreparePublication(
+	options PublicationOptions,
+) (PreparedPublication, error) {
+	return source.PreparePublicationCancellable(nil, options)
+}
+
+// PreparePublicationCancellable prepares publication from an immutable source.
+func (source PublicationSource) PreparePublicationCancellable(
+	cancelled func() error,
+	options PublicationOptions,
+) (PreparedPublication, error) {
+	if !source.Ready() || !options.valid() {
 		return PreparedPublication{}, ErrInvalidPublication
 	}
-	if review.pending != nil {
-		return review.preparePendingPublication(options)
+	if err := cancellationError(cancelled); err != nil {
+		return PreparedPublication{}, err
 	}
-	status := review.snapshot.PendingReviewSummary().Status
+	if source.state != nil {
+		return source.preparePendingPublicationCancellable(cancelled, options)
+	}
+	status := source.status
 	if status == PendingReviewUnavailable || status == PendingReviewLimited ||
 		status == PendingReviewAmbiguous {
 		return PreparedPublication{}, fmt.Errorf(
@@ -372,14 +585,23 @@ func (review Review) PreparePublication(options PublicationOptions) (PreparedPub
 		)
 	}
 	prepared := PreparedPublication{
-		workspace: review.workspace,
-		source:    review.snapshot.SourceID(),
+		workspace: source.workspace,
+		source:    source.source,
 		options:   options,
-		comments:  make([]PublicationComment, 0, len(review.comments)),
-		decisions: make([]PublicationCommentDecision, 0, len(review.comments)),
+		comments:  make([]PublicationComment, 0, len(source.comments.comments)),
+		decisions: make([]PublicationCommentDecision, 0, len(source.comments.comments)),
 	}
-	for _, comment := range review.comments {
-		if _, excluded := slices.BinarySearch(options.excluded, comment.ID()); excluded {
+	summary, err := newBoundedBuilder(MaxPublicationBytes, cancelled)
+	if err != nil {
+		return PreparedPublication{}, err
+	}
+	for index, comment := range source.comments.comments {
+		if index%256 == 0 {
+			if checkpointErr := summary.Checkpoint(); checkpointErr != nil {
+				return PreparedPublication{}, checkpointErr
+			}
+		}
+		if options.exclusions.Contains(comment.ID()) {
 			prepared.excluded++
 			prepared.decisions = append(prepared.decisions, PublicationCommentDecision{
 				id:       comment.ID(),
@@ -387,13 +609,18 @@ func (review Review) PreparePublication(options PublicationOptions) (PreparedPub
 			})
 			continue
 		}
-		body := comment.Body().String()
 		target := comment.Target()
 		if target.Kind() == TargetLine && !comment.Stale() && !comment.Unmappable() {
 			path, hasPath := target.AnchoredPath()
 			pathUTF8, validUTF8 := path.UTF8()
 			side, start, end, hasLines := target.Lines()
 			if hasPath && validUTF8 && hasLines {
+				body, encodeErr := encodeCommentWire(
+					commentContentFrom(comment), source.comments.policies,
+				)
+				if encodeErr != nil {
+					return PreparedPublication{}, fmt.Errorf("%w: %w", ErrInvalidPublication, encodeErr)
+				}
 				prepared.comments = append(prepared.comments, PublicationComment{
 					path:      pathUTF8,
 					body:      body,
@@ -411,15 +638,15 @@ func (review Review) PreparePublication(options PublicationOptions) (PreparedPub
 		}
 		if target.Kind() == TargetReview || target.Kind() == TargetFile ||
 			options.Policies().Has(PublicationMoveUnmappableToSummary) {
-			if target.Kind() != TargetReview {
-				if path, ok := target.AnchoredPath(); ok {
-					body = "`" + markdownEscape(path.Display()) + "`: " + body
-				}
+			body, encodeErr := encodePublicationSummaryWire(
+				commentContentFrom(comment), target, source.comments.policies,
+			)
+			if encodeErr != nil {
+				return PreparedPublication{}, fmt.Errorf("%w: %w", ErrInvalidPublication, encodeErr)
 			}
-			if prepared.summary != "" {
-				prepared.summary += "\n\n"
+			if appendErr := appendPublicationSummary(summary, body); appendErr != nil {
+				return PreparedPublication{}, publicationBuilderError("prepared summary", appendErr)
 			}
-			prepared.summary += body
 			prepared.included++
 			prepared.decisions = append(prepared.decisions, PublicationCommentDecision{
 				id:       comment.ID(),
@@ -438,26 +665,90 @@ func (review Review) PreparePublication(options PublicationOptions) (PreparedPub
 				decision: decision,
 			})
 		}
-		if len(prepared.summary) > MaxPublicationBytes {
-			return PreparedPublication{}, fmt.Errorf(
-				"%w: prepared summary exceeds %d bytes",
+	}
+	prepared.summary, err = summary.Finish()
+	if err != nil {
+		return PreparedPublication{}, err
+	}
+	if err := validatePreparedPublicationBytes(cancelled, prepared); err != nil {
+		return PreparedPublication{}, err
+	}
+	if prepared.RetainedBytes() > source.ConstructionBytes() {
+		return PreparedPublication{}, ErrInvalidPublication
+	}
+	return prepared, nil
+}
+
+func publicationBuilderError(subject string, err error) error {
+	if !errors.Is(err, errBoundedStringLimit) {
+		return err
+	}
+	return fmt.Errorf(
+		"%w: %s exceeds %d bytes: %w",
+		ErrInvalidPublication,
+		subject,
+		MaxPublicationBytes,
+		err,
+	)
+}
+
+func appendPublicationSummary(
+	builder *boundedBuilder,
+	body string,
+) error {
+	if builder.Len() != 0 {
+		if err := builder.WriteString("\n\n"); err != nil {
+			return err
+		}
+	}
+	return builder.WriteString(body)
+}
+
+func encodePublicationSummaryWire(
+	content commentContent,
+	target CommentTarget,
+	policies CommentPolicies,
+) (string, error) {
+	if target.Kind() != TargetReview {
+		if path, ok := target.AnchoredPath(); ok {
+			content.body = "`" + markdownEscape(path.Display()) + "`: " + content.body
+		}
+	}
+	return encodeCommentWire(content, policies)
+}
+
+func validatePreparedPublicationBytes(
+	cancelled func() error,
+	prepared PreparedPublication,
+) error {
+	retained := int64(len(prepared.summary))
+	for index, comment := range prepared.comments {
+		if index%256 == 0 {
+			if err := cancellationError(cancelled); err != nil {
+				return err
+			}
+		}
+		addition := int64(len(comment.path) + len(comment.body) + 32)
+		if addition > MaxPublicationBytes-retained {
+			return fmt.Errorf(
+				"%w: prepared publication exceeds %d bytes",
 				ErrInvalidPublication,
 				MaxPublicationBytes,
 			)
 		}
+		retained += addition
 	}
-	var retained = int64(len(prepared.summary))
-	for _, comment := range prepared.comments {
-		retained += int64(len(comment.path) + len(comment.body) + 32)
+	if err := cancellationError(cancelled); err != nil {
+		return err
 	}
 	if retained > MaxPublicationBytes {
-		return PreparedPublication{}, fmt.Errorf(
+		return fmt.Errorf(
 			"%w: prepared publication exceeds %d bytes",
 			ErrInvalidPublication,
 			MaxPublicationBytes,
 		)
 	}
-	return prepared, nil
+	return nil
 }
 
 // Workspace returns the receiver's workspace value.
@@ -511,595 +802,4 @@ func (prepared PreparedPublication) DecisionAt(
 		return PublicationCommentDecision{}, false
 	}
 	return prepared.decisions[index], true
-}
-
-// PublicationMarker represents publication marker.
-type PublicationMarker string
-
-// NewPublicationMarker constructs and validates publication marker.
-func NewPublicationMarker(value string) (PublicationMarker, error) {
-	const prefix = "<!-- rvw-publication:v1:"
-	const suffix = " -->"
-	if len(value) != len(prefix)+32+len(suffix) ||
-		!strings.HasPrefix(value, prefix) ||
-		!strings.HasSuffix(value, suffix) {
-		return "", fmt.Errorf("%w: marker has invalid shape", ErrInvalidPublication)
-	}
-	for _, value := range value[len(prefix) : len(prefix)+32] {
-		if value < '0' || value > '9' && value < 'a' || value > 'f' {
-			return "", fmt.Errorf("%w: marker is not lowercase hexadecimal", ErrInvalidPublication)
-		}
-	}
-	return PublicationMarker(value), nil
-}
-
-// String returns the receiver's string value.
-func (marker PublicationMarker) String() string {
-	return string(marker)
-}
-
-// CheckedPublication represents checked publication.
-type CheckedPublication struct {
-	target    PublicationTarget
-	marker    PublicationMarker
-	payload   string
-	prepared  PreparedPublication
-	staleHead bool
-}
-
-// CheckedPublicationDescriptor describes checked publication descriptor.
-type CheckedPublicationDescriptor struct {
-	Marker    PublicationMarker
-	Target    PublicationTarget
-	StaleHead bool
-}
-
-// TakeCheckedPublication takes ownership of checked publication.
-func TakeCheckedPublication(
-	descriptor CheckedPublicationDescriptor,
-	prepared PreparedPublication,
-) (*CheckedPublication, error) {
-	marker, markerErr := NewPublicationMarker(descriptor.Marker.String())
-	target, targetErr := NewPublicationTarget(PublicationTargetDescriptor{
-		Repository:  descriptor.Target.repository,
-		PullRequest: descriptor.Target.pullRequest,
-		Base:        descriptor.Target.base,
-		Head:        descriptor.Target.head,
-	})
-	if targetErr != nil || markerErr != nil ||
-		prepared.workspace == 0 || prepared.source == 0 ||
-		!prepared.options.valid() {
-		return nil, fmt.Errorf("%w: checked publication is malformed", ErrInvalidPublication)
-	}
-	var payload string
-	var err error
-	if prepared.pending != nil {
-		payload, err = encodePendingPublicationEnvelope(marker, prepared)
-	} else {
-		payload, err = encodePublicationPayload(target, marker, prepared)
-	}
-	if err != nil {
-		return nil, fmt.Errorf(
-			"%w: encode checked publication: %w",
-			ErrInvalidPublication,
-			err,
-		)
-	}
-	return &CheckedPublication{
-		target:    target,
-		marker:    marker,
-		payload:   payload,
-		prepared:  prepared,
-		staleHead: descriptor.StaleHead,
-	}, nil
-}
-
-// Pending reports whether this publication continues an existing pending review.
-func (checked *CheckedPublication) Pending() bool {
-	return checked != nil && checked.prepared.pending != nil
-}
-
-type publicationPayload struct {
-	CommitID string               `json:"commit_id"`
-	Event    string               `json:"event,omitempty"`
-	Body     string               `json:"body"`
-	Comments []publicationComment `json:"comments"`
-}
-
-type publicationComment struct {
-	Path      string `json:"path"`
-	Body      string `json:"body"`
-	Side      string `json:"side"`
-	StartSide string `json:"start_side,omitempty"`
-	Line      uint32 `json:"line"`
-	StartLine uint32 `json:"start_line,omitempty"`
-}
-
-func encodePublicationPayload(
-	target PublicationTarget,
-	marker PublicationMarker,
-	prepared PreparedPublication,
-) (string, error) {
-	body := prepared.summary
-	if body != "" {
-		body += "\n\n"
-	}
-	body += marker.String()
-	payload := publicationPayload{
-		CommitID: target.head.String(),
-		Event:    prepared.options.event.GitHubValue(),
-		Body:     body,
-		Comments: make([]publicationComment, 0, len(prepared.comments)),
-	}
-	for _, comment := range prepared.comments {
-		side := "RIGHT"
-		if comment.side == LineOld {
-			side = "LEFT"
-		}
-		item := publicationComment{
-			Path: comment.path,
-			Body: comment.body,
-			Line: comment.endLine.Uint32(),
-			Side: side,
-		}
-		if comment.startLine != comment.endLine {
-			item.StartLine = comment.startLine.Uint32()
-			item.StartSide = side
-		}
-		payload.Comments = append(payload.Comments, item)
-	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return "", err
-	}
-	if len(encoded) > MaxPublicationBytes {
-		return "", fmt.Errorf("payload exceeds %d bytes", MaxPublicationBytes)
-	}
-	return string(encoded), nil
-}
-
-// Target returns the receiver's target value.
-func (checked *CheckedPublication) Target() PublicationTarget {
-	if checked == nil {
-		return PublicationTarget{}
-	}
-	return checked.target
-}
-
-// Marker returns the receiver's marker value.
-func (checked *CheckedPublication) Marker() PublicationMarker {
-	if checked == nil {
-		return ""
-	}
-	return checked.marker
-}
-
-// Payload returns the receiver's payload value.
-func (checked *CheckedPublication) Payload() string {
-	if checked == nil {
-		return ""
-	}
-	return checked.payload
-}
-
-// PayloadSize returns the receiver's payload size value.
-func (checked *CheckedPublication) PayloadSize() int64 {
-	if checked == nil {
-		return 0
-	}
-	return int64(len(checked.payload))
-}
-
-// Prepared prepares d.
-func (checked *CheckedPublication) Prepared() PreparedPublication {
-	if checked == nil {
-		return PreparedPublication{}
-	}
-	return checked.prepared
-}
-
-// StaleHead reports the receiver's stale head state.
-func (checked *CheckedPublication) StaleHead() bool {
-	return checked != nil && checked.staleHead
-}
-
-// PublicationStatus describes publication status.
-type PublicationStatus uint8
-
-// PublicationIdle identifies a supported publication idle value.
-const (
-	PublicationIdle PublicationStatus = iota + 1
-	PublicationChecking
-	PublicationChecked
-	PublicationPublishing
-	PublicationCommitted
-	PublicationFailedBeforeCommit
-	PublicationUnknown
-	PublicationReconciling
-	PublicationConfirmedAbsent
-)
-
-// String returns the receiver's string value.
-func (status PublicationStatus) String() string {
-	switch status {
-	case PublicationIdle:
-		return "idle"
-	case PublicationChecking:
-		return "checking"
-	case PublicationChecked:
-		return "checked"
-	case PublicationPublishing:
-		return "publishing"
-	case PublicationCommitted:
-		return "committed"
-	case PublicationFailedBeforeCommit:
-		return "failed-before-commit"
-	case PublicationUnknown:
-		return "unknown"
-	case PublicationReconciling:
-		return "reconciling"
-	case PublicationConfirmedAbsent:
-		return "confirmed-absent"
-	default:
-		return invalidValue
-	}
-}
-
-type publicationState struct {
-	checked      *CheckedPublication
-	marker       PublicationMarker
-	detail       OperationDetail
-	target       PublicationTarget
-	operation    OperationID
-	attempt      OperationID
-	remoteReview uint64
-	included     uint32
-	excluded     uint32
-	status       PublicationStatus
-	event        PublicationEvent
-	acknowledged bool
-}
-
-// PublicationSummary describes publication summary.
-type PublicationSummary struct {
-	Marker       PublicationMarker
-	Detail       OperationDetail
-	Target       PublicationTarget
-	Operation    OperationID
-	RemoteReview uint64
-	Included     uint32
-	Excluded     uint32
-	Status       PublicationStatus
-	Event        PublicationEvent
-	StaleHead    bool
-	Acknowledged bool
-}
-
-// PublicationCheckRequest describes publication check request.
-type PublicationCheckRequest struct {
-	Options   PublicationOptions
-	Operation OperationID
-	Workspace WorkspaceRevision
-	Source    SourceID
-}
-
-// PublicationCheckResult describes publication check result.
-type PublicationCheckResult struct {
-	Checked   *CheckedPublication
-	Detail    OperationDetail
-	Operation OperationID
-	Workspace WorkspaceRevision
-	Source    SourceID
-}
-
-// StartPublicationCheck performs the start publication check operation.
-func (review Review) StartPublicationCheck(
-	id OperationID,
-	options PublicationOptions,
-) (Review, PublicationCheckRequest, error) {
-	if !options.valid() || review.draft != nil ||
-		review.publication.status == PublicationChecking ||
-		review.publication.status == PublicationPublishing ||
-		review.publication.status == PublicationUnknown ||
-		review.publication.status == PublicationReconciling {
-		return review, PublicationCheckRequest{}, ErrInvalidPublication
-	}
-	next, err := review.BeginOperation(id, OperationPublication)
-	if err != nil {
-		return review, PublicationCheckRequest{}, err
-	}
-	next.publication = publicationState{
-		status:    PublicationChecking,
-		operation: id,
-		event:     options.event,
-	}
-	return next, PublicationCheckRequest{
-		Operation: id,
-		Workspace: review.workspace,
-		Source:    review.snapshot.SourceID(),
-		Options:   options,
-	}, nil
-}
-
-// ApplyPublicationCheck performs the apply publication check operation.
-func (review Review) ApplyPublicationCheck(result PublicationCheckResult) (Review, error) {
-	if review.publication.status != PublicationChecking ||
-		review.publication.operation != result.Operation ||
-		review.workspace != result.Workspace ||
-		review.snapshot.SourceID() != result.Source {
-		return review, ErrInvalidPublication
-	}
-	next := review.clone()
-	if result.Checked == nil {
-		if result.Detail.IsEmpty() {
-			return review, ErrInvalidPublication
-		}
-		next.publication = publicationState{
-			status:    PublicationFailedBeforeCommit,
-			operation: result.Operation,
-			detail:    result.Detail,
-			event:     review.publication.event,
-		}
-		return next, nil
-	}
-	if result.Checked.prepared.workspace != result.Workspace ||
-		result.Checked.prepared.source != result.Source {
-		return review, ErrInvalidPublication
-	}
-	next.publication = publicationState{
-		status:    PublicationChecked,
-		operation: result.Operation,
-		checked:   result.Checked,
-		target:    result.Checked.target,
-		marker:    result.Checked.marker,
-		event:     result.Checked.prepared.options.event,
-		included:  result.Checked.prepared.included,
-		excluded:  result.Checked.prepared.excluded,
-	}
-	return next, nil
-}
-
-// PublicationRequest describes publication request.
-type PublicationRequest struct {
-	Checked   *CheckedPublication
-	Operation OperationID
-	Workspace WorkspaceRevision
-	Source    SourceID
-}
-
-// StartPublication performs the start publication operation.
-func (review Review) StartPublication(
-	id OperationID,
-) (Review, PublicationRequest, error) {
-	if review.publication.status != PublicationChecked ||
-		review.publication.checked == nil {
-		return review, PublicationRequest{}, ErrInvalidPublication
-	}
-	next, err := review.BeginOperation(id, OperationPublication)
-	if err != nil {
-		return review, PublicationRequest{}, err
-	}
-	next.publication.status = PublicationPublishing
-	next.publication.operation = id
-	next.publication.attempt = id
-	return next, PublicationRequest{
-		Operation: id,
-		Workspace: review.workspace,
-		Source:    review.snapshot.SourceID(),
-		Checked:   review.publication.checked,
-	}, nil
-}
-
-// PublicationDisposition represents publication disposition.
-type PublicationDisposition uint8
-
-// PublicationDispositionCommitted identifies a supported publication disposition committed value.
-const (
-	PublicationDispositionCommitted PublicationDisposition = iota + 1
-	PublicationDispositionFailedBeforeCommit
-	PublicationDispositionUnknown
-	PublicationDispositionCancelledBeforeCommit
-)
-
-// PublicationResult describes publication result.
-type PublicationResult struct {
-	Pending      *PendingReview
-	Detail       OperationDetail
-	Operation    OperationID
-	Workspace    WorkspaceRevision
-	Source       SourceID
-	RemoteReview uint64
-	Disposition  PublicationDisposition
-}
-
-// ApplyPublication performs the apply publication operation.
-func (review Review) ApplyPublication(result PublicationResult) (Review, error) {
-	if review.publication.status != PublicationPublishing ||
-		review.publication.operation != result.Operation ||
-		review.workspace != result.Workspace ||
-		review.snapshot.SourceID() != result.Source ||
-		result.Disposition < PublicationDispositionCommitted ||
-		result.Disposition > PublicationDispositionCancelledBeforeCommit {
-		return review, ErrInvalidPublication
-	}
-	next := review.clone()
-	next.publication.operation = result.Operation
-	next.publication.attempt = result.Operation
-	next.publication.detail = result.Detail
-	next.publication.remoteReview = result.RemoteReview
-	next.publication.checked = nil
-	switch result.Disposition {
-	case PublicationDispositionCommitted:
-		if result.RemoteReview == 0 {
-			return review, fmt.Errorf("%w: committed result has no remote identity", ErrInvalidPublication)
-		}
-		if result.Pending != nil {
-			if result.Pending.databaseID.Uint64() != result.RemoteReview || next.pending == nil {
-				return review, fmt.Errorf("%w: committed pending review is inconsistent", ErrInvalidPublication)
-			}
-			rebased, err := rebasePendingCapture(next, *result.Pending)
-			if err != nil {
-				return review, fmt.Errorf("%w: rebase committed pending review: %w", ErrInvalidPublication, err)
-			}
-			next = rebased
-		}
-		next.publication.status = PublicationCommitted
-	case PublicationDispositionFailedBeforeCommit, PublicationDispositionCancelledBeforeCommit:
-		next.publication.status = PublicationFailedBeforeCommit
-	case PublicationDispositionUnknown:
-		next.publication.status = PublicationUnknown
-	}
-	return next, nil
-}
-
-// ReconciliationRequest describes reconciliation request.
-type ReconciliationRequest struct {
-	Marker    PublicationMarker
-	Target    PublicationTarget
-	Operation OperationID
-	Workspace WorkspaceRevision
-	Source    SourceID
-}
-
-// StartReconciliation performs the start reconciliation operation.
-func (review Review) StartReconciliation(
-	id OperationID,
-) (Review, ReconciliationRequest, error) {
-	if review.publication.status != PublicationUnknown ||
-		review.publication.marker == "" ||
-		review.publication.target.repository == "" {
-		return review, ReconciliationRequest{}, ErrInvalidPublication
-	}
-	next, err := review.BeginOperation(id, OperationReconciliation)
-	if err != nil {
-		return review, ReconciliationRequest{}, err
-	}
-	next.publication.status = PublicationReconciling
-	next.publication.operation = id
-	return next, ReconciliationRequest{
-		Operation: id,
-		Workspace: review.workspace,
-		Source:    review.snapshot.SourceID(),
-		Target:    review.publication.target,
-		Marker:    review.publication.marker,
-	}, nil
-}
-
-// ReconciliationDisposition represents reconciliation disposition.
-type ReconciliationDisposition uint8
-
-// ReconciliationCommitted identifies a supported reconciliation committed value.
-const (
-	ReconciliationCommitted ReconciliationDisposition = iota + 1
-	ReconciliationNotCommitted
-	ReconciliationStillUnknown
-)
-
-// ReconciliationResult describes reconciliation result.
-type ReconciliationResult struct {
-	Detail      OperationDetail
-	Operation   OperationID
-	Workspace   WorkspaceRevision
-	Source      SourceID
-	Disposition ReconciliationDisposition
-}
-
-// ApplyReconciliation performs the apply reconciliation operation.
-func (review Review) ApplyReconciliation(result ReconciliationResult) (Review, error) {
-	if review.publication.status != PublicationReconciling ||
-		review.publication.operation != result.Operation ||
-		review.workspace != result.Workspace ||
-		review.snapshot.SourceID() != result.Source ||
-		result.Disposition < ReconciliationCommitted ||
-		result.Disposition > ReconciliationStillUnknown {
-		return review, ErrInvalidPublication
-	}
-	next := review.clone()
-	next.publication.operation = result.Operation
-	next.publication.detail = result.Detail
-	switch result.Disposition {
-	case ReconciliationCommitted:
-		next.publication.status = PublicationCommitted
-	case ReconciliationNotCommitted:
-		next.publication.status = PublicationConfirmedAbsent
-	case ReconciliationStillUnknown:
-		next.publication.status = PublicationUnknown
-	}
-	return next, nil
-}
-
-// CancelPublicationCheck returns the receiver's cancel publication check value.
-func (review Review) CancelPublicationCheck() (Review, error) {
-	if review.publication.status != PublicationChecked {
-		return review, ErrInvalidPublication
-	}
-	next := review.clone()
-	next.publication = publicationState{status: PublicationIdle}
-	return next, nil
-}
-
-// AcknowledgePublication returns the receiver's acknowledge publication value.
-func (review Review) AcknowledgePublication() (Review, error) {
-	if review.publication.status == PublicationUnknown ||
-		review.publication.status == PublicationReconciling ||
-		review.publication.status == PublicationIdle {
-		return review, ErrInvalidPublication
-	}
-	next := review.clone()
-	next.publication.acknowledged = true
-	return next, nil
-}
-
-// PublicationSummary returns the receiver's publication summary value.
-func (review Review) PublicationSummary() PublicationSummary {
-	summary := PublicationSummary{
-		Status:       review.publication.status,
-		Operation:    review.publication.operation,
-		Target:       review.publication.target,
-		Marker:       review.publication.marker,
-		RemoteReview: review.publication.remoteReview,
-		Detail:       review.publication.detail,
-		Acknowledged: review.publication.acknowledged,
-		Event:        review.publication.event,
-		Included:     review.publication.included,
-		Excluded:     review.publication.excluded,
-	}
-	if review.publication.checked != nil {
-		summary.StaleHead = review.publication.checked.staleHead
-	}
-	return summary
-}
-
-// UnknownPublicationOperation returns the receiver's unknown publication operation value.
-func (review Review) UnknownPublicationOperation() (OperationID, bool) {
-	return review.publication.attempt,
-		review.publication.attempt != 0 &&
-			(review.publication.status == PublicationUnknown ||
-				review.publication.status == PublicationReconciling)
-}
-
-// PublicationPreflightBody returns the receiver's publication preflight body value.
-func (review Review) PublicationPreflightBody() string {
-	if review.publication.checked == nil {
-		return ""
-	}
-	return review.publication.checked.prepared.summary
-}
-
-// PublicationPreflightPayload returns the receiver's publication preflight payload value.
-func (review Review) PublicationPreflightPayload() string {
-	if review.publication.checked == nil {
-		return ""
-	}
-	return review.publication.checked.payload
-}
-
-// PublicationDecisionAt performs the publication decision at operation.
-func (review Review) PublicationDecisionAt(
-	index int,
-) (PublicationCommentDecision, bool) {
-	if review.publication.checked == nil {
-		return PublicationCommentDecision{}, false
-	}
-	return review.publication.checked.prepared.DecisionAt(index)
 }

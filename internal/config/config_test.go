@@ -75,18 +75,40 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 func TestDefaultsUseExportTemplates(t *testing.T) {
 	export := Defaults().Export()
 	if got, want := export.MarkdownTemplate.String(),
-		"I reviewed your code and have the following comments. Please address them.\n\n{{comments}}\n"; got != want {
+		"I reviewed your code and have the following comments. Please address them.\n\nComment types: {{comment_types}}\n\n{{comments}}\n"; got != want {
 		t.Fatalf("markdown template = %q, want %q", got, want)
 	}
 	if got, want := export.CommentTemplate.String(),
-		"{{index}}. `{{target}}` - {{comment}}"; got != want {
+		"{{index}}. **[{{kind_upper}}]** `{{target}}` - {{comment}}"; got != want {
 		t.Fatalf("comment template = %q, want %q", got, want)
 	}
 }
 
-func TestDefaultsUseDraftGitHubSubmission(t *testing.T) {
-	if got := Defaults().GitHub().SubmitDefault; got != SubmitDraft {
-		t.Fatalf("submit default = %q, want %q", got, SubmitDraft)
+func TestDefaultsUseCommentGitHubSubmission(t *testing.T) {
+	if got := Defaults().GitHub().SubmitDefault; got != SubmitComment {
+		t.Fatalf("submit default = %q, want %q", got, SubmitComment)
+	}
+}
+
+func TestDefaultsUseSortedCommentKindsAndGitHubPrefixes(t *testing.T) {
+	comments := Defaults().Comments()
+	want := []string{
+		defaultIssueCommentKind,
+		"note",
+		"praise",
+		defaultSuggestionCommentKind,
+	}
+	if !comments.TypePrefixForGitHub || len(comments.Kinds) != len(want) {
+		t.Fatalf("comments = %+v, want prefix and kinds %v", comments, want)
+	}
+	for index := range want {
+		if comments.Kinds[index] != want[index] {
+			t.Fatalf("comment kind %d = %q, want %q", index, comments.Kinds[index], want[index])
+		}
+	}
+	comments.Kinds[0] = "mutated"
+	if Defaults().Comments().Kinds[0] != defaultIssueCommentKind {
+		t.Fatal("Comments exposed mutable default backing")
 	}
 }
 
@@ -121,6 +143,51 @@ exclude = ["vendor/**", "**/*.lock"]
 	}
 	if len(config.Filter().Include) != 1 || len(config.Filter().Exclude) != 2 {
 		t.Fatalf("unexpected lists: %+v", config.Filter())
+	}
+}
+
+func TestLoadReplacesAndNormalizesCommentKinds(t *testing.T) {
+	root := projectDirectory(t)
+	home := filepath.Join(root, "home")
+	if err := os.MkdirAll(filepath.Join(home, ".config", "rvw"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(home, ".config", "rvw", "config.toml"), `
+[comments]
+kinds = ["user", "unused"]
+type_prefix_for_github = true
+`)
+	writeTestFile(t, filepath.Join(root, ".rvw.toml"), `
+[comments]
+kinds = [" suggestion ", "issue"]
+type_prefix_for_github = false
+`)
+	loaded, err := Load(LoadRequest{CWD: root, Environment: []string{"HOME=" + home}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	comments := loaded.Comments()
+	if comments.TypePrefixForGitHub || len(comments.Kinds) != 2 ||
+		comments.Kinds[0] != "issue" || comments.Kinds[1] != "suggestion" {
+		t.Fatalf("comments = %+v", comments)
+	}
+}
+
+func TestLoadRejectsInvalidCommentKinds(t *testing.T) {
+	for name, value := range map[string]string{
+		"empty":     `[]`,
+		"duplicate": `["note", " note "]`,
+		"control":   `["bad\nkind"]`,
+		"not-list":  `42`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := projectDirectory(t)
+			writeTestFile(t, filepath.Join(root, ".rvw.toml"),
+				"[comments]\nkinds = "+value+"\n")
+			if _, err := Load(LoadRequest{CWD: root}); err == nil {
+				t.Fatal("Load() succeeded")
+			}
+		})
 	}
 }
 
