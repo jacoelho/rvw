@@ -631,9 +631,7 @@ func (source PublicationSource) appendBoundPendingPublicationComment(
 		if commentContentFrom(comment) == binding.baseline {
 			*desiredBody = binding.wireBaseline
 		} else {
-			wireBody, err := encodeCommentWire(
-				commentContentFrom(comment), source.comments.policies,
-			)
+			wireBody, err := encodeCommentWire(commentContentFrom(comment))
 			if err != nil {
 				return fmt.Errorf("%w: %w", ErrInvalidPublication, err)
 			}
@@ -647,9 +645,7 @@ func (source PublicationSource) appendBoundPendingPublicationComment(
 				ErrInvalidPublication,
 			)
 		}
-		wireBody, err := encodeCommentWire(
-			commentContentFrom(comment), source.comments.policies,
-		)
+		wireBody, err := encodeCommentWire(commentContentFrom(comment))
 		if err != nil {
 			return fmt.Errorf("%w: %w", ErrInvalidPublication, err)
 		}
@@ -680,7 +676,6 @@ func (source PublicationSource) appendUnboundPendingPublicationComment(
 		comment,
 		options,
 		source.state.commit,
-		source.comments.policies,
 	)
 	if err != nil {
 		return err
@@ -789,7 +784,6 @@ func prepareNewPendingComment(
 	comment Comment,
 	options PublicationOptions,
 	commit ObjectID,
-	policies CommentPolicies,
 ) (PendingMutation, PublicationDecision, string, error) {
 	target := comment.target
 	if target.Kind() == TargetLine && !comment.Stale() && !comment.Unmappable() {
@@ -808,7 +802,7 @@ func prepareNewPendingComment(
 				StartSide:      side,
 			})
 			if targetErr == nil && pathUTF8 != "" {
-				body, err := encodeCommentWire(commentContentFrom(comment), policies)
+				body, err := encodeCommentWire(commentContentFrom(comment))
 				if err != nil {
 					return PendingMutation{}, 0, "", fmt.Errorf("%w: %w", ErrInvalidPublication, err)
 				}
@@ -829,7 +823,7 @@ func prepareNewPendingComment(
 				Subject:        PendingSubjectFile,
 			})
 			if targetErr == nil {
-				body, err := encodeCommentWire(commentContentFrom(comment), policies)
+				body, err := encodeCommentWire(commentContentFrom(comment))
 				if err != nil {
 					return PendingMutation{}, 0, "", fmt.Errorf("%w: %w", ErrInvalidPublication, err)
 				}
@@ -843,7 +837,7 @@ func prepareNewPendingComment(
 	if target.Kind() == TargetReview || target.Kind() == TargetFile ||
 		options.policies.Has(PublicationMoveUnmappableToSummary) {
 		body, err := encodePublicationSummaryWire(
-			commentContentFrom(comment), target, policies,
+			commentContentFrom(comment), target,
 		)
 		if err != nil {
 			return PendingMutation{}, 0, "", fmt.Errorf("%w: %w", ErrInvalidPublication, err)

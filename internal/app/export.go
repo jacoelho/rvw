@@ -35,10 +35,6 @@ func (model *Model) applyExportPickerAction(action KeyAction) {
 		model.overlay = OverlayNone
 	case KeyActionToggleExportUnmap:
 		model.toggleExportOption(review.ExportUnmappable)
-	case KeyActionToggleExportNotes:
-		model.toggleExportOption(review.ExportNotes)
-	case KeyActionToggleExportPraise:
-		model.toggleExportOption(review.ExportPraise)
 	case KeyActionExportSelected:
 		selection := model.exportPicker
 		model.overlay = OverlayNone
@@ -119,8 +115,6 @@ func (model *Model) exportPickerView(width, height int) string {
 		"format       " + format,
 		"destination  " + destination,
 		"",
-		checked(review.ExportNotes) + " include notes",
-		checked(review.ExportPraise) + " include praise",
 		checked(review.ExportUnmappable) + " include unmappable comments",
 		"",
 		model.bindingSummary(KeyContextExportPicker),

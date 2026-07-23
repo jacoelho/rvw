@@ -119,8 +119,6 @@ const (
 	KeyActionExtendDown          KeyAction = "extend-down"
 	KeyActionCommentSelection    KeyAction = "comment-selection"
 	KeyActionSaveComment         KeyAction = "save-comment"
-	KeyActionNextCommentKind     KeyAction = "next-comment-kind"
-	KeyActionPreviousCommentKind KeyAction = "previous-comment-kind"
 	KeyActionToggleWrap          KeyAction = "toggle-wrap"
 	KeyActionToggleView          KeyAction = "toggle-view"
 	KeyActionAlignTop            KeyAction = "align-top"
@@ -168,8 +166,6 @@ const (
 	KeyActionHelpHome            KeyAction = "help-home"
 	KeyActionHelpEnd             KeyAction = "help-end"
 	KeyActionToggleExportUnmap   KeyAction = "toggle-export-unmappable"
-	KeyActionToggleExportNotes   KeyAction = "toggle-export-notes"
-	KeyActionToggleExportPraise  KeyAction = "toggle-export-praise"
 	KeyActionExportSelected      KeyAction = "export-selected"
 	KeyActionSubmitRecheck       KeyAction = "submit-recheck"
 	KeyActionToggleStaleOverride KeyAction = "toggle-stale-head-override"
@@ -190,7 +186,7 @@ var validKeyActions = actionSet(
 	KeyActionEditComment, KeyActionDeleteComment, KeyActionExpandContext,
 	KeyActionVisualLine, KeyActionVisualLines, KeyActionVisualHunk,
 	KeyActionExtendUp, KeyActionExtendDown, KeyActionCommentSelection,
-	KeyActionSaveComment, KeyActionNextCommentKind, KeyActionPreviousCommentKind,
+	KeyActionSaveComment,
 	KeyActionToggleWrap, KeyActionToggleView, KeyActionAlignTop,
 	KeyActionAlignCenter, KeyActionAlignBottom, KeyActionToggleDirectory,
 	KeyActionExpandDirectory, KeyActionCollapseDirectory, KeyActionToggleHiddenFiles,
@@ -206,8 +202,7 @@ var validKeyActions = actionSet(
 	KeyActionConfirmYes, KeyActionConfirmNo, KeyActionNextHelpPage,
 	KeyActionPreviousHelpPage, KeyActionHelpLineUp, KeyActionHelpLineDown,
 	KeyActionHelpPageUp, KeyActionHelpPageDown, KeyActionHelpHome,
-	KeyActionHelpEnd, KeyActionToggleExportUnmap, KeyActionToggleExportNotes,
-	KeyActionToggleExportPraise, KeyActionExportSelected,
+	KeyActionHelpEnd, KeyActionToggleExportUnmap, KeyActionExportSelected,
 	KeyActionSubmitRecheck,
 	KeyActionToggleStaleOverride, KeyActionToggleSubmitExclude,
 	KeyActionToggleSubmitSummary, KeyActionSubmitReview, KeyActionToggleFilePanel,
@@ -243,7 +238,6 @@ var contextKeyActions = map[KeyContext]map[KeyAction]struct{}{
 	),
 	KeyContextCommentEdit: actionSet(
 		KeyActionCancel, KeyActionInterrupt, KeyActionDeleteBackward,
-		KeyActionNextCommentKind, KeyActionPreviousCommentKind,
 		KeyActionSaveComment, KeyActionInsertNewline,
 	),
 	KeyContextSearch: actionSet(
@@ -269,8 +263,7 @@ var contextKeyActions = map[KeyContext]map[KeyAction]struct{}{
 		KeyActionCancel, KeyActionInterrupt, KeyActionConfirmYes, KeyActionConfirmNo,
 	),
 	KeyContextExportPicker: actionSet(
-		KeyActionCancel, KeyActionInterrupt, KeyActionToggleExportNotes,
-		KeyActionToggleExportPraise, KeyActionToggleExportUnmap, KeyActionExportSelected,
+		KeyActionCancel, KeyActionInterrupt, KeyActionToggleExportUnmap, KeyActionExportSelected,
 	),
 	KeyContextSubmit: actionSet(
 		KeyActionCancel, KeyActionInterrupt, KeyActionSubmitRecheck,
@@ -412,8 +405,6 @@ var (
 		KeyActionQuit,
 	}
 	commentEditorSummaryActions = [...]KeyAction{
-		KeyActionNextCommentKind,
-		KeyActionPreviousCommentKind,
 		KeyActionSaveComment,
 		KeyActionInsertNewline,
 		KeyActionCancel,
@@ -724,11 +715,9 @@ type Settings struct {
 	palette         Palette
 	keymap          *compiledKeybindings
 	syntaxSelector  review.SyntaxSelector
-	commentKinds    review.CommentKinds
 	exportTemplates review.ExportTemplates
 	publication     review.PublicationOptions
 	patchContext    review.PatchContext
-	commentPolicies review.CommentPolicies
 	mouse           bool
 	colorEnabled    bool
 	wrap            bool
@@ -760,8 +749,6 @@ const (
 	PaletteSyntaxNumber
 	PaletteWarningForeground
 	PaletteWarningBackground
-	PaletteCommentNote
-	PaletteCommentSuggestion
 )
 
 // Palette represents palette.
@@ -773,7 +760,7 @@ type Palette struct {
 func NewPalette(values map[PaletteRole]string) (Palette, error) {
 	colors := make(map[PaletteRole]string, len(values))
 	for role, value := range values {
-		if role < PalettePanelBackground || role > PaletteCommentSuggestion ||
+		if role < PalettePanelBackground || role > PaletteWarningBackground ||
 			value == "" || len(value) > 64 {
 			return Palette{}, errors.New("invalid presentation palette")
 		}
@@ -861,11 +848,9 @@ type SettingsRequest struct {
 	Palette         Palette
 	SyntaxSelector  review.SyntaxSelector
 	Keybindings     []Keybinding
-	CommentKinds    review.CommentKinds
 	ExportTemplates review.ExportTemplates
 	Publication     review.PublicationOptions
 	ContextLines    review.ContextLines
-	CommentPolicies review.CommentPolicies
 	Features        SettingFeatures
 	DiffView        DiffView
 }
@@ -878,8 +863,6 @@ func NewSettings(request SettingsRequest) (Settings, error) {
 	syntaxSelector := request.SyntaxSelector
 	exportTemplates := request.ExportTemplates
 	publication := request.Publication
-	commentKinds := request.CommentKinds
-	commentPolicies := request.CommentPolicies
 	keybindings := request.Keybindings
 	if !features.valid() {
 		return Settings{}, errors.New("interactive setting features contain unknown bits")
@@ -892,9 +875,6 @@ func NewSettings(request SettingsRequest) (Settings, error) {
 	}
 	if !exportTemplates.Ready() {
 		return Settings{}, errors.New("export templates are required")
-	}
-	if !commentKinds.Ready() || !commentPolicies.Ready() {
-		return Settings{}, errors.New("invalid comment settings")
 	}
 	validatedPublication, err := review.NewPublicationOptions(
 		publication.Event(),
@@ -929,8 +909,6 @@ func NewSettings(request SettingsRequest) (Settings, error) {
 		publication:     publication,
 		keymap:          keymap,
 		palette:         request.Palette,
-		commentKinds:    commentKinds,
-		commentPolicies: commentPolicies,
 	}, nil
 }
 

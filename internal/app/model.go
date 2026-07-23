@@ -275,9 +275,7 @@ func NewModel(
 		return nil, err
 	}
 	current, err := review.NewReview(review.ReviewRequest{
-		Snapshot:        document.Snapshot(),
-		CommentKinds:    settings.commentKinds,
-		CommentPolicies: settings.commentPolicies,
+		Snapshot: document.Snapshot(),
 	})
 	if err != nil {
 		return nil, err

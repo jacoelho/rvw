@@ -219,7 +219,7 @@ func TestCommentEditorSynchronizesPastedNewAndEditedDrafts(t *testing.T) {
 	}
 }
 
-func TestCommentEditorCyclesKindsAndRendersCurrentKind(t *testing.T) {
+func TestCommentEditorRendersPlainCommentTitle(t *testing.T) {
 	model, coordinator := newTestModel(t, map[string]string{
 		"alpha.txt": "original\nadded\n",
 	})
@@ -228,43 +228,28 @@ func TestCommentEditorCyclesKindsAndRendersCurrentKind(t *testing.T) {
 	waitForPatch(t, model, coordinator, active)
 	beginTestLineComment(t, model)
 
-	model.applyAction(KeyActionNextCommentKind, 1)
-	draft, ok := model.review.Draft()
-	if !ok || draft.Kind().String() != "note" ||
-		!strings.Contains(ansi.Strip(model.View().Content), "Comment [note]") {
-		t.Fatalf("next kind draft = %#v, present = %t", draft, ok)
-	}
-	model.applyAction(KeyActionPreviousCommentKind, 1)
-	draft, _ = model.review.Draft()
-	if draft.Kind().String() != "issue" {
-		t.Fatalf("previous kind = %q", draft.Kind())
+	view := ansi.Strip(model.View().Content)
+	if !strings.Contains(view, "Comment · alpha.txt") || strings.Contains(view, "[issue]") {
+		t.Fatalf("comment editor title:\n%s", view)
 	}
 }
 
-func TestExportPickerDefaultsAndTogglesKindFilters(t *testing.T) {
+func TestExportPickerDefaultsAndTogglesUnmappableComments(t *testing.T) {
 	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	model.openExportPicker(exportSelection{
 		format: review.ExportMarkdown, destination: delivery.DestinationClipboard,
 		options: review.DefaultExportOptions(),
 	})
 	if model.overlay != OverlayExport ||
-		!model.exportPicker.options.Has(review.ExportNotes) ||
-		!model.exportPicker.options.Has(review.ExportPraise) ||
 		model.exportPicker.options.Has(review.ExportUnmappable) {
 		t.Fatalf("default picker = %#v", model.exportPicker)
 	}
-	model.applyExportPickerAction(KeyActionToggleExportNotes)
-	model.applyExportPickerAction(KeyActionToggleExportPraise)
 	model.applyExportPickerAction(KeyActionToggleExportUnmap)
-	if model.exportPicker.options.Has(review.ExportNotes) ||
-		model.exportPicker.options.Has(review.ExportPraise) ||
-		!model.exportPicker.options.Has(review.ExportUnmappable) {
+	if !model.exportPicker.options.Has(review.ExportUnmappable) {
 		t.Fatalf("toggled picker = %#v", model.exportPicker)
 	}
 	view := model.exportPickerView(80, 20)
-	for _, want := range []string{
-		"[ ] include notes", "[ ] include praise", "[x] include unmappable comments",
-	} {
+	for _, want := range []string{"[x] include unmappable comments"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("picker view omitted %q:\n%s", want, view)
 		}

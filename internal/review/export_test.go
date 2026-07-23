@@ -57,8 +57,7 @@ func TestExportOptionsRequireInitializationAndValidateIndependentFlags(t *testin
 		t.Fatal("zero export options are ready")
 	}
 	defaults := DefaultExportOptions()
-	if !defaults.Has(ExportNotes) || !defaults.Has(ExportPraise) ||
-		defaults.Has(ExportUnmappable) {
+	if defaults.Has(ExportUnmappable) {
 		t.Fatalf("default options = %#v", defaults)
 	}
 	options, err := NewExportOptions(ExportUnmappable)
@@ -73,7 +72,7 @@ func TestExportOptionsRequireInitializationAndValidateIndependentFlags(t *testin
 		t.Fatalf("toggled options = %#v, %v", options, err)
 	}
 	if empty, err := NewExportOptions(); err != nil || !empty.Ready() ||
-		empty.Has(ExportNotes) || empty.Has(ExportPraise) || empty.Has(ExportUnmappable) {
+		empty.Has(ExportUnmappable) {
 		t.Fatalf("empty options = %#v, %v", empty, err)
 	}
 	for _, value := range []ExportOption{0, ExportUnmappable + 1} {
@@ -101,17 +100,17 @@ func TestExportOptionsRequireInitializationAndValidateIndependentFlags(t *testin
 	}
 }
 
-func TestExportFiltersKindsAndKeepsJSONSchemaStable(t *testing.T) {
+func TestExportKeepsPlainCommentBodiesAndJSONSchemaStable(t *testing.T) {
 	current, err := NewReview(testReviewRequest(testSnapshot(t, 1, "one.go")))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, label := range []string{"issue", "note", "praise", "suggestion"} {
-		current = saveTestCommentWithKind(t, current, label, label+" body")
+	for _, body := range []string{"[issue] body", "ordinary body"} {
+		current = saveTestComment(t, current, ReviewCommentTarget(), body)
 	}
 	templates, err := CompileExportTemplates(
-		"types={{comment_types}} count={{comment_count}}\n{{comments}}",
-		"{{kind}}/{{kind_upper}}: {{comment}}",
+		"count={{comment_count}}\n{{comments}}",
+		"{{comment}}",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -121,7 +120,7 @@ func TestExportFiltersKindsAndKeepsJSONSchemaStable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = "types=ISSUE, SUGGESTION count=2\nissue/ISSUE: issue body\nsuggestion/SUGGESTION: suggestion body"
+	const want = "count=2\n\\[issue\\] body\nordinary body"
 	if markdown.Body() != want {
 		t.Fatalf("Markdown = %q, want %q", markdown.Body(), want)
 	}
@@ -129,45 +128,11 @@ func TestExportFiltersKindsAndKeepsJSONSchemaStable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(json.Body(), `"kind"`) || strings.Contains(json.Body(), "note body") ||
-		strings.Contains(json.Body(), "praise body") ||
-		!strings.Contains(json.Body(), "issue body") ||
-		!strings.Contains(json.Body(), "suggestion body") {
+	if strings.Contains(json.Body(), `"kind"`) ||
+		!strings.Contains(json.Body(), "[issue] body") ||
+		!strings.Contains(json.Body(), "ordinary body") {
 		t.Fatalf("JSON = %s", json.Body())
 	}
-}
-
-func saveTestCommentWithKind(
-	t *testing.T,
-	current Review,
-	label string,
-	body string,
-) Review {
-	t.Helper()
-	var err error
-	current, err = current.BeginDraft(ReviewCommentTarget())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for {
-		draft, _ := current.Draft()
-		if draft.Kind().String() == label {
-			break
-		}
-		current, err = current.CycleDraftKind(NavigateNext)
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	current, err = current.UpdateDraft(body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	current, _, err = current.SaveDraft()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return current
 }
 
 func TestCompileExportTemplatesRejectsEmptyAndTooManyTokens(t *testing.T) {

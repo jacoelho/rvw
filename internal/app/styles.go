@@ -22,8 +22,6 @@ func newSemanticStyles(settings Settings) semanticStyles {
 		styles.keyword = lipgloss.NewStyle().Bold(true)
 		styles.literal = lipgloss.NewStyle().Underline(true)
 		styles.comment = lipgloss.NewStyle().Faint(true)
-		styles.commentNote = lipgloss.NewStyle()
-		styles.commentSuggest = lipgloss.NewStyle()
 		styles.number = lipgloss.NewStyle().Bold(true)
 		return styles
 	}
@@ -76,12 +74,6 @@ func newSemanticStyles(settings Settings) semanticStyles {
 	)
 	styles.comment = lipgloss.NewStyle().Foreground(
 		lipgloss.Color(palette.color(PaletteSyntaxComment, "8")),
-	)
-	styles.commentNote = lipgloss.NewStyle().Foreground(
-		lipgloss.Color(palette.color(PaletteCommentNote, palette.color(PaletteSecondary, "7"))),
-	)
-	styles.commentSuggest = lipgloss.NewStyle().Foreground(
-		lipgloss.Color(palette.color(PaletteCommentSuggestion, palette.color(PaletteSecondary, "7"))),
 	)
 	styles.number = lipgloss.NewStyle().Foreground(
 		lipgloss.Color(palette.color(PaletteSyntaxNumber, "6")),

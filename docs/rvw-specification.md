@@ -152,35 +152,26 @@ ignore_file = ".rvwignore"
 include = ["src/**"]
 exclude = ["**/*.generated.rs"]
 
-[comments]
-kinds = ["issue", "note", "praise", "suggestion"]
-type_prefix_for_github = true
-
 [github]
 submit_default = "comment" # comment, draft, approve, or request-changes
 fetch_threads = true
 
 [export]
 markdown_template = "# Review ({{comment_count}})\n\n{{comments}}"
-comment_template = "## {{kind_upper}} — {{target}}\n\n{{comment}}"
+comment_template = "## {{target}}\n\n{{comment}}"
 ```
 
-`include`, `exclude`, and `kinds` each accept either one string or an array of strings.
+`include` and `exclude` each accept either one string or an array of strings.
 
 Defaults are mouse enabled, wrapping enabled, unified view, three context lines, untracked files
 included, built-in filtering enabled, `.gitignore` enabled, `.rvwignore` enabled, remote threads
-fetched, GitHub kind prefixes enabled, submission event `comment`, and comment kinds `issue`,
-`note`, `praise`, and `suggestion` in lexical order.
+fetched, and submission event `comment`.
 
 Filter patterns are nonempty, contain no NUL, and are at most 4,096 UTF-8 bytes each. At most 4,096
 include/exclude patterns are accepted across the merged configuration and command line.
 `context_lines` is an integer from 0 through 10,000. `ignore_file`, when set, is a single path
 component that cannot escape the repository root. Independent hidden reasons accumulate.
 Filtering changes presentation, not membership of the source snapshot.
-
-Comment kinds are distinct and stored in lexical label order regardless of configuration order.
-There may be 1 through 32 kinds. Each trimmed label is nonempty, contains no control character, and
-is at most 256 UTF-8 bytes.
 
 Export templates use `{{name}}` placeholders, are each at most 256 KiB, and compile to at most 4,096
 literal-or-placeholder tokens. Invalid, unknown, unmatched, or unterminated placeholders fail
@@ -190,13 +181,11 @@ configuration rather than rendering literally.
 
 - `comments`: selected comments rendered by `comment_template`, separated by newlines, or
   `_No comments._` when none are selected;
-- `comment_types`: included configured kind labels, uppercased in ASCII and comma-separated;
 - `comment_count`: the number of selected comments.
 
 `comment_template` accepts:
 
 - `index`: one-based selected-comment index;
-- `kind` and `kind_upper`: the kind label as stored or uppercased in ASCII;
 - `target`: `review`, an escaped file path, or `<path>:<line-or-range>`;
 - `path`: the escaped target path, empty for a review-level comment;
 - `line_or_range`: a new-side line or inclusive range, or the same prefixed by `~` for the old
@@ -206,8 +195,8 @@ configuration rather than rendering literally.
 The defaults are:
 
 ```toml
-markdown_template = "I reviewed your code and have the following comments. Please address them.\n\nComment types: {{comment_types}}\n\n{{comments}}\n"
-comment_template = "{{index}}. **[{{kind_upper}}]** `{{target}}` - {{comment}}"
+markdown_template = "I reviewed your code and have the following comments. Please address them.\n\n{{comments}}\n"
+comment_template = "{{index}}. `{{target}}` - {{comment}}"
 ```
 
 #### 4.2 Keybindings
@@ -248,10 +237,10 @@ align-top, align-center, align-bottom, toggle-directory, expand-directory,
 collapse-directory, visual-line, visual-lines, visual-hunk,
 comment-selection, command, filter, help, status-details, search,
 open-submit, cancel, interrupt, delete-backward, confirm-yes, confirm-no,
-next-comment-kind, previous-comment-kind, save-comment, insert-newline,
+save-comment, insert-newline,
 extend-up, extend-down, next-help-page, previous-help-page, help-line-up,
 help-line-down, help-page-up, help-page-down, help-home, help-end,
-toggle-export-notes, toggle-export-praise, toggle-export-unmappable,
+toggle-export-unmappable,
 export-selected, copy-markdown, export-markdown, export-json,
 submit-recheck, toggle-stale-head-override, toggle-submit-exclusion,
 toggle-submit-summary, submit-review, reload, toggle-file-panel,
@@ -302,7 +291,7 @@ The optional keys are:
 
 ```text
 diff_add_bg, diff_del_bg, diff_hunk_header, file_modified, file_renamed,
-comment_note, comment_suggestion, branch_name, message_warning_fg,
+branch_name, message_warning_fg,
 message_warning_bg, syntax_theme
 ```
 

@@ -158,9 +158,9 @@ func importPendingReviewCancellable(
 		bodyUpdate: pending.viewerUpdate,
 	}
 	body, marker := splitPendingMarker(pending.body, publicationMarkerPrefix)
-	content := commentContent{kind: current.commentKinds.first(), body: body}
+	content := commentContent{body: body}
 	if marker != "" {
-		content = decodeOwnedCommentWire(body, current.commentKinds)
+		content = decodeOwnedCommentWire(body)
 	}
 	state.bodyBase = strings.Clone(body)
 	state.bodyMarker = strings.Clone(marker)
@@ -193,9 +193,9 @@ func importPendingReviewCancellable(
 			}
 		}
 		body, commentMarker := splitPendingMarker(remote.body, draftCommentMarkerPrefix)
-		content := commentContent{kind: current.commentKinds.first(), body: body}
+		content := commentContent{body: body}
 		if commentMarker != "" {
-			content = decodeOwnedCommentWire(body, current.commentKinds)
+			content = decodeOwnedCommentWire(body)
 		}
 		target, flags := projectPendingTargetWithMappings(pathMappings, remote.target)
 		id, err := appendPendingCommentUnindexed(&current, content, target, flags)
@@ -237,7 +237,6 @@ func appendPendingCommentUnindexed(
 		id:     id,
 		target: target,
 		body:   validated,
-		kind:   content.kind,
 		flags:  flags,
 	}
 	current.comments = append(current.comments, comment)

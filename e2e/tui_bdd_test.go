@@ -185,9 +185,9 @@ func TestInteractiveSourceContract(t *testing.T) {
 				w.launchPTY(t, 120, 24, "pr", "7", "--repo", "fixture/repository")
 				w.pty.awaitScreen(t, "pending source", containsScreen("reviewed.go"))
 				w.pty.send(t, "zc\tj")
-				w.pty.awaitScreen(t, "selected inline draft", containsScreen("▸ [issue] [draft] reviewed.go:3"))
+				w.pty.awaitScreen(t, "selected inline draft", containsScreen("▸ [draft] reviewed.go:3"))
 				w.pty.send(t, "e")
-				w.pty.awaitScreen(t, "comment editor", containsScreen("Comment [issue] ·"))
+				w.pty.awaitScreen(t, "comment editor", containsScreen("Comment ·"))
 				w.pty.send(t, " edited")
 				w.pty.send(t, "\x13")
 				w.pty.awaitScreen(t, "saved comment", containsScreen("comment saved"))
@@ -575,7 +575,7 @@ func saveLineComment(body string) bdd.Step[*world] {
 		// Patch presentation opens on its metadata header. Move to the final
 		// changed line before asking the line-comment action to anchor a draft.
 		w.pty.send(t, "Gc")
-		w.pty.awaitScreen(t, "comment editor", containsScreen("Comment [issue] ·"))
+		w.pty.awaitScreen(t, "comment editor", containsScreen("Comment ·"))
 		w.pty.send(t, body+"\x13")
 		w.pty.awaitScreen(t, "saved comment", containsScreen("comment saved"))
 	}
@@ -584,7 +584,7 @@ func saveLineComment(body string) bdd.Step[*world] {
 func savePastedLineComment(body string) bdd.Step[*world] {
 	return func(t testing.TB, w *world) {
 		w.pty.send(t, "Gc")
-		w.pty.awaitScreen(t, "comment editor", containsScreen("Comment [issue] ·"))
+		w.pty.awaitScreen(t, "comment editor", containsScreen("Comment ·"))
 		w.pty.send(t, "\x1b[200~"+body+"\x1b[201~")
 		w.pty.awaitScreen(t, "pasted comment body", containsScreen(body))
 		w.pty.send(t, "\x13")
@@ -726,7 +726,7 @@ func TestGitHubPublicationContract(t *testing.T) {
 				}
 				if len(payload.Comments) != 1 ||
 					payload.Comments[0].Path != "reviewed.go" ||
-					payload.Comments[0].Body != "[issue] This should be published." ||
+					payload.Comments[0].Body != "This should be published." ||
 					payload.Comments[0].Side != "RIGHT" ||
 					payload.Comments[0].Line != 3 {
 					t.Fatalf("publication comments = %+v; payload = %s", payload.Comments, call.Stdin)

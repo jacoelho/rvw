@@ -30,27 +30,25 @@ const (
 )
 
 type semanticStyles struct {
-	heading        lipgloss.Style
-	muted          lipgloss.Style
-	focused        lipgloss.Style
-	selected       lipgloss.Style
-	added          lipgloss.Style
-	deleted        lipgloss.Style
-	context        lipgloss.Style
-	hunk           lipgloss.Style
-	pending        lipgloss.Style
-	reviewed       lipgloss.Style
-	commentAnchor  lipgloss.Style
-	keyword        lipgloss.Style
-	literal        lipgloss.Style
-	comment        lipgloss.Style
-	commentNote    lipgloss.Style
-	commentSuggest lipgloss.Style
-	number         lipgloss.Style
-	warning        lipgloss.Style
-	failure        lipgloss.Style
-	status         lipgloss.Style
-	panel          lipgloss.Style
+	heading       lipgloss.Style
+	muted         lipgloss.Style
+	focused       lipgloss.Style
+	selected      lipgloss.Style
+	added         lipgloss.Style
+	deleted       lipgloss.Style
+	context       lipgloss.Style
+	hunk          lipgloss.Style
+	pending       lipgloss.Style
+	reviewed      lipgloss.Style
+	commentAnchor lipgloss.Style
+	keyword       lipgloss.Style
+	literal       lipgloss.Style
+	comment       lipgloss.Style
+	number        lipgloss.Style
+	warning       lipgloss.Style
+	failure       lipgloss.Style
+	status        lipgloss.Style
+	panel         lipgloss.Style
 }
 
 type workspaceLayout struct {
@@ -417,10 +415,8 @@ func (model *Model) commentLines(
 				target = "[" + state + "] " + target
 			}
 			line = model.commentPrefix(prefix, width)
-			remaining := max(width-lipgloss.Width(line), 0)
-			line += model.commentKindCell(comment.Kind(), styles, remaining)
 			line = appendSafeAndClip(line, target+" — ", width)
-			remaining = max(width-lipgloss.Width(line), 0)
+			remaining := max(width-lipgloss.Width(line), 0)
 			if remaining != 0 {
 				line += safeAndClip(comment.Body().String(), remaining)
 			}
@@ -471,17 +467,6 @@ func (model *Model) commentPrefix(prefix string, width int) string {
 		return prefix
 	}
 	return clipStyled(prefix, 0, width)
-}
-
-func (model *Model) commentKindCell(
-	kind review.CommentKind,
-	styles semanticStyles,
-	width int,
-) string {
-	if !model.settings.colorEnabled {
-		return "[" + safeText(kind.String()) + "] "
-	}
-	return clipStyled(commentKindText(kind, styles), 0, width)
 }
 
 func appendSafeAndClip(line, value string, width int) string {
@@ -540,8 +525,7 @@ func (model *Model) commentEditorView(width, height int) string {
 			model.commentEditor.View(),
 		}, "\n")
 	}
-	title := "Comment [" + draft.Kind().String() + "] · " +
-		commentTargetText(draft.Target())
+	title := "Comment · " + commentTargetText(draft.Target())
 	help := model.commentEditorBindingSummary()
 	return strings.Join([]string{
 		workspace,
@@ -550,21 +534,6 @@ func (model *Model) commentEditorView(width, height int) string {
 		model.commentEditor.View(),
 	}, "\n")
 }
-
-func commentKindText(kind review.CommentKind, styles semanticStyles) string {
-	raw := kind.String()
-	label := "[" + safeText(raw) + "] "
-	switch raw {
-	case commentKindNoteLabel:
-		return styles.commentNote.Render(label)
-	case "suggestion":
-		return styles.commentSuggest.Render(label)
-	default:
-		return label
-	}
-}
-
-const commentKindNoteLabel = "note"
 
 func newCommentEditorLayout(height int) commentEditorLayout {
 	editorHeight := min(
