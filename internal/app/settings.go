@@ -269,7 +269,8 @@ var contextKeyActions = map[KeyContext]map[KeyAction]struct{}{
 		KeyActionCancel, KeyActionInterrupt, KeyActionToggleExportUnmap, KeyActionExportSelected,
 	),
 	KeyContextSubmit: actionSet(
-		KeyActionCancel, KeyActionInterrupt, KeyActionSubmitRecheck,
+		KeyActionCancel, KeyActionInterrupt, KeyActionStatusDetails,
+		KeyActionSubmitRecheck,
 		KeyActionToggleStaleOverride, KeyActionToggleSubmitExclude,
 		KeyActionToggleSubmitSummary, KeyActionPreviousSubmitEvent,
 		KeyActionNextSubmitEvent, KeyActionSubmitReview,

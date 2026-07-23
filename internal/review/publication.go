@@ -443,6 +443,7 @@ type PreparedPublication struct {
 // new review or a continuation of one captured pending review.
 type PublicationSource struct {
 	state         *pendingReviewState
+	pendingDetail OperationDetail
 	baseline      PendingReview
 	comments      commentSource
 	workspace     WorkspaceRevision
@@ -468,11 +469,13 @@ func (review Review) PublicationSource() PublicationSource {
 	if hasBaseline {
 		retained += review.snapshot.pendingRetainedBytes
 	}
+	pending := review.snapshot.PendingReviewSummary()
 	return PublicationSource{
 		state:         review.pending,
 		comments:      review.source(),
 		baseline:      baseline,
-		status:        review.snapshot.PendingReviewSummary().Status,
+		status:        pending.Status,
+		pendingDetail: pending.Detail,
 		workspace:     review.workspace,
 		source:        review.snapshot.SourceID(),
 		retainedBytes: retained + publicationSourceMetadataBytes,
@@ -578,6 +581,14 @@ func (source PublicationSource) PreparePublicationCancellable(
 	status := source.status
 	if status == PendingReviewUnavailable || status == PendingReviewLimited ||
 		status == PendingReviewAmbiguous {
+		if !source.pendingDetail.IsEmpty() {
+			return PreparedPublication{}, fmt.Errorf(
+				"%w: pending GitHub review is %s: %s",
+				ErrInvalidPublication,
+				status,
+				source.pendingDetail.String(),
+			)
+		}
 		return PreparedPublication{}, fmt.Errorf(
 			"%w: pending GitHub review is %s",
 			ErrInvalidPublication,

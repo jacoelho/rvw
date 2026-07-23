@@ -434,6 +434,8 @@ func (model *Model) applyPublicationAction(action KeyAction) {
 		default:
 			model.overlay = OverlayNone
 		}
+	case KeyActionStatusDetails:
+		model.overlay = OverlayStatus
 	case KeyActionSubmitReview:
 		switch summary.Status {
 		case review.PublicationChecking:
@@ -581,7 +583,11 @@ func (model *Model) acknowledgePublication() {
 func (model *Model) publicationView(width, height int) string {
 	summary := model.review.PublicationSummary()
 	pending := model.review.PendingReviewSummary()
+	pendingProblem := pendingReviewProblemLine(pending)
 	lines := []string{"GitHub review", model.publicationEventSelector()}
+	if pendingProblem != "" {
+		lines = append(lines, pendingProblem)
+	}
 	switch summary.Status {
 	case review.PublicationChecking:
 		status := "Checking immutable repository, pull request, and head…"
@@ -615,7 +621,7 @@ func (model *Model) publicationView(width, height int) string {
 				"Pending review: continue %d · %d changed · %d conflicts",
 				pending.ReviewID.Uint64(), pending.Dirty, pending.Conflicts,
 			))
-		} else {
+		} else if pendingProblem == "" {
 			lines = append(lines, "Pending review: "+pending.Status.String())
 		}
 		chooserHeight := min(max(height-len(lines)-5, 1), 6)
@@ -648,6 +654,21 @@ func (model *Model) publicationView(width, height int) string {
 	}
 	lines = append(lines, model.bindingSummary(KeyContextSubmit))
 	return constrainedLines(lines, width, height)
+}
+
+func pendingReviewProblemLine(pending review.PendingReviewSummary) string {
+	switch pending.Status {
+	case review.PendingReviewUnavailable,
+		review.PendingReviewLimited,
+		review.PendingReviewAmbiguous:
+	default:
+		return ""
+	}
+	line := "Pending review: " + pending.Status.String()
+	if !pending.Detail.IsEmpty() {
+		line += " — " + pending.Detail.String()
+	}
+	return line
 }
 
 func (model *Model) publicationEventSelector() string {

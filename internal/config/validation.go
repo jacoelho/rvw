@@ -499,6 +499,7 @@ func defaultKeybindings() []Keybinding {
 		binding(KeyContextExportPicker, "", "Enter", "export-selected"),
 		binding(KeyContextSubmit, "", "Ctrl-c", KeyActionInterrupt),
 		binding(KeyContextSubmit, "", "Esc", KeyActionCancel),
+		binding(KeyContextSubmit, "", "F2", KeyActionStatusDetails),
 		binding(KeyContextSubmit, "", "j", KeyActionMoveDown),
 		binding(KeyContextSubmit, "", "k", KeyActionMoveUp),
 		binding(KeyContextSubmit, "", "pgdown", KeyActionPageDown),
@@ -597,7 +598,8 @@ var contextActions = map[KeyContext]map[KeyAction]bool{
 		KeyActionCancel, KeyActionInterrupt, "toggle-export-unmappable", "export-selected",
 	),
 	"submit-preflight": stringSet[KeyAction](
-		KeyActionCancel, KeyActionInterrupt, "submit-recheck", "toggle-stale-head-override",
+		KeyActionCancel, KeyActionInterrupt, KeyActionStatusDetails,
+		"submit-recheck", "toggle-stale-head-override",
 		"toggle-submit-exclusion", "toggle-submit-summary", "submit-review",
 		KeyActionPreviousSubmitEvent, KeyActionNextSubmitEvent,
 		"move-up", "move-down", "page-up", "page-down",

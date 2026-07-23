@@ -139,7 +139,19 @@ func TestModelRemainsUsableWithUnavailableUnsafePendingCapture(t *testing.T) {
 	if summary := model.review.PendingReviewSummary(); summary.Status != review.PendingReviewUnavailable {
 		t.Fatalf("pending status = %s", summary.Status)
 	}
+	model.overlay = OverlaySubmit
 	if view := model.View().Content; view == "" || strings.Contains(view, "\u202e") {
 		t.Fatalf("unavailable model view was empty or unsafe: %q", view)
+	} else if !strings.Contains(view, detail.String()) {
+		t.Fatalf("submit view omitted pending-review failure detail: %q", view)
+	}
+	setModelKeybindings(t, model, Keybinding{
+		Context: KeyContextSubmit,
+		Chord:   "F2",
+		Action:  KeyActionStatusDetails,
+	})
+	_, _ = model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyF2}))
+	if model.overlay != OverlayStatus {
+		t.Fatalf("F2 left overlay = %d, want status details", model.overlay)
 	}
 }
