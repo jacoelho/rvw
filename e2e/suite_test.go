@@ -242,7 +242,9 @@ func serveGraphQLFixture(w *world, writer http.ResponseWriter, body []byte) {
 		return
 	}
 	path := w.threads
-	if strings.Contains(request.Query, "reviews(first:100") {
+	if strings.Contains(request.Query, "reviewThreads(first:100") {
+		path = w.threads
+	} else if strings.Contains(request.Query, "reviews(first:100") {
 		path = w.pending
 	} else if strings.Contains(request.Query, "comments(first:100") {
 		path = w.pendingCapabilities

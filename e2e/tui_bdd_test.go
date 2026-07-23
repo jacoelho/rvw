@@ -21,6 +21,7 @@ import (
 const (
 	kittyEscape        = "\x1b[27u"
 	kittyRepeatedCtrlC = "\x1b[99;5:2u"
+	xtermF2            = "\x1bOQ"
 )
 
 func TestTerminalRenderingContract(t *testing.T) {
@@ -147,6 +148,34 @@ func TestInteractiveSourceContract(t *testing.T) {
 			})
 		})
 
+		feature.Scenario("an existing remote thread is loaded into the comments pane", func(scenario *bdd.ScenarioSpec[*world]) {
+			scenario.Given("GitHub has one inline review thread", func(t testing.TB, w *world) {
+				w.writeConfig(t, "[github]\nfetch_threads = true\n")
+				configureRemoteThread(t, w)
+			})
+			scenario.When("the pull request is opened", func(t testing.TB, w *world) {
+				w.launchPTY(t, 120, 24, "pr", "7", "--repo", "fixture/repository")
+			})
+			scenario.Then("the remote comment is retained and anchored to its diff line", func(t testing.TB, w *world) {
+				w.pty.awaitScreen(t, "pull request with remote thread", containsScreen("reviewed.go"))
+				w.pty.send(t, xtermF2)
+				status := w.pty.awaitScreen(t, "remote thread status", containsScreen("remote threads"))
+				if !strings.Contains(status, "remote threads       ready (1)") {
+					t.Fatalf("remote thread acquisition failed\n%s", status)
+				}
+				w.pty.send(t, kittyEscape)
+				w.pty.send(t, "zc")
+				screen := w.pty.awaitScreen(t, "remote comment row", func(screen string) bool {
+					return strings.Contains(screen, "[remote open]") &&
+						strings.Contains(screen, "reviewed.go:3") &&
+						strings.Contains(screen, "●")
+				})
+				assertNoEscapedWidgetStyles(t, w, screen, "remote thread")
+				w.pty.send(t, "q")
+				w.pty.awaitExit(t)
+			})
+		})
+
 		feature.Scenario("draft save updates and reloads the existing pending review", func(scenario *bdd.ScenarioSpec[*world]) {
 			scenario.Given("GitHub has one viewer-owned pending review", func(t testing.TB, w *world) {
 				w.writeConfig(t, "[github]\nfetch_threads = false\nsubmit_default = \"draft\"\n")
@@ -192,6 +221,50 @@ func TestInteractiveSourceContract(t *testing.T) {
 			})
 		})
 	})
+}
+
+func configureRemoteThread(t testing.TB, w *world) {
+	t.Helper()
+	pageInfo := map[string]any{"hasNextPage": false, "endCursor": nil}
+	comment := map[string]any{
+		"id":        "PRRC_existing",
+		"body":      "existing remote comment",
+		"createdAt": "2001-02-03T04:05:06Z",
+		"url":       "https://github.com/fixture/repository/pull/7#discussion_r1",
+		"author":    map[string]any{"login": "octo-reviewer"},
+	}
+	thread := map[string]any{
+		"id":         "PRRT_existing",
+		"isResolved": false,
+		"isOutdated": false,
+		"path":       "reviewed.go",
+		"line":       3,
+		"startLine":  nil,
+		"diffSide":   "RIGHT",
+		"comments": map[string]any{
+			"pageInfo": pageInfo,
+			"nodes":    []any{comment},
+		},
+	}
+	pullRequest := map[string]any{
+		"number":     7,
+		"baseRefOid": w.prBase,
+		"headRefOid": w.prHead,
+		"reviewThreads": map[string]any{
+			"pageInfo": pageInfo,
+			"nodes":    []any{thread},
+		},
+	}
+	pages := []any{map[string]any{
+		"errors": []any{},
+		"data": map[string]any{"repository": map[string]any{
+			"nameWithOwner": "fixture/repository",
+			"pullRequest":   pullRequest,
+		}},
+	}}
+	if err := writeHelperJSON(w.threads, pages); err != nil {
+		t.Fatalf("write remote thread fixture: %v", err)
+	}
 }
 
 func configurePendingReview(t testing.TB, w *world) {
@@ -635,8 +708,14 @@ func TestGitHubPublicationContract(t *testing.T) {
 			scenario.Then("the exact event and marker shape reached GitHub HTTP", func(t testing.TB, w *world) {
 				call := publicationCall(t, w.calls(t))
 				var payload struct {
-					Event string `json:"event"`
-					Body  string `json:"body"`
+					Event    string `json:"event"`
+					Body     string `json:"body"`
+					Comments []struct {
+						Path string `json:"path"`
+						Body string `json:"body"`
+						Side string `json:"side"`
+						Line uint32 `json:"line"`
+					} `json:"comments"`
 				}
 				if err := json.Unmarshal([]byte(call.Stdin), &payload); err != nil {
 					t.Fatal(err)
@@ -644,6 +723,13 @@ func TestGitHubPublicationContract(t *testing.T) {
 				if payload.Event != example.payload ||
 					!regexp.MustCompile(`<!-- rvw-publication:v1:[0-9a-f]{32} -->`).MatchString(payload.Body) {
 					t.Fatalf("publication payload = %s", call.Stdin)
+				}
+				if len(payload.Comments) != 1 ||
+					payload.Comments[0].Path != "reviewed.go" ||
+					payload.Comments[0].Body != "[issue] This should be published." ||
+					payload.Comments[0].Side != "RIGHT" ||
+					payload.Comments[0].Line != 3 {
+					t.Fatalf("publication comments = %+v; payload = %s", payload.Comments, call.Stdin)
 				}
 				quitDirtyReview(t, w)
 			})
