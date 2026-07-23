@@ -41,7 +41,6 @@ type SubmitEvent string
 // SubmitComment identifies a supported submit comment value.
 const (
 	SubmitComment        SubmitEvent = "comment"
-	SubmitDraft          SubmitEvent = "draft"
 	SubmitApprove        SubmitEvent = "approve"
 	SubmitRequestChanges SubmitEvent = "request-changes"
 )
@@ -228,6 +227,8 @@ const (
 	KeyActionExportMarkdown      KeyAction = "export-markdown"
 	KeyActionExportJSON          KeyAction = "export-json"
 	KeyActionOpenSubmit          KeyAction = "open-submit"
+	KeyActionPreviousSubmitEvent KeyAction = "previous-submit-event"
+	KeyActionNextSubmitEvent     KeyAction = "next-submit-event"
 	KeyActionHelp                KeyAction = "help"
 	KeyActionStatusDetails       KeyAction = "status-details"
 	KeyActionReload              KeyAction = "reload"

@@ -78,11 +78,10 @@ func validate(config *Config, environment map[string]string) error {
 		return filterErr
 	}
 	if config.github.SubmitDefault != SubmitComment &&
-		config.github.SubmitDefault != SubmitDraft &&
 		config.github.SubmitDefault != SubmitApprove &&
 		config.github.SubmitDefault != SubmitRequestChanges {
 		return fmt.Errorf(
-			"%w: github.submit_default must be comment, draft, approve, or request-changes",
+			"%w: github.submit_default must be comment, approve, or request-changes",
 			ErrInvalidConfig,
 		)
 	}
@@ -508,6 +507,8 @@ func defaultKeybindings() []Keybinding {
 		binding(KeyContextSubmit, "", "m", KeyActionToggleSubmitSummary),
 		binding(KeyContextSubmit, "", "S", KeyActionToggleStaleOverride),
 		binding(KeyContextSubmit, "", "r", KeyActionSubmitRecheck),
+		binding(KeyContextSubmit, "", "h", KeyActionPreviousSubmitEvent),
+		binding(KeyContextSubmit, "", "l", KeyActionNextSubmitEvent),
 		binding(KeyContextSubmit, "", "Enter", "submit-review"),
 		binding(KeyContextMinimumSize, "", "q", KeyActionQuit),
 		binding(KeyContextMinimumSize, "", "Ctrl-c", KeyActionInterrupt),
@@ -545,7 +546,8 @@ var keyActions = stringSet[KeyAction](
 	"toggle-export-unmappable",
 	"export-selected", "copy-markdown", "export-markdown", "export-json",
 	"submit-recheck", "toggle-stale-head-override", "toggle-submit-exclusion",
-	"toggle-submit-summary", "submit-review", "reload", "toggle-file-panel",
+	"toggle-submit-summary", KeyActionPreviousSubmitEvent, KeyActionNextSubmitEvent,
+	"submit-review", "reload", "toggle-file-panel",
 	"toggle-comments", "toggle-hidden-files",
 )
 
@@ -597,6 +599,7 @@ var contextActions = map[KeyContext]map[KeyAction]bool{
 	"submit-preflight": stringSet[KeyAction](
 		KeyActionCancel, KeyActionInterrupt, "submit-recheck", "toggle-stale-head-override",
 		"toggle-submit-exclusion", "toggle-submit-summary", "submit-review",
+		KeyActionPreviousSubmitEvent, KeyActionNextSubmitEvent,
 		"move-up", "move-down", "page-up", "page-down",
 	),
 	"minimum-size": stringSet[KeyAction]("quit", KeyActionInterrupt),

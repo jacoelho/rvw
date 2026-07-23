@@ -38,6 +38,37 @@ func TestPublicationCheckReadyAndCancellation(t *testing.T) {
 	})
 }
 
+func TestPublicationEventSelectorCyclesFinalGitHubActions(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	settleModelWork(t, model, coordinator)
+	if got := model.publicationEventSelector(); got !=
+		"Submit as (h/l): [Comment]  Approve  Request changes" {
+		t.Fatalf("default selector = %q", got)
+	}
+	options, err := model.publicationOptions()
+	if err != nil || options.Event() != review.PublicationEventDraft {
+		t.Fatalf("initial publication options = (%s, %v), want draft", options.Event(), err)
+	}
+	model.applyPublicationAction(KeyActionNextSubmitEvent)
+	if model.publicationEvent != review.PublicationEventApprove ||
+		model.publicationEventSelector() != "Submit as (h/l): Comment  [Approve]  Request changes" {
+		t.Fatalf("next selector = %q (%s)", model.publicationEventSelector(), model.publicationEvent)
+	}
+	model.applyPublicationAction(KeyActionPreviousSubmitEvent)
+	if model.publicationEvent != review.PublicationEventComment {
+		t.Fatalf("previous event = %s", model.publicationEvent)
+	}
+	model.applyPublicationAction(KeyActionPreviousSubmitEvent)
+	if model.publicationEvent != review.PublicationEventRequestChanges {
+		t.Fatalf("wrapped event = %s", model.publicationEvent)
+	}
+	model.publicationDraftReady = true
+	options, err = model.publicationOptions()
+	if err != nil || options.Event() != review.PublicationEventRequestChanges {
+		t.Fatalf("final publication options = (%s, %v)", options.Event(), err)
+	}
+}
+
 func TestPublicationCommitDispositionFencesRetry(t *testing.T) {
 	testCases := []struct {
 		name        string
@@ -479,6 +510,7 @@ func checkedPublicationModel(t *testing.T) (*Model, *Coordinator) {
 	t.Helper()
 	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	settleModelWork(t, model, coordinator)
+	model.publicationDraftReady = true
 	id, result := beginTestPublicationCheck(t, model)
 	model.applyPublicationCheckOutcome(PublicationCheckOutcome{ID: id, Check: result})
 	if model.review.PublicationSummary().Status != review.PublicationChecked {
@@ -514,7 +546,7 @@ func prepareTestPublicationResult(
 	t.Helper()
 	prepared, err := review.PreparePublicationResult(
 		request,
-		model.review.PendingRebaseSource(),
+		model.review.PublicationRebaseSource(),
 		result,
 	)
 	if err != nil {

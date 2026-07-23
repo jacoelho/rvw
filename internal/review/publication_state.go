@@ -328,7 +328,13 @@ func validatePublicationResultCancellable(
 	}
 	if prepared == nil {
 		if result.Pending != nil {
-			return ErrInvalidPublication
+			matches, err := checked.CreatedDraftMatchesCancellable(cancelled, *result.Pending)
+			if err != nil {
+				return err
+			}
+			if !matches || result.Pending.databaseID.Uint64() != result.RemoteReview {
+				return ErrInvalidPublication
+			}
 		}
 		return nil
 	}
@@ -352,21 +358,21 @@ func validPublicationRefreshAcquisition(
 	checked *CheckedPublication,
 	result PublicationResult,
 ) bool {
+	draftSynchronization := checked != nil &&
+		checked.prepared.options.event == PublicationEventDraft &&
+		(checked.prepared.pending == nil || !checked.prepared.pending.submit)
 	if result.PendingRefresh == PendingRefreshAcquired {
 		return result.Pending != nil && result.Disposition == PublicationDispositionCommitted &&
-			checked != nil && checked.prepared.pending != nil &&
-			!checked.prepared.pending.submit
+			draftSynchronization
 	}
 	if result.PendingRefresh == PendingRefreshUnavailable {
 		return result.Pending == nil && result.Disposition == PublicationDispositionCommitted &&
-			checked != nil && checked.prepared.pending != nil &&
-			!checked.prepared.pending.submit
+			draftSynchronization
 	}
 	if result.PendingRefresh != PendingRefreshNotRequested || result.Pending != nil {
 		return false
 	}
-	return result.Disposition != PublicationDispositionCommitted || checked == nil ||
-		checked.prepared.pending == nil || checked.prepared.pending.submit
+	return result.Disposition != PublicationDispositionCommitted || !draftSynchronization
 }
 
 // ReconciliationRequest describes reconciliation request.

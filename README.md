@@ -92,7 +92,7 @@ include = ["src/**"]
 exclude = ["**/*.generated.rs"]
 
 [github]
-submit_default = "draft" # draft, comment, approve, or request-changes
+submit_default = "comment" # comment, approve, or request-changes
 fetch_threads = true
 
 [export]
@@ -103,6 +103,10 @@ comment_template = "## {{target}}\n\n{{comment}}"
 `include` and `exclude` accept either one string or an array of strings. The top-level keys
 `mouse`, `theme`, `theme_dark`, `theme_light`, and `appearance` are aliases for their `[ui]`
 equivalents.
+
+Publishing a GitHub review first synchronizes the selected comments as a pending draft. The submit
+dialog then offers Comment, Approve, and Request changes; `submit_default` selects its initial
+choice.
 
 See the [full configuration and theme reference](docs/rvw-specification.md#4-configuration-and-themes)
 for keybindings, custom themes, export-template placeholders, defaults, limits, and validation

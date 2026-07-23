@@ -171,6 +171,8 @@ const (
 	KeyActionToggleStaleOverride KeyAction = "toggle-stale-head-override"
 	KeyActionToggleSubmitExclude KeyAction = "toggle-submit-exclusion"
 	KeyActionToggleSubmitSummary KeyAction = "toggle-submit-summary"
+	KeyActionPreviousSubmitEvent KeyAction = "previous-submit-event"
+	KeyActionNextSubmitEvent     KeyAction = "next-submit-event"
 	KeyActionSubmitReview        KeyAction = "submit-review"
 	KeyActionToggleFilePanel     KeyAction = "toggle-file-panel"
 )
@@ -205,7 +207,8 @@ var validKeyActions = actionSet(
 	KeyActionHelpEnd, KeyActionToggleExportUnmap, KeyActionExportSelected,
 	KeyActionSubmitRecheck,
 	KeyActionToggleStaleOverride, KeyActionToggleSubmitExclude,
-	KeyActionToggleSubmitSummary, KeyActionSubmitReview, KeyActionToggleFilePanel,
+	KeyActionToggleSubmitSummary, KeyActionPreviousSubmitEvent,
+	KeyActionNextSubmitEvent, KeyActionSubmitReview, KeyActionToggleFilePanel,
 )
 
 var contextKeyActions = map[KeyContext]map[KeyAction]struct{}{
@@ -268,7 +271,8 @@ var contextKeyActions = map[KeyContext]map[KeyAction]struct{}{
 	KeyContextSubmit: actionSet(
 		KeyActionCancel, KeyActionInterrupt, KeyActionSubmitRecheck,
 		KeyActionToggleStaleOverride, KeyActionToggleSubmitExclude,
-		KeyActionToggleSubmitSummary, KeyActionSubmitReview,
+		KeyActionToggleSubmitSummary, KeyActionPreviousSubmitEvent,
+		KeyActionNextSubmitEvent, KeyActionSubmitReview,
 		KeyActionMoveUp, KeyActionMoveDown, KeyActionPageUp, KeyActionPageDown,
 	),
 	KeyContextMinimumSize: actionSet(KeyActionQuit, KeyActionInterrupt),
@@ -882,6 +886,9 @@ func NewSettings(request SettingsRequest) (Settings, error) {
 	)
 	if err != nil {
 		return Settings{}, fmt.Errorf("publication settings: %w", err)
+	}
+	if validatedPublication.Event() == review.PublicationEventDraft {
+		return Settings{}, errors.New("publication settings require a final GitHub review event")
 	}
 	validatedPublication, err = validatedPublication.WithExcludedComments(
 		publication.ExcludedComments(),

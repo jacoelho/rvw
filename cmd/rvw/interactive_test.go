@@ -48,7 +48,8 @@ var acceptedKeybindingVocabulary = []acceptedKeybindingContext{
 	`)},
 	{context: "submit-preflight", actions: strings.Fields(`
 		cancel interrupt submit-recheck toggle-stale-head-override toggle-submit-exclusion
-		toggle-submit-summary submit-review move-up move-down page-up page-down
+		toggle-submit-summary previous-submit-event next-submit-event submit-review
+		move-up move-down page-up page-down
 	`)},
 	{context: "minimum-size", actions: strings.Fields(`quit interrupt`)},
 }

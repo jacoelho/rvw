@@ -292,7 +292,7 @@ func (model *Model) applyCommandAction(action KeyAction) (tea.Cmd, bool) {
 			options:     review.DefaultExportOptions(),
 		})
 	case KeyActionOpenSubmit:
-		model.startPublicationCheck()
+		model.openPublication()
 	default:
 		return nil, false
 	}

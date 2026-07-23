@@ -90,6 +90,15 @@ func TestDefaultsUseCommentGitHubSubmission(t *testing.T) {
 	}
 }
 
+func TestDraftIsNotAFinalGitHubSubmissionEvent(t *testing.T) {
+	configured := Defaults()
+	configured.github.SubmitDefault = SubmitEvent("draft")
+	if err := validate(&configured, map[string]string{}); err == nil ||
+		!strings.Contains(err.Error(), "must be comment, approve, or request-changes") {
+		t.Fatalf("draft submit default error = %v", err)
+	}
+}
+
 func TestLoadRejectsProjectKeybindings(t *testing.T) {
 	root := projectDirectory(t)
 	writeTestFile(t, filepath.Join(root, ".rvw.toml"), `

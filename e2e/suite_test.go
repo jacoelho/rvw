@@ -259,6 +259,10 @@ func servePublicationFixture(w *world, writer http.ResponseWriter, body []byte) 
 	}
 	switch worldEnvironment(w, "RVW_E2E_GH_POST_MODE") {
 	case "", "success":
+		if err := installCreatedPendingFixture(w, body); err != nil {
+			http.Error(writer, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		writer.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(writer, `{"id":9001}`)
 	case "unknown", "unknown-present":
@@ -284,6 +288,94 @@ func servePublicationFixture(w *world, writer http.ResponseWriter, body []byte) 
 	default:
 		http.Error(writer, "unsupported post mode", http.StatusInternalServerError)
 	}
+}
+
+func installCreatedPendingFixture(w *world, body []byte) error {
+	var payload struct {
+		CommitID string `json:"commit_id"`
+		Body     string `json:"body"`
+		Comments []struct {
+			Path      string  `json:"path"`
+			Body      string  `json:"body"`
+			Side      string  `json:"side"`
+			StartSide *string `json:"start_side"`
+			Line      uint32  `json:"line"`
+			StartLine *uint32 `json:"start_line"`
+		} `json:"comments"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return err
+	}
+	pageInfo := map[string]any{"hasNextPage": false, "endCursor": nil}
+	pending := []any{map[string]any{
+		"errors": []any{},
+		"data": map[string]any{
+			"viewer": map[string]any{"login": "octo-reviewer"},
+			"repository": map[string]any{
+				"nameWithOwner": "fixture/repository",
+				"pullRequest": map[string]any{
+					"number": 7, "baseRefOid": w.prBase, "headRefOid": w.prHead,
+					"reviews": map[string]any{
+						"pageInfo": pageInfo,
+						"nodes": []any{map[string]any{
+							"id": "PRR_created", "fullDatabaseId": "9001",
+							"body": payload.Body, "state": "PENDING",
+							"viewerDidAuthor": true, "viewerCanUpdate": true,
+							"commit": map[string]any{"oid": payload.CommitID},
+						}},
+					},
+				},
+			},
+		},
+	}}
+	comments := make([]any, 0, len(payload.Comments))
+	capabilities := make([]any, 0, len(payload.Comments))
+	for index, comment := range payload.Comments {
+		databaseID := 9100 + index
+		nodeID := fmt.Sprintf("PRRC_created_%d", index)
+		comments = append(comments, map[string]any{
+			"id": databaseID, "node_id": nodeID, "pull_request_review_id": 9001,
+			"body": comment.Body, "path": comment.Path,
+			"commit_id": payload.CommitID, "original_commit_id": payload.CommitID,
+			"subject_type": "line", "line": comment.Line,
+			"start_line": comment.StartLine, "side": comment.Side,
+			"start_side": comment.StartSide, "original_line": comment.Line,
+			"original_start_line": comment.StartLine, "in_reply_to_id": nil,
+		})
+		capabilities = append(capabilities, map[string]any{
+			"id": nodeID, "fullDatabaseId": strconv.Itoa(databaseID),
+			"viewerCanUpdate": true, "viewerCanDelete": true,
+		})
+	}
+	capabilityPages := []any{map[string]any{
+		"errors": []any{},
+		"data": map[string]any{
+			"repository": map[string]any{
+				"nameWithOwner": "fixture/repository",
+				"pullRequest": map[string]any{
+					"number": 7, "baseRefOid": w.prBase, "headRefOid": w.prHead,
+				},
+			},
+			"node": map[string]any{
+				"id":       "PRR_created",
+				"comments": map[string]any{"pageInfo": pageInfo, "nodes": capabilities},
+			},
+		},
+	}}
+	for path, value := range map[string]any{
+		w.pending:             pending,
+		w.pendingComments:     []any{comments},
+		w.pendingCapabilities: capabilityPages,
+	} {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(path, encoded, 0o600); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func serveFixtureFile(writer http.ResponseWriter, path string, firstPage bool) {

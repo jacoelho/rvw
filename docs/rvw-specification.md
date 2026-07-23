@@ -153,7 +153,7 @@ include = ["src/**"]
 exclude = ["**/*.generated.rs"]
 
 [github]
-submit_default = "comment" # comment, draft, approve, or request-changes
+submit_default = "comment" # comment, approve, or request-changes
 fetch_threads = true
 
 [export]
@@ -243,7 +243,8 @@ help-line-down, help-page-up, help-page-down, help-home, help-end,
 toggle-export-unmappable,
 export-selected, copy-markdown, export-markdown, export-json,
 submit-recheck, toggle-stale-head-override, toggle-submit-exclusion,
-toggle-submit-summary, submit-review, reload, toggle-file-panel,
+toggle-submit-summary, previous-submit-event, next-submit-event,
+submit-review, reload, toggle-file-panel,
 toggle-comments, toggle-hidden-files
 ```
 
@@ -640,8 +641,7 @@ Context changes serialize behind active search work that uses the same patch acq
 ### 9. Export and publication
 
 Markdown and JSON export are prepared from an immutable review snapshot. Export options select
-whether notes, praise, and unmappable comments are included. Preparation is bounded and
-cancellable.
+whether unmappable comments are included. Preparation is bounded and cancellable.
 
 Interactive copy/write actions are in-session deliveries, not additional top-level output modes.
 
@@ -651,9 +651,13 @@ before reporting failure remains fenced through physical worker cleanup. If the 
 unknown, that destination remains unavailable for the process lifetime. Reconciliation applies
 only to GitHub publication.
 
-GitHub submission always uses an explicit preflight that shows:
+GitHub publication first creates or synchronizes a pending review. It then requires a separate
+submission confirmation with a selector for `comment`, `approve`, or `request changes`.
+`github.submit_default` chooses only the selector's initial value. GitHub submission always uses
+an explicit preflight that shows:
 
-- event: comment, draft, approve, or request changes;
+- the selected final event: comment, approve, or request changes;
+- whether the next step synchronizes the pending draft or submits it;
 - summary body;
 - included and excluded comments;
 - unmappable-comment policy;

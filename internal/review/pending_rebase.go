@@ -14,6 +14,7 @@ type PendingRebaseSource struct {
 	remoteThreadDetail   OperationDetail
 	pendingReviewDetail  OperationDetail
 	remoteThreads        []RemoteThread
+	publicationDecisions []PublicationCommentDecision
 	paths                remotePathProjection
 	state                commentState
 	workspace            WorkspaceRevision
@@ -24,6 +25,7 @@ type PendingRebaseSource struct {
 	commentRevision      uint64
 	remoteThreadStatus   RemoteThreadStatus
 	pendingReviewStatus  PendingReviewStatus
+	createdDraft         bool
 }
 
 // PendingRebaseSource captures an O(1), revision-fenced pending-rebase input.
@@ -51,10 +53,27 @@ func (review Review) PendingRebaseSource() PendingRebaseSource {
 	}
 }
 
+// PublicationRebaseSource captures the pending projection required by the
+// currently checked publication. A first draft publication has no prior
+// pending state, so its included local comments are removed before the fresh
+// GitHub draft is imported.
+func (review Review) PublicationRebaseSource() PendingRebaseSource {
+	source := review.PendingRebaseSource()
+	checked := review.publication.checked
+	if checked != nil && !checked.Pending() &&
+		checked.prepared.options.event == PublicationEventDraft {
+		source.createdDraft = true
+		source.publicationDecisions = checked.prepared.decisions
+	}
+	return source
+}
+
 // Ready reports whether the source can prepare a pending rebase.
 func (source PendingRebaseSource) Ready() bool {
 	return source.workspace != 0 && source.source != 0 && source.commentRevision != 0 &&
-		source.state.pending != nil && source.state.activeMutation == 0 &&
+		(source.state.pending != nil || source.createdDraft) &&
+		(source.state.pending == nil || !source.createdDraft) &&
+		source.state.activeMutation == 0 &&
 		source.state.mutationKind == 0 &&
 		source.retainedBytes >= pendingRebaseSourceMetadataBytes &&
 		source.baseRetainedBytes >= source.paths.metadataBytes
@@ -90,8 +109,12 @@ func (source PendingRebaseSource) constructionBytesCancellable(
 	cancelled func() error,
 	remote PendingReview,
 ) (int64, error) {
-	if !source.Ready() || remote.nodeID != source.state.pending.nodeID ||
-		remote.databaseID != source.state.pending.databaseID {
+	if !source.Ready() {
+		return 0, nil
+	}
+	if source.state.pending != nil &&
+		(remote.nodeID != source.state.pending.nodeID ||
+			remote.databaseID != source.state.pending.databaseID) {
 		return 0, nil
 	}
 	remoteRetained, err := remote.retainedBytesCancellable(cancelled)
@@ -209,13 +232,23 @@ func PreparePendingRebaseCancellable(
 	if err != nil {
 		return PreparedPendingRebase{}, err
 	}
-	state, err := preparePendingCommentStateCancellable(
-		cancelled,
-		source.state.pending,
-		source.state,
-		source.paths,
-		owned,
-	)
+	var state commentState
+	if source.createdDraft {
+		state, err = prepareCreatedDraftCommentStateCancellable(
+			cancelled,
+			source.state,
+			source.publicationDecisions,
+			updated,
+		)
+	} else {
+		state, err = preparePendingCommentStateCancellable(
+			cancelled,
+			source.state.pending,
+			source.state,
+			source.paths,
+			owned,
+		)
+	}
 	if err != nil {
 		return PreparedPendingRebase{}, err
 	}
@@ -240,6 +273,66 @@ func PreparePendingRebaseCancellable(
 		)
 	}
 	return prepared, nil
+}
+
+func prepareCreatedDraftCommentStateCancellable(
+	cancelled func() error,
+	state commentState,
+	decisions []PublicationCommentDecision,
+	snapshot Snapshot,
+) (commentState, error) {
+	if state.pending != nil || len(decisions) != len(state.comments) ||
+		snapshot.pendingReviewStatus != PendingReviewReady {
+		return commentState{}, ErrInvalidPendingReview
+	}
+	next, err := cloneCommentStateCancellable(cancelled, state, nil)
+	if err != nil {
+		return commentState{}, err
+	}
+	retained := next.comments[:0]
+	next.commentBody = 0
+	for index, comment := range next.comments {
+		if index%256 == 0 {
+			if cancellationErr := cancellationError(cancelled); cancellationErr != nil {
+				return commentState{}, cancellationErr
+			}
+		}
+		decision := decisions[index]
+		if decision.id != comment.id {
+			return commentState{}, ErrInvalidPendingReview
+		}
+		switch decision.decision {
+		case PublicationIncludedInline, PublicationIncludedSummary:
+			continue
+		case PublicationExcludedManual, PublicationExcludedStale,
+			PublicationExcludedUnmappable, PublicationExcludedInvalid:
+		default:
+			return commentState{}, ErrInvalidPendingReview
+		}
+		retained = append(retained, comment)
+		next.commentBody += int64(len(comment.body))
+	}
+	clear(next.comments[len(retained):])
+	next.comments = retained
+	next.pending = nil
+	current, err := importPendingReviewCancellable(Review{
+		snapshot:     snapshot,
+		commentState: next,
+	}, cancelled)
+	if err != nil {
+		return commentState{}, err
+	}
+	result := current.commentState
+	result.revision = state.revision + 1
+	result.activeMutation = 0
+	result.mutationKind = 0
+	if err := result.rebuildCommentAnchorsCancellable(cancelled); err != nil {
+		return commentState{}, err
+	}
+	if err := result.refreshCancellable(cancelled); err != nil {
+		return commentState{}, err
+	}
+	return result, nil
 }
 
 // ApplyPendingRebase atomically installs a prepared snapshot delta and comment state.

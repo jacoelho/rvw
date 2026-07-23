@@ -275,10 +275,88 @@ func (service *Service) Publish(
 			Detail:      boundedOperationDetail("decode GitHub publication response: " + err.Error()),
 		}
 	}
-	return PublicationCommit{
+	commit := PublicationCommit{
 		Disposition:  review.PublicationDispositionCommitted,
 		RemoteReview: reviewID,
 	}
+	if checked.Prepared().Options().Event() != review.PublicationEventDraft {
+		return commit
+	}
+	pending, detail, ok := service.acquireCreatedDraft(
+		ctx,
+		checked,
+		reviewID,
+	)
+	if !ok {
+		commit.PendingRefresh = review.PendingRefreshUnavailable
+		commit.Detail = detail
+		return commit
+	}
+	commit.Pending = new(pending)
+	commit.PendingRefresh = review.PendingRefreshAcquired
+	return commit
+}
+
+func (service *Service) acquireCreatedDraft(
+	ctx context.Context,
+	checked *review.CheckedPublication,
+	reviewID uint64,
+) (review.PendingReview, review.OperationDetail, bool) {
+	if checked == nil || reviewID == 0 {
+		return review.PendingReview{}, boundedOperationDetail(
+			"GitHub draft was created, but its checked identity is unavailable",
+		), false
+	}
+	target := checked.Target()
+	repository, err := NewOwnerRepository(target.Repository())
+	if err != nil {
+		return review.PendingReview{}, boundedOperationDetail(
+			"GitHub draft was created, but its repository identity is invalid",
+		), false
+	}
+	payload, err := service.pullRequestMetadata(
+		ctx,
+		repository,
+		PullRequestNumber(target.PullRequest()),
+		directCPUAdmission,
+	)
+	if err != nil {
+		return review.PendingReview{}, boundedOperationDetail(
+			"GitHub draft was created, but its pending state could not be loaded: " + err.Error(),
+		), false
+	}
+	details, err := validatePullRequestPayload(
+		repository,
+		PullRequestNumber(target.PullRequest()),
+		payload,
+	)
+	if err != nil || details.BaseOID != target.Base() || details.HeadOID != target.Head() {
+		return review.PendingReview{}, boundedOperationDetail(
+			"GitHub draft was created, but the pull request changed before it could be loaded",
+		), false
+	}
+	pending, status, detail := service.loadPendingReview(ctx, details, directCPUAdmission)
+	if status != review.PendingReviewReady || pending.DatabaseID().Uint64() != reviewID {
+		message := "GitHub draft was created, but its pending state is " + status.String()
+		if status == review.PendingReviewReady {
+			message = "GitHub draft was created, but GitHub returned a different pending review"
+		} else if !detail.IsEmpty() {
+			message += ": " + detail.String()
+		}
+		return review.PendingReview{}, boundedOperationDetail(message), false
+	}
+	matches, matchErr := checked.CreatedDraftMatchesCancellable(
+		func() error { return context.Cause(ctx) },
+		pending,
+	)
+	if matchErr != nil || !matches {
+		message := "GitHub draft was created, but its pending state does not match the published comments"
+		if matchErr != nil {
+			message += ": " + matchErr.Error()
+		}
+		return review.PendingReview{}, boundedOperationDetail(message), false
+	}
+	return pending, review.EmptyOperationDetail(), true
 }
 
 type publicationReviewResponseCollector struct {

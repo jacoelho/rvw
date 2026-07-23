@@ -178,7 +178,7 @@ func TestInteractiveSourceContract(t *testing.T) {
 
 		feature.Scenario("draft save updates and reloads the existing pending review", func(scenario *bdd.ScenarioSpec[*world]) {
 			scenario.Given("GitHub has one viewer-owned pending review", func(t testing.TB, w *world) {
-				w.writeConfig(t, "[github]\nfetch_threads = false\nsubmit_default = \"draft\"\n")
+				w.writeConfig(t, "[github]\nfetch_threads = false\nsubmit_default = \"comment\"\n")
 				configurePendingReview(t, w)
 			})
 			scenario.Given("the existing inline draft is edited", func(t testing.TB, w *world) {
@@ -192,11 +192,11 @@ func TestInteractiveSourceContract(t *testing.T) {
 				w.pty.send(t, "\x13")
 				w.pty.awaitScreen(t, "saved comment", containsScreen("comment saved"))
 			})
-			scenario.When("the configured draft preflight is committed", func(t testing.TB, w *world) {
+			scenario.When("the draft synchronization preflight is committed", func(t testing.TB, w *world) {
 				w.pty.send(t, "s")
 				w.pty.awaitScreen(t, "draft preflight", func(screen string) bool {
-					return strings.Contains(screen, "GitHub draft synchronization preflight") &&
-						strings.Contains(screen, "Event: draft") &&
+					return strings.Contains(screen, "Synchronize comments to a pending GitHub draft") &&
+						strings.Contains(screen, "Submit as (h/l): [Comment]") &&
 						strings.Contains(screen, "Source/head: checked at current head") &&
 						strings.Contains(screen, "Pending review: continue 9001 · 1 changed · 0 conflicts") &&
 						strings.Contains(screen, "[modified · inline] existing inline edited")
@@ -204,7 +204,10 @@ func TestInteractiveSourceContract(t *testing.T) {
 				w.pty.send(t, "\r")
 			})
 			scenario.Then("the same remote comment is updated and the local binding is clean", func(t testing.TB, w *world) {
-				w.pty.awaitScreen(t, "draft synchronized", containsScreen("Publication committed."))
+				w.pty.awaitScreen(t, "draft synchronized", func(screen string) bool {
+					return strings.Contains(screen, "Submit pending draft as comment") &&
+						strings.Contains(screen, "Pending review: continue 9001 · 0 changed · 0 conflicts")
+				})
 				calls := w.calls(t)
 				if !slices.ContainsFunc(calls, func(call externalCall) bool {
 					return call.Command == "github-http" &&
@@ -693,19 +696,18 @@ func TestGitHubPublicationContract(t *testing.T) {
 	}
 	events := []bdd.Example[eventExample]{
 		bdd.Case("comment", eventExample{"comment", "COMMENT"}),
-		bdd.Case("draft", eventExample{"draft", ""}),
 		bdd.Case("approve", eventExample{"approve", "APPROVE"}),
 		bdd.Case("request changes", eventExample{"request-changes", "REQUEST_CHANGES"}),
 	}
 
 	bdd.Feature(t, "GitHub publication is checked and observable", newWorld, func(feature *bdd.Suite[*world]) {
-		bdd.Outline(feature, "all four publication events send the canonical request", events, func(example eventExample, scenario *bdd.ScenarioSpec[*world]) {
+		bdd.Outline(feature, "draft comments are synchronized before the selected submission event", events, func(example eventExample, scenario *bdd.ScenarioSpec[*world]) {
 			scenario.Given("the publication event is configured", func(t testing.TB, w *world) {
 				w.writeConfig(t, "[github]\nfetch_threads = false\nsubmit_default = \""+example.configured+"\"\n")
 			})
 			scenario.Given("a pull request has one local comment", launchCommentedPullRequest())
 			scenario.When("preflight is accepted and publication is confirmed", publishReview())
-			scenario.Then("the exact event and marker shape reached GitHub HTTP", func(t testing.TB, w *world) {
+			scenario.Then("the draft and exact submission event reached GitHub HTTP", func(t testing.TB, w *world) {
 				call := publicationCall(t, w.calls(t))
 				var payload struct {
 					Event    string `json:"event"`
@@ -720,7 +722,7 @@ func TestGitHubPublicationContract(t *testing.T) {
 				if err := json.Unmarshal([]byte(call.Stdin), &payload); err != nil {
 					t.Fatal(err)
 				}
-				if payload.Event != example.payload ||
+				if payload.Event != "" ||
 					!regexp.MustCompile(`<!-- rvw-publication:v1:[0-9a-f]{32} -->`).MatchString(payload.Body) {
 					t.Fatalf("publication payload = %s", call.Stdin)
 				}
@@ -730,6 +732,10 @@ func TestGitHubPublicationContract(t *testing.T) {
 					payload.Comments[0].Side != "RIGHT" ||
 					payload.Comments[0].Line != 3 {
 					t.Fatalf("publication comments = %+v; payload = %s", payload.Comments, call.Stdin)
+				}
+				mutation := publicationMutationCall(t, w.calls(t))
+				if !strings.Contains(mutation.Stdin, `"event":"`+example.payload+`"`) {
+					t.Fatalf("submission mutation does not contain event %q: %s", example.payload, mutation.Stdin)
 				}
 				quitDirtyReview(t, w)
 			})
@@ -782,10 +788,18 @@ func publishReview() bdd.Step[*world] {
 		w.pty.send(t, "s")
 		w.pty.awaitScreen(t, "checked publication", containsScreen("checked at current head"))
 		w.pty.send(t, "\r")
-		w.pty.awaitScreen(t, "publication result", func(screen string) bool {
-			return strings.Contains(screen, "Publication committed.") ||
-				strings.Contains(screen, "Outcome unknown; retry is fenced.")
+		screen := w.pty.awaitScreen(t, "draft synchronization or publication result", func(screen string) bool {
+			return strings.Contains(screen, "Submit pending draft as") ||
+				strings.Contains(screen, "Outcome unknown; retry is fenced.") ||
+				strings.Contains(screen, "Publication committed.")
 		})
+		if strings.Contains(screen, "Submit pending draft as") {
+			w.pty.send(t, "\r")
+			w.pty.awaitScreen(t, "publication result", func(screen string) bool {
+				return strings.Contains(screen, "Publication committed.") ||
+					strings.Contains(screen, "Outcome unknown; retry is fenced.")
+			})
+		}
 	}
 }
 
@@ -798,6 +812,20 @@ func publicationCall(t testing.TB, calls []externalCall) externalCall {
 		}
 	}
 	t.Fatalf("publication POST not found in %+v", calls)
+	return externalCall{}
+}
+
+func publicationMutationCall(t testing.TB, calls []externalCall) externalCall {
+	t.Helper()
+	for _, call := range calls {
+		if call.Command == "github-http" && len(call.Args) == 2 &&
+			call.Args[0] == "POST" && strings.HasSuffix(call.Args[1], "/graphql") &&
+			strings.Contains(call.Stdin, `"query":"mutation(`) &&
+			strings.Contains(call.Stdin, `"event":`) {
+			return call
+		}
+	}
+	t.Fatalf("publication mutation not found in %+v", calls)
 	return externalCall{}
 }
 

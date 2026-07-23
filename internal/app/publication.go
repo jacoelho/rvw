@@ -11,6 +11,13 @@ import (
 	"github.com/jacoelho/rvw/internal/review"
 )
 
+func (model *Model) openPublication() {
+	pending := model.review.PendingReviewSummary()
+	model.publicationDraftReady = pending.Status == review.PendingReviewReady &&
+		pending.Dirty == 0 && pending.Conflicts == 0
+	model.startPublicationCheck()
+}
+
 func (model *Model) startPublicationCheck() {
 	summary := model.review.PublicationSummary()
 	if summary.Status == review.PublicationUnknown {
@@ -82,10 +89,11 @@ func (model *Model) publicationOptions() (review.PublicationOptions, error) {
 	if err != nil {
 		return review.PublicationOptions{}, err
 	}
-	options, err := review.NewPublicationOptions(
-		model.settings.publication.Event(),
-		typedPolicies,
-	)
+	event := review.PublicationEventDraft
+	if model.publicationDraftReady {
+		event = model.publicationEvent
+	}
+	options, err := review.NewPublicationOptions(event, typedPolicies)
 	if err != nil {
 		return review.PublicationOptions{}, err
 	}
@@ -205,7 +213,7 @@ func (model *Model) startPublication() {
 	if err := model.coordinator.SubmitPublication(PublicationWork{
 		ID:      operationID,
 		Request: request,
-		Rebase:  model.review.PendingRebaseSource(),
+		Rebase:  model.review.PublicationRebaseSource(),
 	}); err != nil {
 		result := review.PublicationResult{
 			Operation:   operationID,
@@ -284,6 +292,11 @@ func (model *Model) applyPublicationCommitOutcome(outcome PublicationCommitOutco
 			kind = NoticeWarning
 		}
 		model.notice = &Notice{Kind: kind, Text: NoticeText(message)}
+		if model.review.PublicationSummary().Event == review.PublicationEventDraft &&
+			result.LocalRefreshError() == nil {
+			model.publicationDraftReady = true
+			model.startPublicationCheck()
+		}
 	} else {
 		model.notice = &Notice{
 			Kind: NoticeWarning,
@@ -441,6 +454,10 @@ func (model *Model) applyPublicationAction(action KeyAction) {
 			model.togglePublicationExclusion()
 			model.restartPublicationCheck()
 		}
+	case KeyActionPreviousSubmitEvent:
+		model.movePublicationEvent(-1)
+	case KeyActionNextSubmitEvent:
+		model.movePublicationEvent(1)
 	case KeyActionMoveUp:
 		model.publicationCursor = max(model.publicationCursor-1, 0)
 		model.publicationDetailTop = 0
@@ -461,6 +478,34 @@ func (model *Model) applyPublicationAction(action KeyAction) {
 			review.MaxPublicationBytes,
 		)
 	default:
+	}
+}
+
+var publicationEvents = [...]review.PublicationEvent{
+	review.PublicationEventComment,
+	review.PublicationEventApprove,
+	review.PublicationEventRequestChanges,
+}
+
+func (model *Model) movePublicationEvent(delta int) {
+	if delta == 0 || model.publicationOperation != 0 {
+		return
+	}
+	index := 0
+	for candidate, event := range publicationEvents {
+		if event == model.publicationEvent {
+			index = candidate
+			break
+		}
+	}
+	index = (index + delta) % len(publicationEvents)
+	if index < 0 {
+		index += len(publicationEvents)
+	}
+	model.publicationEvent = publicationEvents[index]
+	if summary := model.review.PublicationSummary(); summary.Status == review.PublicationChecked &&
+		summary.Event != review.PublicationEventDraft {
+		model.restartPublicationCheck()
 	}
 }
 
@@ -523,11 +568,7 @@ func (model *Model) acknowledgePublication() {
 func (model *Model) publicationView(width, height int) string {
 	summary := model.review.PublicationSummary()
 	pending := model.review.PendingReviewSummary()
-	title := "GitHub submission preflight"
-	if summary.Event == review.PublicationEventDraft {
-		title = "GitHub draft synchronization preflight"
-	}
-	lines := []string{title}
+	lines := []string{"GitHub review", model.publicationEventSelector()}
 	switch summary.Status {
 	case review.PublicationChecking:
 		lines = append(lines, "Checking immutable repository, pull request, and head…")
@@ -540,10 +581,14 @@ func (model *Model) publicationView(width, height int) string {
 		if summary.StaleHead {
 			headStatus = "stale head explicitly overridden"
 		}
+		stage := "Submit pending draft as " + model.publicationEvent.String()
+		if summary.Event == review.PublicationEventDraft {
+			stage = "Synchronize comments to a pending GitHub draft"
+		}
 		lines = append(lines,
 			"Target: "+summary.Target.Repository()+"#"+
 				fmt.Sprintf("%d", summary.Target.PullRequest()),
-			"Event: "+summary.Event.String(),
+			"Next step: "+stage,
 			fmt.Sprintf("Comments: %d included, %d excluded", summary.Included, summary.Excluded),
 			"Unmappable policy: "+unmappablePolicy,
 			"Source/head: "+headStatus,
@@ -586,6 +631,38 @@ func (model *Model) publicationView(width, height int) string {
 	}
 	lines = append(lines, model.bindingSummary(KeyContextSubmit))
 	return constrainedLines(lines, width, height)
+}
+
+func (model *Model) publicationEventSelector() string {
+	var selector strings.Builder
+	selector.WriteString("Submit as (h/l): ")
+	for index, event := range publicationEvents {
+		if index != 0 {
+			selector.WriteString("  ")
+		}
+		label := publicationEventLabel(event)
+		if event == model.publicationEvent {
+			selector.WriteByte('[')
+			selector.WriteString(label)
+			selector.WriteByte(']')
+		} else {
+			selector.WriteString(label)
+		}
+	}
+	return selector.String()
+}
+
+func publicationEventLabel(event review.PublicationEvent) string {
+	switch event {
+	case review.PublicationEventComment:
+		return "Comment"
+	case review.PublicationEventApprove:
+		return "Approve"
+	case review.PublicationEventRequestChanges:
+		return "Request changes"
+	default:
+		return event.String()
+	}
 }
 
 func (model *Model) publicationCommentLines(limit int) []string {

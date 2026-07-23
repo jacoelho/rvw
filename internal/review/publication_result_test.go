@@ -497,6 +497,72 @@ func TestPreparedPublicationPreservesCommittedWhenLocalRefreshFails(t *testing.T
 	}
 }
 
+func TestCreatedDraftRefreshReplacesPublishedLocalComments(t *testing.T) {
+	publishing, checked, request := genericPublicationAtPublishing(t, PublicationEventDraft)
+	node, err := NewReviewNodeID("created-review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	databaseID, err := NewReviewDatabaseID(42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := NewPendingReview(PendingReviewDescriptor{
+		NodeID:       node,
+		DatabaseID:   databaseID,
+		Commit:       checked.Target().Head(),
+		Body:         checked.Prepared().SummaryBody() + "\n\n" + checked.Marker().String(),
+		ViewerUpdate: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	matches, err := checked.CreatedDraftMatchesCancellable(nil, pending)
+	if err != nil || !matches {
+		t.Fatalf("created draft match = (%t, %v)", matches, err)
+	}
+	diverged := pending
+	diverged.body = "different\n\n" + checked.Marker().String()
+	matches, err = checked.CreatedDraftMatchesCancellable(nil, diverged)
+	if err != nil || matches {
+		t.Fatalf("diverged draft match = (%t, %v)", matches, err)
+	}
+	raw := PublicationResult{
+		Pending:        new(pending),
+		Operation:      request.Operation,
+		Workspace:      request.Workspace,
+		Source:         request.Source,
+		RemoteReview:   databaseID.Uint64(),
+		Disposition:    PublicationDispositionCommitted,
+		PendingRefresh: PendingRefreshAcquired,
+	}
+	prepared, err := PreparePublicationResult(
+		request,
+		publishing.PublicationRebaseSource(),
+		raw,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := publishing.ApplyPreparedPublication(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.CommentCount() != 1 {
+		t.Fatalf("comments = %d, want one imported draft comment", next.CommentCount())
+	}
+	comment, ok := next.CommentAt(0)
+	if !ok || comment.Body().String() != summaryValue ||
+		next.PendingBindingState(comment.ID()) != PendingBindingClean {
+		t.Fatalf("imported comment = (%+v, %t), binding %s", comment, ok, next.PendingBindingState(comment.ID()))
+	}
+	summary := next.PendingReviewSummary()
+	if summary.Status != PendingReviewReady || summary.ReviewID != databaseID ||
+		summary.Dirty != 0 || summary.Conflicts != 0 {
+		t.Fatalf("pending summary = %+v", summary)
+	}
+}
+
 func TestPreparedReconciliationPreservesNotCommittedWhenLocalRefreshFails(t *testing.T) {
 	publishing, checked, publicationRequest := pendingPublicationAtPublishing(
 		t,

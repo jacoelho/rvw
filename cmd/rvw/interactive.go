@@ -301,8 +301,6 @@ func interactiveSettings(resolved config.Config) (app.Settings, error) {
 	publicationEvent := review.PublicationEventComment
 	switch githubConfig.SubmitDefault {
 	case config.SubmitComment:
-	case config.SubmitDraft:
-		publicationEvent = review.PublicationEventDraft
 	case config.SubmitApprove:
 		publicationEvent = review.PublicationEventApprove
 	case config.SubmitRequestChanges:

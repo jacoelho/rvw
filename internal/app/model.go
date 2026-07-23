@@ -236,6 +236,8 @@ type Model struct {
 	publicationCancel         bool
 	quitting                  bool
 	publicationMoveSummary    bool
+	publicationDraftReady     bool
+	publicationEvent          review.PublicationEvent
 	focusReturn               FocusOwner
 	fileTreeVisible           bool
 	filterTreeBuilding        bool
@@ -296,6 +298,7 @@ func NewModel(
 		coordinator:        coordinator,
 		receiver:           receiver,
 		settings:           settings,
+		publicationEvent:   settings.publication.Event(),
 		help:               helpModel,
 		commentEditor:      editor,
 		searchInput:        searchInput,

@@ -291,3 +291,78 @@ func (checked *CheckedPublication) Prepared() PreparedPublication {
 func (checked *CheckedPublication) StaleHead() bool {
 	return checked != nil && checked.staleHead
 }
+
+type createdDraftComment struct {
+	path  string
+	body  string
+	start LineNumber
+	end   LineNumber
+	side  LineSide
+}
+
+// CreatedDraftMatchesCancellable verifies that a newly acquired pending review
+// is the exact remote projection of this direct draft publication.
+func (checked *CheckedPublication) CreatedDraftMatchesCancellable(
+	cancelled func() error,
+	pending PendingReview,
+) (bool, error) {
+	if checked == nil || checked.Pending() ||
+		checked.prepared.options.event != PublicationEventDraft ||
+		pending.databaseID == 0 || pending.commit != checked.target.head {
+		return false, nil
+	}
+	body, marker := splitPendingMarker(pending.body, publicationMarkerPrefix)
+	if body != checked.prepared.summary || marker != checked.marker.String() ||
+		len(pending.comments) != len(checked.prepared.comments) {
+		return false, nil
+	}
+	expected := make(map[createdDraftComment]uint16, len(checked.prepared.comments))
+	for index, comment := range checked.prepared.comments {
+		if index%256 == 0 {
+			if err := cancellationError(cancelled); err != nil {
+				return false, err
+			}
+		}
+		key := createdDraftComment{
+			path: comment.path, body: comment.body, start: comment.startLine,
+			end: comment.endLine, side: comment.side,
+		}
+		expected[key]++
+	}
+	for index, comment := range pending.comments {
+		if index%256 == 0 {
+			if err := cancellationError(cancelled); err != nil {
+				return false, err
+			}
+		}
+		target := comment.target
+		if target.subject != PendingSubjectLine || target.line == nil || target.outdated ||
+			target.side != LineOld && target.side != LineNew {
+			return false, nil
+		}
+		start := *target.line
+		if target.startLine != nil {
+			if target.startSide != target.side {
+				return false, nil
+			}
+			start = *target.startLine
+		}
+		key := createdDraftComment{
+			path: target.path.raw, body: comment.body, start: start,
+			end: *target.line, side: target.side,
+		}
+		count := expected[key]
+		if count == 0 {
+			return false, nil
+		}
+		if count == 1 {
+			delete(expected, key)
+		} else {
+			expected[key] = count - 1
+		}
+	}
+	if err := cancellationError(cancelled); err != nil {
+		return false, err
+	}
+	return len(expected) == 0, nil
+}
