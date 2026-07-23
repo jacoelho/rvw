@@ -4,15 +4,30 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"maps"
 	"sort"
 	"strconv"
 )
 
 // MaxPatchBytes defines the supported patch bytes limit.
 const (
-	MaxPatchBytes int64 = 64 << 20
-	MaxPatchLines       = 1_000_000
+	MaxPatchBytes                  int64 = 64 << 20
+	MaxPatchLines                        = 1_000_000
+	preparedPatchMetadataBytes     int64 = 280
+	preparedPatchLineMetadataBytes int64 = 25
+	preparedPatchHunkMetadataBytes int64 = 12
+	patchUint32StorageBytes        int64 = 4
+	patchPollBytes                       = 16 << 10
+	maxHunkHeaderBytes                   = 256
+	maxPatchSparseRowGrowthBytes   int64 = MaxPatchLines / 2 * patchUint32StorageBytes
+	maxPatchSparseHunkGrowthBytes  int64 = 3 * (MaxHunks / 2) * patchUint32StorageBytes
+	// MaxPreparedPatchRetainedBytes bounds complete PreparedPatch ownership.
+	MaxPreparedPatchRetainedBytes int64 = preparedPatchMetadataBytes + MaxPatchBytes +
+		MaxPatchLines*preparedPatchLineMetadataBytes +
+		MaxHunks*preparedPatchHunkMetadataBytes
+	// MaxPreparedPatchConstructionBytes includes the largest old-plus-new
+	// sparse-index growth while the maximum retained patch state is live.
+	MaxPreparedPatchConstructionBytes int64 = MaxPreparedPatchRetainedBytes +
+		max(maxPatchSparseRowGrowthBytes, maxPatchSparseHunkGrowthBytes)
 )
 
 // ErrInvalidPatchTransition identifies an invalid patch transition failure.
@@ -117,6 +132,23 @@ type PatchState struct {
 	Status   PatchStatus
 }
 
+// presentationPatch is the single patch retained for terminal presentation.
+// Foreground serialization guarantees that only one patch can be pending or
+// displayed at a time.
+type presentationPatch struct {
+	state         PatchState
+	retainedBytes int64
+	file          FileID
+	set           bool
+}
+
+func (review Review) patchState(fileID FileID) PatchState {
+	if !review.patch.set || review.patch.file != fileID {
+		return PatchState{Status: PatchUnavailable}
+	}
+	return review.patch.state
+}
+
 // MaxLineNumber returns the largest source line represented on side by this patch.
 func (state PatchState) MaxLineNumber(side LineSide) (LineNumber, bool) {
 	if state.prepared == nil {
@@ -168,13 +200,13 @@ func (offset PatchOffset) Uint32() uint32 {
 
 // PatchLine represents patch line.
 type PatchLine struct {
-	Text      PatchText
-	Number    uint32
-	oldLine   uint32
-	newLine   uint32
-	hunk      uint32
-	Truncated bool
-	kind      PatchLineKind
+	Text       PatchText
+	Number     uint32
+	oldLine    uint32
+	newLine    uint32
+	hunk       uint32
+	Truncated  bool
+	descriptor patchLineDescriptor
 }
 
 // PatchLineKind describes patch line kind.
@@ -190,11 +222,86 @@ const (
 	PatchLineNoNewline
 )
 
-const noPatchHunk = ^uint32(0)
+const (
+	noPatchHunk                                 = ^uint32(0)
+	noNewlineMarkerText                         = `\ No newline at end of file`
+	patchLineKindBits                           = 3
+	patchLineDescriptorMask patchLineDescriptor = 1<<patchLineKindBits - 1
+)
+
+type patchLineDescriptor uint8
+
+type patchLineSides uint8
+
+const (
+	patchLineOldSide patchLineSides = 1 << iota
+	patchLineNewSide
+	patchLineBothSides = patchLineOldSide | patchLineNewSide
+)
+
+func plainPatchLineDescriptor(kind PatchLineKind) patchLineDescriptor {
+	return patchLineDescriptor(kind)
+}
+
+func noNewlinePatchLineDescriptor(sides patchLineSides) (patchLineDescriptor, bool) {
+	if !sides.valid() {
+		return 0, false
+	}
+	return plainPatchLineDescriptor(PatchLineNoNewline) |
+		patchLineDescriptor(sides)<<patchLineKindBits, true
+}
+
+func (descriptor patchLineDescriptor) kind() PatchLineKind {
+	return PatchLineKind(descriptor & patchLineDescriptorMask)
+}
+
+func (descriptor patchLineDescriptor) appliesToSide(side LineSide) bool {
+	if descriptor.kind() != PatchLineNoNewline {
+		return false
+	}
+	sides := patchLineSides(descriptor >> patchLineKindBits)
+	if !sides.valid() {
+		return false
+	}
+	return sides.has(side)
+}
+
+func (sides patchLineSides) valid() bool {
+	return sides != 0 && sides&^patchLineBothSides == 0
+}
+
+func (sides patchLineSides) has(side LineSide) bool {
+	switch side {
+	case LineOld:
+		return sides&patchLineOldSide != 0
+	case LineNew:
+		return sides&patchLineNewSide != 0
+	default:
+		return false
+	}
+}
+
+func noNewlineSidesAfter(kind PatchLineKind) patchLineSides {
+	switch kind {
+	case PatchLineContext:
+		return patchLineBothSides
+	case PatchLineAddition:
+		return patchLineNewSide
+	case PatchLineDeletion:
+		return patchLineOldSide
+	default:
+		return 0
+	}
+}
 
 // Kind returns the receiver's kind value.
 func (line PatchLine) Kind() PatchLineKind {
-	return line.kind
+	return line.descriptor.kind()
+}
+
+// AppliesToSide reports whether side owns this no-newline marker.
+func (line PatchLine) AppliesToSide(side LineSide) bool {
+	return line.descriptor.appliesToSide(side)
 }
 
 // OldLine returns the receiver's old line value.
@@ -231,7 +338,7 @@ type PreparedPatch struct {
 	oldLineRows []uint32
 	hunkFirst   []uint32
 	lineOffsets []PatchOffset
-	lineKinds   []PatchLineKind
+	lineKinds   []patchLineDescriptor
 	oldLines    []uint32
 	newLines    []uint32
 	lineHunks   []uint32
@@ -244,127 +351,331 @@ type PreparedPatch struct {
 	maxNewLine  uint32
 }
 
+type patchParseState struct {
+	activeHunk     uint32
+	oldLine        uint32
+	newLine        uint32
+	oldRemaining   uint32
+	newRemaining   uint32
+	noNewlineSides patchLineSides
+}
+
+type parsedPatchLine struct {
+	descriptor patchLineDescriptor
+	oldLine    uint32
+	newLine    uint32
+}
+
 // TakePatch takes ownership of patch.
 func TakePatch(text []byte) (*PreparedPatch, error) {
+	return TakePatchCancellable(nil, text)
+}
+
+// TakePatchCancellable takes ownership of patch while bounding cancellation latency.
+func TakePatchCancellable(cancelled func() error, text []byte) (*PreparedPatch, error) {
+	if err := cancellationError(cancelled); err != nil {
+		return nil, err
+	}
 	if int64(len(text)) > MaxPatchBytes {
 		return nil, fmt.Errorf("patch exceeds %d bytes", MaxPatchBytes)
 	}
-	capacity := min(bytes.Count(text, []byte{'\n'})+1, MaxPatchLines)
-	patch := &PreparedPatch{
-		text:        text,
-		lineOffsets: make([]PatchOffset, 0, capacity),
-		lineKinds:   make([]PatchLineKind, 0, capacity),
-		oldLines:    make([]uint32, 0, capacity),
-		newLines:    make([]uint32, 0, capacity),
-		lineHunks:   make([]uint32, 0, capacity),
+	if int64(cap(text)) > MaxPatchBytes {
+		return nil, fmt.Errorf("patch retained capacity exceeds %d bytes", MaxPatchBytes)
 	}
+	capacity, err := patchLineCapacity(cancelled, text)
+	if err != nil {
+		return nil, err
+	}
+	patch := newPreparedPatch(text, capacity)
 	offsets := patch.lineOffsets
 	remaining := text
 	var offset uint32
-	activeHunk := noPatchHunk
-	var oldLine, newLine, oldRemaining, newRemaining uint32
+	state := patchParseState{activeHunk: noPatchHunk}
 	for len(remaining) > 0 {
-		if len(offsets) == MaxPatchLines {
-			return nil, fmt.Errorf("patch lines exceed %d", MaxPatchLines)
+		offsets, err = appendPatchOffsetCancellable(cancelled, offsets, offset)
+		if err != nil {
+			return nil, err
 		}
-		offsets = append(offsets, PatchOffset(offset))
-		line := remaining
-		if index := bytes.IndexByte(remaining, '\n'); index >= 0 {
-			line = remaining[:index]
-			remaining = remaining[index+1:]
-			offset += uint32FromInt(index + 1)
-		} else {
-			remaining = nil
+		line, next, advance, err := nextPatchLineCancellable(cancelled, remaining)
+		if err != nil {
+			return nil, err
 		}
-		kind := PatchLineMetadata
-		rowOld, rowNew := uint32(0), uint32(0)
-		if bytes.HasPrefix(line, []byte("@@ ")) {
-			if err := completeHunk(oldRemaining, newRemaining); err != nil {
-				return nil, err
-			}
-			if patch.hunks == MaxHunks {
-				return nil, fmt.Errorf("patch hunks exceed %d", MaxHunks)
-			}
-			var err error
-			oldLine, oldRemaining, newLine, newRemaining, err = parseHunkHeader(line)
-			if err != nil {
-				return nil, err
-			}
-			activeHunk = patch.hunks
-			patch.hunks++
-			patch.hunkLines = append(patch.hunkLines, uint32FromInt(len(offsets)-1))
-			patch.hunkFirst = append(patch.hunkFirst, noPatchHunk)
-			patch.hunkLast = append(patch.hunkLast, noPatchHunk)
-			kind = PatchLineHunkHeader
-		} else if activeHunk != noPatchHunk {
-			switch {
-			case bytes.HasPrefix(line, []byte(`\ No newline at end of file`)):
-				kind = PatchLineNoNewline
-			case oldRemaining == 0 && newRemaining == 0:
-				activeHunk = noPatchHunk
-			case len(line) == 0:
-				return nil, errors.New("patch hunk contains an empty unprefixed line")
-			case line[0] == ' ':
-				if oldRemaining == 0 || newRemaining == 0 {
-					return nil, errors.New("patch hunk context exceeds its declared range")
-				}
-				kind = PatchLineContext
-				rowOld, rowNew = oldLine, newLine
-				oldLine++
-				newLine++
-				oldRemaining--
-				newRemaining--
-			case line[0] == '+':
-				if newRemaining == 0 {
-					return nil, errors.New("patch hunk additions exceed their declared range")
-				}
-				kind = PatchLineAddition
-				rowNew = newLine
-				newLine++
-				newRemaining--
-			case line[0] == '-':
-				if oldRemaining == 0 {
-					return nil, errors.New("patch hunk deletions exceed their declared range")
-				}
-				kind = PatchLineDeletion
-				rowOld = oldLine
-				oldLine++
-				oldRemaining--
-			default:
-				return nil, fmt.Errorf("patch hunk contains unsupported line prefix %q", line[0])
-			}
-		}
-		if activeHunk != noPatchHunk &&
-			(kind == PatchLineContext || kind == PatchLineAddition || kind == PatchLineDeletion) {
-			row := uint32FromInt(len(offsets) - 1)
-			if patch.hunkFirst[activeHunk] == noPatchHunk {
-				patch.hunkFirst[activeHunk] = row
-			}
-			patch.hunkLast[activeHunk] = row
-		}
-		patch.lineKinds = append(patch.lineKinds, kind)
-		patch.oldLines = append(patch.oldLines, rowOld)
-		patch.newLines = append(patch.newLines, rowNew)
-		patch.maxOldLine = max(patch.maxOldLine, rowOld)
-		patch.maxNewLine = max(patch.maxNewLine, rowNew)
+		remaining = next
+		offset += advance
 		row := uint32FromInt(len(offsets) - 1)
-		if rowOld != 0 {
-			patch.oldLineRows = append(patch.oldLineRows, row)
+		parsed, parseErr := state.parseLine(patch, line, row)
+		if parseErr != nil {
+			return nil, parseErr
 		}
-		if rowNew != 0 {
-			patch.newLineRows = append(patch.newLineRows, row)
-		}
-		patch.lineHunks = append(patch.lineHunks, activeHunk)
+		patch.appendParsedLine(row, state.activeHunk, parsed)
 	}
-	if err := completeHunk(oldRemaining, newRemaining); err != nil {
+	if err := completeHunk(state.oldRemaining, state.newRemaining); err != nil {
 		return nil, err
 	}
 	patch.lineOffsets = offsets
 	return patch, nil
 }
 
+func (state *patchParseState) parseLine(
+	patch *PreparedPatch,
+	line []byte,
+	row uint32,
+) (parsedPatchLine, error) {
+	markerSides := state.noNewlineSides
+	state.noNewlineSides = 0
+
+	var parsed parsedPatchLine
+	switch {
+	case bytes.Equal(line, []byte(noNewlineMarkerText)):
+		if state.activeHunk == noPatchHunk || !markerSides.valid() {
+			return parsed, errors.New("patch no-newline marker does not follow a material hunk line")
+		}
+		descriptor, valid := noNewlinePatchLineDescriptor(markerSides)
+		if !valid {
+			return parsed, errors.New("patch no-newline marker has invalid side membership")
+		}
+		parsed.descriptor = descriptor
+		return parsed, nil
+	case bytes.HasPrefix(line, []byte(noNewlineMarkerText)):
+		return parsed, errors.New("patch no-newline marker has trailing content")
+	case bytes.HasPrefix(line, []byte("@@ ")):
+		return state.startHunk(patch, line, row)
+	case state.activeHunk != noPatchHunk:
+		material, err := state.parseHunkMaterial(line)
+		if err != nil {
+			return parsedPatchLine{}, err
+		}
+		state.noNewlineSides = noNewlineSidesAfter(material.descriptor.kind())
+		return material, nil
+	default:
+		parsed.descriptor = plainPatchLineDescriptor(PatchLineMetadata)
+		return parsed, nil
+	}
+}
+
+func (state *patchParseState) startHunk(
+	patch *PreparedPatch,
+	line []byte,
+	row uint32,
+) (parsedPatchLine, error) {
+	if err := completeHunk(state.oldRemaining, state.newRemaining); err != nil {
+		return parsedPatchLine{}, err
+	}
+	if patch.hunks == MaxHunks {
+		return parsedPatchLine{}, fmt.Errorf("patch hunks exceed %d", MaxHunks)
+	}
+	oldLine, oldRemaining, newLine, newRemaining, err := parseHunkHeader(line)
+	if err != nil {
+		return parsedPatchLine{}, err
+	}
+	state.activeHunk = patch.hunks
+	state.oldLine, state.oldRemaining = oldLine, oldRemaining
+	state.newLine, state.newRemaining = newLine, newRemaining
+	patch.hunks++
+	patch.appendHunk(row)
+	return parsedPatchLine{
+		descriptor: plainPatchLineDescriptor(PatchLineHunkHeader),
+	}, nil
+}
+
+func (state *patchParseState) parseHunkMaterial(line []byte) (parsedPatchLine, error) {
+	if state.oldRemaining == 0 && state.newRemaining == 0 {
+		state.activeHunk = noPatchHunk
+		return parsedPatchLine{
+			descriptor: plainPatchLineDescriptor(PatchLineMetadata),
+		}, nil
+	}
+	if len(line) == 0 {
+		return parsedPatchLine{}, errors.New("patch hunk contains an empty unprefixed line")
+	}
+	switch line[0] {
+	case ' ':
+		if state.oldRemaining == 0 || state.newRemaining == 0 {
+			return parsedPatchLine{}, errors.New("patch hunk context exceeds its declared range")
+		}
+		parsed := parsedPatchLine{
+			descriptor: plainPatchLineDescriptor(PatchLineContext),
+			oldLine:    state.oldLine,
+			newLine:    state.newLine,
+		}
+		state.oldLine++
+		state.newLine++
+		state.oldRemaining--
+		state.newRemaining--
+		return parsed, nil
+	case '+':
+		if state.newRemaining == 0 {
+			return parsedPatchLine{}, errors.New("patch hunk additions exceed their declared range")
+		}
+		parsed := parsedPatchLine{
+			descriptor: plainPatchLineDescriptor(PatchLineAddition),
+			newLine:    state.newLine,
+		}
+		state.newLine++
+		state.newRemaining--
+		return parsed, nil
+	case '-':
+		if state.oldRemaining == 0 {
+			return parsedPatchLine{}, errors.New("patch hunk deletions exceed their declared range")
+		}
+		parsed := parsedPatchLine{
+			descriptor: plainPatchLineDescriptor(PatchLineDeletion),
+			oldLine:    state.oldLine,
+		}
+		state.oldLine++
+		state.oldRemaining--
+		return parsed, nil
+	default:
+		return parsedPatchLine{}, fmt.Errorf(
+			"patch hunk contains unsupported line prefix %q",
+			line[0],
+		)
+	}
+}
+
+func (patch *PreparedPatch) appendParsedLine(
+	row uint32,
+	activeHunk uint32,
+	parsed parsedPatchLine,
+) {
+	kind := parsed.descriptor.kind()
+	if activeHunk != noPatchHunk && noNewlineSidesAfter(kind).valid() {
+		if patch.hunkFirst[activeHunk] == noPatchHunk {
+			patch.hunkFirst[activeHunk] = row
+		}
+		patch.hunkLast[activeHunk] = row
+	}
+	patch.lineKinds = append(patch.lineKinds, parsed.descriptor)
+	patch.oldLines = append(patch.oldLines, parsed.oldLine)
+	patch.newLines = append(patch.newLines, parsed.newLine)
+	patch.maxOldLine = max(patch.maxOldLine, parsed.oldLine)
+	patch.maxNewLine = max(patch.maxNewLine, parsed.newLine)
+	if parsed.oldLine != 0 {
+		patch.oldLineRows = appendBoundedPatchUint32(
+			patch.oldLineRows, row, MaxPatchLines,
+		)
+	}
+	if parsed.newLine != 0 {
+		patch.newLineRows = appendBoundedPatchUint32(
+			patch.newLineRows, row, MaxPatchLines,
+		)
+	}
+	patch.lineHunks = append(patch.lineHunks, activeHunk)
+}
+
+func newPreparedPatch(text []byte, lineCapacity int) *PreparedPatch {
+	return &PreparedPatch{
+		text:        text,
+		lineOffsets: make([]PatchOffset, 0, lineCapacity),
+		lineKinds:   make([]patchLineDescriptor, 0, lineCapacity),
+		oldLines:    make([]uint32, 0, lineCapacity),
+		newLines:    make([]uint32, 0, lineCapacity),
+		lineHunks:   make([]uint32, 0, lineCapacity),
+	}
+}
+
+func (patch *PreparedPatch) appendHunk(line uint32) {
+	if len(patch.hunkLines) == cap(patch.hunkLines) {
+		capacity := nextBoundedPatchCapacity(len(patch.hunkLines)+1, cap(patch.hunkLines), MaxHunks)
+		lines := make([]uint32, len(patch.hunkLines), capacity)
+		first := make([]uint32, len(patch.hunkFirst), capacity)
+		last := make([]uint32, len(patch.hunkLast), capacity)
+		copy(lines, patch.hunkLines)
+		copy(first, patch.hunkFirst)
+		copy(last, patch.hunkLast)
+		patch.hunkLines = lines
+		patch.hunkFirst = first
+		patch.hunkLast = last
+	}
+	patch.hunkLines = append(patch.hunkLines, line)
+	patch.hunkFirst = append(patch.hunkFirst, noPatchHunk)
+	patch.hunkLast = append(patch.hunkLast, noPatchHunk)
+}
+
+func appendBoundedPatchUint32(values []uint32, value uint32, limit int) []uint32 {
+	if len(values) == cap(values) {
+		capacity := nextBoundedPatchCapacity(len(values)+1, cap(values), limit)
+		next := make([]uint32, len(values), capacity)
+		copy(next, values)
+		values = next
+	}
+	return append(values, value)
+}
+
+func nextBoundedPatchCapacity(required, current, limit int) int {
+	half := limit / 2
+	if required > half {
+		return limit
+	}
+	return min(half, max(required, max(1, current*2)))
+}
+
+func appendPatchOffsetCancellable(
+	cancelled func() error,
+	offsets []PatchOffset,
+	offset uint32,
+) ([]PatchOffset, error) {
+	if err := cancellationError(cancelled); err != nil {
+		return nil, err
+	}
+	if len(offsets) == MaxPatchLines {
+		return nil, fmt.Errorf("patch lines exceed %d", MaxPatchLines)
+	}
+	return append(offsets, PatchOffset(offset)), nil
+}
+
+func nextPatchLineCancellable(
+	cancelled func() error,
+	remaining []byte,
+) ([]byte, []byte, uint32, error) {
+	index, err := indexPatchByteCancellable(cancelled, remaining, '\n')
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	if index < 0 {
+		return remaining, nil, 0, nil
+	}
+	return remaining[:index], remaining[index+1:], uint32FromInt(index + 1), nil
+}
+
+func patchLineCapacity(cancelled func() error, text []byte) (int, error) {
+	lines := 1
+	for start := 0; start < len(text); start += patchPollBytes {
+		if err := cancellationError(cancelled); err != nil {
+			return 0, err
+		}
+		end := min(start+patchPollBytes, len(text))
+		lines += bytes.Count(text[start:end], []byte{'\n'})
+		if lines >= MaxPatchLines {
+			return MaxPatchLines, nil
+		}
+	}
+	if err := cancellationError(cancelled); err != nil {
+		return 0, err
+	}
+	return lines, nil
+}
+
+func indexPatchByteCancellable(
+	cancelled func() error,
+	value []byte,
+	target byte,
+) (int, error) {
+	for start := 0; start < len(value); start += patchPollBytes {
+		if err := cancellationError(cancelled); err != nil {
+			return -1, err
+		}
+		end := min(start+patchPollBytes, len(value))
+		if index := bytes.IndexByte(value[start:end], target); index >= 0 {
+			return start + index, nil
+		}
+	}
+	return -1, cancellationError(cancelled)
+}
+
 func parseHunkHeader(line []byte) (uint32, uint32, uint32, uint32, error) {
-	closeIndex := bytes.Index(line[3:], []byte(" @@"))
+	searchEnd := min(len(line), maxHunkHeaderBytes)
+	closeIndex := bytes.Index(line[3:searchEnd], []byte(" @@"))
 	if closeIndex < 0 {
 		return 0, 0, 0, 0, errors.New("patch hunk header is unterminated")
 	}
@@ -438,11 +749,17 @@ func (patch *PreparedPatch) RetainedBytes() int64 {
 	if patch == nil {
 		return 0
 	}
-	const retainedMetadataBytesPerLine int64 = 25
-	const retainedMetadataBytesPerHunk int64 = 12
-	return int64(len(patch.text)) +
-		int64(len(patch.lineOffsets))*retainedMetadataBytesPerLine +
-		int64(len(patch.hunkLines))*retainedMetadataBytesPerHunk
+	return preparedPatchMetadataBytes + int64(cap(patch.text)) +
+		int64(cap(patch.oldLineRows))*patchUint32StorageBytes +
+		int64(cap(patch.hunkFirst))*patchUint32StorageBytes +
+		int64(cap(patch.lineOffsets))*patchUint32StorageBytes +
+		int64(cap(patch.lineKinds)) +
+		int64(cap(patch.oldLines))*patchUint32StorageBytes +
+		int64(cap(patch.newLines))*patchUint32StorageBytes +
+		int64(cap(patch.lineHunks))*patchUint32StorageBytes +
+		int64(cap(patch.newLineRows))*patchUint32StorageBytes +
+		int64(cap(patch.hunkLast))*patchUint32StorageBytes +
+		int64(cap(patch.hunkLines))*patchUint32StorageBytes
 }
 
 // PatchLineForSource performs the patch line for source operation.
@@ -451,7 +768,7 @@ func (review Review) PatchLineForSource(
 	side LineSide,
 	line LineNumber,
 ) (uint32, bool) {
-	state := review.patches[fileID]
+	state := review.patchState(fileID)
 	if state.Status != PatchReady || state.prepared == nil || line == 0 {
 		return 0, false
 	}
@@ -486,13 +803,16 @@ func (review Review) RequestPatch(fileID FileID, context PatchContext) (Review, 
 	if !ok {
 		return review, PatchRequest{}, ErrInvalidPatchTransition
 	}
-	current := review.patches[fileID]
+	current := review.patchState(fileID)
 	if current.Status == PatchPending {
 		return review, PatchRequest{}, fmt.Errorf("%w: patch is already pending", ErrInvalidPatchTransition)
 	}
 	next := review.clone()
-	next.patches = maps.Clone(review.patches)
-	next.patches[fileID] = PatchState{Status: PatchPending}
+	next.patch = presentationPatch{
+		file:  fileID,
+		state: PatchState{Status: PatchPending},
+		set:   true,
+	}
 	return next, PatchRequest{
 		Workspace: review.workspace,
 		Handle:    file.PatchHandle(),
@@ -509,7 +829,7 @@ func (review Review) ApplyPatch(result PatchResult) (Review, error) {
 	fileID := result.Handle.FileID()
 	file, ok := review.file(fileID)
 	if !ok || file.PatchHandle() != result.Handle ||
-		review.patches[fileID].Status != PatchPending {
+		review.patchState(fileID).Status != PatchPending {
 		return review, ErrInvalidPatchTransition
 	}
 	if result.Status != PatchReady && result.Status != PatchFailed &&
@@ -526,8 +846,7 @@ func (review Review) ApplyPatch(result PatchResult) (Review, error) {
 	}
 
 	next := review.clone()
-	next.patches = maps.Clone(review.patches)
-	next.patches[fileID] = PatchState{
+	state := PatchState{
 		Status:   result.Status,
 		Hunks:    result.Prepared.Hunks(),
 		Lines:    result.Prepared.Lines(),
@@ -535,14 +854,20 @@ func (review Review) ApplyPatch(result PatchResult) (Review, error) {
 		prepared: result.Prepared,
 	}
 	if result.Status != PatchReady {
-		next.patches[fileID] = PatchState{Status: result.Status, Detail: result.Detail}
+		state = PatchState{Status: result.Status, Detail: result.Detail}
+	}
+	next.patch = presentationPatch{
+		file:          fileID,
+		state:         state,
+		retainedBytes: state.RetainedBytes(),
+		set:           true,
 	}
 	return next, nil
 }
 
 // PatchLines performs the patch lines operation.
 func (review Review) PatchLines(fileID FileID, start, count uint32, maxLineBytes int64) []PatchLine {
-	state := review.patches[fileID]
+	state := review.patchState(fileID)
 	if state.Status != PatchReady || count == 0 || start >= state.Lines || maxLineBytes <= 0 {
 		return nil
 	}
@@ -564,13 +889,13 @@ func (review Review) PatchLines(fileID FileID, start, count uint32, maxLineBytes
 			finish = begin + uint32FromInt64(retained)
 		}
 		lines = append(lines, PatchLine{
-			Number:    line,
-			Text:      PatchText(state.prepared.text[begin:finish]),
-			Truncated: truncated,
-			kind:      state.prepared.lineKinds[line],
-			oldLine:   state.prepared.oldLines[line],
-			newLine:   state.prepared.newLines[line],
-			hunk:      state.prepared.lineHunks[line],
+			Number:     line,
+			Text:       PatchText(state.prepared.text[begin:finish]),
+			Truncated:  truncated,
+			descriptor: state.prepared.lineKinds[line],
+			oldLine:    state.prepared.oldLines[line],
+			newLine:    state.prepared.newLines[line],
+			hunk:       state.prepared.lineHunks[line],
 		})
 	}
 	return lines
@@ -578,12 +903,11 @@ func (review Review) PatchLines(fileID FileID, start, count uint32, maxLineBytes
 
 // DropPatch performs the drop patch operation.
 func (review Review) DropPatch(fileID FileID) Review {
-	if _, exists := review.patches[fileID]; !exists {
+	if !review.patch.set || review.patch.file != fileID {
 		return review
 	}
 	next := review.clone()
-	next.patches = maps.Clone(review.patches)
-	delete(next.patches, fileID)
+	next.patch = presentationPatch{}
 	next.hunkMarks = review.hunkMarks.dropFile(fileID)
 	return next
 }
@@ -595,7 +919,7 @@ func (review Review) AdjacentHunkLine(
 	direction NavigationDirection,
 	count uint16,
 ) (uint32, bool) {
-	state := review.patches[fileID]
+	state := review.patchState(fileID)
 	if state.Status != PatchReady || state.prepared == nil ||
 		len(state.prepared.hunkLines) == 0 ||
 		direction != NavigatePrevious && direction != NavigateNext ||
@@ -626,7 +950,7 @@ func (review Review) AdjacentHunkLine(
 
 // HunkRows performs the hunk rows operation.
 func (review Review) HunkRows(id HunkID) (uint32, uint32, bool) {
-	state := review.patches[id.FileID()]
+	state := review.patchState(id.FileID())
 	index := id.Index().Uint32()
 	if state.Status != PatchReady || state.prepared == nil ||
 		index >= uint32FromInt(len(state.prepared.hunkFirst)) {
@@ -639,18 +963,10 @@ func (review Review) HunkRows(id HunkID) (uint32, uint32, bool) {
 
 // Patch performs the patch operation.
 func (review Review) Patch(fileID FileID) PatchState {
-	state, ok := review.patches[fileID]
-	if !ok {
-		return PatchState{Status: PatchUnavailable}
-	}
-	return state
+	return review.patchState(fileID)
 }
 
 // RetainedPatchBytes returns the receiver's retained patch bytes value.
 func (review Review) RetainedPatchBytes() int64 {
-	var total int64
-	for _, state := range review.patches {
-		total += state.RetainedBytes()
-	}
-	return total
+	return review.patch.retainedBytes
 }

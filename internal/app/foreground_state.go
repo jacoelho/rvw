@@ -8,6 +8,7 @@ const (
 	reloadIdle reloadPhase = iota
 	reloadWaitingForPatch
 	reloadAcquiring
+	reloadCapturing
 	reloadPreparing
 )
 
@@ -32,11 +33,13 @@ const (
 	searchContinuationClear
 	searchContinuationReplace
 	searchContinuationPatchContext
+	searchContinuationPatch
 )
 
 type searchContinuation struct {
 	search  pendingSearch
 	context review.PatchContext
+	file    review.FileID
 	kind    searchContinuationKind
 }
 
@@ -48,10 +51,15 @@ type reloadFlow struct {
 }
 
 type patchFlow struct {
-	active       map[review.OperationID]review.FileID
+	active       *activePatch
 	viewport     *diffViewport
 	target       *pendingDiffTarget
 	continuation patchContinuation
+}
+
+type activePatch struct {
+	operation review.OperationID
+	file      review.FileID
 }
 
 type searchFlow struct {
@@ -122,8 +130,7 @@ func (target pendingDiffTarget) valid() bool {
 }
 
 // foregroundState is the sole owner of reload, patch, and search coordination.
-// Its zero value is not valid because patch admission requires an initialized,
-// bounded operation set.
+// Its zero value is valid.
 type foregroundState struct {
 	reload reloadFlow
 	patch  patchFlow
@@ -131,9 +138,7 @@ type foregroundState struct {
 }
 
 func (search pendingSearch) valid() bool {
-	query, err := review.NewSearchQuery(search.query.String())
-	return err == nil && query == search.query && search.target != nil &&
-		search.target.FileCount() != 0
+	return search.query != "" && search.candidates.valid()
 }
 
 func validForegroundPatchContext(context review.PatchContext) bool {
@@ -149,9 +154,7 @@ func validForegroundPatchContext(context review.PatchContext) bool {
 }
 
 func newForegroundState() foregroundState {
-	return foregroundState{
-		patch: patchFlow{active: make(map[review.OperationID]review.FileID)},
-	}
+	return foregroundState{}
 }
 
 type foregroundStartKind uint8
@@ -205,6 +208,9 @@ func (state *foregroundState) valid() bool {
 	if state == nil || !state.validPatchFlow() || !state.validReloadFlow() {
 		return false
 	}
+	if state.search.active != 0 && state.patch.active != nil {
+		return false
+	}
 	if state.reload.phase != reloadIdle &&
 		state.patch.continuation.kind == patchContinuationBeginSearch {
 		return false
@@ -213,11 +219,8 @@ func (state *foregroundState) valid() bool {
 }
 
 func (state *foregroundState) validPatchFlow() bool {
-	if state.patch.active == nil || len(state.patch.active) > MaxAcceptedOperations {
-		return false
-	}
-	for operation, file := range state.patch.active {
-		if operation == 0 || file.Uint32() >= review.MaxFiles {
+	if active := state.patch.active; active != nil {
+		if active.operation == 0 || active.file.Uint32() >= review.MaxFiles {
 			return false
 		}
 	}
@@ -227,8 +230,9 @@ func (state *foregroundState) validPatchFlow() bool {
 			return false
 		}
 		if target.operation != 0 {
-			file, exists := state.patch.active[target.operation]
-			if !exists || file != target.handle.FileID() {
+			active := state.patch.active
+			if active == nil || active.operation != target.operation ||
+				active.file != target.handle.FileID() {
 				return false
 			}
 		}
@@ -252,6 +256,11 @@ func (state *foregroundState) validReloadFlow() bool {
 		}
 	case reloadAcquiring:
 		if state.reload.operation == 0 || state.reload.attempts != 0 {
+			return false
+		}
+	case reloadCapturing:
+		if state.reload.operation == 0 ||
+			state.reload.attempts >= maxReloadPreparationTries {
 			return false
 		}
 	case reloadPreparing:
@@ -295,12 +304,16 @@ func (state *foregroundState) validSearchContinuation() bool {
 		if !state.search.continuation.search.valid() {
 			return false
 		}
-	case searchContinuationClear, searchContinuationPatchContext:
+	case searchContinuationClear, searchContinuationPatchContext, searchContinuationPatch:
 		if state.search.active == 0 {
 			return false
 		}
 		if state.search.continuation.kind == searchContinuationPatchContext &&
 			!validForegroundPatchContext(state.search.continuation.context) {
+			return false
+		}
+		if state.search.continuation.kind == searchContinuationPatch &&
+			state.search.continuation.file.Uint32() >= review.MaxFiles {
 			return false
 		}
 	default:
@@ -310,15 +323,17 @@ func (state *foregroundState) validSearchContinuation() bool {
 }
 
 func (state *foregroundState) patchCount() int {
-	return len(state.patch.active)
+	if state.patch.active == nil {
+		return 0
+	}
+	return 1
 }
 
 func (state *foregroundState) patchOperationIDs() []review.OperationID {
-	ids := make([]review.OperationID, 0, len(state.patch.active))
-	for id := range state.patch.active {
-		ids = append(ids, id)
+	if state.patch.active == nil {
+		return nil
 	}
-	return ids
+	return []review.OperationID{state.patch.active.operation}
 }
 
 func (state *foregroundState) reloadActive() bool {
@@ -326,7 +341,7 @@ func (state *foregroundState) reloadActive() bool {
 }
 
 func (state *foregroundState) reloadIsPreparing() bool {
-	return state.reload.phase == reloadPreparing
+	return state.reload.phase == reloadCapturing || state.reload.phase == reloadPreparing
 }
 
 func (state *foregroundState) reloadOperation() review.OperationID {
@@ -342,8 +357,8 @@ func (state *foregroundState) searchOperation() review.OperationID {
 }
 
 func (state *foregroundState) preparePatch(file review.FileID) (foregroundStart, bool) {
-	if file.Uint32() >= review.MaxFiles || len(state.patch.active) != 0 ||
-		state.reload.phase != reloadIdle {
+	if file.Uint32() >= review.MaxFiles || state.patch.active != nil ||
+		state.reload.phase != reloadIdle || state.search.active != 0 {
 		return foregroundStart{}, false
 	}
 	start := foregroundStart{kind: foregroundStartPatch, file: file}
@@ -372,7 +387,7 @@ func (state *foregroundState) prepareSearch(search pendingSearch) (foregroundSta
 	case searchContinuationNone:
 		switch {
 		case state.patch.continuation.kind == patchContinuationBeginSearch:
-			if len(state.patch.active) != 0 {
+			if state.patch.active != nil {
 				return foregroundStart{}, false
 			}
 			if state.patch.continuation.search != search {
@@ -380,7 +395,7 @@ func (state *foregroundState) prepareSearch(search pendingSearch) (foregroundSta
 			}
 			start.source = foregroundStartPatchSearch
 		case state.patch.continuation.kind == patchContinuationNone &&
-			len(state.patch.active) == 0:
+			state.patch.active == nil:
 			start.source = foregroundStartDirect
 		default:
 			return foregroundStart{}, false
@@ -399,14 +414,14 @@ func (state *foregroundState) prepareSearch(search pendingSearch) (foregroundSta
 func (state *foregroundState) prepareReload() (foregroundStart, bool) {
 	switch state.reload.phase {
 	case reloadIdle:
-		if len(state.patch.active) != 0 {
+		if state.patch.active != nil {
 			return foregroundStart{}, false
 		}
 		return foregroundStart{
 			kind: foregroundStartReload, source: foregroundStartDirect,
 		}, true
 	case reloadWaitingForPatch:
-		if len(state.patch.active) != 0 {
+		if state.patch.active != nil {
 			return foregroundStart{}, false
 		}
 		return foregroundStart{
@@ -426,7 +441,7 @@ func (state *foregroundState) admitted(
 	}
 	switch start.kind {
 	case foregroundStartPatch:
-		if len(state.patch.active) >= MaxAcceptedOperations {
+		if state.patch.active != nil {
 			return false
 		}
 		prepared, ok := state.preparePatch(start.file)
@@ -436,7 +451,7 @@ func (state *foregroundState) admitted(
 		if start.source == foregroundStartPatchRetry {
 			state.patch.continuation = patchContinuation{}
 		}
-		state.patch.active[operation] = start.file
+		state.patch.active = &activePatch{operation: operation, file: start.file}
 		if state.patch.target != nil && state.patch.target.operation == 0 &&
 			state.patch.target.handle.FileID() == start.file {
 			state.patch.target.operation = operation
@@ -546,10 +561,19 @@ func (state *foregroundState) rejected(start foregroundStart) (foregroundEffect,
 func (state *foregroundState) requestPatch(
 	file review.FileID,
 ) (foregroundStart, []review.OperationID, bool) {
-	if state.reload.phase != reloadIdle {
+	if state.reload.phase != reloadIdle || file.Uint32() >= review.MaxFiles {
 		return foregroundStart{}, nil, false
 	}
-	if len(state.patch.active) == 0 {
+	if state.search.active != 0 {
+		if state.search.continuation.kind != searchContinuationPatchContext {
+			state.search.continuation = searchContinuation{
+				kind: searchContinuationPatch,
+				file: file,
+			}
+		}
+		return foregroundStart{}, []review.OperationID{state.search.active}, false
+	}
+	if state.patch.active == nil {
 		start, ok := state.preparePatch(file)
 		return start, nil, ok
 	}
@@ -575,7 +599,7 @@ func (state *foregroundState) requestSearch(
 		}
 		return foregroundStart{}, []review.OperationID{state.search.active}, false
 	}
-	if len(state.patch.active) != 0 {
+	if state.patch.active != nil {
 		state.patch.continuation = patchContinuation{
 			kind:   patchContinuationBeginSearch,
 			search: search,
@@ -619,7 +643,7 @@ func (state *foregroundState) requestReload() (foregroundStart, []review.Operati
 	if state.reload.phase != reloadIdle || state.search.active != 0 {
 		return foregroundStart{}, nil, false
 	}
-	if len(state.patch.active) == 0 {
+	if state.patch.active == nil {
 		start, ok := state.prepareReload()
 		return start, nil, ok
 	}
@@ -642,20 +666,18 @@ func (state *foregroundState) requestReload() (foregroundStart, []review.Operati
 func (state *foregroundState) completePatch(
 	id review.OperationID,
 ) (review.FileID, *pendingDiffTarget, bool, foregroundEffect) {
-	file, ok := state.patch.active[id]
-	if !ok {
+	active := state.patch.active
+	if active == nil || active.operation != id {
 		return 0, nil, false, foregroundEffect{}
 	}
+	file := active.file
 	var target *pendingDiffTarget
 	if state.patch.target != nil && state.patch.target.operation == id {
 		value := *state.patch.target
 		target = &value
 		state.patch.target = nil
 	}
-	delete(state.patch.active, id)
-	if len(state.patch.active) != 0 {
-		return file, target, true, foregroundEffect{}
-	}
+	state.patch.active = nil
 	if state.reload.phase == reloadWaitingForPatch {
 		return file, target, true, foregroundEffect{kind: foregroundEffectStartReload}
 	}
@@ -683,6 +705,13 @@ func (state *foregroundState) completeSearch(
 	}
 	state.search.active = 0
 	switch state.search.continuation.kind {
+	case searchContinuationPatch:
+		effect := foregroundEffect{
+			kind: foregroundEffectRequestPatch,
+			file: state.search.continuation.file,
+		}
+		state.search.continuation = searchContinuation{}
+		return true, effect
 	case searchContinuationPatchContext:
 		effect := foregroundEffect{
 			kind:    foregroundEffectApplyPatchContext,
@@ -708,24 +737,28 @@ func (state *foregroundState) reloadAcquired(id review.OperationID) bool {
 		state.reload.operation == id
 }
 
-func (state *foregroundState) reloadPreparationAdmitted(id review.OperationID) bool {
-	if !state.reloadAcquired(id) {
-		return false
-	}
-	state.reload.phase = reloadPreparing
-	state.reload.attempts = 1
-	return state.valid()
-}
-
-func (state *foregroundState) reloadPreparationRetryAdmitted(
-	id review.OperationID,
-) bool {
-	if id == 0 || state.reload.phase != reloadPreparing ||
-		state.reload.operation != id ||
+func (state *foregroundState) reloadCaptureStarted(id review.OperationID) bool {
+	if id == 0 || state.reload.operation != id ||
+		state.reload.phase != reloadAcquiring && state.reload.phase != reloadPreparing ||
 		state.reload.attempts >= maxReloadPreparationTries {
 		return false
 	}
+	state.reload.phase = reloadCapturing
+	return state.valid()
+}
+
+func (state *foregroundState) reloadPreparationAdmitted(
+	id review.OperationID,
+	capturedAttempts uint8,
+) bool {
+	if id == 0 || state.reload.phase != reloadCapturing ||
+		state.reload.operation != id ||
+		state.reload.attempts != capturedAttempts ||
+		capturedAttempts >= maxReloadPreparationTries {
+		return false
+	}
 	state.reload.attempts++
+	state.reload.phase = reloadPreparing
 	return state.valid()
 }
 
@@ -738,7 +771,8 @@ func (state *foregroundState) finishReloadFailure(
 	id review.OperationID,
 ) (review.OperationID, foregroundEffect, bool) {
 	if id == 0 || id != state.reload.operation ||
-		state.reload.phase != reloadAcquiring && state.reload.phase != reloadPreparing {
+		state.reload.phase != reloadAcquiring && state.reload.phase != reloadCapturing &&
+			state.reload.phase != reloadPreparing {
 		return 0, foregroundEffect{}, false
 	}
 	var effect foregroundEffect

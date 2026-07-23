@@ -71,15 +71,28 @@ func TestPrepareWorktreeCandidatesNormalizesUnmergedRecordGroups(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			raw, removals, paths, err := prepareWorktreeCandidates(test.records, nil)
+			ledger, ledgerErr := newSourceLedger(0)
+			if ledgerErr != nil {
+				t.Fatal(ledgerErr)
+			}
+			raw, removals, paths, err := prepareWorktreeCandidates(
+				t.Context(), ledger, test.records, nil,
+			)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(raw) != boolCount(test.wantRaw) ||
-				len(removals) != boolCount(test.wantRemoval) {
+			wantRaw := 0
+			if test.wantRaw {
+				wantRaw = 1
+			}
+			wantRemovals := 0
+			if test.wantRemoval {
+				wantRemovals = 1
+			}
+			if len(raw) != wantRaw || len(removals) != wantRemovals {
 				t.Fatalf("raw=%+v removals=%+v", raw, removals)
 			}
-			if len(paths) != 1 || string(paths[0]) != "path" {
+			if len(paths) != 1 || paths[0] != "path" {
 				t.Fatalf("paths = %q", paths)
 			}
 			if test.wantRaw && raw[0].mode != test.wantMode {
@@ -119,7 +132,13 @@ func TestPrepareWorktreeCandidatesRejectsAmbiguousRecordGroups(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if _, _, _, err := prepareWorktreeCandidates(test.records, nil); err == nil {
+			ledger, ledgerErr := newSourceLedger(0)
+			if ledgerErr != nil {
+				t.Fatal(ledgerErr)
+			}
+			if _, _, _, err := prepareWorktreeCandidates(
+				t.Context(), ledger, test.records, nil,
+			); err == nil {
 				t.Fatal("ambiguous group was accepted")
 			}
 		})
@@ -128,164 +147,35 @@ func TestPrepareWorktreeCandidatesRejectsAmbiguousRecordGroups(t *testing.T) {
 
 func TestPrepareWorktreeCandidatesPreservesUniqueSortedPaths(t *testing.T) {
 	mode := testFileMode(t, "100644")
-	raw, _, paths, err := prepareWorktreeCandidates(
-		[]diffRecord{
-			testWorktreeRecord('U', "z", mode),
-			testWorktreeRecord('M', "z", mode),
-			testWorktreeRecord('M', "b", mode),
-		},
+	untracked, err := parseUntrackedWorktreeRecords(
 		[]byte("a\x00b\x00"),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := bytePaths(paths); !slices.Equal(got, []string{"a", "b", "z"}) {
-		t.Fatalf("paths = %q", got)
-	}
-	if got := rawWorktreePaths(raw); !slices.Equal(got, []string{"z", "b", "a"}) {
-		t.Fatalf("raw paths = %q", got)
-	}
-}
-
-func TestParseUntrackedWorktreeRecordsPreservesRecordKind(t *testing.T) {
-	records, err := parseUntrackedWorktreeRecords(
-		[]byte("ordinary\x00nested/\x00"),
 		make(map[string]struct{}),
 		review.MaxFiles,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(records) != 2 || string(records[0].path) != "ordinary" ||
-		records[0].kind != untrackedWorktreeOrdinary ||
-		string(records[1].path) != "nested" || records[1].kind != untrackedWorktreeGitlink {
-		t.Fatalf("untracked records = %+v", records)
+	ledger, err := newSourceLedger(0)
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestParseUntrackedWorktreeRecordsRejectsAmbiguousOrMalformedInventory(t *testing.T) {
-	for name, inventory := range map[string][]byte{
-		"missing terminator":       []byte("path"),
-		"duplicate ordinary":       []byte("path\x00path\x00"),
-		"duplicate gitlink":        []byte("path/\x00path/\x00"),
-		"kind collision":           []byte("path\x00path/\x00"),
-		"root marker":              []byte("/\x00"),
-		"repeated trailing slash":  []byte("path//\x00"),
-		"empty interior component": []byte("a//b\x00"),
-	} {
-		t.Run(name, func(t *testing.T) {
-			if _, err := parseUntrackedWorktreeRecords(
-				inventory,
-				make(map[string]struct{}),
-				review.MaxFiles,
-			); err == nil {
-				t.Fatal("invalid untracked inventory was accepted")
-			}
-		})
-	}
-}
-
-func TestParseUntrackedWorktreeRecordsEnforcesLimitBeforeRetention(t *testing.T) {
-	if _, err := parseUntrackedWorktreeRecords(
-		[]byte("a\x00b\x00"),
-		make(map[string]struct{}),
-		1,
-	); err == nil {
-		t.Fatal("inventory above the record limit was accepted")
-	}
-}
-
-func TestParseUntrackedWorktreeRecordsSharesAggregatePathBudget(t *testing.T) {
-	existing := map[string]struct{}{"changed": {}}
-	records, err := parseUntrackedWorktreeRecords(
-		[]byte("changed\x00new\x00"),
-		existing,
-		2,
+	raw, _, paths, err := prepareWorktreeCandidates(
+		t.Context(), ledger,
+		[]diffRecord{
+			testWorktreeRecord('U', "z", mode),
+			testWorktreeRecord('M', "z", mode),
+			testWorktreeRecord('M', "b", mode),
+		},
+		untracked,
 	)
-	if err != nil || len(records) != 1 || string(records[0].path) != "new" || len(existing) != 2 {
-		t.Fatalf("exact aggregate budget = %+v, existing=%v, err=%v", records, existing, err)
-	}
-	if _, err := parseUntrackedWorktreeRecords([]byte("over\x00"), existing, 2); err == nil {
-		t.Fatal("aggregate path budget plus one was accepted")
-	}
-}
-
-func TestUniqueWorktreeRepositoryRootsUsesComponentPrefixes(t *testing.T) {
-	unique, roots := uniqueWorktreeRepositoryRoots([][]byte{
-		[]byte("a/b"),
-		[]byte("a-b"),
-		[]byte("a"),
-		[]byte("z/nested"),
-	})
-	if got := bytePaths(unique); !slices.Equal(got, []string{"a", "a-b", "z/nested"}) {
-		t.Fatalf("unique repository roots = %q", got)
-	}
-	for path, want := range map[string]string{
-		"a/b/file":       "a",
-		"a-b/file":       "a-b",
-		"z/nested/child": "z/nested",
-	} {
-		root, ok := containingWorktreeRepository([]byte(path), roots)
-		if !ok || string(root) != want {
-			t.Fatalf("containing root for %q = %q, %v; want %q", path, root, ok, want)
-		}
-	}
-}
-
-func TestWorktreeFilterOutputLimitCoversExactAcceptedRecords(t *testing.T) {
-	limit, err := worktreeFilterOutputLimit(10, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if limit != 105 {
-		t.Fatalf("five-path output limit = %d, want 105", limit)
+	if got := paths; !slices.Equal(got, []string{"a", "b", "z"}) {
+		t.Fatalf("paths = %q", got)
 	}
-	limit, err = worktreeFilterOutputLimit(17, 2)
-	if err != nil || limit != 55 {
-		t.Fatalf("varied output limit = %d, %v, want 55", limit, err)
-	}
-	maxInt := int(^uint(0) >> 1)
-	if _, err := worktreeFilterOutputLimit(maxInt, 1); err == nil {
-		t.Fatal("overflowing filter output limit was accepted")
-	}
-}
-
-func TestValidateFilterAttributeOutputRequiresExactAcceptedSequence(t *testing.T) {
-	paths := [][]byte{[]byte("a"), []byte("b")}
-	valid := []byte("a\x00filter\x00unspecified\x00b\x00filter\x00unset\x00")
-	names, err := validateFilterAttributeOutput(valid, paths)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !names.has(worktreeFilterUnspecified) || !names.has(worktreeFilterUnset) {
-		t.Fatalf("ambiguous filter names = %08b", names.bits)
-	}
-	for name, output := range map[string][]byte{
-		"missing path":         nil,
-		"missing attribute":    []byte("a\x00"),
-		"missing value":        []byte("a\x00filter\x00"),
-		"mismatched path":      []byte("b\x00filter\x00unspecified\x00b\x00filter\x00unset\x00"),
-		"mismatched attribute": []byte("a\x00diff\x00unspecified\x00b\x00filter\x00unset\x00"),
-		"configured value":     []byte("a\x00filter\x00driver\x00b\x00filter\x00unset\x00"),
-		"extra record":         append(append([]byte{}, valid...), []byte("c\x00filter\x00unset\x00")...),
-	} {
-		t.Run(name, func(t *testing.T) {
-			if _, err := validateFilterAttributeOutput(output, paths); err == nil {
-				t.Fatal("invalid filter attribute sequence was accepted")
-			}
-		})
-	}
-}
-
-func TestValidateExplicitAmbiguousFilterAttributesIgnoresUnconfiguredSentinelName(t *testing.T) {
-	configured := worktreeFilterNames{}
-	configured.add(worktreeFilterUnspecified)
-	if err := validateExplicitAmbiguousFilterAttributes(
-		[]byte("unset.txt\x00filter\x00unset\x00"),
-		[][]byte{[]byte("plain.txt"), []byte("unset.txt")},
-		configured,
-	); err != nil {
-		t.Fatalf("safe mixed sentinel states were rejected: %v", err)
+	if got := rawWorktreePaths(raw); !slices.Equal(got, []string{"z", "b", "a"}) {
+		t.Fatalf("raw paths = %q", got)
 	}
 }
 
@@ -348,10 +238,11 @@ func TestRawWorktreeBatchCancellationCleansStagingAndPreservesCause(t *testing.T
 	batch.add(stagedWorktreeBlob{file: staged, entryIndex: 0, size: 4})
 	err := (&Service{}).flushRawWorktreeBatch(
 		ctx,
-		RepositoryPath("/unused"),
 		nil,
-		[]rawWorktreeEntry{{path: []byte("path")}},
+		nil,
+		[]rawWorktreeEntry{{path: "path"}},
 		&batch,
+		directCPUAdmission,
 	)
 	if !errors.Is(err, cause) {
 		t.Fatalf("cancellation error = %v", err)
@@ -379,10 +270,11 @@ func TestRawWorktreeBatchCleanupFailureDoesNotMaskCancellation(t *testing.T) {
 	batch.add(stagedWorktreeBlob{file: staged, entryIndex: 0})
 	err := (&Service{}).flushRawWorktreeBatch(
 		ctx,
-		RepositoryPath("/unused"),
 		nil,
-		[]rawWorktreeEntry{{path: []byte("path")}},
+		nil,
+		[]rawWorktreeEntry{{path: "path"}},
 		&batch,
+		directCPUAdmission,
 	)
 	if !errors.Is(err, cause) || !strings.Contains(err.Error(), "remove raw blob staging file") {
 		t.Fatalf("joined cleanup error = %v", err)
@@ -449,7 +341,8 @@ func TestWorktreeFileLargerThanNormalBatchHashesInIsolation(t *testing.T) {
 }
 
 func TestOpenRawWorktreePathRetainsPerFileLimit(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "too-large.bin")
+	directory, root := newOpenTestRoot(t)
+	path := filepath.Join(directory, "too-large.bin")
 	file, err := os.Create(path)
 	if err != nil {
 		t.Fatal(err)
@@ -457,18 +350,19 @@ func TestOpenRawWorktreePathRetainsPerFileLimit(t *testing.T) {
 	if err := errors.Join(file.Truncate(maxWorktreeFileBytes+1), file.Close()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := openRawWorktreePath(path, review.FileMode("")); err == nil ||
+	if _, err := openRawWorktreePath(root, "too-large.bin", review.FileMode("")); err == nil ||
 		!strings.Contains(err.Error(), "exceeds raw byte limit") {
 		t.Fatalf("per-file limit error = %v", err)
 	}
 }
 
 func TestOpenRawWorktreePathDerivesExecutableModeFromOpenedDescriptor(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "executable")
+	directory, root := newOpenTestRoot(t)
+	path := filepath.Join(directory, "executable")
 	if err := os.WriteFile(path, []byte("body"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	capture, err := openRawWorktreePath(path, review.FileMode(""))
+	capture, err := openRawWorktreePath(root, "executable", review.FileMode(""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -479,18 +373,20 @@ func TestOpenRawWorktreePathDerivesExecutableModeFromOpenedDescriptor(t *testing
 }
 
 func TestOpenRawWorktreePathRejectsMetadataChangeBeforeDescriptorOpen(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "chmod-race")
+	directory, root := newOpenTestRoot(t)
+	path := filepath.Join(directory, "chmod-race")
 	if err := os.WriteFile(path, []byte("body"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, err := openRawWorktreePathWith(
-		path,
+		root,
+		"chmod-race",
 		review.FileMode(""),
-		func(path string) (*os.File, error) {
-			if err := os.Chmod(path, 0o700); err != nil {
+		func(root *os.Root, relative string) (*os.File, error) {
+			if err := root.Chmod(relative, 0o700); err != nil {
 				return nil, err
 			}
-			return openRawWorktreeRegular(path)
+			return openRawWorktreeRegular(root, relative)
 		},
 	)
 	if err == nil || !strings.Contains(err.Error(), "changed while opening") {
@@ -572,12 +468,12 @@ func TestCopyBoundedWorktreeFilePropagatesShortWrite(t *testing.T) {
 }
 
 func TestRawWorktreeCaptureRejectsPathReplacementAfterCopy(t *testing.T) {
-	directory := t.TempDir()
+	directory, root := newOpenTestRoot(t)
 	path := filepath.Join(directory, "path")
 	if err := os.WriteFile(path, []byte("body"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	capture, err := openRawWorktreePath(path, review.FileMode(""))
+	capture, err := openRawWorktreePath(root, "path", review.FileMode(""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -784,12 +680,12 @@ func BenchmarkRawWorktreeBatchAdmission(b *testing.B) {
 }
 
 func BenchmarkContainingWorktreeRepository100000Roots(b *testing.B) {
-	roots := make(map[string][]byte, 100_000)
-	paths := make([][]byte, 100_000)
+	roots := make(map[string]string, 100_000)
+	paths := make([]string, 100_000)
 	for index := range 100_000 {
-		root := []byte("repository-" + strconv.Itoa(index))
-		roots[string(root)] = root
-		paths[index] = append(append([]byte{}, root...), "/child"...)
+		root := "repository-" + strconv.Itoa(index)
+		roots[root] = root
+		paths[index] = root + "/child"
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -883,33 +779,18 @@ func testFileMode(t *testing.T, value string) review.FileMode {
 func testWorktreeRecord(status byte, path string, mode review.FileMode) diffRecord {
 	record := diffRecord{status: status, newMode: mode}
 	if status == 'D' {
-		record.oldPath = []byte(path)
+		record.oldPath = path
 	} else {
-		record.oldPath = []byte(path)
-		record.newPath = []byte(path)
+		record.oldPath = path
+		record.newPath = path
 	}
 	return record
-}
-
-func boolCount(value bool) int {
-	if value {
-		return 1
-	}
-	return 0
-}
-
-func bytePaths(paths [][]byte) []string {
-	values := make([]string, len(paths))
-	for index, path := range paths {
-		values[index] = string(path)
-	}
-	return values
 }
 
 func rawWorktreePaths(entries []rawWorktreeEntry) []string {
 	values := make([]string, len(entries))
 	for index, entry := range entries {
-		values[index] = string(entry.path)
+		values[index] = entry.path
 	}
 	return values
 }

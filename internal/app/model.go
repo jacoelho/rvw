@@ -6,11 +6,9 @@ import (
 	"fmt"
 	"math"
 	"strconv"
-	"strings"
 	"time"
 
 	"charm.land/bubbles/v2/help"
-	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 
@@ -25,6 +23,7 @@ const (
 	operationIdentityExhausted = "operation identity exhausted"
 	keyEnter                   = "enter"
 	keyEscape                  = "esc"
+	keyReturn                  = "return"
 	unknownValue               = "unknown"
 )
 
@@ -44,6 +43,14 @@ func uint32FromInt(value int) uint32 {
 		panic("value exceeds uint32")
 	}
 	return uint32(converted)
+}
+
+func int32FromInt(value int) int32 {
+	converted := int64(value)
+	if converted < math.MinInt32 || converted > math.MaxInt32 {
+		panic("value cannot be represented as int32")
+	}
+	return int32(converted)
 }
 
 func uint64FromInt(value int) uint64 {
@@ -152,88 +159,92 @@ type exportSelection struct {
 }
 
 type pendingSearch struct {
-	target *review.SearchTarget
-	query  review.SearchQuery
+	candidates *searchCandidates
+	query      review.SearchQuery
 }
 
 // Model represents model.
 type Model struct {
-	commentEditor          textarea.Model
-	commandContext         context.Context
-	deliveryOperations     map[review.OperationID]delivery.Destination
-	filteredFileTree       *fileTree
-	receiver               *ReadyReceiver
-	operationProgress      map[review.OperationID]Progress
-	filterBuild            *fileFilterBuild
-	collapsedTrees         map[string]struct{}
-	exportOperations       map[review.OperationID]exportRequest
-	pathFiles              map[string]review.FileID
-	publicationExcluded    map[review.CommentID]struct{}
-	syntaxSuppressed       map[review.SyntaxIdentity]review.SyntaxStatus
-	syntaxNew              *review.PreparedSyntax
-	document               *source.Document
-	syntaxOld              *review.PreparedSyntax
-	coordinator            *Coordinator
-	pendingStdout          *review.PreparedExport
-	ambiguousPaths         map[string]struct{}
-	notice                 *Notice
-	findRestore            *findReturnState
-	help                   help.Model
-	filterQuery            string
-	visibleFileTree        fileTree
-	allFileTree            fileTree
-	filterTreeFiles        []review.FileID
-	cleanupDocuments       []*source.Document
-	treeCursor             treeNodeIdentity
-	visibleFileOrder       []review.FileID
-	allFileOrder           []review.FileID
-	fileOrder              []review.FileID
-	searchInput            textinput.Model
-	commandInput           textinput.Model
-	foreground             foregroundState
-	chord                  pendingKeyChord
-	settings               Settings
-	review                 review.Review
-	find                   findPalette
-	coordinatorStats       CoordinatorStats
-	size                   TerminalSize
-	searchCursor           int
-	publicationOperation   review.OperationID
-	treeMoveGeneration     uint64
-	treeMovePending        int
-	diffLeft               int
-	filterTreeGeneration   uint64
-	commentCursor          int
-	publicationDetailTop   int
-	publicationCursor      int
-	helpTop                int
-	statusTop              int
-	nextOperation          uint64
-	filterTreeOperation    review.OperationID
-	syntaxOperation        review.OperationID
-	filterGeneration       uint64
-	workspaceIndex         review.OperationID
-	confirmation           confirmation
-	syntaxFile             review.FileID
-	visualAnchor           uint32
-	diffTop                uint32
-	diffCursor             uint32
-	repeat                 uint16
-	exportPicker           exportSelection
-	publicationAllowStale  bool
-	commentsVisible        bool
-	publicationCancel      bool
-	quitting               bool
-	publicationMoveSummary bool
-	focusReturn            FocusOwner
-	fileTreeVisible        bool
-	filterTreeBuilding     bool
-	overlay                Overlay
-	syntaxDeferred         bool
-	focus                  FocusOwner
-	mode                   InteractionMode
-	initialized            bool
-	coordinatorClosed      bool
+	commentEditor             *commentEditor
+	commandContext            context.Context
+	deliveryOperations        map[review.OperationID]delivery.Destination
+	filteredFileTree          *fileTree
+	receiver                  *ReadyReceiver
+	operationProgress         map[review.OperationID]Progress
+	filterBuild               *fileFilterBuild
+	collapseCapture           *collapseCapture
+	exportOperations          map[review.OperationID]exportRequest
+	pathFiles                 map[string]review.FileID
+	syntaxSuppressed          map[review.SyntaxIdentity]review.SyntaxStatus
+	syntaxNew                 *review.PreparedSyntax
+	document                  *source.Document
+	reloadPreparationDocument *source.Document
+	syntaxOld                 *review.PreparedSyntax
+	coordinator               *Coordinator
+	pendingStdout             *review.PreparedExport
+	ambiguousPaths            map[string]struct{}
+	notice                    *Notice
+	findRestore               *findReturnState
+	searchAfterSyntax         *pendingSearch
+	help                      help.Model
+	filterQuery               string
+	visibleFileTree           fileTree
+	allFileTree               fileTree
+	filterTreeFiles           []review.FileID
+	cleanupSources            []*source.Cleanup
+	treeCursor                treeNodeIdentity
+	visibleFileOrder          []review.FileID
+	allFileOrder              []review.FileID
+	fileOrder                 []review.FileID
+	searchInput               textinput.Model
+	commandInput              textinput.Model
+	chord                     pendingKeyChord
+	foreground                foregroundState
+	collapsedTree             collapsedTreeState
+	review                    review.Review
+	find                      findPalette
+	settings                  Settings
+	publicationExcluded       review.PublicationExclusions
+	coordinatorStats          CoordinatorStats
+	size                      TerminalSize
+	searchCursor              int
+	publicationOperation      review.OperationID
+	treeMoveGeneration        uint64
+	nextCollapseCapturePermit uint64
+	treeMovePending           int
+	diffLeft                  int
+	filterTreeGeneration      uint64
+	commentCursor             int
+	publicationDetailTop      int
+	publicationCursor         int
+	helpTop                   int
+	statusTop                 int
+	nextOperation             uint64
+	filterTreeOperation       review.OperationID
+	syntaxOperation           review.OperationID
+	filterGeneration          uint64
+	workspaceIndex            review.OperationID
+	confirmation              confirmation
+	syntaxFile                review.FileID
+	visualAnchor              uint32
+	diffTop                   uint32
+	diffCursor                uint32
+	repeat                    uint16
+	exportPicker              exportSelection
+	publicationAllowStale     bool
+	commentsVisible           bool
+	publicationCancel         bool
+	quitting                  bool
+	publicationMoveSummary    bool
+	focusReturn               FocusOwner
+	fileTreeVisible           bool
+	filterTreeBuilding        bool
+	overlay                   Overlay
+	syntaxDeferred            bool
+	focus                     FocusOwner
+	mode                      InteractionMode
+	initialized               bool
+	coordinatorClosed         bool
 }
 
 type pendingKeyChord struct {
@@ -263,17 +274,17 @@ func NewModel(
 	if err != nil {
 		return nil, err
 	}
-	current, err := review.NewReview(document.Snapshot())
+	current, err := review.NewReview(review.ReviewRequest{
+		Snapshot:        document.Snapshot(),
+		CommentKinds:    settings.commentKinds,
+		CommentPolicies: settings.commentPolicies,
+	})
 	if err != nil {
 		return nil, err
 	}
 	helpModel := help.New()
 	helpModel.ShowAll = true
-	editor := textarea.New()
-	editor.Placeholder = "Write a review comment"
-	editor.ShowLineNumbers = false
-	editor.CharLimit = int(review.MaxCommentBodyBytes)
-	editor.MaxContentHeight = 4_096
+	editor := newCommentEditor(review.MaxCommentBodyBytes)
 	searchInput := textinput.New()
 	searchInput.Prompt = "/ "
 	searchInput.Placeholder = "search changed patches"
@@ -282,28 +293,26 @@ func NewModel(
 	commandInput.Prompt = ": "
 	commandInput.CharLimit = maxPromptBytes
 	model := &Model{
-		commandContext:      ctx,
-		document:            document,
-		coordinator:         coordinator,
-		receiver:            receiver,
-		settings:            settings,
-		help:                helpModel,
-		commentEditor:       editor,
-		searchInput:         searchInput,
-		commandInput:        commandInput,
-		review:              current,
-		focus:               FocusDiff,
-		mode:                ModeNormal,
-		commentsVisible:     false,
-		fileTreeVisible:     true,
-		nextOperation:       1,
-		foreground:          newForegroundState(),
-		operationProgress:   make(map[review.OperationID]Progress),
-		exportOperations:    make(map[review.OperationID]exportRequest),
-		deliveryOperations:  make(map[review.OperationID]delivery.Destination),
-		publicationExcluded: make(map[review.CommentID]struct{}),
-		syntaxSuppressed:    make(map[review.SyntaxIdentity]review.SyntaxStatus),
-		collapsedTrees:      make(map[string]struct{}),
+		commandContext:     ctx,
+		document:           document,
+		coordinator:        coordinator,
+		receiver:           receiver,
+		settings:           settings,
+		help:               helpModel,
+		commentEditor:      editor,
+		searchInput:        searchInput,
+		commandInput:       commandInput,
+		review:             current,
+		focus:              FocusDiff,
+		mode:               ModeNormal,
+		commentsVisible:    false,
+		fileTreeVisible:    true,
+		nextOperation:      1,
+		foreground:         newForegroundState(),
+		operationProgress:  make(map[review.OperationID]Progress),
+		exportOperations:   make(map[review.OperationID]exportRequest),
+		deliveryOperations: make(map[review.OperationID]delivery.Destination),
+		syntaxSuppressed:   make(map[review.SyntaxIdentity]review.SyntaxStatus),
 	}
 	model.refreshCoordinatorStats()
 	pending := current.PendingReviewSummary()
@@ -346,7 +355,11 @@ func (model *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case initializeMsg:
 		if !model.initialized {
 			model.initialized = true
-			model.requestWorkspaceIndex()
+			return model.finishUpdate(
+				helpCommand,
+				childCommand,
+				model.requestWorkspaceIndex(),
+			)
 		}
 	case mouseActionMsg:
 		if mouseCommand := model.applyMouseAction(message); mouseCommand != nil {
@@ -356,6 +369,8 @@ func (model *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return model.finishUpdate(helpCommand, childCommand, model.advanceFileFilter(message))
 	case treeMoveChunkMsg:
 		return model.finishUpdate(helpCommand, childCommand, model.advanceTreeMove(message))
+	case collapseCaptureStepMsg:
+		return model.finishUpdate(helpCommand, childCommand, model.advanceCollapseCapture(message))
 	case findDebounceMsg:
 		return model.finishUpdate(helpCommand, childCommand, model.beginFileFind(message))
 	case findChunkMsg:
@@ -425,7 +440,7 @@ func (model *Model) applyMouseAction(message mouseActionMsg) tea.Cmd {
 			message.findIndex >= 0 && message.findIndex < model.findResultCount() {
 			model.find.cursor = message.findIndex
 			model.clampFindTop()
-			model.previewFindSelection(false)
+			model.previewFindSelection(findSelectionPreview)
 		}
 		return nil
 	}
@@ -489,18 +504,21 @@ func (model *Model) TerminalSize() TerminalSize {
 // CloseSourceDocument releases the current source after Program.Run and the
 // coordinator's worker join have completed.
 func (model *Model) CloseSourceDocument() error {
-	documents := model.cleanupDocuments
+	cleanups := model.cleanupSources
+	if cleanup := model.detachCollapseCaptureCleanup(); cleanup != nil {
+		cleanups = append(cleanups, cleanup)
+	}
 	if model.document != nil {
-		documents = append(documents, model.document)
+		cleanups = append(cleanups, model.document.DetachCleanup())
 	}
 	var closeErrors []error
-	for _, document := range documents {
-		if document != nil {
-			closeErrors = append(closeErrors, document.Close())
+	for _, cleanup := range cleanups {
+		if cleanup != nil {
+			closeErrors = append(closeErrors, cleanup.Close())
 		}
 	}
 	model.document = nil
-	model.cleanupDocuments = nil
+	model.cleanupSources = nil
 	return errors.Join(closeErrors...)
 }
 
@@ -563,6 +581,8 @@ func (model *Model) applyOutcome(outcome Outcome) tea.Cmd {
 	case PatchOutcome:
 		model.applyPatchOutcome(outcome)
 		return nil
+	case commentMutationOutcome:
+		return model.applyCommentMutationOutcome(outcome)
 	case SearchOutcome:
 		model.applySearchOutcome(outcome)
 		return nil
@@ -581,16 +601,13 @@ func (model *Model) applyOutcome(outcome Outcome) tea.Cmd {
 	case ExportOutcome:
 		return model.applyExportOutcome(outcome)
 	case ReloadAcquiredOutcome:
-		model.applyReloadAcquired(outcome)
-		return nil
+		return model.applyReloadAcquired(outcome)
 	case ReloadPreparedOutcome:
-		model.applyReloadPrepared(outcome)
-		return nil
+		return model.applyReloadPrepared(outcome)
 	case FileTreeOutcome:
 		return model.applyFileFilterTree(outcome)
 	case WorkspaceIndexOutcome:
-		model.applyWorkspaceIndex(outcome)
-		return nil
+		return model.applyWorkspaceIndex(outcome)
 	case DeliveryOutcome:
 		model.applyDeliveryOutcome(outcome)
 		return nil
@@ -663,12 +680,16 @@ func (model *Model) applyPatchOutcome(patch PatchOutcome) {
 		if target != nil {
 			model.applyDiffTarget(*target)
 		}
-		model.requestSyntax()
 	} else if active, exists := model.review.ActiveFile(); exists && active == fileID {
 		model.foreground.clearReloadViewport(fileID)
 	}
+	restoredViewport := false
 	if active, exists := model.review.ActiveFile(); exists && active == fileID {
-		model.applyPendingFindRestore(fileID)
+		restoredViewport = model.applyPendingFindRestore(fileID)
+	}
+	if active, exists := model.review.ActiveFile(); exists && active == fileID && patchReady &&
+		!restoredViewport {
+		model.requestSyntax()
 	}
 	if effect.kind == foregroundEffectRequestPatch &&
 		result.Status == review.PatchReady {
@@ -836,376 +857,6 @@ func (model *Model) applyForegroundEffect(effect foregroundEffect) {
 		model.review = model.review.ClearSearch()
 		model.searchCursor = 0
 		model.notice = &Notice{Kind: NoticeInformation, Text: "search cleared"}
-	}
-}
-
-func (model *Model) handleKey(message tea.KeyPressMsg) tea.Cmd {
-	stroke := keyStrokeFrom(message)
-	if stroke.value == "" {
-		return nil
-	}
-	if model.foreground.reloadIsPreparing() {
-		if action, consumed, command := model.resolveKeyStroke(stroke); consumed {
-			if action == KeyActionNone {
-				return command
-			}
-			repeat := model.takeRepeat(action)
-			if action == KeyActionQuit || action == KeyActionInterrupt ||
-				action == KeyActionCancel {
-				return model.applyAction(action, repeat)
-			}
-		}
-		model.notice = &Notice{
-			Kind: NoticeInformation,
-			Text: "finishing reload; only cancel or quit is available",
-		}
-		return nil
-	}
-	model.invalidateChordForOwnerChange()
-	if model.acceptRepeatDigit(stroke.value) {
-		return nil
-	}
-	if action, consumed, command := model.resolveKeyStroke(stroke); consumed {
-		if action == KeyActionNone {
-			return command
-		}
-		return model.applyAction(action, model.takeRepeat(action))
-	}
-	model.repeat = 0
-	return nil
-}
-
-// resolveKeyStroke owns chord accumulation for every key context. A pending
-// prefix is consumed; when it fails to extend, the current stroke is retried as
-// the start of a new chord so modal text inputs receive only unbound strokes.
-func (model *Model) resolveKeyStroke(stroke keyStroke) (KeyAction, bool, tea.Cmd) {
-	if stroke.value == "" {
-		return KeyActionNone, false, nil
-	}
-	model.invalidateChordForOwnerChange()
-	if action, exact, prefix := model.resolveAction(append(model.chord.strokes, stroke.value)); exact {
-		model.completeChord()
-		return keyRepeatAction(stroke, action), true, nil
-	} else if prefix {
-		model.chord.strokes = append(model.chord.strokes, stroke.value)
-		if len(model.chord.strokes) == 1 {
-			model.chord.context = model.keyContext()
-			model.chord.focus = model.configFocus()
-		}
-		model.chord.generation++
-		return KeyActionNone, true,
-			chordTimeoutCmd(model.commandContext, model.chord.generation)
-	}
-	model.abandonChord()
-	if action, exact, prefix := model.resolveAction([]string{stroke.value}); exact {
-		return keyRepeatAction(stroke, action), true, nil
-	} else if prefix {
-		model.chord.strokes = []string{stroke.value}
-		model.chord.context = model.keyContext()
-		model.chord.focus = model.configFocus()
-		model.chord.generation++
-		return KeyActionNone, true,
-			chordTimeoutCmd(model.commandContext, model.chord.generation)
-	}
-	return KeyActionNone, false, nil
-}
-
-func keyStrokeFrom(message tea.KeyPressMsg) keyStroke {
-	return keyStroke{
-		value:    normalizeStroke(message.String()),
-		repeated: message.Key().IsRepeat,
-	}
-}
-
-func keyRepeatAction(stroke keyStroke, action KeyAction) KeyAction {
-	if stroke.repeated && !actionAcceptsKeyRepeat(action) {
-		return KeyActionNone
-	}
-	return action
-}
-
-func (model *Model) invalidateChordForOwnerChange() {
-	if len(model.chord.strokes) == 0 ||
-		model.chord.context == model.keyContext() &&
-			model.chord.focus == model.configFocus() {
-		return
-	}
-	model.abandonChord()
-}
-
-func (model *Model) completeChord() {
-	if len(model.chord.strokes) != 0 {
-		model.chord.generation++
-	}
-	model.chord.strokes = nil
-	model.chord.context = ""
-	model.chord.focus = ""
-}
-
-func (model *Model) abandonChord() {
-	model.completeChord()
-	model.repeat = 0
-}
-
-func (model *Model) acceptRepeatDigit(stroke string) bool {
-	if model.belowMinimum() || model.overlay != OverlayNone ||
-		model.mode != ModeNormal && model.mode != ModeVisual ||
-		len(model.chord.strokes) != 0 || len(stroke) != 1 ||
-		stroke[0] < '0' || stroke[0] > '9' {
-		return false
-	}
-	digit := uint16(stroke[0] - '0')
-	if model.repeat == 0 && digit == 0 {
-		return false
-	}
-	next := uint32(model.repeat)*10 + uint32(digit)
-	if next > 9_999 {
-		model.repeat = 0
-		model.notice = &Notice{Kind: NoticeWarning, Text: "numeric repeat must not exceed 9999"}
-		return true
-	}
-	model.repeat = uint16(next)
-	return true
-}
-
-func (model *Model) takeRepeat(action KeyAction) int {
-	repeat := model.repeat
-	model.repeat = 0
-	if repeat == 0 || !repeatableAction(action) {
-		return 1
-	}
-	return int(repeat)
-}
-
-func repeatableAction(action KeyAction) bool {
-	switch action {
-	case KeyActionFocusNextPane, KeyActionFocusPreviousPane,
-		KeyActionMoveUp, KeyActionMoveDown,
-		KeyActionPageUp, KeyActionPageDown,
-		KeyActionHalfPageUp, KeyActionHalfPageDown,
-		KeyActionNextFile, KeyActionPreviousFile,
-		KeyActionNextHunk, KeyActionPreviousHunk,
-		KeyActionNextComment, KeyActionPreviousComment,
-		KeyActionExtendUp, KeyActionExtendDown:
-		return true
-	default:
-		return false
-	}
-}
-
-func actionAcceptsKeyRepeat(action KeyAction) bool {
-	switch action {
-	case KeyActionFocusNextPane, KeyActionFocusPreviousPane,
-		KeyActionMoveUp, KeyActionMoveDown,
-		KeyActionScrollLeft, KeyActionScrollRight,
-		KeyActionPageUp, KeyActionPageDown,
-		KeyActionHalfPageUp, KeyActionHalfPageDown,
-		KeyActionNextFile, KeyActionPreviousFile,
-		KeyActionNextHunk, KeyActionPreviousHunk,
-		KeyActionNextComment, KeyActionPreviousComment,
-		KeyActionNextSearchHit, KeyActionPreviousSearchHit,
-		KeyActionExtendUp, KeyActionExtendDown,
-		KeyActionDeleteBackward, KeyActionInsertNewline,
-		KeyActionNextHelpPage, KeyActionPreviousHelpPage,
-		KeyActionHelpLineUp, KeyActionHelpLineDown,
-		KeyActionHelpPageUp, KeyActionHelpPageDown:
-		return true
-	default:
-		return false
-	}
-}
-
-func (model *Model) handleCommentEditorKey(message tea.KeyPressMsg) tea.Cmd {
-	stroke := keyStrokeFrom(message)
-	if action, consumed, command := model.resolveKeyStroke(stroke); consumed {
-		if action == KeyActionNone {
-			return command
-		}
-		switch action {
-		case KeyActionDeleteBackward:
-			return model.updateCommentEditor(tea.KeyPressMsg(tea.Key{Code: tea.KeyBackspace}))
-		case KeyActionInsertNewline:
-			return model.updateCommentEditor(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
-		default:
-			return model.applyAction(action, 1)
-		}
-	}
-	return model.updateCommentEditor(message)
-}
-
-func (model *Model) updateCommentEditor(message tea.Msg) tea.Cmd {
-	if paste, ok := message.(tea.PasteMsg); ok &&
-		int64(len(paste.Content)) > review.MaxCommentBodyBytes {
-		model.notice = &Notice{
-			Kind: NoticeWarning,
-			Text: NoticeText(
-				"comment body limit reached: " + strconv.FormatInt(review.MaxCommentBodyBytes, 10) +
-					" bytes",
-			),
-		}
-		return nil
-	}
-	previous := model.commentEditor.Value()
-	previousLine := model.commentEditor.Line()
-	previousColumn := model.commentEditor.Column()
-	var command tea.Cmd
-	model.commentEditor, command = model.commentEditor.Update(message)
-	value := model.commentEditor.Value()
-	if value == previous {
-		return command
-	}
-	if int64(len(value)) > review.MaxCommentBodyBytes {
-		model.restoreCommentEditor(previous, previousLine, previousColumn)
-		model.notice = &Notice{
-			Kind: NoticeWarning,
-			Text: NoticeText(
-				"comment body limit reached: " + strconv.FormatInt(review.MaxCommentBodyBytes, 10) +
-					" bytes",
-			),
-		}
-		return command
-	}
-	next, err := model.review.UpdateDraft(value)
-	if err != nil {
-		model.restoreCommentEditor(previous, previousLine, previousColumn)
-		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
-		return command
-	}
-	model.review = next
-	return command
-}
-
-func (model *Model) restoreCommentEditor(value string, line, column int) {
-	model.commentEditor.SetValue(value)
-	for model.commentEditor.Line() > line {
-		model.commentEditor.CursorUp()
-	}
-	model.commentEditor.SetCursorColumn(column)
-}
-
-func (model *Model) resolveAction(strokes []string) (KeyAction, bool, bool) {
-	contextName := model.keyContext()
-	var (
-		exactAction KeyAction
-		prefix      bool
-	)
-	for _, binding := range model.effectiveBindings(contextName) {
-		bindingStrokes := normalizedChord(binding.Chord)
-		if len(strokes) > len(bindingStrokes) {
-			continue
-		}
-		matches := true
-		for index := range strokes {
-			if strokes[index] != bindingStrokes[index] {
-				matches = false
-				break
-			}
-		}
-		if !matches {
-			continue
-		}
-		if len(strokes) == len(bindingStrokes) {
-			exactAction = binding.Action
-		} else {
-			prefix = true
-		}
-	}
-	return exactAction, exactAction != KeyActionNone, prefix
-}
-
-func (model *Model) keyContext() KeyContext {
-	if model.belowMinimum() {
-		return KeyContextMinimumSize
-	}
-	if model.overlay == OverlayConfirm {
-		return KeyContextConfirm
-	}
-	switch {
-	case model.mode == ModeVisual:
-		return KeyContextVisual
-	case model.mode == ModeCommentEdit:
-		return KeyContextCommentEdit
-	case model.overlay == OverlayFind:
-		return KeyContextSearch
-	case model.mode == ModeCommand:
-		return KeyContextCommand
-	case model.overlay == OverlayHelp:
-		return KeyContextHelp
-	case model.overlay == OverlayStatus:
-		return KeyContextStatusDetails
-	case model.overlay == OverlayExport:
-		return KeyContextExportPicker
-	case model.overlay == OverlaySubmit:
-		return KeyContextSubmit
-	default:
-		return KeyContextNormal
-	}
-}
-
-func (model *Model) effectiveBindings(contextName KeyContext) []Keybinding {
-	focus := model.configFocus()
-	bindings := make([]Keybinding, 0, len(model.settings.keybindings))
-	positions := make(map[string]int)
-	for _, binding := range model.settings.keybindings {
-		if binding.Context != contextName ||
-			binding.Focus != KeyFocusNone && binding.Focus != focus {
-			continue
-		}
-		if contextName == KeyContextMinimumSize &&
-			binding.Action != KeyActionQuit &&
-			binding.Action != KeyActionInterrupt {
-			continue
-		}
-		chord := strings.Join(normalizedChord(binding.Chord), " ")
-		if position, exists := positions[chord]; exists {
-			if binding.Focus != KeyFocusNone {
-				bindings[position] = binding
-			}
-			continue
-		}
-		positions[chord] = len(bindings)
-		bindings = append(bindings, binding)
-	}
-	return bindings
-}
-
-func chordTimeoutCmd(ctx context.Context, generation uint64) tea.Cmd {
-	return func() tea.Msg {
-		timer := time.NewTimer(chordTimeout)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-			return chordTimeoutMsg{generation: generation}
-		case <-ctx.Done():
-			return nil
-		}
-	}
-}
-
-func normalizedChord(chord KeyChord) []string {
-	fields := strings.Fields(chord.String())
-	for index := range fields {
-		fields[index] = normalizeStroke(fields[index])
-	}
-	return fields
-}
-
-func normalizeStroke(value string) string {
-	if value == " " {
-		return "space"
-	}
-	value = strings.TrimSpace(value)
-	value = strings.ReplaceAll(value, "+", "-")
-	if len([]rune(value)) == 1 {
-		return value
-	}
-	switch strings.ToLower(value) {
-	case "return":
-		return keyEnter
-	case "escape":
-		return keyEscape
-	default:
-		return strings.ToLower(value)
 	}
 }
 

@@ -48,7 +48,7 @@ var requiredThemeColors = []ThemeColor{
 
 var optionalThemeColors = stringSet[ThemeColor](
 	"diff_add_bg", "diff_del_bg", "diff_hunk_header", "file_modified", "file_renamed",
-	"branch_name", "message_warning_fg", "message_warning_bg",
+	"comment_note", "comment_suggestion", "branch_name", "message_warning_fg", "message_warning_bg",
 )
 
 var namedColors = stringSet[string](

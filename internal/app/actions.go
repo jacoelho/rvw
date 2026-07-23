@@ -65,6 +65,10 @@ func (model *Model) applyRestrictedAction(action KeyAction, repeat int) (tea.Cmd
 			model.cancelCommentEdit()
 		case KeyActionSaveComment:
 			model.saveComment()
+		case KeyActionNextCommentKind:
+			model.cycleCommentKind(review.NavigateNext)
+		case KeyActionPreviousCommentKind:
+			model.cycleCommentKind(review.NavigatePrevious)
 		default:
 		}
 		return nil, true
@@ -173,7 +177,7 @@ func (model *Model) applyReviewAction(action KeyAction) (tea.Cmd, bool) {
 	case KeyActionSummaryComment:
 		return model.beginSummaryComment(), true
 	case KeyActionEditComment:
-		return model.beginEditComment(), true
+		model.beginEditComment()
 	case KeyActionDeleteComment:
 		model.requestCommentDelete()
 	case KeyActionExpandContext:
@@ -251,10 +255,12 @@ func (model *Model) applyCommandAction(action KeyAction) (tea.Cmd, bool) {
 		return model.requestQuit(), true
 	case KeyActionCancel:
 		if operationID := model.foreground.reloadOperation(); operationID != 0 {
-			model.coordinator.Cancel(operationID)
-			model.notice = &Notice{
-				Kind: NoticeInformation,
-				Text: "cancelling reload; the current source remains active",
+			if !model.cancelReloadCollapseCapture() {
+				model.coordinator.Cancel(operationID)
+				model.notice = &Notice{
+					Kind: NoticeInformation,
+					Text: "cancelling reload; the current source remains active",
+				}
 			}
 		}
 	case KeyActionReload:
@@ -275,16 +281,19 @@ func (model *Model) applyCommandAction(action KeyAction) (tea.Cmd, bool) {
 		model.openExportPicker(exportSelection{
 			format:      review.ExportMarkdown,
 			destination: delivery.DestinationClipboard,
+			options:     review.DefaultExportOptions(),
 		})
 	case KeyActionExportMarkdown:
 		model.openExportPicker(exportSelection{
 			format:      review.ExportMarkdown,
 			destination: delivery.DestinationStdout,
+			options:     review.DefaultExportOptions(),
 		})
 	case KeyActionExportJSON:
 		model.openExportPicker(exportSelection{
 			format:      review.ExportJSON,
 			destination: delivery.DestinationStdout,
+			options:     review.DefaultExportOptions(),
 		})
 	case KeyActionOpenSubmit:
 		model.startPublicationCheck()

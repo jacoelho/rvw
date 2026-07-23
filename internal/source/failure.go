@@ -53,6 +53,7 @@ const (
 	LimitPullRequestDepth LimitResource = "pull-request-fetch-depth"
 	LimitRemoteThreads    LimitResource = "remote-review-thread-identities"
 	LimitPendingReview    LimitResource = "pending-review-identities"
+	LimitFilterAutomaton  LimitResource = "filter-automaton-work"
 )
 
 // LimitError describes limit error.

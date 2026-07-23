@@ -116,6 +116,108 @@ linters:
             - github.com/rivo/uniseg
             - golang.org/x/sys/unix
 
+        cmd-rvw-production:
+          list-mode: strict
+          files:
+            - "**/cmd/rvw/*.go"
+            - "!**/*_test.go"
+          allow:
+            - $gostd
+            - charm.land/bubbletea/v2
+            - github.com/jacoelho/rvw/internal/app$
+            - github.com/jacoelho/rvw/internal/config$
+            - github.com/jacoelho/rvw/internal/delivery$
+            - github.com/jacoelho/rvw/internal/output$
+            - github.com/jacoelho/rvw/internal/review$
+            - github.com/jacoelho/rvw/internal/source$
+            - golang.org/x/sys/unix$
+
+        app-production:
+          list-mode: strict
+          files:
+            - "**/internal/app/*.go"
+            - "!**/*_test.go"
+          allow:
+            - $gostd
+            - charm.land/bubbles/v2
+            - charm.land/bubbletea/v2
+            - charm.land/lipgloss/v2
+            - github.com/charmbracelet/x/ansi$
+            - github.com/jacoelho/rvw/internal/delivery$
+            - github.com/jacoelho/rvw/internal/review$
+            - github.com/jacoelho/rvw/internal/source$
+            - github.com/rivo/uniseg$
+
+        config-production:
+          list-mode: strict
+          files:
+            - "**/internal/config/*.go"
+            - "!**/*_test.go"
+          allow:
+            - $gostd
+            - github.com/BurntSushi/toml$
+
+        delivery-production:
+          list-mode: strict
+          files:
+            - "**/internal/delivery/*.go"
+            - "!**/*_test.go"
+          allow:
+            - $gostd
+            - github.com/jacoelho/rvw/internal/subprocess$
+
+        output-production:
+          list-mode: strict
+          files:
+            - "**/internal/output/*.go"
+            - "!**/*_test.go"
+          allow:
+            - $gostd
+            - github.com/jacoelho/rvw/internal/review$
+            - github.com/jacoelho/rvw/internal/source$
+
+        review-production:
+          list-mode: strict
+          files:
+            - "**/internal/review/*.go"
+            - "!**/*_test.go"
+          allow:
+            - bytes$
+            - crypto/sha256$
+            - encoding/base64$
+            - encoding/json$
+            - errors$
+            - fmt$
+            - iter$
+            - maps$
+            - math$
+            - math/bits$
+            - slices$
+            - sort$
+            - strconv$
+            - strings$
+            - unicode$
+            - unicode/utf8$
+
+        source-production:
+          list-mode: strict
+          files:
+            - "**/internal/source/*.go"
+            - "!**/*_test.go"
+          allow:
+            - $gostd
+            - github.com/jacoelho/rvw/internal/review$
+            - github.com/jacoelho/rvw/internal/subprocess$
+            - golang.org/x/sys/unix$
+
+        subprocess-production:
+          list-mode: strict
+          files:
+            - "**/internal/subprocess/*.go"
+            - "!**/*_test.go"
+          allow:
+            - $gostd
+
     revive:
       enable-default-rules: true
       rules:

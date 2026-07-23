@@ -15,6 +15,8 @@ const (
 	limitedValue            = "limited"
 	draftValue              = "draft"
 	inlineValue             = "inline"
+	pendingValue            = "pending"
+	summaryValue            = "summary"
 )
 
 // ErrInvalidOperation identifies an invalid operation failure.
@@ -166,7 +168,7 @@ func (kind OperationKind) String() string {
 func (status OperationStatus) String() string {
 	switch status {
 	case OperationPending:
-		return "pending"
+		return pendingValue
 	case OperationSucceeded:
 		return "succeeded"
 	case OperationFailed:

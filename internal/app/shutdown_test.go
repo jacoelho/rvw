@@ -16,8 +16,8 @@ import (
 func TestCoordinatorDirectOutcomeFamiliesRetainUntilClaim(t *testing.T) {
 	fixture := newSourceFixture(t, map[string]string{"alpha.txt": "changed\n"})
 	testCases := []struct {
-		name    string
 		outcome func(review.OperationID) Outcome
+		name    string
 	}{
 		{name: "patch", outcome: func(id review.OperationID) Outcome { return PatchOutcome{ID: id} }},
 		{name: "search", outcome: func(id review.OperationID) Outcome { return SearchOutcome{ID: id} }},
@@ -102,8 +102,8 @@ func TestCoordinatorDirectOutcomeFamiliesRetainUntilClaim(t *testing.T) {
 
 func TestShutdownClosesDocumentsFromDirectReloadVariants(t *testing.T) {
 	testCases := []struct {
-		name    string
 		outcome func(review.OperationID, *source.Document) Outcome
+		name    string
 	}{
 		{
 			name: "acquired",
@@ -152,12 +152,12 @@ func TestShutdownDirectPublicationVariants(t *testing.T) {
 		t.Fatal(err)
 	}
 	testCases := []struct {
-		name               string
 		outcome            func(review.OperationID) Outcome
 		publication        *publicationReservation
+		name               string
+		wantFacts          int
 		wantDisposition    review.PublicationDisposition
 		wantReconciliation review.ReconciliationDisposition
-		wantFacts          int
 	}{
 		{
 			name: "check only",
@@ -169,12 +169,9 @@ func TestShutdownDirectPublicationVariants(t *testing.T) {
 			name: "committed",
 			outcome: func(id review.OperationID) Outcome {
 				return PublicationCommitOutcome{
-					ID: id,
-					Publication: review.PublicationResult{
-						Operation:   id,
-						Disposition: review.PublicationDispositionCommitted,
-						Detail:      boundedOperationDetail("committed"),
-					},
+					ID:          id,
+					Disposition: review.PublicationDispositionCommitted,
+					Detail:      boundedOperationDetail("committed"),
 				}
 			},
 			publication:     &publicationReservation{target: target, marker: marker},
@@ -185,12 +182,9 @@ func TestShutdownDirectPublicationVariants(t *testing.T) {
 			name: "failed before commit",
 			outcome: func(id review.OperationID) Outcome {
 				return PublicationCommitOutcome{
-					ID: id,
-					Publication: review.PublicationResult{
-						Operation:   id,
-						Disposition: review.PublicationDispositionFailedBeforeCommit,
-						Detail:      boundedOperationDetail("failed"),
-					},
+					ID:          id,
+					Disposition: review.PublicationDispositionFailedBeforeCommit,
+					Detail:      boundedOperationDetail("failed"),
 				}
 			},
 			publication:     &publicationReservation{target: target, marker: marker},
@@ -201,12 +195,9 @@ func TestShutdownDirectPublicationVariants(t *testing.T) {
 			name: "cancelled before commit",
 			outcome: func(id review.OperationID) Outcome {
 				return PublicationCommitOutcome{
-					ID: id,
-					Publication: review.PublicationResult{
-						Operation:   id,
-						Disposition: review.PublicationDispositionCancelledBeforeCommit,
-						Detail:      boundedOperationDetail("cancelled"),
-					},
+					ID:          id,
+					Disposition: review.PublicationDispositionCancelledBeforeCommit,
+					Detail:      boundedOperationDetail("cancelled"),
 				}
 			},
 			publication:     &publicationReservation{target: target, marker: marker},
@@ -217,12 +208,9 @@ func TestShutdownDirectPublicationVariants(t *testing.T) {
 			name: "unknown",
 			outcome: func(id review.OperationID) Outcome {
 				return PublicationCommitOutcome{
-					ID: id,
-					Publication: review.PublicationResult{
-						Operation:   id,
-						Disposition: review.PublicationDispositionUnknown,
-						Detail:      boundedOperationDetail("unknown"),
-					},
+					ID:          id,
+					Disposition: review.PublicationDispositionUnknown,
+					Detail:      boundedOperationDetail("unknown"),
 				}
 			},
 			publication:     &publicationReservation{target: target, marker: marker},
@@ -233,12 +221,9 @@ func TestShutdownDirectPublicationVariants(t *testing.T) {
 			name: "reconciliation committed",
 			outcome: func(id review.OperationID) Outcome {
 				return ReconciliationOutcome{
-					ID: id,
-					Reconciliation: review.ReconciliationResult{
-						Operation:   id,
-						Disposition: review.ReconciliationCommitted,
-						Detail:      boundedOperationDetail("found"),
-					},
+					ID:          id,
+					Disposition: review.ReconciliationCommitted,
+					Detail:      boundedOperationDetail("found"),
 				}
 			},
 			publication:        &publicationReservation{target: target, marker: marker},
@@ -249,12 +234,9 @@ func TestShutdownDirectPublicationVariants(t *testing.T) {
 			name: "reconciliation absent",
 			outcome: func(id review.OperationID) Outcome {
 				return ReconciliationOutcome{
-					ID: id,
-					Reconciliation: review.ReconciliationResult{
-						Operation:   id,
-						Disposition: review.ReconciliationNotCommitted,
-						Detail:      boundedOperationDetail("absent"),
-					},
+					ID:          id,
+					Disposition: review.ReconciliationNotCommitted,
+					Detail:      boundedOperationDetail("absent"),
 				}
 			},
 			publication:        &publicationReservation{target: target, marker: marker},
@@ -265,12 +247,9 @@ func TestShutdownDirectPublicationVariants(t *testing.T) {
 			name: "reconciliation still unknown",
 			outcome: func(id review.OperationID) Outcome {
 				return ReconciliationOutcome{
-					ID: id,
-					Reconciliation: review.ReconciliationResult{
-						Operation:   id,
-						Disposition: review.ReconciliationStillUnknown,
-						Detail:      boundedOperationDetail("still unknown"),
-					},
+					ID:          id,
+					Disposition: review.ReconciliationStillUnknown,
+					Detail:      boundedOperationDetail("still unknown"),
 				}
 			},
 			publication:        &publicationReservation{target: target, marker: marker},

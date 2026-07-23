@@ -12,39 +12,70 @@ var ErrInvalidReviewTransition = errors.New("invalid review transition")
 
 // Review represents review.
 type Review struct {
-	active         *FileID
-	selected       *FileID
-	commentAnchors commentAnchorCounts
-	patches        map[FileID]PatchState
-	draft          *Draft
-	operations     map[OperationID]Operation
-	pending        *pendingReviewState
-	snapshot       Snapshot
-	comments       []Comment
-	operationIDs   []OperationID
-	hunkMarks      hunkMarkSet
-	fileMarks      fileMarkSet
-	search         searchState
-	publication    publicationState
-	commentBody    int64
-	workspace      WorkspaceRevision
-	state          uint64
-	nextComment    uint32
-	showHidden     bool
+	active       *FileID
+	selected     *FileID
+	operations   map[OperationID]Operation
+	operationIDs []OperationID
+	fileMarks    fileMarkSet
+	hunkMarks    hunkMarkSet
+	search       searchState
+	patch        presentationPatch
+	publication  publicationState
+	snapshot     Snapshot
+	commentState
+	workspace  WorkspaceRevision
+	state      uint64
+	showHidden bool
+}
+
+// commentState is the single owner of coupled local and pending comment data.
+// Worker-prepared mutations replace this value atomically after checking its
+// revision; unrelated review transitions do not invalidate it.
+type commentState struct {
+	commentAnchors  commentAnchorCounts
+	draft           *Draft
+	pending         *pendingReviewState
+	comments        []Comment
+	commentKinds    CommentKinds
+	commentBody     int64
+	commentBytes    int64
+	retainedBytes   int64
+	revision        uint64
+	activeMutation  OperationID
+	pendingDirty    uint32
+	pendingConflict uint32
+	nextComment     uint32
+	commentPolicies CommentPolicies
+	mutationKind    CommentMutationKind
+}
+
+// ReviewRequest describes the required immutable inputs for a review.
+type ReviewRequest struct {
+	CommentKinds    CommentKinds
+	Snapshot        Snapshot
+	CommentPolicies CommentPolicies
 }
 
 // NewReview constructs and validates review.
-func NewReview(snapshot Snapshot) (Review, error) {
+func NewReview(request ReviewRequest) (Review, error) {
+	snapshot := request.Snapshot
 	if snapshot.SourceID() == 0 {
 		return Review{}, fmt.Errorf("%w: snapshot has no source", ErrInvalidReviewTransition)
 	}
+	if !request.CommentKinds.valid() || !request.CommentPolicies.valid() {
+		return Review{}, fmt.Errorf("%w: comment settings are invalid", ErrInvalidReviewTransition)
+	}
 	workspace := WorkspaceRevision(1)
 	review := Review{
+		commentState: commentState{
+			revision:        1,
+			commentKinds:    request.CommentKinds,
+			commentPolicies: request.CommentPolicies,
+		},
 		workspace:   workspace,
 		snapshot:    snapshot,
 		state:       1,
 		operations:  make(map[OperationID]Operation),
-		patches:     make(map[FileID]PatchState),
 		search:      searchState{status: SearchIdle},
 		publication: publicationState{status: PublicationIdle},
 	}
@@ -62,7 +93,12 @@ func NewReview(snapshot Snapshot) (Review, error) {
 		review.active = new(id)
 		review.selected = new(id)
 	}
-	return importPendingReview(review)
+	current, err := importPendingReviewCancellable(review, nil)
+	if err != nil {
+		return Review{}, err
+	}
+	current.refresh()
+	return current, nil
 }
 
 // WorkspaceRevision returns the receiver's workspace revision value.
@@ -175,161 +211,137 @@ func (review Review) HideHiddenFiles() Review {
 
 // BeginDraft performs the begin draft operation.
 func (review Review) BeginDraft(target CommentTarget) (Review, error) {
-	if review.draft != nil || !review.validTarget(target) {
+	if review.draft != nil || review.activeMutation != 0 ||
+		review.publicationBlocksCommentMutation() || !review.validTarget(target) {
 		return review, ErrInvalidReviewTransition
 	}
 	if fileID, ok := target.FileID(); ok {
 		file, _ := review.file(fileID)
 		target = target.withPath(file.IdentityPath())
 	}
-	next := review.clone()
-	next.draft = &Draft{target: target}
+	next := review.cloneCommentState()
+	next.draft = &Draft{target: target, kind: review.commentKinds.first()}
+	next.retainedBytes += draftRetainedBytes(next.draft)
+	return next, nil
+}
+
+// CycleDraftKind moves the active draft through the configured lexical kinds.
+func (review Review) CycleDraftKind(direction NavigationDirection) (Review, error) {
+	if review.draft == nil || review.activeMutation != 0 ||
+		direction != NavigatePrevious && direction != NavigateNext {
+		return review, ErrInvalidReviewTransition
+	}
+	index, found := slices.BinarySearchFunc(
+		review.commentKinds.values,
+		review.draft.kind,
+		func(left, right CommentKind) int { return strings.Compare(left.label, right.label) },
+	)
+	if !found {
+		return review, ErrInvalidReviewTransition
+	}
+	index = (index + int(direction) + review.commentKinds.Len()) % review.commentKinds.Len()
+	next := review.cloneCommentState()
+	next.draft.kind = review.commentKinds.values[index]
 	return next, nil
 }
 
 // UpdateDraft performs the update draft operation.
 func (review Review) UpdateDraft(body string) (Review, error) {
-	if review.draft == nil || int64(len(body)) > MaxCommentBodyBytes {
+	if review.draft == nil || review.activeMutation != 0 {
 		return review, ErrInvalidReviewTransition
 	}
-	next := review.clone()
-	draft := *review.draft
-	draft.body = strings.Clone(body)
-	next.draft = new(draft)
+	if _, err := scanCommentText(nil, body); err != nil {
+		return review, ErrInvalidReviewTransition
+	}
+	next := review.cloneCommentState()
+	next.draft.body = strings.Clone(body)
+	next.retainedBytes += int64(len(next.draft.body) - len(review.draft.body))
 	return next, nil
+}
+
+// OwnDraftBody installs an already-owned immutable draft body without copying it.
+func (review Review) OwnDraftBody(body OwnedDraftBody) (Review, error) {
+	if review.draft == nil || review.activeMutation != 0 || !body.valid {
+		return review, ErrInvalidReviewTransition
+	}
+	next := review.cloneCommentState()
+	next.draft.body = body.value
+	next.retainedBytes += int64(len(body.value) - len(review.draft.body))
+	return next, nil
+}
+
+// TakeDraftBody transfers the draft body out while preserving draft metadata.
+func (review Review) TakeDraftBody() (Review, OwnedDraftBody, error) {
+	if review.draft == nil || review.activeMutation != 0 {
+		return review, OwnedDraftBody{}, ErrInvalidReviewTransition
+	}
+	next := review.cloneCommentState()
+	body := OwnedDraftBody{value: next.draft.body, valid: true}
+	next.draft.body = ""
+	next.retainedBytes -= int64(len(body.value))
+	return next, body, nil
 }
 
 // SaveDraft returns the receiver's save draft value.
 func (review Review) SaveDraft() (Review, CommentID, error) {
-	if review.draft == nil {
-		return review, 0, ErrInvalidReviewTransition
-	}
-	body, err := NewCommentBody(review.draft.body)
+	started, mutation, err := review.StartSaveComment(synchronousCommentMutationID)
 	if err != nil {
 		return review, 0, ErrInvalidReviewTransition
 	}
-	next := review.clone()
-	next.comments = slices.Clone(review.comments)
-	var id CommentID
-	if review.draft.editing != nil {
-		index := slices.IndexFunc(review.comments, func(comment Comment) bool {
-			return comment.id == *review.draft.editing
-		})
-		if index < 0 ||
-			review.commentBody-int64(len(review.comments[index].body))+int64(len(body)) >
-				MaxCommentBodyTotal {
-			return review, 0, ErrInvalidReviewTransition
-		}
-		id = review.comments[index].id
-		next.commentBody -= int64(len(next.comments[index].body))
-		before := next.comments[index]
-		next.comments[index].target = review.draft.target
-		next.comments[index].body = body
-		next.commentBody += int64(len(body))
-		next.commentAnchors = replaceCommentAnchor(
-			review.commentAnchors,
-			&before,
-			&next.comments[index],
-		)
-	} else {
-		if len(review.comments) >= MaxComments || review.nextComment >= MaxComments ||
-			review.commentBody+int64(len(body)) > MaxCommentBodyTotal {
-			return review, 0, ErrInvalidReviewTransition
-		}
-		id = CommentID(review.nextComment)
-		comment := Comment{
-			id:     id,
-			target: review.draft.target,
-			body:   body,
-		}
-		next.comments = append(next.comments, comment)
-		next.commentAnchors = replaceCommentAnchor(review.commentAnchors, nil, &comment)
-		next.commentBody += int64(len(body))
-		next.nextComment++
+	prepared, err := PrepareCommentMutationCancellable(nil, mutation)
+	if err != nil {
+		return review, 0, ErrInvalidReviewTransition
 	}
-	next.draft = nil
+	next, err := started.ApplyCommentMutation(prepared)
+	if err != nil {
+		return review, 0, ErrInvalidReviewTransition
+	}
+	id, _ := prepared.SavedComment()
 	return next, id, nil
 }
 
 // BeginEditComment performs the begin edit comment operation.
 func (review Review) BeginEditComment(id CommentID) (Review, error) {
-	if review.draft != nil {
+	started, mutation, err := review.StartBeginEditComment(synchronousCommentMutationID, id)
+	if err != nil {
 		return review, ErrInvalidReviewTransition
 	}
-	index := slices.IndexFunc(review.comments, func(comment Comment) bool {
-		return comment.id == id
-	})
-	if index < 0 {
+	prepared, err := PrepareCommentMutationCancellable(nil, mutation)
+	if err != nil {
 		return review, ErrInvalidReviewTransition
 	}
-	restore := false
-	if review.pending != nil {
-		if binding, bound := review.pending.bindings[id]; bound {
-			if !binding.canUpdate {
-				return review, ErrInvalidReviewTransition
-			}
-			restore = binding.deleted
-		}
-	}
-	comment := review.comments[index]
-	next := review.clone()
-	if restore {
-		next.pending = review.pending.clone()
-		binding := next.pending.bindings[id]
-		binding.deleted = false
-		next.pending.bindings[id] = binding
-		next.commentAnchors = replaceCommentAnchor(review.commentAnchors, nil, &comment)
-	}
-	next.draft = &Draft{
-		target:  comment.target,
-		body:    comment.body.String(),
-		editing: new(id),
+	next, err := started.ApplyCommentMutation(prepared)
+	if err != nil {
+		return review, ErrInvalidReviewTransition
 	}
 	return next, nil
 }
 
 // CancelDraft returns the receiver's cancel draft value.
 func (review Review) CancelDraft() (Review, error) {
-	if review.draft == nil {
+	if review.draft == nil || review.activeMutation != 0 {
 		return review, ErrInvalidReviewTransition
 	}
-	next := review.clone()
+	next := review.cloneCommentState()
+	next.retainedBytes -= draftRetainedBytes(review.draft)
 	next.draft = nil
 	return next, nil
 }
 
 // DeleteComment performs the delete comment operation.
 func (review Review) DeleteComment(id CommentID) (Review, error) {
-	index := slices.IndexFunc(review.comments, func(comment Comment) bool {
-		return comment.id == id
-	})
-	if index < 0 {
+	started, mutation, err := review.StartDeleteComment(synchronousCommentMutationID, id)
+	if err != nil {
 		return review, ErrInvalidReviewTransition
 	}
-	if review.pending != nil {
-		if binding, bound := review.pending.bindings[id]; bound {
-			if binding.kind == pendingBindingBody && !review.pending.bodyUpdate ||
-				binding.kind == pendingBindingComment && !binding.canDelete {
-				return review, ErrInvalidReviewTransition
-			}
-			next := review.clone()
-			next.pending = review.pending.clone()
-			binding.deleted = true
-			next.pending.bindings[id] = binding
-			next.commentAnchors = replaceCommentAnchor(
-				review.commentAnchors,
-				&review.comments[index],
-				nil,
-			)
-			return next, nil
-		}
+	prepared, err := PrepareCommentMutationCancellable(nil, mutation)
+	if err != nil {
+		return review, ErrInvalidReviewTransition
 	}
-	next := review.clone()
-	next.comments = slices.Clone(review.comments)
-	removed := next.comments[index]
-	next.commentBody -= int64(len(next.comments[index].body))
-	next.comments = slices.Delete(next.comments, index, index+1)
-	next.commentAnchors = replaceCommentAnchor(review.commentAnchors, &removed, nil)
+	next, err := started.ApplyCommentMutation(prepared)
+	if err != nil {
+		return review, ErrInvalidReviewTransition
+	}
 	return next, nil
 }
 
@@ -365,7 +377,7 @@ func (review Review) CommentRange(start, count int) []Comment {
 
 // RetainedCommentBytes returns the receiver's retained comment bytes value.
 func (review Review) RetainedCommentBytes() int64 {
-	return review.commentBody
+	return review.retainedBytes
 }
 
 // Draft returns the receiver's draft value.
@@ -404,6 +416,12 @@ func (review Review) clone() Review {
 	if review.draft != nil {
 		next.draft = new(*review.draft)
 	}
+	return next
+}
+
+func (review Review) cloneCommentState() Review {
+	next := review.clone()
+	next.revision++
 	return next
 }
 

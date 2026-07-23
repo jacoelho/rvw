@@ -12,21 +12,23 @@ import (
 
 // PublicationCheckWork represents publication check work.
 type PublicationCheckWork struct {
-	Document *source.Document
-	Request  review.PublicationCheckRequest
-	Review   review.Review
-	ID       review.OperationID
+	Target  source.PublicationTarget
+	Source  review.PublicationSource
+	Request review.PublicationCheckRequest
+	ID      review.OperationID
 }
 
 // PublicationWork represents publication work.
 type PublicationWork struct {
 	Request review.PublicationRequest
+	Rebase  review.PendingRebaseSource
 	ID      review.OperationID
 }
 
 // ReconciliationWork represents reconciliation work.
 type ReconciliationWork struct {
 	Request review.ReconciliationRequest
+	Rebase  review.PendingRebaseSource
 	ID      review.OperationID
 }
 
@@ -67,15 +69,19 @@ func (permit *publicationCommitPermit) claim() bool {
 
 // SubmitPublicationCheck performs the submit publication check operation.
 func (coordinator *Coordinator) SubmitPublicationCheck(work PublicationCheckWork) error {
-	if work.ID == 0 || work.Document == nil ||
+	if work.ID == 0 || work.Target.SourceID() == 0 ||
 		work.Request.Operation != work.ID ||
-		work.Request.Source == 0 {
+		work.Request.Source == 0 || !work.Source.Ready() ||
+		work.Source.Workspace() != work.Request.Workspace ||
+		work.Source.Source() != work.Request.Source ||
+		work.Target.SourceID() != work.Request.Source {
 		return errors.New("invalid publication check work")
 	}
 	return coordinator.submitReservedPublication(
 		work.ID,
-		work.Review.RetainedCommentBytes()+256,
-		review.MaxPublicationBytes,
+		work.Source.RetainedBytes()+work.Target.RetainedBytes()+
+			work.Request.Options.RetainedBytes()+256,
+		max(publicationResultReservation, work.Source.ConstructionBytes()),
 		nil,
 		nil,
 		func(ctx context.Context) bool {
@@ -96,14 +102,17 @@ func (coordinator *Coordinator) SubmitPublicationCheck(work PublicationCheckWork
 // SubmitPublication performs the submit publication operation.
 func (coordinator *Coordinator) SubmitPublication(work PublicationWork) error {
 	if work.ID == 0 || work.Request.Operation != work.ID ||
-		work.Request.Checked == nil {
+		work.Request.Checked == nil ||
+		work.Request.Checked.Pending() != work.Rebase.Ready() ||
+		work.Rebase.Ready() && (work.Rebase.Workspace() != work.Request.Workspace ||
+			work.Rebase.Source() != work.Request.Source) {
 		return errors.New("invalid publication work")
 	}
 	permit := &publicationCommitPermit{}
 	return coordinator.submitReservedPublication(
 		work.ID,
-		work.Request.Checked.PayloadSize(),
-		1<<20,
+		work.Request.Checked.RetainedBytes()+work.Rebase.RetainedBytes(),
+		publicationResultReservation,
 		&publicationReservation{
 			target: work.Request.Checked.Target(),
 			marker: work.Request.Checked.Marker(),
@@ -131,10 +140,19 @@ func (coordinator *Coordinator) SubmitReconciliation(work ReconciliationWork) er
 		work.Request.Marker == "" {
 		return errors.New("invalid publication reconciliation work")
 	}
+	_, phase, pending := work.Request.PendingContinuation()
+	if pending && phase == 0 {
+		return errors.New("invalid publication reconciliation continuation")
+	}
+	if pending != work.Rebase.Ready() || work.Rebase.Ready() &&
+		(work.Rebase.Workspace() != work.Request.Workspace ||
+			work.Rebase.Source() != work.Request.Source) {
+		return errors.New("invalid publication reconciliation rebase source")
+	}
 	return coordinator.submitReservedPublication(
 		work.ID,
-		512,
-		review.MaxPublicationBytes,
+		work.Request.RetainedBytes()+work.Rebase.RetainedBytes(),
+		publicationResultReservation,
 		&publicationReservation{
 			target: work.Request.Target,
 			marker: work.Request.Marker,
@@ -176,7 +194,11 @@ func (coordinator *Coordinator) submitReservedPublication(
 	if _, exists := coordinator.accepted[id]; exists {
 		return fmt.Errorf("operation %d is already accepted", id)
 	}
-	if len(coordinator.accepted) >= MaxAcceptedOperations ||
+	active := len(coordinator.accepted)
+	if coordinator.collapseCapture != 0 {
+		active++
+	}
+	if active >= MaxAcceptedOperations ||
 		coordinator.requestBytes+requestBytes > MaxQueuedRequestBytes ||
 		coordinator.reservedResult+resultBytes > MaxRetainedResultBytes {
 		return ErrCoordinatorSaturated
@@ -236,37 +258,103 @@ func (coordinator *Coordinator) runPublicationCheck(job publicationJob) {
 		Total:  2,
 		Detail: boundedOperationDetail("preparing publication"),
 	})
-	prepared, err := job.check.Review.PreparePublication(job.check.Request.Options)
-	if err == nil {
-		coordinator.reportProgress(Progress{
-			ID:        job.check.ID,
-			Completed: 1,
-			Total:     2,
-			Detail:    boundedOperationDetail("checking immutable GitHub target"),
-		})
-		var checked *review.CheckedPublication
-		checked, err = coordinator.service.CheckPublication(
-			job.ctx,
-			job.check.Document,
-			prepared,
-		)
-		if err == nil {
-			coordinator.complete(PublicationCheckOutcome{
-				ID: job.check.ID,
-				Check: review.PublicationCheckResult{
-					Operation: job.check.Request.Operation,
-					Workspace: job.check.Request.Workspace,
-					Source:    job.check.Request.Source,
-					Checked:   checked,
-				},
-			})
-			return
-		}
+	checked, err := coordinator.preparePublicationCheck(&job)
+	if err != nil {
+		coordinator.complete(PublicationCheckOutcome{ID: job.check.ID, Err: err})
+		return
 	}
 	coordinator.complete(PublicationCheckOutcome{
-		ID:  job.check.ID,
-		Err: err,
+		ID: job.check.ID,
+		Check: review.PublicationCheckResult{
+			Operation: job.check.Request.Operation,
+			Workspace: job.check.Request.Workspace,
+			Source:    job.check.Request.Source,
+			Checked:   checked,
+		},
 	})
+}
+
+func (coordinator *Coordinator) preparePublicationCheck(
+	job *publicationJob,
+) (*review.CheckedPublication, error) {
+	publicationSource := job.check.Source
+	job.check.Source = review.PublicationSource{}
+	if !coordinator.acquireCPU(job.ctx) {
+		return nil, context.Cause(job.ctx)
+	}
+	prepared, err := publicationSource.PreparePublicationCancellable(
+		func() error { return context.Cause(job.ctx) },
+		job.check.Request.Options,
+	)
+	coordinator.releaseCPU()
+	if err != nil {
+		return nil, err
+	}
+
+	coordinator.reportProgress(Progress{
+		ID:        job.check.ID,
+		Completed: 1,
+		Total:     2,
+		Detail:    boundedOperationDetail("checking immutable GitHub target"),
+	})
+	mode := source.PublicationCheckNew
+	if prepared.ContinuesPendingPublication() {
+		mode = source.PublicationCheckPendingContinuation
+	}
+	acquisition, err := coordinator.service.AcquirePublicationCheck(
+		job.ctx,
+		job.check.Target,
+		prepared.Options(),
+		mode,
+		coordinator.runCPU,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if fresh, ok := acquisition.FreshPending(); ok {
+		prepared, err = coordinator.preparePendingPublicationCheck(job, prepared, fresh)
+		if err != nil {
+			// The remote state was only read; rejecting local construction cannot
+			// make the publication outcome ambiguous.
+			return nil, err
+		}
+	}
+	if !coordinator.acquireCPU(job.ctx) {
+		return nil, context.Cause(job.ctx)
+	}
+	checked, err := source.FinishPublicationCheckCancellable(
+		func() error { return context.Cause(job.ctx) },
+		acquisition,
+		prepared,
+	)
+	coordinator.releaseCPU()
+	if err != nil {
+		return nil, err
+	}
+	return checked, nil
+}
+
+func (coordinator *Coordinator) preparePendingPublicationCheck(
+	job *publicationJob,
+	prepared review.PreparedPublication,
+	fresh review.PendingReview,
+) (review.PreparedPublication, error) {
+	construction := prepared.PendingReconciliationConstructionBytes(fresh)
+	if construction == 0 {
+		return review.PreparedPublication{}, review.ErrInvalidPublication
+	}
+	if err := coordinator.growResultReservation(job.check.ID, construction); err != nil {
+		return review.PreparedPublication{}, err
+	}
+	if !coordinator.acquireCPU(job.ctx) {
+		return review.PreparedPublication{}, context.Cause(job.ctx)
+	}
+	reconciled, err := prepared.ReconcilePendingPublicationCancellable(
+		func() error { return context.Cause(job.ctx) },
+		fresh,
+	)
+	coordinator.releaseCPU()
+	return reconciled, err
 }
 
 func (coordinator *Coordinator) runPublicationCommit(job publicationJob) {
@@ -275,28 +363,187 @@ func (coordinator *Coordinator) runPublicationCommit(job publicationJob) {
 		Workspace: job.publication.Request.Workspace,
 		Source:    job.publication.Request.Source,
 	}
-	if !job.permit.claim() {
+	checked := job.publication.Request.Checked
+	switch {
+	case checked.Pending():
+		result = coordinator.runPendingPublicationCommit(job, result, checked)
+	case !job.permit.claim():
 		result.Disposition = review.PublicationDispositionCancelledBeforeCommit
 		result.Detail = boundedOperationDetail("publication cancelled before remote commit")
-	} else {
+	default:
 		coordinator.reportProgress(Progress{
 			ID:     job.publication.ID,
 			Total:  1,
 			Detail: boundedOperationDetail("committing GitHub review"),
 		})
-		commit := coordinator.service.Publish(
-			job.ctx,
-			job.publication.Request.Checked,
-		)
+		commit := coordinator.service.Publish(job.ctx, checked)
 		result.Disposition = commit.Disposition
+		result.PendingPhase = commit.PendingPhase
 		result.RemoteReview = commit.RemoteReview
 		result.Pending = commit.Pending
+		result.PendingRefresh = commit.PendingRefresh
 		result.Detail = commit.Detail
 	}
+	prepared, err := coordinator.preparePublicationResult(job, result)
+	result.Pending = nil
+	job.publication.Rebase = review.PendingRebaseSource{}
 	coordinator.complete(PublicationCommitOutcome{
 		ID:          job.publication.ID,
-		Publication: result,
+		Publication: prepared,
+		Disposition: prepared.Disposition(),
+		Detail:      prepared.Detail(),
+		Err:         err,
 	})
+}
+
+func (coordinator *Coordinator) runPendingPublicationCommit(
+	job publicationJob,
+	result review.PublicationResult,
+	checked *review.CheckedPublication,
+) review.PublicationResult {
+	var execution source.PendingPublicationExecution
+	var err error
+	if !coordinator.acquireCPU(job.ctx) {
+		err = context.Cause(job.ctx)
+	} else {
+		construction, constructionErr := source.PendingPublicationExecutionConstructionBytes(
+			job.ctx,
+			checked,
+		)
+		coordinator.releaseCPU()
+		if constructionErr != nil {
+			err = constructionErr
+		} else {
+			err = coordinator.growResultReservation(job.publication.ID, construction)
+		}
+	}
+	if err == nil {
+		if !coordinator.acquireCPU(job.ctx) {
+			err = context.Cause(job.ctx)
+		} else {
+			execution, err = source.PreparePendingPublicationExecution(job.ctx, checked)
+			coordinator.releaseCPU()
+		}
+	}
+	if err != nil {
+		result.Disposition = review.PublicationDispositionFailedBeforeCommit
+		if context.Cause(job.ctx) != nil {
+			result.Disposition = review.PublicationDispositionCancelledBeforeCommit
+		}
+		result.Detail = boundedOperationDetail(err.Error())
+		return result
+	}
+	defer execution.Close()
+	if !job.permit.claim() {
+		result.Disposition = review.PublicationDispositionCancelledBeforeCommit
+		result.Detail = boundedOperationDetail("publication cancelled before remote commit")
+		return result
+	}
+	coordinator.reportProgress(Progress{
+		ID:     job.publication.ID,
+		Total:  1,
+		Detail: boundedOperationDetail("committing GitHub review"),
+	})
+	step := coordinator.service.AcquirePendingPublication(job.ctx, execution, coordinator.runCPU)
+	for {
+		switch step.Kind() {
+		case source.PendingPublicationStepAcquired:
+			construction := execution.RetainedBytes() + step.ConstructionBytes()
+			if construction == 0 {
+				err = review.ErrInvalidPublication
+			} else {
+				err = coordinator.growResultReservation(job.publication.ID, construction)
+			}
+			if err == nil && coordinator.acquireCPU(job.ctx) {
+				step = step.Finish(job.ctx)
+				coordinator.releaseCPU()
+			} else if err == nil {
+				err = context.Cause(job.ctx)
+			}
+			if err != nil {
+				step.Close()
+				return applyPendingPublicationCommit(result, reviewUnknownPendingCommit(err))
+			}
+		case source.PendingPublicationStepContinue:
+			if err = step.Advance(); err != nil {
+				return applyPendingPublicationCommit(result, reviewUnknownPendingCommit(err))
+			}
+			step = coordinator.service.AcquirePendingPublication(job.ctx, execution, coordinator.runCPU)
+		case source.PendingPublicationStepTerminal:
+			commit, takeErr := step.TakeCommit()
+			if takeErr != nil {
+				commit = reviewUnknownPendingCommit(takeErr)
+			}
+			return applyPendingPublicationCommit(result, commit)
+		default:
+			return applyPendingPublicationCommit(
+				result,
+				reviewUnknownPendingCommit(errors.New("pending publication step is invalid")),
+			)
+		}
+	}
+}
+
+func applyPendingPublicationCommit(
+	result review.PublicationResult,
+	commit source.PublicationCommit,
+) review.PublicationResult {
+	result.Disposition = commit.Disposition
+	result.PendingPhase = commit.PendingPhase
+	result.RemoteReview = commit.RemoteReview
+	result.Pending = commit.Pending
+	result.PendingRefresh = commit.PendingRefresh
+	result.Detail = commit.Detail
+	return result
+}
+
+func reviewUnknownPendingCommit(err error) source.PublicationCommit {
+	return source.PublicationCommit{
+		Disposition:  review.PublicationDispositionUnknown,
+		PendingPhase: review.PendingPublicationIndeterminate,
+		Detail:       boundedOperationDetail(err.Error()),
+	}
+}
+
+//nolint:dupl // The typed result adapters are intentionally explicit; prepareReservedTerminal owns the shared algorithm.
+func (coordinator *Coordinator) preparePublicationResult(
+	job publicationJob,
+	result review.PublicationResult,
+) (review.PreparedPublicationResult, error) {
+	request := job.publication.Request
+	source := job.publication.Rebase
+	return prepareReservedTerminal(
+		job.ctx,
+		coordinator,
+		job.publication.ID,
+		func() int64 {
+			return request.PublicationResultConstructionBytes(source, result)
+		},
+		func() (review.PreparedPublicationResult, error) {
+			return review.PreparePublicationResultCancellable(
+				func() error { return context.Cause(job.ctx) },
+				request,
+				source,
+				result,
+			)
+		},
+		func() (review.PreparedPublicationResult, error) {
+			// The remote call crossed its commit boundary. Cancellation may stop
+			// proportional refresh work, but cannot discard the terminal fact.
+			return review.PreparePublicationResultFallbackCancellable(
+				nil,
+				request,
+				source,
+				result,
+			)
+		},
+		func(failure error) (review.PreparedPublicationResult, error) {
+			return review.PrepareUnknownPublicationResult(
+				request,
+				boundedOperationDetail(failure.Error()),
+			)
+		},
+	)
 }
 
 func (coordinator *Coordinator) runPublicationReconciliation(job publicationJob) {
@@ -305,12 +552,255 @@ func (coordinator *Coordinator) runPublicationReconciliation(job publicationJob)
 		Total:  1,
 		Detail: boundedOperationDetail("enumerating GitHub review history"),
 	})
-	result := coordinator.service.ReconcilePublication(
-		job.ctx,
-		job.reconciliation.Request,
-	)
+	prepared, err := coordinator.preparePublicationReconciliation(job)
+	job.reconciliation.Rebase = review.PendingRebaseSource{}
 	coordinator.complete(ReconciliationOutcome{
 		ID:             job.reconciliation.ID,
-		Reconciliation: result,
+		Reconciliation: prepared,
+		Disposition:    prepared.Disposition(),
+		Detail:         prepared.Detail(),
+		Err:            err,
 	})
+}
+
+func (coordinator *Coordinator) preparePublicationReconciliation(
+	job publicationJob,
+) (review.PreparedReconciliationResult, error) {
+	request := job.reconciliation.Request
+	_, phase, pending := request.PendingContinuation()
+	switch {
+	case pending && phase != review.PendingPublicationSubmitting:
+		return coordinator.preparePendingCaptureReconciliation(job)
+	case pending:
+		result := coordinator.runPendingSubmissionReconciliation(job)
+		return coordinator.prepareReconciliationResult(job, result)
+	default:
+		result := coordinator.runReviewHistoryReconciliation(job)
+		return coordinator.prepareReconciliationResult(job, result)
+	}
+}
+
+func (coordinator *Coordinator) preparePendingCaptureReconciliation(
+	job publicationJob,
+) (review.PreparedReconciliationResult, error) {
+	request := job.reconciliation.Request
+	acquisition, err := coordinator.service.AcquirePendingPublicationReconciliation(
+		job.ctx,
+		request,
+		coordinator.runCPU,
+	)
+	if err != nil {
+		return coordinator.prepareReconciliationResult(
+			job,
+			failedReconciliationResult(request, err),
+		)
+	}
+	defer acquisition.Close()
+	fresh, ok := acquisition.TakePendingCapture()
+	if !ok {
+		return coordinator.prepareReconciliationResult(
+			job,
+			failedReconciliationResult(request, review.ErrInvalidPublication),
+		)
+	}
+
+	construction, err := coordinator.pendingCaptureReconciliationConstruction(job, fresh)
+	if err == nil {
+		err = coordinator.growResultReservation(job.reconciliation.ID, construction)
+	}
+	if err != nil {
+		return coordinator.prepareReconciliationResult(
+			job,
+			failedReconciliationResult(request, err),
+		)
+	}
+	if !coordinator.acquireCPU(job.ctx) {
+		return coordinator.prepareReconciliationResult(
+			job,
+			failedReconciliationResult(request, context.Cause(job.ctx)),
+		)
+	}
+	prepared, prepareErr := review.PreparePendingReconciliationCaptureCancellable(
+		func() error { return context.Cause(job.ctx) },
+		request,
+		job.reconciliation.Rebase,
+		fresh,
+	)
+	coordinator.releaseCPU()
+	if prepareErr != nil {
+		return coordinator.prepareReconciliationResult(
+			job,
+			failedReconciliationResult(request, prepareErr),
+		)
+	}
+	return prepared, nil
+}
+
+func (coordinator *Coordinator) pendingCaptureReconciliationConstruction(
+	job publicationJob,
+	fresh review.PendingReview,
+) (int64, error) {
+	if !coordinator.acquireCPU(job.ctx) {
+		return 0, context.Cause(job.ctx)
+	}
+	construction := job.reconciliation.Request.PendingReconciliationCaptureConstructionBytes(
+		job.reconciliation.Rebase,
+		fresh,
+	)
+	coordinator.releaseCPU()
+	if construction == 0 {
+		return 0, review.ErrInvalidPublication
+	}
+	return construction, nil
+}
+
+func (coordinator *Coordinator) runPendingSubmissionReconciliation(
+	job publicationJob,
+) review.ReconciliationResult {
+	request := job.reconciliation.Request
+	acquisition, err := coordinator.service.AcquirePendingPublicationReconciliation(
+		job.ctx,
+		request,
+		coordinator.runCPU,
+	)
+	if err != nil {
+		return failedReconciliationResult(request, err)
+	}
+	defer acquisition.Close()
+	construction := acquisition.ConstructionBytes()
+	switch {
+	case construction == 0:
+		err = review.ErrInvalidPublication
+	case construction > MaxRetainedResultBytes:
+		err = ErrCoordinatorSaturated
+	default:
+		err = coordinator.growResultReservation(job.reconciliation.ID, construction)
+	}
+	if err != nil {
+		return failedReconciliationResult(request, err)
+	}
+	if !coordinator.acquireCPU(job.ctx) {
+		return failedReconciliationResult(request, context.Cause(job.ctx))
+	}
+	result := acquisition.Finish(job.ctx)
+	coordinator.releaseCPU()
+	return result
+}
+
+func (coordinator *Coordinator) runReviewHistoryReconciliation(
+	job publicationJob,
+) review.ReconciliationResult {
+	request := job.reconciliation.Request
+	acquisition, err := coordinator.service.AcquirePublicationReconciliation(job.ctx, request)
+	if err != nil {
+		return failedReconciliationResult(request, err)
+	}
+	return acquisition.Finish(job.ctx, coordinator.runCPU)
+}
+
+//nolint:dupl // The typed result adapters are intentionally explicit; prepareReservedTerminal owns the shared algorithm.
+func (coordinator *Coordinator) prepareReconciliationResult(
+	job publicationJob,
+	result review.ReconciliationResult,
+) (review.PreparedReconciliationResult, error) {
+	request := job.reconciliation.Request
+	source := job.reconciliation.Rebase
+	return prepareReservedTerminal(
+		job.ctx,
+		coordinator,
+		job.reconciliation.ID,
+		func() int64 {
+			return request.ReconciliationResultConstructionBytes(source, result)
+		},
+		func() (review.PreparedReconciliationResult, error) {
+			return review.PrepareReconciliationResultCancellable(
+				func() error { return context.Cause(job.ctx) },
+				request,
+				source,
+				result,
+			)
+		},
+		func() (review.PreparedReconciliationResult, error) {
+			// Reconciliation produced a terminal fact. Finish the fixed fallback
+			// during shutdown so settlement never invents a disposition.
+			return review.PrepareReconciliationResultFallbackCancellable(
+				nil,
+				request,
+				source,
+				result,
+			)
+		},
+		func(failure error) (review.PreparedReconciliationResult, error) {
+			return review.PrepareStillUnknownReconciliationResult(
+				request,
+				boundedOperationDetail(failure.Error()),
+			)
+		},
+	)
+}
+
+func prepareReservedTerminal[T any](
+	ctx context.Context,
+	coordinator *Coordinator,
+	id review.OperationID,
+	constructionBytes func() int64,
+	prepare func() (T, error),
+	fallback func() (T, error),
+	safeFallback func(error) (T, error),
+) (T, error) {
+	var zero T
+	var prepareErr error
+	if !coordinator.acquireCPU(ctx) {
+		prepareErr = context.Cause(ctx)
+	} else {
+		construction := constructionBytes()
+		coordinator.releaseCPU()
+		switch {
+		case construction == 0:
+			prepareErr = review.ErrInvalidPublication
+		case construction > MaxRetainedResultBytes:
+			prepareErr = ErrCoordinatorSaturated
+		default:
+			prepareErr = coordinator.growResultReservation(id, construction)
+		}
+		if prepareErr == nil {
+			if !coordinator.acquireCPU(ctx) {
+				prepareErr = context.Cause(ctx)
+			} else {
+				prepared, err := prepare()
+				coordinator.releaseCPU()
+				if err == nil {
+					return prepared, nil
+				}
+				prepareErr = err
+			}
+		}
+	}
+	prepared, fallbackErr := fallback()
+	if fallbackErr == nil {
+		return prepared, nil
+	}
+	failure := errors.Join(prepareErr, fallbackErr)
+	prepared, safeErr := safeFallback(failure)
+	if safeErr == nil {
+		return prepared, nil
+	}
+	return zero, errors.Join(failure, safeErr)
+}
+
+func failedReconciliationResult(
+	request review.ReconciliationRequest,
+	failure error,
+) review.ReconciliationResult {
+	detail := "publication reconciliation failed"
+	if failure != nil {
+		detail = failure.Error()
+	}
+	return review.ReconciliationResult{
+		Operation:   request.Operation,
+		Workspace:   request.Workspace,
+		Source:      request.Source,
+		Disposition: review.ReconciliationStillUnknown,
+		Detail:      boundedOperationDetail(detail),
+	}
 }

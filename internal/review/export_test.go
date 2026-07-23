@@ -52,7 +52,15 @@ func TestCompiledExportTemplatesSeparateReadinessFromRetainedBytes(t *testing.T)
 	}
 }
 
-func TestExportOptionsValidateRebasedUnmappableFlag(t *testing.T) {
+func TestExportOptionsRequireInitializationAndValidateIndependentFlags(t *testing.T) {
+	if (ExportOptions{}).Ready() {
+		t.Fatal("zero export options are ready")
+	}
+	defaults := DefaultExportOptions()
+	if !defaults.Has(ExportNotes) || !defaults.Has(ExportPraise) ||
+		defaults.Has(ExportUnmappable) {
+		t.Fatalf("default options = %#v", defaults)
+	}
 	options, err := NewExportOptions(ExportUnmappable)
 	if err != nil {
 		t.Fatal(err)
@@ -64,7 +72,8 @@ func TestExportOptionsValidateRebasedUnmappableFlag(t *testing.T) {
 	if err != nil || options.Has(ExportUnmappable) {
 		t.Fatalf("toggled options = %#v, %v", options, err)
 	}
-	if empty, err := NewExportOptions(); err != nil || empty.Has(ExportUnmappable) {
+	if empty, err := NewExportOptions(); err != nil || !empty.Ready() ||
+		empty.Has(ExportNotes) || empty.Has(ExportPraise) || empty.Has(ExportUnmappable) {
 		t.Fatalf("empty options = %#v, %v", empty, err)
 	}
 	for _, value := range []ExportOption{0, ExportUnmappable + 1} {
@@ -92,6 +101,75 @@ func TestExportOptionsValidateRebasedUnmappableFlag(t *testing.T) {
 	}
 }
 
+func TestExportFiltersKindsAndKeepsJSONSchemaStable(t *testing.T) {
+	current, err := NewReview(testReviewRequest(testSnapshot(t, 1, "one.go")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, label := range []string{"issue", "note", "praise", "suggestion"} {
+		current = saveTestCommentWithKind(t, current, label, label+" body")
+	}
+	templates, err := CompileExportTemplates(
+		"types={{comment_types}} count={{comment_count}}\n{{comments}}",
+		"{{kind}}/{{kind_upper}}: {{comment}}",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutSpecial, _ := NewExportOptions()
+	markdown, err := current.PrepareMarkdown(templates, withoutSpecial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "types=ISSUE, SUGGESTION count=2\nissue/ISSUE: issue body\nsuggestion/SUGGESTION: suggestion body"
+	if markdown.Body() != want {
+		t.Fatalf("Markdown = %q, want %q", markdown.Body(), want)
+	}
+	json, err := current.PrepareJSON(withoutSpecial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(json.Body(), `"kind"`) || strings.Contains(json.Body(), "note body") ||
+		strings.Contains(json.Body(), "praise body") ||
+		!strings.Contains(json.Body(), "issue body") ||
+		!strings.Contains(json.Body(), "suggestion body") {
+		t.Fatalf("JSON = %s", json.Body())
+	}
+}
+
+func saveTestCommentWithKind(
+	t *testing.T,
+	current Review,
+	label string,
+	body string,
+) Review {
+	t.Helper()
+	var err error
+	current, err = current.BeginDraft(ReviewCommentTarget())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		draft, _ := current.Draft()
+		if draft.Kind().String() == label {
+			break
+		}
+		current, err = current.CycleDraftKind(NavigateNext)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	current, err = current.UpdateDraft(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, _, err = current.SaveDraft()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return current
+}
+
 func TestCompileExportTemplatesRejectsEmptyAndTooManyTokens(t *testing.T) {
 	for _, testCase := range []struct {
 		name     string
@@ -115,7 +193,7 @@ func TestCompileExportTemplatesRejectsEmptyAndTooManyTokens(t *testing.T) {
 }
 
 func TestPrepareMarkdownUsesTypedTemplatesForAllComments(t *testing.T) {
-	current, err := NewReview(testSnapshot(t, 1, "one.go"))
+	current, err := NewReview(testReviewRequest(testSnapshot(t, 1, "one.go")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +207,7 @@ func TestPrepareMarkdownUsesTypedTemplatesForAllComments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := current.PrepareMarkdown(templates, ExportOptions{})
+	prepared, err := current.PrepareMarkdown(templates, DefaultExportOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,9 +222,40 @@ func TestPrepareMarkdownUsesTypedTemplatesForAllComments(t *testing.T) {
 	}
 }
 
+func TestPrepareMarkdownCancellationIsBoundedInsideTemplateSizing(t *testing.T) {
+	current, err := NewReview(testReviewRequest(testSnapshot(t, 1, "one.go")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	current = saveTestComment(t, current, ReviewCommentTarget(), "body")
+	templates, err := CompileExportTemplates(
+		"{{comments}}",
+		strings.Repeat("{{comment}}", 4_096),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err := current.ExportSource().ProjectCancellable(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cause := errors.New("cancel Markdown sizing")
+	checks := 0
+	_, err = input.PrepareMarkdownCancellable(func() error {
+		checks++
+		if checks == 13 {
+			return cause
+		}
+		return nil
+	}, templates, DefaultExportOptions())
+	if !errors.Is(err, cause) || checks != 13 {
+		t.Fatalf("Markdown sizing cancellation = %v after %d checks", err, checks)
+	}
+}
+
 func TestPrepareMarkdownDoesNotEscapeOrdinaryPathAndProsePunctuation(t *testing.T) {
 	const path = "experimental/technical-writing-discover/SKILL.md"
-	current, err := NewReview(testSnapshot(t, 1, path))
+	current, err := NewReview(testReviewRequest(testSnapshot(t, 1, path)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +271,7 @@ func TestPrepareMarkdownDoesNotEscapeOrdinaryPathAndProsePunctuation(t *testing.
 		t.Fatal(err)
 	}
 
-	prepared, err := current.PrepareMarkdown(templates, ExportOptions{})
+	prepared, err := current.PrepareMarkdown(templates, DefaultExportOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,14 +314,14 @@ func TestPrepareJSONPreservesCommentSemanticsAndUnsafePathBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	current, err := NewReview(snapshot)
+	current, err := NewReview(testReviewRequest(snapshot))
 	if err != nil {
 		t.Fatal(err)
 	}
 	target, _ := FileCommentTarget(0)
 	current = saveTestComment(t, current, target, "quote: \"\n\u00e9")
 
-	prepared, err := current.PrepareJSON(ExportOptions{})
+	prepared, err := current.PrepareJSON(DefaultExportOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +334,7 @@ func TestPrepareJSONPreservesCommentSemanticsAndUnsafePathBytes(t *testing.T) {
 }
 
 func TestPrepareJSONEncodesLineRangeAndAllComments(t *testing.T) {
-	current, err := NewReview(testSnapshot(t, 1, "one.go"))
+	current, err := NewReview(testReviewRequest(testSnapshot(t, 1, "one.go")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +344,7 @@ func TestPrepareJSONEncodesLineRangeAndAllComments(t *testing.T) {
 	current = saveTestComment(t, current, target, "range")
 	current = saveTestComment(t, current, ReviewCommentTarget(), "omit")
 
-	prepared, err := current.PrepareJSON(ExportOptions{})
+	prepared, err := current.PrepareJSON(DefaultExportOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +366,7 @@ func TestPrepareJSONRequiresOptionForUnmappableComments(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	prepared, err := current.PrepareJSON(ExportOptions{})
+	prepared, err := current.PrepareJSON(DefaultExportOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +388,7 @@ func TestPrepareJSONRequiresOptionForUnmappableComments(t *testing.T) {
 }
 
 func TestPrepareMarkdownPreflightsCumulativeLimitAndCancellation(t *testing.T) {
-	current, err := NewReview(testSnapshot(t, 1, "one.go"))
+	current, err := NewReview(testReviewRequest(testSnapshot(t, 1, "one.go")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +400,7 @@ func TestPrepareMarkdownPreflightsCumulativeLimitAndCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := current.PrepareMarkdown(templates, ExportOptions{}); !errors.Is(err, ErrInvalidExport) {
+	if _, err := current.PrepareMarkdown(templates, DefaultExportOptions()); !errors.Is(err, ErrInvalidExport) {
 		t.Fatalf("cumulative export limit error = %v, want ErrInvalidExport", err)
 	}
 
@@ -303,14 +412,14 @@ func TestPrepareMarkdownPreflightsCumulativeLimitAndCancellation(t *testing.T) {
 	if _, err := current.PrepareMarkdownCancellable(
 		func() error { return cancelled },
 		templates,
-		ExportOptions{},
+		DefaultExportOptions(),
 	); !errors.Is(err, cancelled) {
 		t.Fatalf("cancellation error = %v, want sentinel", err)
 	}
 }
 
 func TestExportInputExcludesPatchAndSearchStateAndPreservesOutput(t *testing.T) {
-	current, err := NewReview(testSnapshot(t, 1, "one.go"))
+	current, err := NewReview(testReviewRequest(testSnapshot(t, 1, "one.go")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -337,14 +446,9 @@ func TestExportInputExcludesPatchAndSearchStateAndPreservesOutput(t *testing.T) 
 	}
 	operation, _ := NewOperationID(1)
 	query, _ := NewSearchQuery("short")
-	searchTarget, err := NewSearchTarget(current.Snapshot(), []FileID{0})
-	if err != nil {
-		t.Fatal(err)
-	}
-	searching, searchRequest, err := current.StartSearch(
+	searching, searchAdmission, err := current.StartSearch(
 		operation,
 		query,
-		searchTarget,
 		WholeFileContext(),
 	)
 	if err != nil {
@@ -353,10 +457,10 @@ func TestExportInputExcludesPatchAndSearchStateAndPreservesOutput(t *testing.T) 
 	batch := ScanSearchBatch(preparedPatch, 0, PrepareSearchQuery(query), SearchCursor{})
 	searchResult, err := TakeSearchResult(SearchResultDescriptor{
 		Operation: operation,
-		Workspace: searchRequest.Workspace,
-		Source:    searchRequest.Source,
+		Workspace: searchAdmission.Workspace(),
+		Source:    searchAdmission.Source(),
 		Status:    SearchComplete,
-	}, batch.Hits)
+	}, batch.hits)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,22 +484,22 @@ func TestExportInputExcludesPatchAndSearchStateAndPreservesOutput(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	fromReview, err := current.PrepareMarkdown(templates, ExportOptions{})
+	fromReview, err := current.PrepareMarkdown(templates, DefaultExportOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
-	fromInput, err := projected.PrepareMarkdownCancellable(nil, templates, ExportOptions{})
+	fromInput, err := projected.PrepareMarkdownCancellable(nil, templates, DefaultExportOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if fromInput != fromReview {
 		t.Fatalf("projected Markdown = %+v, review Markdown = %+v", fromInput, fromReview)
 	}
-	reviewJSON, err := current.PrepareJSON(ExportOptions{})
+	reviewJSON, err := current.PrepareJSON(DefaultExportOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
-	inputJSON, err := projected.PrepareJSONCancellable(nil, ExportOptions{})
+	inputJSON, err := projected.PrepareJSONCancellable(nil, DefaultExportOptions())
 	if err != nil {
 		t.Fatal(err)
 	}

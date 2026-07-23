@@ -1,98 +1,6 @@
 package review
 
-import (
-	"encoding/json"
-	"fmt"
-	"unicode/utf8"
-)
-
-type commentExportJSON struct {
-	Target  commentTargetJSON `json:"target"`
-	Binding string            `json:"binding"`
-	Comment string            `json:"comment"`
-}
-
-type commentTargetJSON struct {
-	Path  *exportPathJSON `json:"path,omitempty"`
-	Line  *uint32         `json:"line,omitempty"`
-	Start *uint32         `json:"start,omitempty"`
-	End   *uint32         `json:"end,omitempty"`
-	Type  string          `json:"type"`
-	Side  string          `json:"side,omitempty"`
-}
-
-// MarshalJSON preserves the v1 target field order independently of the
-// in-memory layout chosen for alignment.
-func (target commentTargetJSON) MarshalJSON() ([]byte, error) {
-	body, err := json.Marshal(target.Type)
-	if err != nil {
-		return nil, err
-	}
-	body = append([]byte(`{"type":`), body...)
-	if target.Path != nil {
-		body, err = appendJSONField(body, "path", target.Path)
-	}
-	if err == nil && target.Side != "" {
-		body, err = appendJSONField(body, "side", target.Side)
-	}
-	if err == nil && target.Line != nil {
-		body, err = appendJSONField(body, "line", target.Line)
-	}
-	if err == nil && target.Start != nil {
-		body, err = appendJSONField(body, "start", target.Start)
-	}
-	if err == nil && target.End != nil {
-		body, err = appendJSONField(body, "end", target.End)
-	}
-	if err != nil {
-		return nil, err
-	}
-	return append(body, '}'), nil
-}
-
-func appendJSONField(body []byte, name string, value any) ([]byte, error) {
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return nil, err
-	}
-	body = append(body, ',')
-	body = append(body, '"')
-	body = append(body, name...)
-	body = append(body, '"', ':')
-	return append(body, encoded...), nil
-}
-
-type exportPathJSON struct {
-	path Path
-}
-
-// MarshalJSON returns the receiver's marshal json value.
-func (path exportPathJSON) MarshalJSON() ([]byte, error) {
-	raw := path.path.Raw()
-	encoded := make([]byte, 0, len(raw)+2)
-	encoded = append(encoded, '"')
-	for len(raw) != 0 {
-		character, size := utf8.DecodeRune(raw)
-		if character == utf8.RuneError && size == 1 {
-			encoded = appendJSONUnicodeByte(encoded, raw[0])
-			raw = raw[1:]
-			continue
-		}
-		if isUnsafeJSONRune(character) {
-			encoded = appendJSONUnicodeRune(encoded, character)
-			raw = raw[size:]
-			continue
-		}
-		piece, err := json.Marshal(string(character))
-		if err != nil {
-			return nil, err
-		}
-		encoded = append(encoded, piece[1:len(piece)-1]...)
-		raw = raw[size:]
-	}
-	encoded = append(encoded, '"')
-	return encoded, nil
-}
+import "fmt"
 
 // PrepareJSON prepares json.
 func (review Review) PrepareJSON(options ExportOptions) (PreparedExport, error) {
@@ -118,117 +26,146 @@ func (input ExportInput) PrepareJSONCancellable(
 	if !options.valid() {
 		return PreparedExport{}, fmt.Errorf("%w: export options contain unknown bits", ErrInvalidExport)
 	}
-	selected := input.exportComments(options)
-	comments := make([]commentExportJSON, 0, len(selected))
-	for index, comment := range selected {
+	builder, builderErr := newJSONBuilder(MaxPreparedExportBytes, cancelled)
+	if builderErr != nil {
+		return PreparedExport{}, fmt.Errorf("%w: encode JSON export: %w", ErrInvalidExport, builderErr)
+	}
+	if err := builder.Syntax(`{"comments":[`); err != nil {
+		return PreparedExport{}, exportJSONError(err)
+	}
+	written := 0
+	for index, comment := range input.comments {
+		if !includeExportComment(comment, options) {
+			continue
+		}
 		if index%256 == 0 {
-			if err := cancellationError(cancelled); err != nil {
+			if err := builder.Checkpoint(); err != nil {
 				return PreparedExport{}, err
 			}
 		}
-		target, err := exportCommentTargetJSON(comment.target)
-		if err != nil {
-			return PreparedExport{}, err
+		if written != 0 {
+			if err := builder.Syntax(","); err != nil {
+				return PreparedExport{}, exportJSONError(err)
+			}
 		}
-		binding := "active"
-		if comment.unmappable {
-			binding = "orphaned"
-		} else if comment.stale {
-			binding = "stale"
+		if err := writeExportCommentJSON(builder, comment); err != nil {
+			return PreparedExport{}, exportJSONError(err)
 		}
-		comments = append(comments, commentExportJSON{
-			Target:  target,
-			Binding: binding,
-			Comment: comment.body.String(),
-		})
+		written++
 	}
-	body, err := json.Marshal(struct {
-		Comments []commentExportJSON `json:"comments"`
-	}{Comments: comments})
-	if err != nil {
-		return PreparedExport{}, fmt.Errorf("%w: encode JSON export: %w", ErrInvalidExport, err)
+	if err := builder.Syntax("]}\n"); err != nil {
+		return PreparedExport{}, exportJSONError(err)
 	}
-	if err := cancellationError(cancelled); err != nil {
-		return PreparedExport{}, err
+	body, finishErr := builder.Finish()
+	if finishErr != nil {
+		return PreparedExport{}, finishErr
 	}
-	if int64(len(body)+1) > MaxPreparedExportBytes {
-		return PreparedExport{}, fmt.Errorf(
-			"%w: prepared body exceeds %d bytes",
-			ErrInvalidExport,
-			MaxPreparedExportBytes,
-		)
-	}
-	body = append(body, '\n')
-	return PreparedExport{format: ExportJSON, body: string(body)}, nil
+	return PreparedExport{format: ExportJSON, body: body}, nil
 }
 
-func exportCommentTargetJSON(target exportCommentTarget) (commentTargetJSON, error) {
+func writeExportCommentJSON(builder *jsonBuilder, comment exportComment) error {
+	if err := builder.Syntax(`{"target":`); err != nil {
+		return err
+	}
+	if err := writeExportTargetJSON(builder, comment.target); err != nil {
+		return err
+	}
+	binding := "active"
+	if comment.unmappable {
+		binding = "orphaned"
+	} else if comment.stale {
+		binding = "stale"
+	}
+	if err := builder.Syntax(`,"binding":`); err != nil {
+		return err
+	}
+	if err := builder.String(binding); err != nil {
+		return err
+	}
+	if err := builder.Syntax(`,"comment":`); err != nil {
+		return err
+	}
+	if err := builder.String(comment.body.String()); err != nil {
+		return err
+	}
+	return builder.Syntax("}")
+}
+
+func writeExportTargetJSON(builder *jsonBuilder, target exportCommentTarget) error {
+	if err := builder.Syntax(`{"type":`); err != nil {
+		return err
+	}
+	var kind string
 	switch target.kind {
 	case TargetReview:
-		return commentTargetJSON{Type: "review"}, nil
+		kind = "review"
 	case TargetFile:
 		if !target.hasPath {
-			return commentTargetJSON{}, fmt.Errorf("%w: file comment has no path", ErrInvalidExport)
+			return fmt.Errorf("%w: file comment has no path", ErrInvalidExport)
 		}
-		return commentTargetJSON{
-			Type: "file",
-			Path: &exportPathJSON{path: target.path},
-		}, nil
+		kind = "file"
 	case TargetLine:
 		if !target.hasPath {
-			return commentTargetJSON{}, fmt.Errorf("%w: line comment target is incomplete", ErrInvalidExport)
+			return fmt.Errorf("%w: line comment target is incomplete", ErrInvalidExport)
 		}
-		sideName := "new"
-		if target.side == LineOld {
-			sideName = "old"
+		if target.start == target.end {
+			kind = "line"
+		} else {
+			kind = "range"
 		}
-		startValue := target.start.Uint32()
-		targetJSON := commentTargetJSON{
-			Type: "line",
-			Path: &exportPathJSON{path: target.path},
-			Side: sideName,
-			Line: &startValue,
-		}
-		if target.start != target.end {
-			endValue := target.end.Uint32()
-			targetJSON.Type = "range"
-			targetJSON.Line = nil
-			targetJSON.Start = &startValue
-			targetJSON.End = &endValue
-		}
-		return targetJSON, nil
 	default:
-		return commentTargetJSON{}, fmt.Errorf("%w: unknown comment target", ErrInvalidExport)
+		return fmt.Errorf("%w: unknown comment target", ErrInvalidExport)
 	}
+	if err := builder.String(kind); err != nil {
+		return err
+	}
+	if target.hasPath {
+		if err := builder.Syntax(`,"path":`); err != nil {
+			return err
+		}
+		if err := builder.ByteString([]byte(target.path.raw), isUnsafeJSONRune); err != nil {
+			return err
+		}
+	}
+	if target.kind == TargetLine {
+		if err := writeExportLineTargetJSON(builder, target); err != nil {
+			return err
+		}
+	}
+	return builder.Syntax("}")
 }
 
-func appendJSONUnicodeByte(destination []byte, value byte) []byte {
-	const hexadecimal = "0123456789abcdef"
-	return append(
-		destination,
-		'\\', 'u', '0', '0',
-		hexadecimal[value>>4],
-		hexadecimal[value&0x0f],
-	)
+func writeExportLineTargetJSON(builder *jsonBuilder, target exportCommentTarget) error {
+	side := "new"
+	if target.side == LineOld {
+		side = "old"
+	}
+	if err := builder.Syntax(`,"side":`); err != nil {
+		return err
+	}
+	if err := builder.String(side); err != nil {
+		return err
+	}
+	if target.start == target.end {
+		if err := builder.Syntax(`,"line":`); err != nil {
+			return err
+		}
+		return builder.Uint64(uint64(target.start.Uint32()))
+	}
+	if err := builder.Syntax(`,"start":`); err != nil {
+		return err
+	}
+	if err := builder.Uint64(uint64(target.start.Uint32())); err != nil {
+		return err
+	}
+	if err := builder.Syntax(`,"end":`); err != nil {
+		return err
+	}
+	return builder.Uint64(uint64(target.end.Uint32()))
 }
 
-func appendJSONUnicodeRune(destination []byte, value rune) []byte {
-	const hexadecimal = "0123456789abcdef"
-	if value <= 0xffff {
-		return append(
-			destination,
-			'\\', 'u',
-			hexadecimal[value>>12&0x0f],
-			hexadecimal[value>>8&0x0f],
-			hexadecimal[value>>4&0x0f],
-			hexadecimal[value&0x0f],
-		)
-	}
-	value -= 0x10000
-	high := rune(0xd800) + value>>10
-	low := rune(0xdc00) + value&0x3ff
-	destination = appendJSONUnicodeRune(destination, high)
-	return appendJSONUnicodeRune(destination, low)
+func exportJSONError(err error) error {
+	return fmt.Errorf("%w: encode JSON export: %w", ErrInvalidExport, err)
 }
 
 func isUnsafeJSONRune(character rune) bool {

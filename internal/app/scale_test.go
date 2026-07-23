@@ -221,10 +221,11 @@ func appScaleModel(tb testing.TB) (*Model, *Coordinator) {
 	model.review = current
 	model.allFileOrder = index.AllFiles
 	model.visibleFileOrder = index.VisibleFiles
-	model.allFileTree = index.AllFileTree
-	model.visibleFileTree = index.VisibleFileTree
+	model.allFileTree = index.FileTree
+	model.visibleFileTree = index.FileTree.withProjection(index.VisibleProjection)
 	model.pathFiles = index.PathFiles
 	model.ambiguousPaths = index.AmbiguousPaths
+	model.collapsedTree = index.Collapsed
 	model.notice = nil
 	model.commentsVisible = true
 	model.focus = FocusDiff
@@ -240,7 +241,7 @@ func appScaleReview(
 	patch []byte,
 ) review.Review {
 	tb.Helper()
-	current, err := review.NewReview(snapshot)
+	current, err := review.NewReview(testReviewRequest(snapshot))
 	if err != nil {
 		tb.Fatal(err)
 	}

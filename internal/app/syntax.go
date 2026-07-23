@@ -10,6 +10,7 @@ import (
 func (model *Model) requestSyntax() {
 	if !model.size.Known || model.belowMinimum() ||
 		model.foreground.reloadActive() ||
+		model.foreground.searchOperation() != 0 || model.searchAfterSyntax != nil ||
 		model.mode != ModeNormal || model.overlay != OverlayNone {
 		return
 	}
@@ -17,6 +18,7 @@ func (model *Model) requestSyntax() {
 	if !ok || model.review.Patch(fileID).Status != review.PatchReady {
 		return
 	}
+	model.syntaxDeferred = false
 	count := uint32FromInt(max(model.diffHeight()+viewportOverscan, 1))
 	lines := model.review.PatchLines(fileID, model.diffTop, count, 4_096)
 	oldLines := make([]review.LineNumber, 0, len(lines))
@@ -178,8 +180,13 @@ func syntaxStatusForWorkError(err error) review.SyntaxStatus {
 }
 
 func (model *Model) finishSyntaxDeferral() {
+	if model.searchAfterSyntax != nil {
+		pending := *model.searchAfterSyntax
+		model.searchAfterSyntax = nil
+		model.startPendingSearch(pending)
+		return
+	}
 	if model.syntaxDeferred {
-		model.syntaxDeferred = false
 		model.requestSyntax()
 	}
 }

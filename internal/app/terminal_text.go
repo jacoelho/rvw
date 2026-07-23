@@ -93,3 +93,12 @@ func isBidiControl(character rune) bool {
 		character >= '\u202a' && character <= '\u202e' ||
 		character >= '\u2066' && character <= '\u2069'
 }
+
+func containsBidiControl(value string) bool {
+	for _, character := range value {
+		if isBidiControl(character) {
+			return true
+		}
+	}
+	return false
+}

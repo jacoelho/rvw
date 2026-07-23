@@ -20,6 +20,7 @@ var (
 	scaleExportSink      PreparedExport
 	scalePublicationSink *CheckedPublication
 	scaleSearchHitsSink  int
+	searchBatchHitSink   SearchHit
 	scaleSyntaxSink      *PreparedSyntax
 	scaleReviewSink      Review
 	scaleFileSink        File
@@ -30,7 +31,7 @@ func BenchmarkNewReview100000Files(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		current, err := NewReview(snapshot)
+		current, err := NewReview(testReviewRequest(snapshot))
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -209,16 +210,52 @@ func BenchmarkSearchLargePatch(b *testing.B) {
 		hitCount := 0
 		for {
 			batch := ScanSearchBatch(patch, fileID, preparedQuery, cursor)
-			hitCount += len(batch.Hits)
-			if batch.Done {
+			hitCount += batch.HitCount()
+			if batch.Done() {
 				break
 			}
-			cursor = batch.Cursor
+			cursor = batch.Cursor()
 		}
 		if hitCount != expectedHits {
 			b.Fatalf("search hits = %d, want %d", hitCount, expectedHits)
 		}
 		scaleSearchHitsSink = hitCount
+	}
+}
+
+func BenchmarkSearchZeroHitReviewScale(b *testing.B) {
+	patch, err := TakePatch(scaleSearchPatchText(scaleFileLines))
+	if err != nil {
+		b.Fatal(err)
+	}
+	query, err := NewSearchQuery("absent-from-review")
+	if err != nil {
+		b.Fatal(err)
+	}
+	preparedQuery := PrepareSearchQuery(query)
+	fileID, err := NewFileID(0)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		cursor := SearchCursor{}
+		batches := 0
+		for {
+			batch := ScanSearchBatch(patch, fileID, preparedQuery, cursor)
+			for index := range batch.HitCount() {
+				searchBatchHitSink, _ = batch.Hit(index)
+			}
+			batches++
+			if batch.Done() {
+				break
+			}
+			cursor = batch.Cursor()
+		}
+		if batches < 2 {
+			b.Fatalf("search batches = %d, want multiple batches", batches)
+		}
+		scaleSearchHitsSink = batches
 	}
 }
 
@@ -388,7 +425,7 @@ func scaleReviewWithFiles(tb testing.TB, fileCount int) Review {
 	if err != nil {
 		tb.Fatal(err)
 	}
-	current, err := NewReview(snapshot)
+	current, err := NewReview(testReviewRequest(snapshot))
 	if err != nil {
 		tb.Fatal(err)
 	}

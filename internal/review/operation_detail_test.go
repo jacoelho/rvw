@@ -47,13 +47,17 @@ func TestOperationDetailOwnsBackingAcrossRetainedStates(t *testing.T) {
 		id, _ := NewOperationID(1)
 		current.search = searchState{status: SearchActive, operation: id}
 		source, detail := oversizedOperationDetail(t, "search failed")
-		next, err := current.ApplySearch(SearchResult{
+		result, err := TakeSearchResult(SearchResultDescriptor{
 			Operation: id,
 			Workspace: current.workspace,
 			Source:    current.snapshot.SourceID(),
 			Status:    SearchFailed,
-			detail:    detail,
-		})
+			Detail:    detail,
+		}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		next, err := current.ApplySearch(result)
 		if err != nil {
 			t.Fatal(err)
 		}

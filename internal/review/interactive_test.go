@@ -426,7 +426,7 @@ func saveTestComment(
 
 func testReview(t *testing.T, snapshot Snapshot) Review {
 	t.Helper()
-	current, err := NewReview(snapshot)
+	current, err := NewReview(testReviewRequest(snapshot))
 	if err != nil {
 		t.Fatal(err)
 	}

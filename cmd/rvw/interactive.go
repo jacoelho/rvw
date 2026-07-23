@@ -55,10 +55,7 @@ func runInteractive(request interactiveRequest) (returnErr error) {
 	receiverContext, cancelReceiver := context.WithCancel(context.WithoutCancel(request.ctx))
 	defer cancelReceiver()
 
-	deliveryManager, err := delivery.NewManager()
-	if err != nil {
-		return err
-	}
+	deliveryManager := delivery.NewManager()
 	defer func() {
 		closeContext, cancel := context.WithTimeout(
 			context.WithoutCancel(request.ctx),
@@ -304,6 +301,19 @@ func interactiveSettings(resolved config.Config) (app.Settings, error) {
 	if err != nil {
 		return app.Settings{}, err
 	}
+	commentsConfig := resolved.Comments()
+	commentKinds, err := review.NewCommentKinds(commentsConfig.Kinds...)
+	if err != nil {
+		return app.Settings{}, err
+	}
+	commentPolicyValues := []review.CommentPolicy{}
+	if commentsConfig.TypePrefixForGitHub {
+		commentPolicyValues = append(commentPolicyValues, review.CommentTypePrefixForGitHub)
+	}
+	commentPolicies, err := review.NewCommentPolicies(commentPolicyValues...)
+	if err != nil {
+		return app.Settings{}, err
+	}
 	keybindings, err := interactiveKeybindings(ui.Keybindings)
 	if err != nil {
 		return app.Settings{}, err
@@ -313,6 +323,8 @@ func interactiveSettings(resolved config.Config) (app.Settings, error) {
 		return app.Settings{}, err
 	}
 	return app.NewSettings(app.SettingsRequest{
+		CommentKinds:    commentKinds,
+		CommentPolicies: commentPolicies,
 		Features:        settingFeatures,
 		DiffView:        diffView,
 		ContextLines:    contextLines,
@@ -347,6 +359,8 @@ func interactivePalette(resolved config.Config, activeTheme config.ThemeName) (a
 		"diff_hunk_header":   app.PaletteDiffHunk,
 		"message_warning_fg": app.PaletteWarningForeground,
 		"message_warning_bg": app.PaletteWarningBackground,
+		"comment_note":       app.PaletteCommentNote,
+		"comment_suggestion": app.PaletteCommentSuggestion,
 	}
 	for name, role := range roles {
 		if color := theme.Colors[name].String(); color != "" {

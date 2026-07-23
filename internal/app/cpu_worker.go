@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/jacoelho/rvw/internal/review"
 )
@@ -11,8 +13,9 @@ func (coordinator *Coordinator) runCPUWorker() {
 	reloadJobs := coordinator.reloadPreparationJobs
 	fileTreeJobs := coordinator.fileTreeJobs
 	workspaceIndexJobs := coordinator.workspaceIndexJobs
+	commentJobs := coordinator.commentMutationJobs
 	for exportJobs != nil || reloadJobs != nil || fileTreeJobs != nil ||
-		workspaceIndexJobs != nil {
+		workspaceIndexJobs != nil || commentJobs != nil {
 		select {
 		case job, ok := <-exportJobs:
 			if !ok {
@@ -38,6 +41,12 @@ func (coordinator *Coordinator) runCPUWorker() {
 				continue
 			}
 			coordinator.executeWorkspaceIndexCPU(job)
+		case job, ok := <-commentJobs:
+			if !ok {
+				commentJobs = nil
+				continue
+			}
+			coordinator.executeCommentMutationCPU(job)
 		}
 	}
 }
@@ -54,18 +63,24 @@ func (coordinator *Coordinator) executeExportCPU(job exportJob) {
 	if !coordinator.acquireCPU(job.ctx) {
 		err = context.Cause(job.ctx)
 	} else {
-		switch job.work.Format {
-		case review.ExportMarkdown:
-			prepared, err = job.work.Input.PrepareMarkdownCancellable(
-				func() error { return context.Cause(job.ctx) },
-				job.work.Templates,
-				job.work.Options,
-			)
-		case review.ExportJSON:
-			prepared, err = job.work.Input.PrepareJSONCancellable(
-				func() error { return context.Cause(job.ctx) },
-				job.work.Options,
-			)
+		cancelled := func() error { return context.Cause(job.ctx) }
+		var input review.ExportInput
+		input, err = job.work.Source.ProjectCancellable(cancelled)
+		job.work.Source = review.ExportSource{}
+		if err == nil {
+			switch job.work.Format {
+			case review.ExportMarkdown:
+				prepared, err = input.PrepareMarkdownCancellable(
+					cancelled,
+					job.work.Templates,
+					job.work.Options,
+				)
+			case review.ExportJSON:
+				prepared, err = input.PrepareJSONCancellable(
+					cancelled,
+					job.work.Options,
+				)
+			}
 		}
 		coordinator.releaseCPU()
 	}
@@ -79,33 +94,51 @@ func (coordinator *Coordinator) executeExportCPU(job exportJob) {
 
 func (coordinator *Coordinator) executeReloadPreparationCPU(job reloadPreparationJob) {
 	coordinator.required.wait(job.work.ID)
-	prepared, err := coordinator.prepareReplacementCPU(job)
-	var (
-		allFiles, visibleFiles       []review.FileID
-		allFileTree, visibleFileTree fileTree
-		pathFiles                    map[string]review.FileID
-		ambiguousPaths               map[string]struct{}
-	)
+	snapshot := job.work.Document.Snapshot()
+	ledger, err := newRetainedLedger(MaxRetainedResultBytes, snapshot.RetainedBytes())
+	var prepared review.PreparedReplacement
 	if err == nil {
-		allFiles, visibleFiles, allFileTree, visibleFileTree,
-			pathFiles, ambiguousPaths, err = coordinator.prepareReloadIndexesCPU(job)
+		prepared, err = coordinator.prepareReplacementCPU(job, ledger)
 	}
-	coordinator.complete(ReloadPreparedOutcome{
-		ID:              job.work.ID,
-		Document:        job.work.Document,
-		Replacement:     prepared,
-		AllFiles:        allFiles,
-		VisibleFiles:    visibleFiles,
-		AllFileTree:     allFileTree,
-		VisibleFileTree: visibleFileTree,
-		PathFiles:       pathFiles,
-		AmbiguousPaths:  ambiguousPaths,
-		Err:             err,
-	})
+	var index WorkspaceIndexOutcome
+	if err == nil {
+		index, err = coordinator.prepareReloadIndexesCPU(job, ledger)
+	}
+	if err != nil {
+		prepared = review.PreparedReplacement{}
+		index = WorkspaceIndexOutcome{}
+	}
+	outcome := ReloadPreparedOutcome{
+		ID:                job.work.ID,
+		Document:          job.work.Document,
+		Replacement:       prepared,
+		AllFiles:          index.AllFiles,
+		VisibleFiles:      index.VisibleFiles,
+		FileTree:          index.FileTree,
+		VisibleProjection: index.VisibleProjection,
+		Collapsed:         index.Collapsed,
+		PathFiles:         index.PathFiles,
+		AmbiguousPaths:    index.AmbiguousPaths,
+		Err:               err,
+	}
+	if outcome.Err == nil && outcome.RetainedBytes() > MaxRetainedResultBytes {
+		outcome = ReloadPreparedOutcome{
+			ID:       job.work.ID,
+			Document: job.work.Document,
+			Err: fmt.Errorf(
+				"%w: reload preparation retains %d bytes; limit is %d",
+				ErrRetainedResultLimited,
+				outcome.RetainedBytes(),
+				MaxRetainedResultBytes,
+			),
+		}
+	}
+	coordinator.complete(outcome)
 }
 
 func (coordinator *Coordinator) prepareReplacementCPU(
 	job reloadPreparationJob,
+	ledger *retainedLedger,
 ) (review.PreparedReplacement, error) {
 	coordinator.reportProgress(Progress{
 		ID:     job.work.ID,
@@ -115,26 +148,37 @@ func (coordinator *Coordinator) prepareReplacementCPU(
 	if !coordinator.acquireCPU(job.ctx) {
 		return review.PreparedReplacement{}, context.Cause(job.ctx)
 	}
+	constructionBytes := review.ReplacementConstructionBytes(
+		job.work.Review,
+		job.work.Document.Snapshot(),
+	)
+	if err := ledger.reserve(constructionBytes); err != nil {
+		coordinator.releaseCPU()
+		return review.PreparedReplacement{}, err
+	}
 	prepared, err := review.PrepareReplacementCancellable(
 		func() error { return context.Cause(job.ctx) },
 		job.work.Review,
 		job.work.Document.Snapshot(),
 	)
 	coordinator.releaseCPU()
+	if err != nil {
+		ledger.release(constructionBytes)
+		return review.PreparedReplacement{}, err
+	}
+	retainedBytes := prepared.RetainedBytes()
+	if retainedBytes > constructionBytes {
+		ledger.release(constructionBytes)
+		return review.PreparedReplacement{}, errors.New("reload replacement construction accounting is incomplete")
+	}
+	ledger.release(constructionBytes - retainedBytes)
 	return prepared, err
 }
 
 func (coordinator *Coordinator) prepareReloadIndexesCPU(
 	job reloadPreparationJob,
-) (
-	[]review.FileID,
-	[]review.FileID,
-	fileTree,
-	fileTree,
-	map[string]review.FileID,
-	map[string]struct{},
-	error,
-) {
+	ledger *retainedLedger,
+) (WorkspaceIndexOutcome, error) {
 	coordinator.reportProgress(Progress{
 		ID:        job.work.ID,
 		Completed: 1,
@@ -142,41 +186,28 @@ func (coordinator *Coordinator) prepareReloadIndexesCPU(
 		Detail:    boundedOperationDetail("building file indexes"),
 	})
 	if !coordinator.acquireCPU(job.ctx) {
-		return nil, nil, fileTree{}, fileTree{}, nil, nil, context.Cause(job.ctx)
+		return WorkspaceIndexOutcome{}, context.Cause(job.ctx)
 	}
 	defer coordinator.releaseCPU()
 	snapshot := job.work.Document.Snapshot()
-	allFiles, visibleFiles, pathFiles, ambiguousPaths, err :=
-		buildFileIndexesContext(job.ctx, snapshot)
-	if err != nil {
-		return nil, nil, fileTree{}, fileTree{}, nil, nil, err
-	}
-	allTree, err := buildFileTreeContext(job.ctx, snapshot, allFiles)
-	if err != nil {
-		return nil, nil, fileTree{}, fileTree{}, nil, nil, err
-	}
-	visibleTree := allTree
-	if len(visibleFiles) != len(allFiles) {
-		visibleTree, err = buildFileTreeContext(job.ctx, snapshot, visibleFiles)
-	}
-	return allFiles, visibleFiles, allTree, visibleTree, pathFiles, ambiguousPaths, err
+	return buildWorkspaceIndexWithLedger(job.ctx, snapshot, job.work.Collapse, ledger)
 }
 
 func (coordinator *Coordinator) executeFileTreeCPU(job fileTreeJob) {
 	coordinator.required.wait(job.work.ID)
-	var tree fileTree
+	var projection treeProjection
 	var err error
 	if !coordinator.acquireCPU(job.ctx) {
 		err = context.Cause(job.ctx)
 	} else {
-		tree, err = buildFileTreeContext(job.ctx, job.work.Snapshot, job.work.Files)
+		projection, err = job.work.Tree.project(job.ctx, job.work.Files)
 		coordinator.releaseCPU()
 	}
 	coordinator.complete(FileTreeOutcome{
 		ID:         job.work.ID,
 		Generation: job.work.Generation,
 		Files:      job.work.Files,
-		Tree:       tree,
+		Projection: projection,
 		Err:        err,
 	})
 }
@@ -187,7 +218,22 @@ func (coordinator *Coordinator) executeWorkspaceIndexCPU(job workspaceIndexJob) 
 	if !coordinator.acquireCPU(job.ctx) {
 		outcome.Err = context.Cause(job.ctx)
 	} else {
-		prepared, err := buildWorkspaceIndex(job.ctx, job.work.Snapshot)
+		ledger, ledgerErr := newRetainedLedger(
+			MaxRetainedResultBytes,
+			job.work.Snapshot.RetainedBytes(),
+		)
+		var prepared WorkspaceIndexOutcome
+		var err error
+		if ledgerErr != nil {
+			err = ledgerErr
+		} else {
+			prepared, err = buildWorkspaceIndexWithLedger(
+				job.ctx,
+				job.work.Snapshot,
+				job.work.Collapse,
+				ledger,
+			)
+		}
 		coordinator.releaseCPU()
 		outcome = prepared
 		outcome.ID = job.work.ID

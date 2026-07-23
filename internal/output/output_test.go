@@ -98,23 +98,15 @@ func TestTerminalJSONEscapesBidirectionalControls(t *testing.T) {
 	}
 }
 
-func TestWritePreparedExportTerminalJSONRemainsValidAndRoundTrips(t *testing.T) {
-	prepared := preparedJSONWithReviewComment(t, "before\u202eafter\u009b")
+func TestWritePreparedExportTerminalJSONRoundTripsSafeUnicode(t *testing.T) {
+	const comment = "before界after café"
+	prepared := preparedJSONWithReviewComment(t, comment)
 	var output bytes.Buffer
 	if err := WritePreparedExport(&output, prepared, Options{Terminal: true}); err != nil {
 		t.Fatal(err)
 	}
 	if !json.Valid(output.Bytes()) {
 		t.Fatalf("terminal-safe prepared JSON is invalid: %q", output.String())
-	}
-	if bytes.Contains(output.Bytes(), []byte("\u202e")) ||
-		bytes.Contains(output.Bytes(), []byte("\u009b")) {
-		t.Fatalf("terminal-safe prepared JSON contains raw controls: %q", output.String())
-	}
-	if !bytes.Contains(output.Bytes(), []byte(`\u202e`)) ||
-		!bytes.Contains(output.Bytes(), []byte(`\u009b`)) ||
-		bytes.Contains(output.Bytes(), []byte(`\u{`)) {
-		t.Fatalf("terminal-safe prepared JSON uses invalid escaping: %q", output.String())
 	}
 	var decoded struct {
 		Comments []struct {
@@ -124,7 +116,7 @@ func TestWritePreparedExportTerminalJSONRemainsValidAndRoundTrips(t *testing.T) 
 	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if len(decoded.Comments) != 1 || decoded.Comments[0].Comment != "before\u202eafter\u009b" {
+	if len(decoded.Comments) != 1 || decoded.Comments[0].Comment != comment {
 		t.Fatalf("decoded comments = %+v", decoded.Comments)
 	}
 }
@@ -217,7 +209,7 @@ func preparedJSONWithReviewComment(t *testing.T, body string) review.PreparedExp
 	t.Helper()
 	document := localDocument(t, map[string]string{"a.go": "package a\n"})
 	defer document.Close()
-	current, err := review.NewReview(document.Snapshot())
+	current, err := review.NewReview(testReviewRequest(document.Snapshot()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +225,7 @@ func preparedJSONWithReviewComment(t *testing.T, body string) review.PreparedExp
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := current.PrepareJSON(review.ExportOptions{})
+	prepared, err := current.PrepareJSON(review.DefaultExportOptions())
 	if err != nil {
 		t.Fatal(err)
 	}

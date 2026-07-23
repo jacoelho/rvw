@@ -7,10 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"os"
 	"os/exec"
-	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -19,14 +17,23 @@ import (
 
 // DefaultStdoutLimit identifies a supported default stdout limit value.
 const (
-	DefaultStdoutLimit int64 = 64 << 20
-	DefaultStderrLimit int64 = 1 << 20
-	DefaultStdinLimit  int64 = 64 << 20
-	DefaultTimeout           = 30 * time.Second
-	DefaultTermGrace         = 750 * time.Millisecond
-	DefaultReapBound         = 5 * time.Second
-	DefaultConcurrency       = 4
+	DefaultStdoutLimit     int64 = 64 << 20
+	DefaultStderrLimit     int64 = 1 << 20
+	DefaultStdinLimit      int64 = 64 << 20
+	DefaultTimeout               = 30 * time.Second
+	DefaultTermGrace             = 750 * time.Millisecond
+	DefaultReapBound             = 5 * time.Second
+	MaxConcurrentProcesses       = 4
+	MaxBorrowedFiles             = 8
+	MaxSpoolStreamBytes    int64 = 128 << 20
+	// MaxErrorDetailBytes bounds terminal-safe external error detail.
+	MaxErrorDetailBytes int64 = 16 << 10
+	// MaxErrorConstructionBytes covers captured stderr, retained detail, one
+	// formatted error value, and fixed formatting metadata.
+	MaxErrorConstructionBytes = DefaultStderrLimit + 2*MaxErrorDetailBytes + 256
 )
+
+var processPermits = make(chan struct{}, MaxConcurrentProcesses)
 
 // ErrClosed identifies an closed failure.
 var (
@@ -37,16 +44,30 @@ var (
 
 // Request describes request.
 type Request struct {
-	Env             map[string]string
-	Name            string
-	Dir             string
+	Env         map[string]string
+	InputSpool  *InputSpool
+	OutputSpool *OutputSpool
+	// BorrowedFiles requires DirFile and is borrowed until Run returns without
+	// transferring caller ownership. The target receives element i at FD 5+i;
+	// FD 3 is the lifetime witness and launcher-only FD 4 is closed before exec.
+	// Use BorrowedFilePath to construct target-visible paths.
+	BorrowedFiles []*os.File
+	Name          string
+	Dir           string
+	// DirFile is a directory descriptor borrowed until Run returns. It pins the
+	// command's working directory even if its path is renamed or replaced.
+	DirFile         *os.File
 	OperationDetail string
 	Args            []string
-	Stdin           []byte
-	AcceptedExits   []int
-	StdoutLimit     int64
-	StderrLimit     int64
-	Timeout         time.Duration
+	// Stdin is borrowed until Run returns and must not be mutated concurrently.
+	Stdin            []byte
+	StdinText        string
+	AcceptedExits    []int
+	StdoutLimit      int64
+	StderrLimit      int64
+	InputSpoolLimit  int64
+	OutputSpoolLimit int64
+	Timeout          time.Duration
 }
 
 // Result describes result.
@@ -78,9 +99,10 @@ func (err *LimitError) Unwrap() error {
 
 // ExitError describes exit error.
 type ExitError struct {
-	Name     string
-	Stderr   string
-	ExitCode int
+	Name      string
+	Stderr    string
+	ExitCode  int
+	Truncated bool
 }
 
 // StartError describes start error.
@@ -104,7 +126,11 @@ func (err *ExitError) Error() string {
 	if err.Stderr == "" {
 		return fmt.Sprintf("%s exited with status %d", err.Name, err.ExitCode)
 	}
-	return fmt.Sprintf("%s exited with status %d: %s", err.Name, err.ExitCode, err.Stderr)
+	detail := err.Stderr
+	if err.Truncated {
+		detail += "…"
+	}
+	return fmt.Sprintf("%s exited with status %d: %s", err.Name, err.ExitCode, detail)
 }
 
 // NonGracefulError describes non graceful error.
@@ -124,13 +150,23 @@ func (err *NonGracefulError) Unwrap() error {
 
 // Runner represents runner.
 type Runner struct {
-	limits     chan struct{}
-	live       map[int]*os.Process
-	controlErr error
-	runs       sync.WaitGroup
-	mu         sync.Mutex
-	closed     bool
+	live           map[int]*os.Process
+	stopped        chan struct{}
+	controlErr     error
+	testAfterStart func()
+	runs           sync.WaitGroup
+	mu             sync.Mutex
+	state          runnerControlState
 }
+
+type runnerControlState uint8
+
+const (
+	runnerOpen runnerControlState = iota
+	runnerAdmissionClosed
+	runnerTerminating
+	runnerKillRequested
+)
 
 // Stream represents stream.
 type Stream string
@@ -142,15 +178,12 @@ const (
 	StreamStderr Stream = "stderr"
 )
 
-// NewRunner constructs and validates runner.
-func NewRunner(concurrency int) (*Runner, error) {
-	if concurrency <= 0 || concurrency > DefaultConcurrency {
-		return nil, fmt.Errorf("subprocess concurrency must be from 1 through %d", DefaultConcurrency)
-	}
+// NewRunner constructs a runner.
+func NewRunner() *Runner {
 	return &Runner{
-		limits: make(chan struct{}, concurrency),
-		live:   make(map[int]*os.Process),
-	}, nil
+		live:    make(map[int]*os.Process),
+		stopped: make(chan struct{}),
+	}
 }
 
 // Run performs the run operation.
@@ -158,32 +191,40 @@ func (runner *Runner) Run(ctx context.Context, request Request) (
 	result Result,
 	returnErr error,
 ) {
-	request, err := validatedRequest(request)
-	if err != nil {
-		return Result{}, err
+	request, validationErr := validatedRequest(request)
+	if validationErr != nil {
+		return Result{}, validationErr
 	}
 	if contextErr := context.Cause(ctx); contextErr != nil {
 		return Result{}, contextErr
 	}
 
-	select {
-	case runner.limits <- struct{}{}:
-	case <-ctx.Done():
-		return Result{}, context.Cause(ctx)
-	}
-
 	if admitErr := runner.admit(); admitErr != nil {
-		<-runner.limits
 		return Result{}, ErrClosed
 	}
+	permitHeld := false
 	waitStarted := false
 	runDone := make(chan struct{})
 	defer func() {
 		close(runDone)
 		if !waitStarted {
-			runner.release()
+			if permitHeld {
+				releaseProcessPermit()
+			}
+			runner.runs.Done()
 		}
 	}()
+
+	if permitErr := runner.acquireProcessPermit(ctx); permitErr != nil {
+		return Result{}, permitErr
+	}
+	permitHeld = true
+	if contextErr := context.Cause(ctx); contextErr != nil {
+		return Result{}, contextErr
+	}
+	if openErr := runner.requireOpen(); openErr != nil {
+		return Result{}, openErr
+	}
 
 	runContext, cancel := context.WithTimeoutCause(
 		ctx,
@@ -192,127 +233,210 @@ func (runner *Runner) Run(ctx context.Context, request Request) (
 	)
 	defer cancel()
 
-	executable, err := exec.LookPath(request.Name)
-	if err != nil {
-		return Result{}, &StartError{Name: operationName(request), cause: err}
-	}
-	arguments := make([]string, 1, len(request.Args)+1)
-	arguments[0] = request.Name
-	arguments = append(arguments, request.Args...)
-	command := &exec.Cmd{Path: executable, Args: arguments}
-	command.Dir = request.Dir
-	command.Env = mergedEnvironment(request.Env)
-	command.Stdin = bytes.NewReader(request.Stdin)
-	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	command.WaitDelay = DefaultReapBound
-	lifetime, inheritedLifetime, err := newProcessLifetime()
-	if err != nil {
-		return Result{}, fmt.Errorf("create subprocess lifetime witness: %w", err)
+	prepared, prepareErr := prepareCommand(request)
+	if prepareErr != nil {
+		return Result{}, prepareErr
 	}
 	defer func() {
-		returnErr = errors.Join(returnErr, lifetime.Close())
+		returnErr = errors.Join(returnErr, prepared.close())
 	}()
-	command.ExtraFiles = []*os.File{inheritedLifetime}
-	command.Env = append(command.Env, "RVW_PROCESS_LIFETIME_FD=3")
-	limited := make(chan *LimitError, 1)
-	stdout := newCapture(request.StdoutLimit, StreamStdout, limited)
-	stderr := newCapture(request.StderrLimit, StreamStderr, limited)
-	command.Stdout = stdout
-	command.Stderr = stderr
-
-	if err := command.Start(); err != nil {
-		return Result{}, errors.Join(
-			&StartError{Name: operationName(request), cause: err},
-			inheritedLifetime.Close(),
-		)
+	command := prepared.command
+	if startErr := command.Start(); startErr != nil {
+		return Result{}, &StartError{Name: operationName(request), cause: startErr}
 	}
-	pid := command.Process.Pid
-	if err := inheritedLifetime.Close(); err != nil {
-		return Result{Started: true}, errors.Join(
-			fmt.Errorf("close inherited subprocess lifetime witness: %w", err),
-			terminateStartedCommand(command, pid),
-		)
+	if runner.testAfterStart != nil {
+		runner.testAfterStart()
 	}
-	if err := runner.register(pid, command.Process); err != nil {
-		return Result{Started: true}, errors.Join(err, terminateStartedCommand(command, pid))
-	}
-
-	waited := newWaitState()
+	adopted := runner.adoptStartedCommand(command, prepared, runDone)
 	waitStarted = true
+
+	result, waitErr, runErr := runner.await(
+		runContext,
+		adopted.pid,
+		adopted.waited,
+		prepared.lifetime,
+		prepared.streamErrors,
+		adopted.setupErr,
+	)
+	result.Started = true
+	return finishResult(
+		request,
+		result,
+		waitErr,
+		runErr,
+		adopted.waited,
+		prepared.stdout,
+		prepared.stderr,
+	)
+}
+
+type adoptedCommand struct {
+	waited   *waitState
+	setupErr error
+	pid      int
+}
+
+func (runner *Runner) adoptStartedCommand(
+	command *exec.Cmd,
+	prepared *preparedCommand,
+	runDone <-chan struct{},
+) adoptedCommand {
+	pid := command.Process.Pid
+	waited := newWaitState()
+	control := runner.registerStarted(pid, command.Process)
+	controlErr := applyRunnerControl(pid, control)
+	runner.recordControlError(controlErr)
 	go func() {
 		waitErr := command.Wait()
 		waited.complete(waitErr)
 		runner.unregister(pid)
 		<-runDone
-		runner.release()
+		releaseProcessPermit()
+		runner.runs.Done()
 	}()
-
-	result, waitErr, runErr := runner.await(
-		runContext,
-		pid,
-		waited,
-		lifetime,
-		limited,
-	)
-	result.Started = true
-	return finishResult(request, result, waitErr, runErr, waited, stdout, stderr)
+	return adoptedCommand{
+		pid:      pid,
+		waited:   waited,
+		setupErr: errors.Join(controlErr, prepared.closeStartedInputs()),
+	}
 }
 
-func finishResult(
-	request Request,
-	result Result,
-	waitErr error,
-	runErr error,
-	waited *waitState,
-	stdout *capture,
-	stderr *capture,
-) (Result, error) {
-	if completed := waited.completed(); completed {
-		result.Stdout = stdout.TakeBytes()
-		result.Stderr = stderr.TakeBytes()
-		if stdout.Exceeded() {
-			return result, &LimitError{Stream: StreamStdout, Limit: request.StdoutLimit}
-		}
-		if stderr.Exceeded() {
-			return result, &LimitError{Stream: StreamStderr, Limit: request.StderrLimit}
-		}
+type preparedCommand struct {
+	command           *exec.Cmd
+	inputFile         *os.File
+	outputFile        *os.File
+	inheritedLifetime *os.File
+	lifetime          *processLifetime
+	stderr            *capture
+	stdout            boundedCapture
+	streamErrors      chan error
+}
+
+func prepareCommand(request Request) (*preparedCommand, error) {
+	executable, err := exec.LookPath(request.Name)
+	if err != nil {
+		return nil, &StartError{Name: operationName(request), cause: err}
 	}
-	if runErr != nil {
-		return result, runErr
-	}
-	if waitErr != nil && !slices.Contains(request.AcceptedExits, result.ExitCode) {
-		return result, &ExitError{
-			Name:     operationName(request),
-			ExitCode: result.ExitCode,
-			Stderr:   strings.TrimSpace(string(result.Stderr)),
+	arguments := make([]string, 1, len(request.Args)+1)
+	arguments[0] = request.Name
+	arguments = append(arguments, request.Args...)
+	directory := request.Dir
+	if request.DirFile != nil {
+		executable, arguments, err = descriptorCommand(
+			executable,
+			arguments,
+		)
+		if err != nil {
+			return nil, &StartError{Name: operationName(request), cause: err}
 		}
+		directory = ""
 	}
-	return result, nil
+	prepared := &preparedCommand{streamErrors: make(chan error, 1)}
+	prepared.command = &exec.Cmd{Path: executable, Args: arguments}
+	prepared.command.Dir = directory
+	prepared.command.Env = mergedEnvironment(request.Env)
+	prepared.command.Stdin = bytes.NewReader(request.Stdin)
+	if request.StdinText != "" {
+		prepared.command.Stdin = strings.NewReader(request.StdinText)
+	}
+	if request.InputSpool != nil {
+		prepared.inputFile, err = request.InputSpool.duplicate(StreamStdin)
+		if err != nil {
+			return nil, err
+		}
+		if _, err = prepared.inputFile.Seek(0, io.SeekStart); err != nil {
+			return nil, errors.Join(
+				fmt.Errorf("rewind subprocess input spool: %w", err),
+				prepared.close(),
+			)
+		}
+		prepared.command.Stdin = prepared.inputFile
+	}
+	prepared.command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	prepared.command.WaitDelay = DefaultReapBound
+	prepared.lifetime, prepared.inheritedLifetime, err = newProcessLifetime()
+	if err != nil {
+		return nil, errors.Join(
+			fmt.Errorf("create subprocess lifetime witness: %w", err),
+			prepared.close(),
+		)
+	}
+	prepared.command.ExtraFiles = []*os.File{prepared.inheritedLifetime}
+	if request.DirFile != nil {
+		prepared.command.ExtraFiles = append(prepared.command.ExtraFiles, request.DirFile)
+	}
+	prepared.command.ExtraFiles = append(prepared.command.ExtraFiles, request.BorrowedFiles...)
+	prepared.command.Env = append(prepared.command.Env, "RVW_PROCESS_LIFETIME_FD=3")
+	prepared.stdout = newCapture(request.StdoutLimit, StreamStdout, prepared.streamErrors)
+	if request.OutputSpool != nil {
+		prepared.outputFile, err = request.OutputSpool.duplicate(StreamStdout)
+		if err != nil {
+			return nil, errors.Join(err, prepared.close())
+		}
+		if err = prepared.outputFile.Truncate(0); err != nil {
+			return nil, errors.Join(
+				fmt.Errorf("truncate subprocess output spool: %w", err),
+				prepared.close(),
+			)
+		}
+		if _, err = prepared.outputFile.Seek(0, io.SeekStart); err != nil {
+			return nil, errors.Join(
+				fmt.Errorf("rewind subprocess output spool: %w", err),
+				prepared.close(),
+			)
+		}
+		prepared.stdout = newSpoolCapture(
+			prepared.outputFile,
+			request.OutputSpoolLimit,
+			StreamStdout,
+			prepared.streamErrors,
+		)
+	}
+	prepared.stderr = newCapture(request.StderrLimit, StreamStderr, prepared.streamErrors)
+	prepared.command.Stdout = prepared.stdout
+	prepared.command.Stderr = prepared.stderr
+	return prepared, nil
+}
+
+func (prepared *preparedCommand) closeStartedInputs() error {
+	inputErr := closeFile(prepared.inputFile)
+	prepared.inputFile = nil
+	lifetimeErr := closeFile(prepared.inheritedLifetime)
+	prepared.inheritedLifetime = nil
+	return errors.Join(inputErr, lifetimeErr)
+}
+
+func (prepared *preparedCommand) close() error {
+	if prepared == nil {
+		return nil
+	}
+	return errors.Join(
+		closeFile(prepared.inputFile),
+		closeFile(prepared.outputFile),
+		closeFile(prepared.inheritedLifetime),
+		prepared.lifetime.Close(),
+	)
 }
 
 // StopAdmission performs the stop admission operation.
 func (runner *Runner) StopAdmission() {
 	runner.mu.Lock()
-	runner.closed = true
+	runner.advanceControlLocked(runnerAdmissionClosed)
 	runner.mu.Unlock()
 }
 
 // Escalate performs the escalate operation.
 func (runner *Runner) Escalate() {
-	runner.mu.Lock()
-	processes := make(map[int]*os.Process, len(runner.live))
-	maps.Copy(processes, runner.live)
-	runner.mu.Unlock()
-
-	for pid := range processes {
+	_, pids := runner.advanceControl(runnerKillRequested)
+	for _, pid := range pids {
 		runner.recordControlError(signalProcessGroup(pid, syscall.SIGKILL))
 	}
 }
 
 // Shutdown performs the shutdown operation.
 func (runner *Runner) Shutdown(ctx context.Context) error {
-	runner.StopAdmission()
-	runner.signalAll(syscall.SIGTERM)
+	control, pids := runner.advanceControl(runnerTerminating)
+	runner.signalSnapshot(pids, control.signal())
 
 	done := make(chan struct{})
 	go func() {
@@ -352,8 +476,12 @@ func (runner *Runner) await(
 	pid int,
 	waited *waitState,
 	lifetime *processLifetime,
-	limited <-chan *LimitError,
+	streamErrors <-chan error,
+	setupErr error,
 ) (Result, error, error) {
+	if setupErr != nil {
+		return runner.terminateAndAwait(pid, waited, lifetime, setupErr)
+	}
 	select {
 	case <-waited.done:
 		waitErr := waited.err()
@@ -383,55 +511,42 @@ func (runner *Runner) await(
 			waitErr,
 			processAlreadyWaited,
 		)
-	case limitErr := <-limited:
-		result := Result{ExitCode: -1, Terminated: true}
-		termErr := signalProcessGroup(pid, syscall.SIGTERM)
-		completed, waitErr := waitForProcessTree(
-			pid,
-			waited,
-			lifetime,
-			DefaultTermGrace,
-		)
-		if completed {
-			result = resultFromWait(waitErr)
-			result.Terminated = true
-			return result, waitErr, errors.Join(limitErr, termErr)
-		}
-		return runner.escalate(
-			pid,
-			waited,
-			lifetime,
-			result,
-			waitErr,
-			processWaitPending,
-			limitErr,
-			termErr,
-		)
+	case streamErr := <-streamErrors:
+		return runner.terminateAndAwait(pid, waited, lifetime, streamErr)
 	case <-ctx.Done():
-		result := Result{ExitCode: -1, Terminated: true}
-		termErr := signalProcessGroup(pid, syscall.SIGTERM)
-		completed, waitErr := waitForProcessTree(
-			pid,
-			waited,
-			lifetime,
-			DefaultTermGrace,
-		)
-		if completed {
-			result = resultFromWait(waitErr)
-			result.Terminated = true
-			return result, waitErr, errors.Join(context.Cause(ctx), termErr)
-		}
-		return runner.escalate(
-			pid,
-			waited,
-			lifetime,
-			result,
-			waitErr,
-			processWaitPending,
-			context.Cause(ctx),
-			termErr,
-		)
+		return runner.terminateAndAwait(pid, waited, lifetime, context.Cause(ctx))
 	}
+}
+
+func (runner *Runner) terminateAndAwait(
+	pid int,
+	waited *waitState,
+	lifetime *processLifetime,
+	cause error,
+) (Result, error, error) {
+	result := Result{ExitCode: -1, Terminated: true}
+	termErr := signalProcessGroup(pid, syscall.SIGTERM)
+	completed, waitErr := waitForProcessTree(
+		pid,
+		waited,
+		lifetime,
+		DefaultTermGrace,
+	)
+	if completed {
+		result = resultFromWait(waitErr)
+		result.Terminated = true
+		return result, waitErr, errors.Join(cause, termErr)
+	}
+	return runner.escalate(
+		pid,
+		waited,
+		lifetime,
+		result,
+		waitErr,
+		processWaitPending,
+		cause,
+		termErr,
+	)
 }
 
 type processWaitState uint8
@@ -482,40 +597,48 @@ func (runner *Runner) escalate(
 func (runner *Runner) admit() error {
 	runner.mu.Lock()
 	defer runner.mu.Unlock()
-	if runner.closed {
+	if runner.state != runnerOpen {
 		return ErrClosed
 	}
 	runner.runs.Add(1)
 	return nil
 }
 
-func (runner *Runner) release() {
-	<-runner.limits
-	runner.runs.Done()
+func (runner *Runner) acquireProcessPermit(ctx context.Context) error {
+	select {
+	case processPermits <- struct{}{}:
+		return nil
+	case <-runner.stopped:
+		return ErrClosed
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	}
 }
 
-func (runner *Runner) register(pid int, process *os.Process) error {
+func (runner *Runner) requireOpen() error {
 	runner.mu.Lock()
 	defer runner.mu.Unlock()
-	if runner.closed {
+	if runner.state != runnerOpen {
 		return ErrClosed
 	}
-	runner.live[pid] = process
 	return nil
+}
+
+func releaseProcessPermit() {
+	<-processPermits
+}
+
+func (runner *Runner) registerStarted(pid int, process *os.Process) runnerControlState {
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	runner.live[pid] = process
+	return runner.state
 }
 
 func (runner *Runner) unregister(pid int) {
 	runner.mu.Lock()
 	delete(runner.live, pid)
 	runner.mu.Unlock()
-}
-
-type capture struct {
-	limited  chan<- *LimitError
-	stream   Stream
-	buffer   bytes.Buffer
-	limit    int64
-	exceeded bool
 }
 
 type waitState struct {
@@ -588,121 +711,6 @@ func (state *waitState) completed() bool {
 func (state *waitState) err() error {
 	<-state.done
 	return state.waitErr
-}
-
-func newCapture(limit int64, stream Stream, limited chan<- *LimitError) *capture {
-	return &capture{limit: limit, stream: stream, limited: limited}
-}
-
-// Write performs the write operation.
-func (capture *capture) Write(value []byte) (int, error) {
-	original := len(value)
-	remaining := capture.limit - int64(capture.buffer.Len())
-	if remaining > 0 {
-		retained := min(remaining, int64(len(value)))
-		_, _ = capture.buffer.Write(value[:int(retained)])
-	}
-	if int64(original) > remaining {
-		if !capture.exceeded {
-			capture.exceeded = true
-			select {
-			case capture.limited <- &LimitError{Stream: capture.stream, Limit: capture.limit}:
-			default:
-			}
-		}
-	}
-	return original, nil
-}
-
-// TakeBytes takes ownership of bytes.
-func (capture *capture) TakeBytes() []byte {
-	value := capture.buffer.Bytes()
-	capture.buffer = bytes.Buffer{}
-	return value
-}
-
-// Exceeded reports the receiver's exceeded state.
-func (capture *capture) Exceeded() bool {
-	return capture.exceeded
-}
-
-func validatedRequest(request Request) (Request, error) {
-	if request.Name == "" || strings.IndexByte(request.Name, 0) >= 0 {
-		return Request{}, errors.New("subprocess executable must be nonempty and contain no NUL")
-	}
-	for _, argument := range request.Args {
-		if strings.IndexByte(argument, 0) >= 0 {
-			return Request{}, errors.New("subprocess argument contains NUL")
-		}
-	}
-	for key, value := range request.Env {
-		if key == "" || strings.ContainsAny(key, "=\x00") || strings.IndexByte(value, 0) >= 0 {
-			return Request{}, fmt.Errorf("invalid subprocess environment key %q", key)
-		}
-	}
-	if int64(len(request.Stdin)) > DefaultStdinLimit {
-		return Request{}, &LimitError{Stream: StreamStdin, Limit: DefaultStdinLimit}
-	}
-	if request.StdoutLimit == 0 {
-		request.StdoutLimit = DefaultStdoutLimit
-	}
-	if request.StderrLimit == 0 {
-		request.StderrLimit = DefaultStderrLimit
-	}
-	if request.StdoutLimit < 0 || request.StdoutLimit > DefaultStdoutLimit {
-		return Request{}, fmt.Errorf("stdout limit must be from 1 through %d", DefaultStdoutLimit)
-	}
-	if request.StderrLimit < 0 || request.StderrLimit > DefaultStderrLimit {
-		return Request{}, fmt.Errorf("stderr limit must be from 1 through %d", DefaultStderrLimit)
-	}
-	if request.Timeout == 0 {
-		request.Timeout = DefaultTimeout
-	}
-	if request.Timeout < 0 || request.Timeout > DefaultTimeout {
-		return Request{}, fmt.Errorf("timeout must be from 1ns through %s", DefaultTimeout)
-	}
-	if len(request.AcceptedExits) == 0 {
-		request.AcceptedExits = []int{0}
-	} else {
-		request.AcceptedExits = slices.Clone(request.AcceptedExits)
-		for _, code := range request.AcceptedExits {
-			if code < 0 || code > 255 {
-				return Request{}, fmt.Errorf("accepted exit status %d is outside 0..255", code)
-			}
-		}
-	}
-	request.Args = slices.Clone(request.Args)
-	request.Stdin = bytes.Clone(request.Stdin)
-	return request, nil
-}
-
-func mergedEnvironment(overrides map[string]string) []string {
-	environment := os.Environ()
-	if len(overrides) == 0 {
-		return environment
-	}
-	for key, value := range overrides {
-		prefix := key + "="
-		replaced := false
-		for index, entry := range environment {
-			if strings.HasPrefix(entry, prefix) {
-				environment[index] = prefix + value
-				replaced = true
-				break
-			}
-		}
-		if !replaced {
-			environment = append(environment, prefix+value)
-		}
-	}
-	return environment
-}
-
-func operationName(request Request) string {
-	if request.OperationDetail != "" {
-		return request.OperationDetail
-	}
-	return request.Name
 }
 
 func waitForProcessTree(
@@ -785,13 +793,52 @@ func waitForQuiescence(
 	return processTreeQuiescent(pid, lifetime)
 }
 
-func (runner *Runner) signalAll(signal syscall.Signal) {
+func (runner *Runner) advanceControl(next runnerControlState) (runnerControlState, []int) {
 	runner.mu.Lock()
+	runner.advanceControlLocked(next)
 	pids := make([]int, 0, len(runner.live))
 	for pid := range runner.live {
 		pids = append(pids, pid)
 	}
+	state := runner.state
 	runner.mu.Unlock()
+	return state, pids
+}
+
+func (runner *Runner) advanceControlLocked(next runnerControlState) {
+	if next <= runner.state {
+		return
+	}
+	wasOpen := runner.state == runnerOpen
+	runner.state = next
+	if wasOpen {
+		close(runner.stopped)
+	}
+}
+
+func (state runnerControlState) signal() syscall.Signal {
+	switch state {
+	case runnerTerminating:
+		return syscall.SIGTERM
+	case runnerKillRequested:
+		return syscall.SIGKILL
+	default:
+		return 0
+	}
+}
+
+func applyRunnerControl(pid int, state runnerControlState) error {
+	signal := state.signal()
+	if signal == 0 {
+		return nil
+	}
+	return signalProcessGroup(pid, signal)
+}
+
+func (runner *Runner) signalSnapshot(pids []int, signal syscall.Signal) {
+	if signal == 0 {
+		return
+	}
 	for _, pid := range pids {
 		runner.recordControlError(signalProcessGroup(pid, signal))
 	}
@@ -810,13 +857,4 @@ func (runner *Runner) controlError() error {
 	runner.mu.Lock()
 	defer runner.mu.Unlock()
 	return runner.controlErr
-}
-
-func terminateStartedCommand(command *exec.Cmd, pid int) error {
-	signalErr := signalProcessGroup(pid, syscall.SIGKILL)
-	waitErr := command.Wait()
-	if exitErr, ok := errors.AsType[*exec.ExitError](waitErr); ok && exitErr != nil {
-		waitErr = nil
-	}
-	return errors.Join(signalErr, waitErr)
 }

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"unsafe"
 
 	"github.com/jacoelho/rvw/internal/review"
 	"github.com/jacoelho/rvw/internal/source"
@@ -27,6 +28,17 @@ type syntaxJob struct {
 	work SyntaxWork
 }
 
+const syntaxResultConstructionBytes = review.MaxBlobBytes +
+	3*review.MaxSyntaxBytes + source.MaxCommandErrorConstructionBytes
+
+func (work SyntaxWork) requestBytes() int64 {
+	requestBytes := work.Request.RetainedBytes()
+	if requestBytes == 0 {
+		return 0
+	}
+	return int64(unsafe.Sizeof(work)-unsafe.Sizeof(work.Request)) + requestBytes
+}
+
 // SubmitSyntax performs the submit syntax operation.
 func (coordinator *Coordinator) SubmitSyntax(work SyntaxWork) error {
 	if work.ID == 0 || work.Document == nil ||
@@ -34,15 +46,16 @@ func (coordinator *Coordinator) SubmitSyntax(work SyntaxWork) error {
 		work.Request.Source == 0 {
 		return errors.New("invalid syntax work")
 	}
-	var requestBytes int64 = 256
-	for _, demand := range work.Request.Demands {
-		requestBytes += int64(len(demand.Lines) * 4)
-		requestBytes += int64(len(demand.Identity.Selector()))
+	requestBytes := work.requestBytes()
+	if requestBytes == 0 {
+		return errors.New("invalid syntax work")
 	}
 	return coordinator.submit(
 		work.ID,
 		requestBytes,
-		2*review.MaxBlobBytes+review.MaxSyntaxBytes,
+		// Demands are loaded sequentially. The peak is the first terminal
+		// result, one blob, and the old-plus-new growth peak of the second.
+		syntaxResultConstructionBytes,
 		func(ctx context.Context) bool {
 			select {
 			case coordinator.syntaxJobs <- syntaxJob{work: work, ctx: ctx}:
@@ -62,18 +75,12 @@ func (coordinator *Coordinator) runSyntaxWorker() {
 			Total:  1,
 			Detail: boundedOperationDetail("loading and preparing syntax"),
 		})
-		var result review.SyntaxResult
-		var err error
-		if !coordinator.acquireCPU(job.ctx) {
-			err = context.Cause(job.ctx)
-		} else {
-			result, err = coordinator.service.LoadSyntax(
-				job.ctx,
-				job.work.Document,
-				job.work.Request,
-			)
-			coordinator.releaseCPU()
-		}
+		result, err := coordinator.service.LoadSyntaxWithCPUAdmission(
+			job.ctx,
+			job.work.Document,
+			job.work.Request,
+			coordinator.runCPU,
+		)
 		coordinator.complete(SyntaxOutcome{
 			ID:     job.work.ID,
 			Result: result,

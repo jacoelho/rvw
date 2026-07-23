@@ -3,7 +3,6 @@ package app
 import (
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -23,6 +22,11 @@ func (model *Model) startPublicationCheck() {
 			Kind: NoticeWarning,
 			Text: "GitHub publication is available only for a pull-request source",
 		}
+		return
+	}
+	target, ok := model.document.PublicationTarget()
+	if !ok {
+		model.notice = &Notice{Kind: NoticeWarning, Text: "GitHub publication target is unavailable"}
 		return
 	}
 	if model.publicationOperation != 0 {
@@ -47,10 +51,10 @@ func (model *Model) startPublicationCheck() {
 		return
 	}
 	if err := model.coordinator.SubmitPublicationCheck(PublicationCheckWork{
-		ID:       operationID,
-		Document: model.document,
-		Review:   current,
-		Request:  request,
+		ID:      operationID,
+		Target:  target,
+		Source:  current.PublicationSource(),
+		Request: request,
 	}); err != nil {
 		model.review = failPublicationCheck(next, request, err)
 		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
@@ -85,12 +89,7 @@ func (model *Model) publicationOptions() (review.PublicationOptions, error) {
 	if err != nil {
 		return review.PublicationOptions{}, err
 	}
-	excluded := make([]review.CommentID, 0, len(model.publicationExcluded))
-	for id := range model.publicationExcluded {
-		excluded = append(excluded, id)
-	}
-	slices.Sort(excluded)
-	return options.WithExcludedComments(excluded)
+	return options.WithExclusions(model.publicationExcluded)
 }
 
 func (model *Model) nextOperationID() (review.OperationID, error) {
@@ -166,7 +165,7 @@ func (model *Model) applyPublicationCheckOutcome(outcome PublicationCheckOutcome
 	}
 	status := review.OperationSucceeded
 	if result.Checked == nil {
-		status = review.OperationFailed
+		status = operationStatusForWorkError(outcome.Err)
 	}
 	next, err = next.ResolveOperation(outcome.ID, status, result.Detail)
 	if err != nil {
@@ -206,6 +205,7 @@ func (model *Model) startPublication() {
 	if err := model.coordinator.SubmitPublication(PublicationWork{
 		ID:      operationID,
 		Request: request,
+		Rebase:  model.review.PendingRebaseSource(),
 	}); err != nil {
 		result := review.PublicationResult{
 			Operation:   operationID,
@@ -236,23 +236,16 @@ func (model *Model) applyPublicationCommitOutcome(outcome PublicationCommitOutco
 		return
 	}
 	result := outcome.Publication
-	next, err := model.review.ApplyPublication(result)
+	next, err := model.review.ApplyPreparedPublication(result)
 	if err != nil {
-		result = review.PublicationResult{
-			Operation:   outcome.ID,
-			Workspace:   model.review.WorkspaceRevision(),
-			Source:      model.review.Snapshot().SourceID(),
-			Disposition: review.PublicationDispositionUnknown,
-			Detail:      boundedOperationDetail(err.Error()),
+		if outcome.Err != nil {
+			err = errors.Join(outcome.Err, err)
 		}
-		next, err = model.review.ApplyPublication(result)
-		if err != nil {
-			model.notice = &Notice{Kind: NoticeError, Text: NoticeText(err.Error())}
-			return
-		}
+		model.notice = &Notice{Kind: NoticeError, Text: NoticeText(err.Error())}
+		return
 	}
 	status := review.OperationSucceeded
-	switch result.Disposition {
+	switch result.Disposition() {
 	case review.PublicationDispositionCommitted:
 	case review.PublicationDispositionUnknown:
 		status = review.OperationUnknown
@@ -264,33 +257,37 @@ func (model *Model) applyPublicationCommitOutcome(outcome PublicationCommitOutco
 		next,
 		outcome.ID,
 		status,
-		result.Detail,
+		result.Detail(),
 	)
 	model.review = next
 	model.publicationCancel = false
-	if result.Disposition == review.PublicationDispositionUnknown {
+	if result.Disposition() == review.PublicationDispositionUnknown {
 		model.notice = &Notice{
 			Kind: NoticeError,
-			Text: "publication outcome is unknown; reconciling exact remote marker",
+			Text: "publication outcome is unknown; reconciling exact remote state",
 		}
 		model.startReconciliation()
 		return
 	}
-	if result.Disposition == review.PublicationDispositionCommitted {
+	if result.Disposition() == review.PublicationDispositionCommitted {
 		message := "GitHub review published"
 		kind := NoticeInformation
 		if model.review.PublicationSummary().Event == review.PublicationEventDraft {
 			message = "GitHub draft review synchronized"
-			if !result.Detail.IsEmpty() {
-				message = result.Detail.String()
+			if !result.Detail().IsEmpty() {
+				message = result.Detail().String()
 				kind = NoticeWarning
 			}
+		}
+		if refreshErr := result.LocalRefreshError(); refreshErr != nil {
+			message = refreshErr.Error()
+			kind = NoticeWarning
 		}
 		model.notice = &Notice{Kind: kind, Text: NoticeText(message)}
 	} else {
 		model.notice = &Notice{
 			Kind: NoticeWarning,
-			Text: NoticeText(result.Detail.String()),
+			Text: NoticeText(result.Detail().String()),
 		}
 	}
 }
@@ -313,6 +310,7 @@ func (model *Model) startReconciliation() {
 	if err := model.coordinator.SubmitReconciliation(ReconciliationWork{
 		ID:      operationID,
 		Request: request,
+		Rebase:  model.review.PendingRebaseSource(),
 	}); err != nil {
 		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
 		return
@@ -329,51 +327,48 @@ func (model *Model) applyReconciliationOutcome(outcome ReconciliationOutcome) {
 	}
 	attempt, hasAttempt := model.review.UnknownPublicationOperation()
 	result := outcome.Reconciliation
-	next, err := model.review.ApplyReconciliation(result)
+	next, err := model.review.ApplyPreparedReconciliation(result)
 	if err != nil {
-		result = review.ReconciliationResult{
-			Operation:   outcome.ID,
-			Workspace:   model.review.WorkspaceRevision(),
-			Source:      model.review.Snapshot().SourceID(),
-			Disposition: review.ReconciliationStillUnknown,
-			Detail:      boundedOperationDetail(err.Error()),
+		if outcome.Err != nil {
+			err = errors.Join(outcome.Err, err)
 		}
-		next, err = model.review.ApplyReconciliation(result)
-		if err != nil {
-			model.notice = &Notice{Kind: NoticeError, Text: NoticeText(err.Error())}
-			return
-		}
+		model.notice = &Notice{Kind: NoticeError, Text: NoticeText(err.Error())}
+		return
 	}
 	reconciliationStatus := review.OperationSucceeded
-	if result.Disposition == review.ReconciliationStillUnknown {
+	if result.Disposition() == review.ReconciliationStillUnknown {
 		reconciliationStatus = review.OperationFailed
 	}
 	next = resolvePublicationOperation(
 		next,
 		outcome.ID,
 		reconciliationStatus,
-		result.Detail,
+		result.Detail(),
 	)
 	if hasAttempt &&
-		result.Disposition != review.ReconciliationStillUnknown {
+		result.Disposition() != review.ReconciliationStillUnknown {
 		settledStatus := review.OperationSucceeded
-		if result.Disposition == review.ReconciliationNotCommitted {
+		if result.Disposition() == review.ReconciliationNotCommitted {
 			settledStatus = review.OperationFailed
 		}
 		if settled, settleErr := next.SettleUnknownOperation(
 			attempt,
 			settledStatus,
-			result.Detail,
+			result.Detail(),
 		); settleErr == nil {
 			next = settled
 		}
 	}
 	model.review = next
-	switch result.Disposition {
+	if refreshErr := result.LocalRefreshError(); refreshErr != nil {
+		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(refreshErr.Error())}
+		return
+	}
+	switch result.Disposition() {
 	case review.ReconciliationCommitted:
 		model.notice = &Notice{
 			Kind: NoticeInformation,
-			Text: "GitHub review commit confirmed by publication marker",
+			Text: "GitHub publication confirmed from exact remote state",
 		}
 	case review.ReconciliationNotCommitted:
 		model.notice = &Notice{
@@ -504,11 +499,12 @@ func (model *Model) togglePublicationExclusion() {
 		}
 		return
 	}
-	if _, excluded := model.publicationExcluded[comment.ID()]; excluded {
-		delete(model.publicationExcluded, comment.ID())
-	} else {
-		model.publicationExcluded[comment.ID()] = struct{}{}
+	exclusions, err := model.publicationExcluded.Toggle(comment.ID())
+	if err != nil {
+		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
+		return
 	}
+	model.publicationExcluded = exclusions
 }
 
 func (model *Model) acknowledgePublication() {
@@ -575,10 +571,10 @@ func (model *Model) publicationView(width, height int) string {
 			"Target: "+summary.Target.Repository()+"#"+
 				fmt.Sprintf("%d", summary.Target.PullRequest()),
 			"Marker: "+summary.Marker.String(),
-			"Use submit-recheck to enumerate every remote review.",
+			"Use submit-recheck to verify exact remote state.",
 		)
 	case review.PublicationReconciling:
-		lines = append(lines, "Enumerating every remote review for the exact publication marker…")
+		lines = append(lines, "Checking exact GitHub publication state…")
 	case review.PublicationCommitted:
 		lines = append(lines, "Publication committed.")
 	case review.PublicationConfirmedAbsent:

@@ -238,4 +238,35 @@ func TestObjectIDRejectsZeroAndSnapshotBuilderRejectsMixedFormats(t *testing.T) 
 	if _, err := builder.Finish(); !errors.Is(err, ErrInvalidSnapshot) {
 		t.Fatalf("mixed object ID formats error = %v, want ErrInvalidSnapshot", err)
 	}
+	if builder.files != nil {
+		t.Fatal("failed Finish retained consumed file backing")
+	}
+	if _, err := builder.Finish(); !errors.Is(err, ErrInvalidSnapshot) {
+		t.Fatalf("repeated Finish error = %v, want ErrInvalidSnapshot", err)
+	}
+}
+
+func TestSnapshotBuilderFinishConsumesTransferredBacking(t *testing.T) {
+	sourceID, _ := NewSourceID(1)
+	builder, err := NewSnapshotBuilder(sourceID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, _ := NewPath([]byte("file.go"))
+	change, _ := NewUnclassifiedChange(ChangeAdded, 1, 0)
+	flags, _ := NewFlags(FileTraits{}, HiddenReasons{})
+	if _, err := builder.AddFile(nil, &path, change, flags); err != nil {
+		t.Fatal(err)
+	}
+	backing := &builder.files[0]
+	snapshot, err := builder.Finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if builder.files != nil || &snapshot.files[0] != backing {
+		t.Fatal("Finish did not consume and transfer file backing")
+	}
+	if _, err := builder.AddFile(nil, &path, change, flags); !errors.Is(err, ErrInvalidSnapshot) {
+		t.Fatalf("post-Finish mutation error = %v, want ErrInvalidSnapshot", err)
+	}
 }

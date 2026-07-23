@@ -86,52 +86,6 @@ func TestServiceSerializesRepositoryDiscoveryAndSourceIdentity(t *testing.T) {
 	}
 }
 
-func TestParseRawAndNumstat(t *testing.T) {
-	const oidA = "1111111111111111111111111111111111111111"
-	const oidB = "2222222222222222222222222222222222222222"
-	raw := []byte(
-		":000000 100644 0000000000000000000000000000000000000000 " + oidA + " A\x00added.go\x00" +
-			":100644 100644 " + oidA + " " + oidB + " R100\x00old.go\x00new.go\x00",
-	)
-	records, err := parseRawDiff(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	numstat, err := parseNumstat([]byte("3\t0\tadded.go\x000\t0\t\x00old.go\x00new.go\x00"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(records) != 2 || len(numstat) != 2 {
-		t.Fatalf("record counts = %d %d", len(records), len(numstat))
-	}
-	if !matchingNumstatPath(records[0], numstat[0]) || !matchingNumstatPath(records[1], numstat[1]) {
-		t.Fatal("raw and numstat paths did not match")
-	}
-	records[0].additions = numstat[0].additions
-	change, err := changeFromDiff(records[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if change.Kind() != "added" || change.Additions() != 3 {
-		t.Fatalf("unexpected change: %+v", change)
-	}
-}
-
-func TestParseRawDiffRejectsMalformedStatusSuffixes(t *testing.T) {
-	const oid = "1111111111111111111111111111111111111111"
-	for _, status := range []string{"Mgarbage", "A100", "Rxyz", "R101", "C-1"} {
-		t.Run(status, func(t *testing.T) {
-			raw := []byte(
-				":100644 100644 " + oid + " " + oid + " " + status +
-					"\x00old.go\x00new.go\x00",
-			)
-			if _, err := parseRawDiff(raw); err == nil {
-				t.Fatalf("status %q unexpectedly accepted", status)
-			}
-		})
-	}
-}
-
 func TestOpenLocalSources(t *testing.T) {
 	root := initializedRepository(t)
 	writeFile(t, filepath.Join(root, "tracked.txt"), "one\n")
@@ -634,7 +588,7 @@ func TestOpenStagedPreservesUnmergedIndexAsUnavailablePatch(t *testing.T) {
 		t.Fatalf("unexpected staged conflict snapshot: %+v", document.Snapshot())
 	}
 
-	current, err := review.NewReview(document.Snapshot())
+	current, err := review.NewReview(testReviewRequest(document.Snapshot()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -676,7 +630,7 @@ func TestLoadPatchAndReloadUseGenerationFencedIdentities(t *testing.T) {
 	}
 	defer document.Close()
 
-	current, err := review.NewReview(document.Snapshot())
+	current, err := review.NewReview(testReviewRequest(document.Snapshot()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -701,7 +655,7 @@ func TestLoadPatchAndReloadUseGenerationFencedIdentities(t *testing.T) {
 		t.Fatalf("unexpected patch text:\n%s", lines)
 	}
 
-	reloaded, err := service.Reload(t.Context(), document, options)
+	reloaded, err := service.Reload(t.Context(), document, options, directCPUAdmission)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -732,7 +686,7 @@ func TestLoadPatchTreatsRawPathAsLiteral(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer document.Close()
-	current, err := review.NewReview(document.Snapshot())
+	current, err := review.NewReview(testReviewRequest(document.Snapshot()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -865,7 +819,12 @@ func TestIgnoreFileCannotFollowSymlinkOutsideRepository(t *testing.T) {
 	}
 	repository, _ := NewRepositoryPath(root)
 	name, _ := NewIgnoreFile(".rvwignore")
-	if _, err := readIgnoreRules(repository, name); err == nil {
+	rooted, err := openRootedRepository(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rooted.Close()
+	if _, err := readIgnoreRules(rooted, name); err == nil {
 		t.Fatal("outside-repository ignore-file symlink was followed")
 	}
 }

@@ -1,41 +1,264 @@
 package source
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
-	"unicode/utf8"
 
 	"github.com/jacoelho/rvw/internal/review"
-	"github.com/jacoelho/rvw/internal/subprocess"
 )
 
 const (
-	pendingMutationResponseBytes = 1 << 20
-	updatePullRequestReviewInput = "UpdatePullRequestReviewInput"
-	updatePullRequestReviewField = "updatePullRequestReview"
+	pendingMutationResponseBytes        = 1 << 20
+	pendingExecutionMetadataBytes int64 = 1_024
+	pendingBatchMetadataBytes     int64 = 256
+	pendingEffectMetadataBytes    int64 = 512
+	pendingAliasMetadataBytes     int64 = 64
+	updatePullRequestReviewInput        = "UpdatePullRequestReviewInput"
+	updatePullRequestReviewField        = "updatePullRequestReview"
 )
 
-type pendingWireEffect struct {
-	input    map[string]any
-	field    string
-	typeName string
-	desired  string
+type pendingEffect struct {
+	before   string
+	after    string
+	marker   string
 	mutation review.PendingMutation
 }
 
-type pendingMutationEnvelope struct {
-	Data   map[string]json.RawMessage `json:"data"`
-	Errors []json.RawMessage          `json:"errors"`
+type pendingWireEffect struct {
+	reviewID         string
+	clientMutationID string
+	pendingEffect
+}
+
+type pendingSubmissionInput struct {
+	reviewID         string
+	event            string
+	clientMutationID string
 }
 
 type pendingMutationAlias struct {
 	name   string
 	client string
+}
+
+type pendingMutationAliasPresence uint64
+
+func (presence *pendingMutationAliasPresence) add(index int) error {
+	if presence == nil || index < 0 || index >= review.MaxPendingMutationBatch {
+		return errors.New("pending mutation response alias index is invalid")
+	}
+	bit := pendingMutationAliasPresence(1) << index
+	if *presence&bit != 0 {
+		return errors.New("GitHub pending mutation response repeats an alias field")
+	}
+	*presence |= bit
+	return nil
+}
+
+func (presence *pendingMutationAliasPresence) has(index int) bool {
+	if presence == nil || index < 0 || index >= review.MaxPendingMutationBatch {
+		return false
+	}
+	return *presence&(pendingMutationAliasPresence(1)<<index) != 0
+}
+
+type pendingMutationResponseCollector struct {
+	aliases          []pendingMutationAlias
+	scope            *jsonDecodeScope
+	path             jsonPathTracker
+	duplicates       jsonDuplicateGuard
+	aliasesSeen      pendingMutationAliasPresence
+	clientsSeen      pendingMutationAliasPresence
+	clientsConfirmed pendingMutationAliasPresence
+	root             bool
+	data             bool
+}
+
+func newPendingMutationResponseCollector(
+	aliases []pendingMutationAlias,
+) (pendingMutationResponseCollector, error) {
+	if len(aliases) == 0 || len(aliases) > review.MaxPendingMutationBatch {
+		return pendingMutationResponseCollector{}, errors.New(
+			"pending mutation response aliases are unavailable",
+		)
+	}
+	for index, alias := range aliases {
+		if alias.name == "" || alias.client == "" {
+			return pendingMutationResponseCollector{}, errors.New(
+				"pending mutation response alias is incomplete",
+			)
+		}
+		for prior := range index {
+			if aliases[prior].name == alias.name {
+				return pendingMutationResponseCollector{}, errors.New(
+					"pending mutation response aliases are not unique",
+				)
+			}
+		}
+	}
+	return pendingMutationResponseCollector{aliases: aliases}, nil
+}
+
+func (collector *pendingMutationResponseCollector) consume(frame jsonFrame) error {
+	switch frame.Kind {
+	case jsonObjectKey:
+		if err := collector.path.keyFrame(collector.scope, frame); err != nil {
+			return err
+		}
+		if err := collector.duplicates.key(&collector.path); err != nil {
+			return err
+		}
+		return collector.recordDynamicKey()
+	case jsonObjectStart:
+		if err := collector.path.start(frame.Kind, 0); err != nil {
+			return err
+		}
+		collector.duplicates.startObject(collector.path.depth)
+		return collector.startObject()
+	case jsonArrayStart:
+		if err := collector.path.start(frame.Kind, frame.Count); err != nil {
+			return err
+		}
+		if collector.path.suffix(jsonFieldErrors) {
+			if frame.Count != 0 {
+				return errors.New("GitHub pending mutation response contains errors")
+			}
+			return nil
+		}
+		if collector.path.depth == 1 || collector.path.suffix(jsonFieldData) ||
+			collector.expectedAliasContainer() >= 0 {
+			return errors.New("GitHub pending mutation response has an invalid structure")
+		}
+		return nil
+	case jsonObjectEnd:
+		collector.duplicates.endObject(collector.path.depth)
+		return collector.path.end(frame.Kind)
+	case jsonArrayEnd:
+		return collector.path.end(frame.Kind)
+	default:
+		return collector.path.scalar(func(value jsonPathValue) error {
+			return collector.scalar(value, frame)
+		})
+	}
+}
+
+func (collector *pendingMutationResponseCollector) recordDynamicKey() error {
+	if collector.path.depth == 2 &&
+		collector.path.stack[collector.path.depth-1].name == jsonFieldData {
+		index := collector.aliasIndex(collector.path.stack[collector.path.depth-1].pendingKey)
+		if index >= 0 {
+			return collector.aliasesSeen.add(index)
+		}
+	}
+	index := collector.expectedAliasContainer()
+	if index >= 0 && collector.path.stack[collector.path.depth-1].pendingKey == graphqlClientID {
+		return collector.clientsSeen.add(index)
+	}
+	return nil
+}
+
+func (collector *pendingMutationResponseCollector) startObject() error {
+	switch {
+	case collector.path.depth == 1:
+		if collector.root {
+			return errors.New("GitHub pending mutation response has multiple roots")
+		}
+		collector.root = true
+	case collector.path.suffix(jsonFieldData):
+		collector.data = true
+	case collector.path.suffix(jsonFieldErrors):
+		return errors.New("GitHub pending mutation response errors field is not an array")
+	}
+	return nil
+}
+
+func (collector *pendingMutationResponseCollector) scalar(value jsonPathValue, frame jsonFrame) error {
+	switch {
+	case collector.path.depth == 0:
+		return errors.New("GitHub pending mutation response root is not an object")
+	case collector.path.scalarSuffix(value, jsonFieldData):
+		return errors.New("GitHub pending mutation response contains errors")
+	case collector.path.scalarSuffix(value, jsonFieldErrors):
+		if frame.Kind == jsonNull {
+			return nil
+		}
+		return errors.New("GitHub pending mutation response errors field is not an array")
+	}
+	index := collector.expectedAliasScalar(value.name)
+	if index >= 0 {
+		return errors.New("GitHub pending mutation response is incomplete")
+	}
+	index = collector.expectedClientScalar(value.name)
+	if index < 0 {
+		return nil
+	}
+	client, err := collector.scope.string(frame)
+	if err != nil {
+		return errors.New("GitHub pending mutation response has no client identity")
+	}
+	confirmed := client == collector.aliases[index].client
+	collector.scope.release(frame.DecodedBytes)
+	if !confirmed {
+		return errors.New("GitHub pending mutation response has no client identity")
+	}
+	if collector.clientsConfirmed.has(index) {
+		return errors.New("GitHub pending mutation response repeats a client identity")
+	}
+	return collector.clientsConfirmed.add(index)
+}
+
+func (collector *pendingMutationResponseCollector) close() {
+	if collector == nil {
+		return
+	}
+	collector.path.close()
+	collector.scope.Close()
+	collector.scope = nil
+}
+
+func (collector *pendingMutationResponseCollector) finish() error {
+	if !collector.root || !collector.data || collector.path.depth != 0 {
+		return errors.New("GitHub pending mutation response contains errors")
+	}
+	for index := range collector.aliases {
+		if !collector.aliasesSeen.has(index) || !collector.clientsSeen.has(index) ||
+			!collector.clientsConfirmed.has(index) {
+			return errors.New("GitHub pending mutation response is incomplete")
+		}
+	}
+	return nil
+}
+
+func (collector *pendingMutationResponseCollector) aliasIndex(name string) int {
+	for index, alias := range collector.aliases {
+		if alias.name == name {
+			return index
+		}
+	}
+	return -1
+}
+
+func (collector *pendingMutationResponseCollector) expectedAliasContainer() int {
+	if collector.path.depth != 3 || collector.path.stack[1].name != jsonFieldData {
+		return -1
+	}
+	return collector.aliasIndex(collector.path.stack[2].name)
+}
+
+func (collector *pendingMutationResponseCollector) expectedAliasScalar(name string) int {
+	if collector.path.depth != 2 || collector.path.stack[1].name != jsonFieldData {
+		return -1
+	}
+	return collector.aliasIndex(name)
+}
+
+func (collector *pendingMutationResponseCollector) expectedClientScalar(name string) int {
+	if name != graphqlClientID {
+		return -1
+	}
+	return collector.expectedAliasContainer()
 }
 
 type pendingEffectState uint8
@@ -46,204 +269,498 @@ const (
 	pendingEffectUnknown
 )
 
-func (service *Service) publishPendingReview(
+type pendingMutationBatch struct {
+	payload string
+	effects []pendingWireEffect
+	aliases []pendingMutationAlias
+}
+
+func (batch pendingMutationBatch) retainedBytes() int64 {
+	retained := pendingBatchMetadataBytes + int64(len(batch.payload)) +
+		int64(cap(batch.effects))*pendingEffectMetadataBytes +
+		int64(cap(batch.aliases))*pendingAliasMetadataBytes
+	for _, effect := range batch.effects {
+		retained += pendingWireEffectRetainedBytes(effect)
+	}
+	for _, alias := range batch.aliases {
+		retained += int64(len(alias.name) + len(alias.client))
+	}
+	return retained
+}
+
+type pendingBatchSizer struct {
+	variableBytes    int64
+	declarationBytes int64
+	selectionBytes   int64
+	count            int
+}
+
+func newPendingBatchSizer() pendingBatchSizer {
+	return pendingBatchSizer{
+		declarationBytes: int64(len("mutation(")),
+		selectionBytes:   1,
+	}
+}
+
+func (sizer pendingBatchSizer) add(effect pendingWireEffect) (pendingBatchSizer, error) {
+	index := sizer.count
+	variableBytes, err := pendingMutationVariableBytes(index, effect)
+	if err != nil {
+		return pendingBatchSizer{}, err
+	}
+	digits := len(strconv.Itoa(index))
+	operation, err := pendingMutationOperationFor(effect.mutation.Kind())
+	if err != nil {
+		return pendingBatchSizer{}, err
+	}
+	if index != 0 {
+		sizer.variableBytes++
+		sizer.declarationBytes++
+	}
+	sizer.variableBytes += variableBytes
+	sizer.declarationBytes += int64(
+		len("$v") + digits + len(":") + len(operation.typeName) + len("!"),
+	)
+	sizer.selectionBytes += int64(
+		len("m") + digits + len(":") + len(operation.field) + len("(input:$v") + digits +
+			len("){clientMutationId}"),
+	)
+	sizer.count++
+	return sizer, nil
+}
+
+func (sizer pendingBatchSizer) payloadBytes() int64 {
+	if sizer.count == 0 {
+		return 0
+	}
+	queryBytes := sizer.declarationBytes + 1 + sizer.selectionBytes + 1
+	return int64(len(`{"variables":{`)) + sizer.variableBytes +
+		int64(len(`},"query":`)) + queryBytes + 2 + 1
+}
+
+// PendingPublicationExecutionConstructionBytes returns a conservative bound
+// for prepared wire ownership and the largest one-batch encoding scratch.
+func PendingPublicationExecutionConstructionBytes(
 	ctx context.Context,
 	checked *review.CheckedPublication,
-) PublicationCommit {
-	prepared, ok := checked.Prepared().PendingPublication()
+) (int64, error) {
+	prepared, ok := pendingPublicationInputs(checked)
 	if !ok {
-		return PublicationCommit{
-			Disposition: review.PublicationDispositionFailedBeforeCommit,
-			Detail:      boundedOperationDetail("checked pending review is unavailable"),
-		}
+		return 0, errors.New("checked pending publication is unavailable")
 	}
-	baseline := prepared.Baseline()
-	effects, err := pendingWireEffects(prepared, checked.Marker())
-	if err != nil {
-		return PublicationCommit{
-			Disposition: review.PublicationDispositionFailedBeforeCommit,
-			Detail:      boundedOperationDetail(err.Error()),
+	retained := pendingExecutionMetadataBytes
+	sizer := newPendingBatchSizer()
+	batches := 0
+	for index := range prepared.MutationCount() {
+		if err := context.Cause(ctx); err != nil {
+			return 0, err
 		}
-	}
-	for start := 0; start < len(effects); {
-		end := pendingBatchEnd(effects, start)
-		if end == start {
-			return PublicationCommit{
-				Disposition: review.PublicationDispositionFailedBeforeCommit,
-				Detail: boundedOperationDetail(fmt.Sprintf(
+		mutation, exists := prepared.MutationAt(index)
+		if !exists {
+			return 0, errors.New("pending review mutation plan is incomplete")
+		}
+		effect, err := pendingWireEffectFor(
+			prepared.BaselineNodeID(),
+			prepared.BaselineBody(),
+			mutation,
+			checked.Marker(),
+		)
+		if err != nil {
+			return 0, err
+		}
+		candidate, err := sizer.add(effect)
+		if err != nil {
+			return 0, err
+		}
+		if candidate.count > review.MaxPendingMutationBatch ||
+			candidate.payloadBytes() > review.MaxPendingMutationBatchBytes {
+			if sizer.count == 0 {
+				return 0, fmt.Errorf(
 					"pending review mutation exceeds %d bytes",
 					review.MaxPendingMutationBatchBytes,
-				)),
+				)
+			}
+			retained += sizer.payloadBytes() + pendingBatchMetadataBytes
+			batches++
+			sizer = newPendingBatchSizer()
+			candidate, err = sizer.add(effect)
+			if err != nil || candidate.payloadBytes() > review.MaxPendingMutationBatchBytes {
+				if err != nil {
+					return 0, err
+				}
+				return 0, fmt.Errorf(
+					"pending review mutation exceeds %d bytes",
+					review.MaxPendingMutationBatchBytes,
+				)
 			}
 		}
-		committed, disposition, detail := service.executePendingBatch(
-			ctx,
-			checked.Target(),
-			baseline,
-			effects[start:end],
-			true,
-		)
-		if !committed {
-			return PublicationCommit{Disposition: disposition, Detail: detail}
-		}
-		start = end
+		sizer = candidate
+		retained += pendingWireEffectRetainedBytes(effect) +
+			pendingEffectMetadataBytes + pendingAliasMetadataBytes
 	}
-	if !prepared.Submit() {
-		commit := PublicationCommit{
-			Disposition:  review.PublicationDispositionCommitted,
-			RemoteReview: baseline.DatabaseID().Uint64(),
-		}
-		fresh, captureErr := service.capturePendingReview(ctx, checked.Target(), baseline)
-		if captureErr == nil {
-			commit.Pending = new(fresh)
-		} else {
-			commit.Detail = boundedOperationDetail(
-				"draft synchronized; refresh pending review: " + captureErr.Error(),
-			)
-		}
-		return commit
+	if sizer.count != 0 {
+		retained += sizer.payloadBytes() + pendingBatchMetadataBytes
+		batches++
 	}
-	return service.submitPendingReview(ctx, checked, prepared)
+	retained += int64(batches)*pendingBatchMetadataBytes +
+		int64(len(checked.Target().Repository())+len(prepared.BaselineNodeID())+len(checked.Marker()))
+	if prepared.Submit() {
+		// Submission input is small, but reserve the protocol maximum so its
+		// construction never precedes admission.
+		retained += review.MaxPendingMutationBatchBytes + pendingBatchMetadataBytes +
+			pendingAliasMetadataBytes
+	}
+	return retained + 3*review.MaxPendingMutationBatchBytes +
+		2*pendingMutationResponseBytes + 4_096, nil
 }
 
-func (service *Service) capturePendingReview(
+// PreparePendingPublicationExecution constructs every first-attempt payload
+// once. The caller must reserve PendingPublicationExecutionConstructionBytes
+// and hold a CPU permit while this runs.
+func PreparePendingPublicationExecution(
 	ctx context.Context,
-	target review.PublicationTarget,
-	baseline review.PendingReview,
-) (review.PendingReview, error) {
-	details, err := publicationTargetDetails(target)
-	if err != nil {
-		return review.PendingReview{}, err
-	}
-	metadata, err := service.pullRequestMetadata(ctx, details.Repository, details.Number)
-	if err != nil {
-		return review.PendingReview{}, err
-	}
-	details, err = validatePullRequestPayload(details.Repository, details.Number, metadata)
-	if err != nil {
-		return review.PendingReview{}, err
-	}
-	fresh, status, detail := service.loadPendingReview(ctx, details)
-	if status != review.PendingReviewReady {
-		message := "pending review capture is " + status.String()
-		if !detail.IsEmpty() {
-			message += ": " + detail.String()
-		}
-		return review.PendingReview{}, errors.New(message)
-	}
-	if fresh.NodeID() != baseline.NodeID() || fresh.DatabaseID() != baseline.DatabaseID() {
-		return review.PendingReview{}, errors.New("pending review identity changed after synchronization")
-	}
-	return fresh, nil
+	checked *review.CheckedPublication,
+) (PendingPublicationExecution, error) {
+	return preparePendingPublicationExecution(ctx, checked, encodePendingMutationBatchCancellable)
 }
 
-func pendingWireEffects(
-	prepared review.PreparedPendingPublication,
-	attempt review.PublicationMarker,
-) ([]pendingWireEffect, error) {
-	baseline := prepared.Baseline()
-	effects := make([]pendingWireEffect, 0, prepared.MutationCount())
-	for start := 0; start < prepared.MutationCount(); start += review.MaxPendingMutationBatch {
-		mutations := prepared.Mutations(
-			start,
-			min(review.MaxPendingMutationBatch, prepared.MutationCount()-start),
-		)
-		if len(mutations) == 0 {
-			return nil, errors.New("pending review mutation plan is incomplete")
-		}
-		for _, mutation := range mutations {
-			effect, err := pendingWireEffectFor(baseline, mutation, attempt)
-			if err != nil {
-				return nil, err
-			}
-			effects = append(effects, effect)
-		}
+func preparePendingPublicationExecution(
+	ctx context.Context,
+	checked *review.CheckedPublication,
+	encode func(func() error, []pendingWireEffect) ([]pendingMutationAlias, string, error),
+) (PendingPublicationExecution, error) {
+	prepared, ok := pendingPublicationInputs(checked)
+	if !ok || encode == nil {
+		return PendingPublicationExecution{}, errors.New("checked pending publication is unavailable")
 	}
-	return effects, nil
+	state := &pendingPublicationExecutionState{
+		target:         checked.Target(),
+		reviewID:       prepared.BaselineNodeID(),
+		marker:         checked.Marker(),
+		databaseID:     prepared.BaselineDatabaseID().Uint64(),
+		reconciliation: pendingPublicationNoReconciliation,
+		progress:       pendingPublicationUncommitted,
+		status:         pendingPublicationExecutionOpen,
+	}
+	execution := PendingPublicationExecution{state: state}
+	current := make([]pendingWireEffect, 0, review.MaxPendingMutationBatch)
+	sizer := newPendingBatchSizer()
+	flush := func() error {
+		if len(current) == 0 {
+			return nil
+		}
+		aliases, payload, err := encode(func() error { return context.Cause(ctx) }, current)
+		if err != nil || int64(len(payload)) != sizer.payloadBytes() {
+			return errors.Join(err, errors.New("pending mutation sizing does not match encoding"))
+		}
+		state.batches = append(state.batches, pendingMutationBatch{
+			effects: current,
+			aliases: aliases,
+			payload: payload,
+		})
+		current = make([]pendingWireEffect, 0, review.MaxPendingMutationBatch)
+		sizer = newPendingBatchSizer()
+		return nil
+	}
+	for index := range prepared.MutationCount() {
+		if err := context.Cause(ctx); err != nil {
+			return PendingPublicationExecution{}, err
+		}
+		mutation, exists := prepared.MutationAt(index)
+		if !exists {
+			return PendingPublicationExecution{}, errors.New("pending review mutation plan is incomplete")
+		}
+		effect, err := pendingWireEffectFor(
+			prepared.BaselineNodeID(),
+			prepared.BaselineBody(),
+			mutation,
+			checked.Marker(),
+		)
+		if err != nil {
+			return PendingPublicationExecution{}, err
+		}
+		candidate, err := sizer.add(effect)
+		if err != nil {
+			return PendingPublicationExecution{}, err
+		}
+		if candidate.count > review.MaxPendingMutationBatch ||
+			candidate.payloadBytes() > review.MaxPendingMutationBatchBytes {
+			if flushErr := flush(); flushErr != nil {
+				return PendingPublicationExecution{}, flushErr
+			}
+			candidate, err = sizer.add(effect)
+			if err != nil || candidate.payloadBytes() > review.MaxPendingMutationBatchBytes {
+				return PendingPublicationExecution{}, errors.Join(
+					err,
+					errors.New("pending review mutation exceeds its byte limit"),
+				)
+			}
+		}
+		current = append(current, effect)
+		sizer = candidate
+	}
+	if err := flush(); err != nil {
+		return PendingPublicationExecution{}, err
+	}
+	if prepared.Submit() {
+		if len(state.batches) == 0 || len(state.batches[0].effects) == 0 ||
+			state.batches[0].effects[0].mutation.Kind() != review.PendingMutationReviewBody {
+			return PendingPublicationExecution{}, errors.New("pending review submission has no body effect")
+		}
+		state.expectedBody = state.batches[0].effects[0].after
+		state.expectedState = pendingSubmissionState(checked.Prepared().Options().Event())
+		aliases, payload, err := encodePendingSubmissionCancellable(
+			func() error { return context.Cause(ctx) },
+			pendingSubmissionInput{
+				reviewID:         state.reviewID.String(),
+				event:            checked.Prepared().Options().Event().GitHubValue(),
+				clientMutationID: state.marker.String(),
+			},
+		)
+		if err != nil {
+			return PendingPublicationExecution{}, err
+		}
+		state.submission = pendingMutationBatch{aliases: aliases, payload: payload}
+	}
+	state.refreshRetainedBytes()
+	return execution, nil
+}
+
+func pendingSubmissionState(event review.PublicationEvent) string {
+	switch event {
+	case review.PublicationEventApprove:
+		return "APPROVED"
+	case review.PublicationEventRequestChanges:
+		return "CHANGES_REQUESTED"
+	default:
+		return "COMMENTED"
+	}
+}
+
+func pendingPublicationInputs(
+	checked *review.CheckedPublication,
+) (review.PendingPublicationView, bool) {
+	if checked == nil || !checked.Pending() || checked.PayloadSize() == 0 {
+		return review.PendingPublicationView{}, false
+	}
+	prepared, ok := checked.Prepared().BorrowPendingPublication()
+	if !ok || prepared.MutationCount() == 0 {
+		return review.PendingPublicationView{}, false
+	}
+	if prepared.BaselineNodeID() == "" || prepared.BaselineDatabaseID().Uint64() == 0 {
+		return review.PendingPublicationView{}, false
+	}
+	return prepared, true
+}
+
+func pendingWireEffectRetainedBytes(effect pendingWireEffect) int64 {
+	target := effect.mutation.Target()
+	path, _ := target.Path().UTF8()
+	reply, _ := target.ReplyTo()
+	return int64(
+		len(effect.reviewID) + len(effect.clientMutationID) + len(effect.before) +
+			len(effect.after) + len(effect.marker) + len(effect.mutation.NodeID()) +
+			len(effect.mutation.Body()) + len(effect.mutation.Baseline()) +
+			len(effect.mutation.Marker()) + len(path) + len(reply),
+	)
+}
+
+func pendingMutationVariableBytes(index int, effect pendingWireEffect) (int64, error) {
+	variable := "v" + strconv.Itoa(index)
+	inputBytes, err := pendingMutationInputBytes(effect)
+	if err != nil {
+		return 0, err
+	}
+	nameBytes, err := pendingJSONStringBytes(variable)
+	if err != nil {
+		return 0, err
+	}
+	return nameBytes + int64(len(":{}")) + inputBytes, nil
+}
+
+func pendingMutationInputBytes(effect pendingWireEffect) (int64, error) {
+	mutation := effect.mutation
+	var fields [][2]string
+	var uintFields [][2]uint32
+	switch mutation.Kind() {
+	case review.PendingMutationReviewBody:
+		fields = [][2]string{
+			{graphqlReviewID, effect.reviewID},
+			{graphqlBody, effect.after},
+			{graphqlClientID, effect.clientMutationID},
+		}
+	case review.PendingMutationUpdateComment:
+		fields = [][2]string{
+			{"pullRequestReviewCommentId", mutation.NodeID().String()},
+			{graphqlBody, effect.after},
+			{graphqlClientID, effect.clientMutationID},
+		}
+	case review.PendingMutationDeleteComment:
+		fields = [][2]string{
+			{"id", mutation.NodeID().String()},
+			{graphqlClientID, effect.clientMutationID},
+		}
+	case review.PendingMutationAddComment:
+		target := mutation.Target()
+		path, ok := target.Path().UTF8()
+		if !ok || path == "" {
+			return 0, errors.New("pending review addition path is not valid UTF-8")
+		}
+		fields = [][2]string{
+			{graphqlReviewID, effect.reviewID},
+			{graphqlPath, path},
+			{graphqlBody, effect.after},
+			{graphqlClientID, effect.clientMutationID},
+		}
+		switch target.Subject() {
+		case review.PendingSubjectFile:
+			fields = append(fields, [2]string{"subjectType", "FILE"})
+		case review.PendingSubjectLine:
+			startSide, start, side, line := target.Lines()
+			if line == nil {
+				return 0, errors.New("pending review line addition has no line")
+			}
+			lineField, err := pendingUintField(fields, line.Uint32())
+			if err != nil {
+				return 0, err
+			}
+			uintFields = append(uintFields, lineField)
+			fields = append(fields,
+				[2]string{githubSubjectLine, ""},
+				[2]string{"side", githubLineSide(side)},
+			)
+			if start != nil {
+				startField, err := pendingUintField(fields, start.Uint32())
+				if err != nil {
+					return 0, err
+				}
+				uintFields = append(uintFields, startField)
+				fields = append(fields,
+					[2]string{jsonFieldStartLine, ""},
+					[2]string{"startSide", githubLineSide(startSide)},
+				)
+			}
+		default:
+			return 0, errors.New("pending review addition target is unsupported")
+		}
+	default:
+		return 0, errors.New("pending review mutation kind is invalid")
+	}
+	bytes := int64(0)
+	for index, field := range fields {
+		if index != 0 {
+			bytes++
+		}
+		nameBytes, err := pendingJSONStringBytes(field[0])
+		if err != nil {
+			return 0, err
+		}
+		bytes += nameBytes + 1
+		value, numeric := uint32(0), false
+		for _, uintField := range uintFields {
+			if int(uintField[0]) == index {
+				value, numeric = uintField[1], true
+				break
+			}
+		}
+		if numeric {
+			bytes += int64(len(strconv.FormatUint(uint64(value), 10)))
+			continue
+		}
+		valueBytes, err := pendingJSONStringBytes(field[1])
+		if err != nil {
+			return 0, err
+		}
+		bytes += valueBytes
+	}
+	return bytes, nil
+}
+
+func pendingUintField(fields [][2]string, value uint32) ([2]uint32, error) {
+	const maxPendingMutationFields = 8
+	if len(fields) > maxPendingMutationFields {
+		return [2]uint32{}, errors.New("pending review mutation has too many fields")
+	}
+	return [2]uint32{
+		uint32(len(fields)), //nolint:gosec // len is bounded by maxPendingMutationFields.
+		value,
+	}, nil
 }
 
 func pendingWireEffectFor(
-	baseline review.PendingReview,
+	reviewID review.ReviewNodeID,
+	baselineBody string,
 	mutation review.PendingMutation,
 	attempt review.PublicationMarker,
 ) (pendingWireEffect, error) {
-	desired := mutation.RemoteBody(baseline.NodeID(), attempt)
+	effect, err := pendingEffectFor(reviewID, baselineBody, mutation, attempt)
+	if err != nil {
+		return pendingWireEffect{}, err
+	}
 	clientMutationID := strconv.Itoa(int(mutation.Kind())) + ":" +
 		strconv.FormatUint(uint64(mutation.LocalCommentID()), 10) + ":" +
 		attempt.String()
-	effect := pendingWireEffect{mutation: mutation, desired: desired}
+	wire := pendingWireEffect{
+		reviewID: reviewID.String(), clientMutationID: clientMutationID,
+		pendingEffect: effect,
+	}
 	switch mutation.Kind() {
-	case review.PendingMutationReviewBody:
-		effect.typeName = updatePullRequestReviewInput
-		effect.field = updatePullRequestReviewField
-		effect.input = map[string]any{
-			graphqlReviewID: baseline.NodeID().String(),
-			graphqlBody:     desired,
-			graphqlClientID: clientMutationID,
-		}
-	case review.PendingMutationUpdateComment:
-		effect.typeName = "UpdatePullRequestReviewCommentInput"
-		effect.field = "updatePullRequestReviewComment"
-		effect.input = map[string]any{
-			"pullRequestReviewCommentId": mutation.NodeID().String(),
-			graphqlBody:                  desired,
-			graphqlClientID:              clientMutationID,
-		}
-	case review.PendingMutationDeleteComment:
-		effect.typeName = "DeletePullRequestReviewCommentInput"
-		effect.field = "deletePullRequestReviewComment"
-		effect.input = map[string]any{
-			"id":            mutation.NodeID().String(),
-			graphqlClientID: clientMutationID,
-		}
+	case review.PendingMutationReviewBody,
+		review.PendingMutationUpdateComment,
+		review.PendingMutationDeleteComment:
 	case review.PendingMutationAddComment:
-		effect.typeName = "AddPullRequestReviewThreadInput"
-		effect.field = "addPullRequestReviewThread"
-		input, err := pendingAddThreadInput(baseline, mutation, desired, clientMutationID)
-		if err != nil {
+		if err := validatePendingAddThread(mutation); err != nil {
 			return pendingWireEffect{}, err
 		}
-		effect.input = input
 	default:
 		return pendingWireEffect{}, errors.New("pending review mutation kind is invalid")
+	}
+	return wire, nil
+}
+
+func pendingEffectFor(
+	reviewID review.ReviewNodeID,
+	baselineBody string,
+	mutation review.PendingMutation,
+	attempt review.PublicationMarker,
+) (pendingEffect, error) {
+	effect := pendingEffect{
+		mutation: mutation,
+		after:    mutation.RemoteBody(reviewID, attempt),
+	}
+	switch mutation.Kind() {
+	case review.PendingMutationReviewBody:
+		effect.before = baselineBody
+	case review.PendingMutationUpdateComment, review.PendingMutationDeleteComment:
+		effect.before = mutation.BaselineRemoteBody()
+	case review.PendingMutationAddComment:
+		effect.marker = mutation.DraftMarker(reviewID)
+		if effect.marker == "" {
+			return pendingEffect{}, errors.New("pending review addition has no stable marker")
+		}
+	default:
+		return pendingEffect{}, errors.New("pending review mutation kind is invalid")
 	}
 	return effect, nil
 }
 
-func pendingAddThreadInput(
-	baseline review.PendingReview,
-	mutation review.PendingMutation,
-	desired, clientMutationID string,
-) (map[string]any, error) {
+func validatePendingAddThread(mutation review.PendingMutation) error {
 	target := mutation.Target()
 	path, ok := target.Path().UTF8()
 	if !ok || path == "" {
-		return nil, errors.New("pending review addition path is not valid UTF-8")
-	}
-	input := map[string]any{
-		graphqlReviewID: baseline.NodeID().String(),
-		graphqlPath:     path,
-		graphqlBody:     desired,
-		graphqlClientID: clientMutationID,
+		return errors.New("pending review addition path is not valid UTF-8")
 	}
 	switch target.Subject() {
 	case review.PendingSubjectFile:
-		input["subjectType"] = "FILE"
 	case review.PendingSubjectLine:
-		startSide, start, side, line := target.Lines()
+		_, _, _, line := target.Lines()
 		if line == nil {
-			return nil, errors.New("pending review line addition has no line")
-		}
-		input["line"] = line.Uint32()
-		input["side"] = githubLineSide(side)
-		if start != nil {
-			input["startLine"] = start.Uint32()
-			input["startSide"] = githubLineSide(startSide)
+			return errors.New("pending review line addition has no line")
 		}
 	default:
-		return nil, errors.New("pending review addition target is unsupported")
+		return errors.New("pending review addition target is unsupported")
 	}
-	return input, nil
+	return nil
 }
 
 func githubLineSide(side review.LineSide) string {
@@ -251,452 +768,4 @@ func githubLineSide(side review.LineSide) string {
 		return githubSideLeft
 	}
 	return githubSideRight
-}
-
-func pendingBatchEnd(effects []pendingWireEffect, start int) int {
-	end := start
-	for end < len(effects) && end-start < review.MaxPendingMutationBatch {
-		_, encoded, err := encodePendingMutationBatch(effects[start : end+1])
-		if err != nil || len(encoded) > review.MaxPendingMutationBatchBytes {
-			break
-		}
-		end++
-	}
-	return end
-}
-
-func encodePendingMutationBatch(
-	effects []pendingWireEffect,
-) ([]pendingMutationAlias, []byte, error) {
-	if len(effects) == 0 || len(effects) > review.MaxPendingMutationBatch {
-		return nil, nil, errors.New("pending mutation batch size is invalid")
-	}
-	aliases := make([]pendingMutationAlias, len(effects))
-	variables := make(map[string]any, len(effects))
-	var declaration strings.Builder
-	var selection strings.Builder
-	declaration.WriteString("mutation(")
-	selection.WriteByte('{')
-	for index, effect := range effects {
-		variable := "v" + strconv.Itoa(index)
-		alias := "m" + strconv.Itoa(index)
-		clientMutationID, ok := effect.input[graphqlClientID].(string)
-		if !ok || clientMutationID == "" {
-			return nil, nil, errors.New("pending mutation has no client identity")
-		}
-		aliases[index] = pendingMutationAlias{name: alias, client: clientMutationID}
-		if index != 0 {
-			declaration.WriteByte(',')
-		}
-		declaration.WriteByte('$')
-		declaration.WriteString(variable)
-		declaration.WriteByte(':')
-		declaration.WriteString(effect.typeName)
-		declaration.WriteByte('!')
-		selection.WriteString(alias)
-		selection.WriteByte(':')
-		selection.WriteString(effect.field)
-		selection.WriteString("(input:$")
-		selection.WriteString(variable)
-		selection.WriteString("){clientMutationId}")
-		variables[variable] = effect.input
-	}
-	declaration.WriteByte(')')
-	selection.WriteByte('}')
-	payload, err := json.Marshal(struct {
-		Variables map[string]any `json:"variables"`
-		Query     string         `json:"query"`
-	}{
-		Query:     declaration.String() + selection.String(),
-		Variables: variables,
-	})
-	if err != nil {
-		return nil, nil, err
-	}
-	return aliases, payload, nil
-}
-
-func (service *Service) executePendingBatch(
-	ctx context.Context,
-	target review.PublicationTarget,
-	baseline review.PendingReview,
-	effects []pendingWireEffect,
-	allowRetry bool,
-) (bool, review.PublicationDisposition, review.OperationDetail) {
-	aliases, payload, err := encodePendingMutationBatch(effects)
-	if err != nil || len(payload) > review.MaxPendingMutationBatchBytes {
-		if err == nil {
-			err = errors.New("pending mutation batch exceeds its byte limit")
-		}
-		return false, review.PublicationDispositionFailedBeforeCommit,
-			boundedOperationDetail(err.Error())
-	}
-	command, runErr := service.runGraphQLMutation(ctx, payload)
-	if runErr == nil {
-		runErr = validatePendingMutationResponse(command.Stdout, aliases)
-	}
-	if runErr == nil {
-		return true, 0, review.EmptyOperationDetail()
-	}
-	if !command.Started {
-		return false, review.PublicationDispositionFailedBeforeCommit,
-			boundedOperationDetail(runErr.Error())
-	}
-	states, reconcileErr := service.reconcilePendingEffects(ctx, target, baseline, effects)
-	if reconcileErr != nil {
-		return false, review.PublicationDispositionUnknown,
-			boundedOperationDetail(errors.Join(runErr, reconcileErr).Error())
-	}
-	retry := make([]pendingWireEffect, 0, len(effects))
-	for index, state := range states {
-		switch state {
-		case pendingEffectCommitted:
-		case pendingEffectAbsent:
-			retry = append(retry, effects[index])
-		case pendingEffectUnknown:
-			return false, review.PublicationDispositionUnknown,
-				boundedOperationDetail("pending review mutation outcome is unknown")
-		}
-	}
-	if len(retry) == 0 {
-		return true, 0, review.EmptyOperationDetail()
-	}
-	if !allowRetry {
-		return false, review.PublicationDispositionFailedBeforeCommit,
-			boundedOperationDetail("pending review mutation was confirmed absent after retry")
-	}
-	return service.executePendingBatch(ctx, target, baseline, retry, false)
-}
-
-func (service *Service) runGraphQLMutation(
-	ctx context.Context,
-	payload []byte,
-) (subprocess.Result, error) {
-	return service.runner.Run(ctx, subprocess.Request{
-		Name:            "gh",
-		Args:            []string{ghAPI, ghGraphQL, "--input", "-"},
-		Dir:             service.cwd.String(),
-		Env:             map[string]string{localeAllKey: "C", localeLanguageKey: "C", ghPromptDisabled: "1"},
-		Stdin:           payload,
-		StdoutLimit:     pendingMutationResponseBytes,
-		StderrLimit:     pendingMutationResponseBytes,
-		OperationDetail: "gh api pending review mutation",
-	})
-}
-
-func validatePendingMutationResponse(encoded []byte, aliases []pendingMutationAlias) error {
-	if !utf8.Valid(encoded) {
-		return errors.New("GitHub pending mutation response is not valid UTF-8")
-	}
-	var envelope pendingMutationEnvelope
-	if err := json.Unmarshal(encoded, &envelope); err != nil {
-		return fmt.Errorf("decode GitHub pending mutation response: %w", err)
-	}
-	if len(envelope.Errors) != 0 || envelope.Data == nil {
-		return errors.New("GitHub pending mutation response contains errors")
-	}
-	for _, alias := range aliases {
-		raw, exists := envelope.Data[alias.name]
-		if !exists || string(raw) == graphqlNull {
-			return errors.New("GitHub pending mutation response is incomplete")
-		}
-		var result struct {
-			ClientMutationID string `json:"clientMutationId"`
-		}
-		if err := json.Unmarshal(raw, &result); err != nil ||
-			result.ClientMutationID != alias.client {
-			return errors.New("GitHub pending mutation response has no client identity")
-		}
-	}
-	return nil
-}
-
-func (service *Service) reconcilePendingEffects(
-	ctx context.Context,
-	target review.PublicationTarget,
-	baseline review.PendingReview,
-	effects []pendingWireEffect,
-) ([]pendingEffectState, error) {
-	details, err := publicationTargetDetails(target)
-	if err != nil {
-		return nil, err
-	}
-	metadata, err := service.pullRequestMetadata(ctx, details.Repository, details.Number)
-	if err != nil {
-		return nil, err
-	}
-	details, err = validatePullRequestPayload(details.Repository, details.Number, metadata)
-	if err != nil {
-		return nil, err
-	}
-	fresh, status, detail := service.loadPendingReview(ctx, details)
-	if status != review.PendingReviewReady {
-		message := "pending review reconciliation is " + status.String()
-		if !detail.IsEmpty() {
-			message += ": " + detail.String()
-		}
-		return nil, errors.New(message)
-	}
-	if fresh.NodeID() != baseline.NodeID() || fresh.DatabaseID() != baseline.DatabaseID() {
-		return nil, errors.New("pending review identity changed during reconciliation")
-	}
-	comments := make(map[review.CommentNodeID]review.PendingComment, fresh.CommentCount())
-	all := fresh.Comments(0, fresh.CommentCount())
-	for _, comment := range all {
-		comments[comment.NodeID()] = comment
-	}
-	states := make([]pendingEffectState, len(effects))
-	for index, effect := range effects {
-		mutation := effect.mutation
-		switch mutation.Kind() {
-		case review.PendingMutationReviewBody:
-			states[index] = classifyPendingBody(fresh.Body(), effect.desired, mutation.Baseline())
-		case review.PendingMutationUpdateComment:
-			comment, exists := comments[mutation.NodeID()]
-			if !exists {
-				states[index] = pendingEffectUnknown
-			} else {
-				states[index] = classifyPendingBody(
-					comment.Body(),
-					effect.desired,
-					mutation.Baseline(),
-				)
-			}
-		case review.PendingMutationDeleteComment:
-			comment, exists := comments[mutation.NodeID()]
-			if !exists {
-				states[index] = pendingEffectCommitted
-			} else {
-				visible := stripPendingWireMarker(comment.Body(), "<!-- rvw-draft-comment:v1:")
-				if visible == mutation.Baseline() {
-					states[index] = pendingEffectAbsent
-				} else {
-					states[index] = pendingEffectUnknown
-				}
-			}
-		case review.PendingMutationAddComment:
-			matches := 0
-			for _, comment := range all {
-				if comment.Body() == effect.desired &&
-					pendingAdditionTargetsEqual(comment.Target(), mutation.Target()) {
-					matches++
-				}
-			}
-			switch matches {
-			case 0:
-				states[index] = pendingEffectAbsent
-			case 1:
-				states[index] = pendingEffectCommitted
-			default:
-				states[index] = pendingEffectUnknown
-			}
-		}
-	}
-	return states, nil
-}
-
-func pendingAdditionTargetsEqual(left, right review.PendingCommentTarget) bool {
-	if left.Subject() != right.Subject() || left.Outdated() ||
-		!bytes.Equal(left.Path().Raw(), right.Path().Raw()) {
-		return false
-	}
-	leftStartSide, leftStart, leftSide, leftLine := left.Lines()
-	rightStartSide, rightStart, rightSide, rightLine := right.Lines()
-	return leftStartSide == rightStartSide && leftSide == rightSide &&
-		pendingLineNumbersEqual(leftStart, rightStart) &&
-		pendingLineNumbersEqual(leftLine, rightLine)
-}
-
-func pendingLineNumbersEqual(left, right *review.LineNumber) bool {
-	return left == nil && right == nil ||
-		left != nil && right != nil && left.Uint32() == right.Uint32()
-}
-
-func classifyPendingBody(raw, desired, baseline string) pendingEffectState {
-	if raw == desired {
-		return pendingEffectCommitted
-	}
-	visible := stripKnownPendingWireMarker(raw)
-	if visible == stripKnownPendingWireMarker(desired) {
-		return pendingEffectCommitted
-	}
-	if visible == baseline {
-		return pendingEffectAbsent
-	}
-	return pendingEffectUnknown
-}
-
-func stripKnownPendingWireMarker(body string) string {
-	visible := stripPendingWireMarker(body, "<!-- rvw-draft-comment:v1:")
-	if visible == body {
-		visible = stripPendingWireMarker(body, "<!-- rvw-publication:v1:")
-	}
-	return visible
-}
-
-func stripPendingWireMarker(body, prefix string) string {
-	const suffix = " -->"
-	markerSize := len(prefix) + 32 + len(suffix)
-	if len(body) < markerSize {
-		return body
-	}
-	marker := body[len(body)-markerSize:]
-	if !strings.HasPrefix(marker, prefix) || !strings.HasSuffix(marker, suffix) {
-		return body
-	}
-	for _, value := range marker[len(prefix) : len(prefix)+32] {
-		if value < '0' || value > '9' && value < 'a' || value > 'f' {
-			return body
-		}
-	}
-	return strings.TrimSuffix(body[:len(body)-markerSize], "\n\n")
-}
-
-func publicationTargetDetails(target review.PublicationTarget) (PullRequestDetails, error) {
-	repository, err := NewOwnerRepository(target.Repository())
-	if err != nil {
-		return PullRequestDetails{}, err
-	}
-	return PullRequestDetails{
-		Repository: repository,
-		Number:     PullRequestNumber(target.PullRequest()),
-		BaseOID:    target.Base(),
-		HeadOID:    target.Head(),
-	}, nil
-}
-
-func (service *Service) submitPendingReview(
-	ctx context.Context,
-	checked *review.CheckedPublication,
-	prepared review.PreparedPendingPublication,
-) PublicationCommit {
-	baseline := prepared.Baseline()
-	input := map[string]any{
-		graphqlReviewID: baseline.NodeID().String(),
-		"event":         checked.Prepared().Options().Event().GitHubValue(),
-		graphqlClientID: checked.Marker().String(),
-	}
-	effect := pendingWireEffect{
-		field:    "submitPullRequestReview",
-		typeName: "SubmitPullRequestReviewInput",
-		input:    input,
-	}
-	aliases, payload, err := encodePendingMutationBatch([]pendingWireEffect{effect})
-	if err != nil {
-		return PublicationCommit{
-			Disposition: review.PublicationDispositionFailedBeforeCommit,
-			Detail:      boundedOperationDetail(err.Error()),
-		}
-	}
-	command, runErr := service.runGraphQLMutation(ctx, payload)
-	if runErr == nil {
-		runErr = validatePendingMutationResponse(command.Stdout, aliases)
-	}
-	if runErr == nil {
-		return PublicationCommit{
-			Disposition:  review.PublicationDispositionCommitted,
-			RemoteReview: baseline.DatabaseID().Uint64(),
-		}
-	}
-	if !command.Started {
-		return PublicationCommit{
-			Disposition: review.PublicationDispositionFailedBeforeCommit,
-			Detail:      boundedOperationDetail(runErr.Error()),
-		}
-	}
-	committed, absent, reconcileErr := service.reconcilePendingSubmission(ctx, checked, prepared)
-	if reconcileErr != nil || !committed && !absent {
-		return PublicationCommit{
-			Disposition: review.PublicationDispositionUnknown,
-			Detail:      boundedOperationDetail(errors.Join(runErr, reconcileErr).Error()),
-		}
-	}
-	if committed {
-		return PublicationCommit{
-			Disposition:  review.PublicationDispositionCommitted,
-			RemoteReview: baseline.DatabaseID().Uint64(),
-		}
-	}
-	command, runErr = service.runGraphQLMutation(ctx, payload)
-	if runErr == nil {
-		runErr = validatePendingMutationResponse(command.Stdout, aliases)
-	}
-	if runErr == nil {
-		return PublicationCommit{
-			Disposition:  review.PublicationDispositionCommitted,
-			RemoteReview: baseline.DatabaseID().Uint64(),
-		}
-	}
-	if !command.Started {
-		return PublicationCommit{
-			Disposition: review.PublicationDispositionFailedBeforeCommit,
-			Detail:      boundedOperationDetail(runErr.Error()),
-		}
-	}
-	committed, absent, reconcileErr = service.reconcilePendingSubmission(ctx, checked, prepared)
-	if committed {
-		return PublicationCommit{
-			Disposition:  review.PublicationDispositionCommitted,
-			RemoteReview: baseline.DatabaseID().Uint64(),
-		}
-	}
-	if reconcileErr != nil || !absent {
-		return PublicationCommit{
-			Disposition: review.PublicationDispositionUnknown,
-			Detail:      boundedOperationDetail(errors.Join(runErr, reconcileErr).Error()),
-		}
-	}
-	return PublicationCommit{
-		Disposition: review.PublicationDispositionFailedBeforeCommit,
-		Detail: boundedOperationDetail(
-			errors.Join(runErr, errors.New("pending review submission was confirmed absent after retry")).Error(),
-		),
-	}
-}
-
-func (service *Service) reconcilePendingSubmission(
-	ctx context.Context,
-	checked *review.CheckedPublication,
-	prepared review.PreparedPendingPublication,
-) (committed, absent bool, returnErr error) {
-	target := checked.Target()
-	baseline := prepared.Baseline()
-	endpoint := "repos/" + target.Repository() + "/pulls/" +
-		strconv.FormatUint(target.PullRequest(), 10) + "/reviews/" +
-		strconv.FormatUint(baseline.DatabaseID().Uint64(), 10)
-	result, err := service.runGH(ctx, []string{ghAPI, endpoint}, pendingMutationResponseBytes)
-	if err != nil {
-		return false, false, err
-	}
-	if !utf8.Valid(result.Stdout) {
-		return false, false, errors.New("GitHub pending review reconciliation is not valid UTF-8")
-	}
-	var response struct {
-		Body   *string      `json:"body"`
-		NodeID string       `json:"node_id"`
-		State  string       `json:"state"`
-		ID     githubUint64 `json:"id"`
-	}
-	if err := json.Unmarshal(result.Stdout, &response); err != nil || response.Body == nil ||
-		uint64(response.ID) != baseline.DatabaseID().Uint64() ||
-		response.NodeID != baseline.NodeID().String() {
-		return false, false, errors.New("GitHub pending review reconciliation response is incomplete")
-	}
-	desired := prepared.DesiredBody()
-	visible := stripPendingWireMarker(*response.Body, "<!-- rvw-publication:v1:")
-	if visible != desired {
-		return false, false, errors.New("GitHub pending review body changed during submission")
-	}
-	if response.State == githubPending {
-		return false, true, nil
-	}
-	want := "COMMENTED"
-	switch checked.Prepared().Options().Event() {
-	case review.PublicationEventComment, review.PublicationEventDraft:
-	case review.PublicationEventApprove:
-		want = "APPROVED"
-	case review.PublicationEventRequestChanges:
-		want = "CHANGES_REQUESTED"
-	}
-	return response.State == want, false, nil
 }

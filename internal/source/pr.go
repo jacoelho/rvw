@@ -2,7 +2,6 @@ package source
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -11,16 +10,18 @@ import (
 	"strings"
 	"time"
 	"unicode"
-	"unicode/utf8"
 
 	"github.com/jacoelho/rvw/internal/review"
 	"github.com/jacoelho/rvw/internal/subprocess"
 )
 
-const githubFilesAPICap = 3_000
+const (
+	githubFilesAPICap = 3_000
+	ghRepo            = "repo"
+)
 
 type pullRequestPayload struct {
-	MergedAt *string `json:"-"`
+	MergedAt *string `json:"merged_at"`
 	User     *struct {
 		Login string `json:"login"`
 	} `json:"user"`
@@ -33,63 +34,18 @@ type pullRequestPayload struct {
 		SHA string `json:"sha"`
 	} `json:"head"`
 	Title        string `json:"title"`
-	HTMLURL      string `json:"-"`
+	HTMLURL      string `json:"html_url"`
 	State        string `json:"state"`
 	Number       uint64 `json:"number"`
-	ChangedFiles uint64 `json:"-"`
+	ChangedFiles uint64 `json:"changed_files"`
 	Draft        bool   `json:"draft"`
-}
-
-func (payload *pullRequestPayload) UnmarshalJSON(value []byte) error {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(value, &fields); err != nil {
-		return err
-	}
-	if err := decodePullRequestField(fields, "merged_at", &payload.MergedAt); err != nil {
-		return err
-	}
-	if err := decodePullRequestField(fields, "user", &payload.User); err != nil {
-		return err
-	}
-	if err := decodePullRequestField(fields, "base", &payload.Base); err != nil {
-		return err
-	}
-	if err := decodePullRequestField(fields, "head", &payload.Head); err != nil {
-		return err
-	}
-	if err := decodePullRequestField(fields, "title", &payload.Title); err != nil {
-		return err
-	}
-	if err := decodePullRequestField(fields, "html_url", &payload.HTMLURL); err != nil {
-		return err
-	}
-	if err := decodePullRequestField(fields, "state", &payload.State); err != nil {
-		return err
-	}
-	if err := decodePullRequestField(fields, "number", &payload.Number); err != nil {
-		return err
-	}
-	if err := decodePullRequestField(fields, "changed_files", &payload.ChangedFiles); err != nil {
-		return err
-	}
-	return decodePullRequestField(fields, "draft", &payload.Draft)
-}
-
-func decodePullRequestField(fields map[string]json.RawMessage, name string, target any) error {
-	encoded, exists := fields[name]
-	if !exists {
-		return nil
-	}
-	if err := json.Unmarshal(encoded, target); err != nil {
-		return fmt.Errorf("decode GitHub pull-request field %q: %w", name, err)
-	}
-	return nil
 }
 
 func (service *Service) openPullRequest(
 	ctx context.Context,
 	target Target,
 	options OpenOptions,
+	runCPU CPUAdmission,
 ) (_ *Document, returnErr error) {
 	selector, ok := target.PullRequest()
 	if !ok {
@@ -98,12 +54,12 @@ func (service *Service) openPullRequest(
 	repository, ok := selector.Repository()
 	if !ok {
 		var err error
-		repository, err = service.currentGitHubRepository(ctx)
+		repository, err = service.currentGitHubRepository(ctx, runCPU)
 		if err != nil {
 			return nil, err
 		}
 	}
-	payload, err := service.pullRequestMetadata(ctx, repository, selector.Number())
+	payload, err := service.pullRequestMetadata(ctx, repository, selector.Number(), runCPU)
 	if err != nil {
 		return nil, err
 	}
@@ -120,18 +76,29 @@ func (service *Service) openPullRequest(
 	if err != nil {
 		return nil, fmt.Errorf("create pull-request workspace: %w", err)
 	}
+	var rootOwner *rootedRepository
 	defer func() {
 		if returnErr != nil {
-			returnErr = errors.Join(returnErr, os.RemoveAll(workspace))
+			if rootOwner != nil {
+				returnErr = errors.Join(returnErr, rootOwner.Close())
+			} else {
+				returnErr = errors.Join(returnErr, os.RemoveAll(workspace))
+			}
 		}
 	}()
 	bare, err := service.fetchPullRequest(ctx, workspace, details)
 	if err != nil {
 		return nil, err
 	}
+	rootOwner, err = openRootedRepository(bare)
+	if err != nil {
+		return nil, err
+	}
+	rootOwner.cleanup = workspace
 	snapshot, preparedRevision, err := service.preparePullRequestSnapshot(
 		ctx,
-		bare,
+		runCPU,
+		rootOwner,
 		details,
 		payload,
 		options,
@@ -139,55 +106,140 @@ func (service *Service) openPullRequest(
 	if err != nil {
 		return nil, err
 	}
+	ledger, err := newSourceLedger(snapshot.RetainedBytes())
+	if err != nil {
+		return nil, err
+	}
+	snapshot, err = service.acquirePullRequestOptionalData(
+		ctx,
+		runCPU,
+		details,
+		options,
+		snapshot,
+		ledger,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if cancellationErr := context.Cause(ctx); cancellationErr != nil {
+		return nil, cancellationErr
+	}
+	preparedRevision.repository = rootOwner
+	document := newPullRequestDocument(snapshot, target, options, details, preparedRevision)
+	rootOwner = nil
+	return document, nil
+}
+
+func (service *Service) acquirePullRequestOptionalData(
+	ctx context.Context,
+	runCPU CPUAdmission,
+	details PullRequestDetails,
+	options OpenOptions,
+	snapshot review.Snapshot,
+	ledger *sourceLedger,
+) (review.Snapshot, error) {
+	var err error
 	if options.FetchThreads {
-		threads, threadErr := service.loadRemoteThreads(ctx, details)
+		threads, threadErr := service.loadRemoteThreadsWithLedgerCPU(
+			ctx, details, ledger, runCPU,
+		)
 		if threadErr != nil {
-			status := review.RemoteThreadsUnavailable
-			var limited *LimitError
-			if errors.As(threadErr, &limited) {
-				status = review.RemoteThreadsLimited
+			if cancellationErr := context.Cause(ctx); cancellationErr != nil {
+				return review.Snapshot{}, cancellationErr
 			}
-			snapshot, err = snapshot.WithRemoteThreadFailure(
-				status,
-				boundedOperationDetail(threadErr.Error()),
-			)
+			err = runCPU(ctx, func() error {
+				status := remoteThreadFailureStatus(threadErr)
+				detail := boundedOperationDetail(threadErr.Error())
+				if reserveErr := ledger.reserve(detail.Bytes()); reserveErr != nil {
+					return reserveErr
+				}
+				var installErr error
+				snapshot, installErr = snapshot.WithRemoteThreadFailure(status, detail)
+				return installErr
+			})
 		} else {
-			snapshot, err = snapshot.WithRemoteThreads(threads)
-			if err != nil {
-				return nil, fmt.Errorf("validate GitHub review threads: %w", err)
-			}
+			err = runCPU(ctx, func() error {
+				scratchBytes, retainedBytes, accountingErr := remoteThreadInstallationBytes(
+					ctx,
+					snapshot,
+					threads,
+				)
+				if accountingErr != nil {
+					return accountingErr
+				}
+				if reserveErr := ledger.reserve(scratchBytes + retainedBytes); reserveErr != nil {
+					return reserveErr
+				}
+				var installErr error
+				snapshot, installErr = snapshot.TakeRemoteThreadsCancellable(
+					func() error { return context.Cause(ctx) },
+					threads,
+				)
+				ledger.release(scratchBytes)
+				if installErr != nil {
+					return fmt.Errorf("validate GitHub review threads: %w", installErr)
+				}
+				return nil
+			})
 		}
 		if err != nil {
-			return nil, fmt.Errorf("retain GitHub review thread status: %w", err)
+			return review.Snapshot{}, fmt.Errorf("retain GitHub review thread status: %w", err)
 		}
 	}
 	if options.FetchPending {
-		pending, status, detail := service.loadPendingReview(ctx, details)
-		switch status {
-		case review.PendingReviewReady:
-			snapshot, err = snapshot.WithPendingReview(pending)
-		case review.PendingReviewAbsent, review.PendingReviewUnavailable,
-			review.PendingReviewLimited, review.PendingReviewAmbiguous:
-			snapshot, err = snapshot.WithPendingReviewStatus(status, detail)
-		default:
-			err = errors.New("GitHub pending review returned an invalid acquisition status")
+		pending, status, detail := service.loadPendingReviewWithLedger(
+			ctx, details, ledger, runCPU,
+		)
+		if cancellationErr := context.Cause(ctx); cancellationErr != nil {
+			return review.Snapshot{}, cancellationErr
 		}
+		err = runCPU(ctx, func() error {
+			switch status {
+			case review.PendingReviewReady:
+				scratchBytes := snapshot.PendingReviewInstallationBytes(pending)
+				if reserveErr := ledger.reserve(scratchBytes); reserveErr != nil {
+					return reserveErr
+				}
+				var installErr error
+				snapshot, installErr = snapshot.TakePendingReview(pending)
+				ledger.release(scratchBytes)
+				return installErr
+			case review.PendingReviewAbsent, review.PendingReviewUnavailable,
+				review.PendingReviewLimited, review.PendingReviewAmbiguous:
+				if reserveErr := ledger.reserve(detail.Bytes()); reserveErr != nil {
+					return reserveErr
+				}
+				var installErr error
+				snapshot, installErr = snapshot.WithPendingReviewStatus(status, detail)
+				return installErr
+			default:
+				return errors.New("GitHub pending review returned an invalid acquisition status")
+			}
+		})
 		if err != nil {
-			return nil, fmt.Errorf("retain GitHub pending review status: %w", err)
+			return review.Snapshot{}, fmt.Errorf("retain GitHub pending review status: %w", err)
 		}
 	}
-	preparedRevision.cleanupPath = workspace
-	return newPullRequestDocument(snapshot, target, options, details, preparedRevision), nil
+	return snapshot, nil
+}
+
+func remoteThreadFailureStatus(err error) review.RemoteThreadStatus {
+	var limited *LimitError
+	if errors.As(err, &limited) || errors.Is(err, ErrSourceLimited) {
+		return review.RemoteThreadsLimited
+	}
+	return review.RemoteThreadsUnavailable
 }
 
 func (service *Service) preparePullRequestSnapshot(
 	ctx context.Context,
-	bare RepositoryPath,
+	runCPU CPUAdmission,
+	repository *rootedRepository,
 	details PullRequestDetails,
 	payload pullRequestPayload,
 	options OpenOptions,
 ) (review.Snapshot, revision, error) {
-	baseCommit, err := service.resolveCommit(ctx, bare, RevisionRef("refs/rvw/base"))
+	baseCommit, err := service.resolveCommit(ctx, repository, RevisionRef("refs/rvw/base"))
 	if err != nil {
 		return review.Snapshot{}, revision{}, fmt.Errorf("validate fetched base: %w", err)
 	}
@@ -197,7 +249,7 @@ func (service *Service) preparePullRequestSnapshot(
 			ErrSourceStale,
 		)
 	}
-	headCommit, err := service.resolveCommit(ctx, bare, RevisionRef("refs/rvw/head"))
+	headCommit, err := service.resolveCommit(ctx, repository, RevisionRef("refs/rvw/head"))
 	if err != nil {
 		return review.Snapshot{}, revision{}, fmt.Errorf("validate fetched head: %w", err)
 	}
@@ -207,19 +259,19 @@ func (service *Service) preparePullRequestSnapshot(
 			ErrSourceStale,
 		)
 	}
-	mergeBase, err := service.mergeBase(ctx, bare, baseCommit, headCommit)
+	mergeBase, err := service.mergeBase(ctx, repository, baseCommit, headCommit)
 	if err != nil {
 		return review.Snapshot{}, revision{}, err
 	}
-	baseTree, err := service.resolveTree(ctx, bare, nil, RevisionRef(mergeBase.String()))
+	baseTree, err := service.resolveTree(ctx, repository, nil, RevisionRef(mergeBase.String()))
 	if err != nil {
 		return review.Snapshot{}, revision{}, fmt.Errorf("resolve pull-request base tree: %w", err)
 	}
-	headTree, err := service.resolveTree(ctx, bare, nil, RevisionRef(headCommit.String()))
+	headTree, err := service.resolveTree(ctx, repository, nil, RevisionRef(headCommit.String()))
 	if err != nil {
 		return review.Snapshot{}, revision{}, fmt.Errorf("resolve pull-request head tree: %w", err)
 	}
-	files, err := service.diffMetadata(ctx, bare, nil, baseTree, headTree)
+	files, err := service.diffMetadata(ctx, repository, nil, baseTree, headTree, runCPU)
 	if err != nil {
 		return review.Snapshot{}, revision{}, err
 	}
@@ -237,54 +289,58 @@ func (service *Service) preparePullRequestSnapshot(
 	if err != nil {
 		return review.Snapshot{}, revision{}, err
 	}
-	snapshot, err := service.snapshot(ctx, sourceID, bare, nil, files, options)
+	snapshot, err := service.snapshot(
+		ctx,
+		runCPU,
+		sourceID,
+		repository,
+		nil,
+		files,
+		options,
+	)
 	if err != nil {
 		return review.Snapshot{}, revision{}, err
 	}
 	return snapshot, revision{
 		kind:       revisionTree,
-		repository: bare,
+		repository: repository,
 		base:       baseTree,
 		head:       headTree,
 	}, nil
 }
 
-func (service *Service) currentGitHubRepository(ctx context.Context) (OwnerRepository, error) {
+func (service *Service) currentGitHubRepository(
+	ctx context.Context,
+	runCPU CPUAdmission,
+) (OwnerRepository, error) {
 	result, err := service.runGH(
 		ctx,
-		[]string{"repo", "view", "--json", "nameWithOwner"},
+		[]string{ghRepo, "view", "--json", jsonFieldNameWithOwner},
 		256<<10,
 	)
 	if err != nil {
 		return OwnerRepository{}, fmt.Errorf("resolve GitHub repository: %w", err)
 	}
-	if !utf8.Valid(result.Stdout) {
-		return OwnerRepository{}, errors.New("gh repository output is not valid UTF-8")
-	}
-	var payload struct {
-		NameWithOwner string `json:"nameWithOwner"`
-	}
-	if err := json.Unmarshal(result.Stdout, &payload); err != nil {
+	name, err := decodeRepositoryJSON(ctx, result.Stdout, runCPU)
+	if err != nil {
 		return OwnerRepository{}, fmt.Errorf("decode GitHub repository: %w", err)
 	}
-	return NewOwnerRepository(payload.NameWithOwner)
+	return NewOwnerRepository(name)
 }
 
 func (service *Service) pullRequestMetadata(
 	ctx context.Context,
 	repository OwnerRepository,
 	number PullRequestNumber,
+	runCPU CPUAdmission,
 ) (pullRequestPayload, error) {
 	endpoint := "repos/" + repository.String() + "/pulls/" + strconv.FormatUint(number.Uint64(), 10)
 	result, err := service.runGH(ctx, []string{ghAPI, endpoint}, 1<<20)
 	if err != nil {
 		return pullRequestPayload{}, fmt.Errorf("read pull-request metadata: %w", err)
 	}
-	if !utf8.Valid(result.Stdout) {
-		return pullRequestPayload{}, errors.New("GitHub metadata is not valid UTF-8")
-	}
-	var payload pullRequestPayload
-	if err := json.Unmarshal(result.Stdout, &payload); err != nil {
+	payload, err := decodePullRequestJSON(ctx, result.Stdout, runCPU)
+	if err != nil {
 		return pullRequestPayload{}, fmt.Errorf("decode pull-request metadata: %w", err)
 	}
 	return payload, nil
@@ -328,14 +384,15 @@ func (service *Service) fetchPullRequest(
 
 func (service *Service) resolveCommit(
 	ctx context.Context,
-	repository RepositoryPath,
+	repository *rootedRepository,
 	ref RevisionRef,
 ) (review.ObjectID, error) {
-	result, err := service.runGit(
+	result, err := service.runGitWithInputIn(
 		ctx,
-		repository.String(),
+		repository.gitDirectory(),
 		nil,
 		[]string{gitRevParse, gitVerify, gitEndOfOptions, ref.String() + "^{commit}"},
+		nil,
 		nil,
 		64<<10,
 	)
@@ -347,14 +404,15 @@ func (service *Service) resolveCommit(
 
 func (service *Service) mergeBase(
 	ctx context.Context,
-	repository RepositoryPath,
+	repository *rootedRepository,
 	base, head review.ObjectID,
 ) (review.ObjectID, error) {
-	result, err := service.runGit(
+	result, err := service.runGitWithInputIn(
 		ctx,
-		repository.String(),
+		repository.gitDirectory(),
 		nil,
 		[]string{"merge-base", base.String(), head.String()},
+		nil,
 		[]int{0, 1},
 		64<<10,
 	)
@@ -378,6 +436,7 @@ func (service *Service) runGH(
 		Dir:             service.cwd.String(),
 		Env:             map[string]string{localeAllKey: "C", localeLanguageKey: "C", ghPromptDisabled: "1"},
 		StdoutLimit:     stdoutLimit,
+		StderrLimit:     MaxCommandStderrBytes,
 		OperationDetail: "gh " + strings.Join(arguments[:min(2, len(arguments))], " "),
 	})
 }

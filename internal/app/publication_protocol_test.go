@@ -123,16 +123,17 @@ func TestPublicationCommitDispositionFencesRetry(t *testing.T) {
 				// closed coordinator must leave the unknown publication fenced.
 				coordinator.StopAdmissionAndCancel()
 			}
+			prepared := prepareTestPublicationResult(t, model, request, review.PublicationResult{
+				Operation:    id,
+				Workspace:    request.Workspace,
+				Source:       request.Source,
+				Disposition:  testCase.disposition,
+				RemoteReview: remoteReview,
+				Detail:       boundedOperationDetail("terminal publication result"),
+			})
 			model.applyPublicationCommitOutcome(PublicationCommitOutcome{
-				ID: id,
-				Publication: review.PublicationResult{
-					Operation:    id,
-					Workspace:    request.Workspace,
-					Source:       request.Source,
-					Disposition:  testCase.disposition,
-					RemoteReview: remoteReview,
-					Detail:       boundedOperationDetail("terminal publication result"),
-				},
+				ID:          id,
+				Publication: prepared,
 			})
 			if summary := model.review.PublicationSummary(); summary.Status != testCase.wantSummary {
 				t.Fatalf("publication summary = %+v, want %v", summary, testCase.wantSummary)
@@ -173,27 +174,19 @@ func TestStalePublicationOutcomeDoesNotConsumeActiveAttempt(t *testing.T) {
 	stale, _ := review.NewOperationID(id.Uint64() + 100)
 	model.applyPublicationCommitOutcome(PublicationCommitOutcome{
 		ID: stale,
-		Publication: review.PublicationResult{
-			Operation:   stale,
-			Workspace:   request.Workspace,
-			Source:      request.Source,
-			Disposition: review.PublicationDispositionCommitted,
-		},
 	})
 	if model.publicationOperation != id ||
 		model.review.PublicationSummary().Status != review.PublicationPublishing {
 		t.Fatal("stale publication outcome consumed the active attempt")
 	}
-	model.applyPublicationCommitOutcome(PublicationCommitOutcome{
-		ID: id,
-		Publication: review.PublicationResult{
-			Operation:   id,
-			Workspace:   request.Workspace,
-			Source:      request.Source,
-			Disposition: review.PublicationDispositionFailedBeforeCommit,
-			Detail:      boundedOperationDetail("settled after stale result"),
-		},
+	prepared := prepareTestPublicationResult(t, model, request, review.PublicationResult{
+		Operation:   id,
+		Workspace:   request.Workspace,
+		Source:      request.Source,
+		Disposition: review.PublicationDispositionFailedBeforeCommit,
+		Detail:      boundedOperationDetail("settled after stale result"),
 	})
+	model.applyPublicationCommitOutcome(PublicationCommitOutcome{ID: id, Publication: prepared})
 }
 
 func TestPublicationReconciliationSettlesUnknownAttempt(t *testing.T) {
@@ -260,15 +253,15 @@ func TestPublicationReconciliationSettlesUnknownAttempt(t *testing.T) {
 			}
 			model.review = next
 			model.publicationOperation = reconciliation
+			prepared := prepareTestReconciliationResult(t, model, request, review.ReconciliationResult{
+				Operation:   reconciliation,
+				Workspace:   request.Workspace,
+				Source:      request.Source,
+				Disposition: testCase.disposition,
+				Detail:      boundedOperationDetail("reconciliation result"),
+			})
 			model.applyReconciliationOutcome(ReconciliationOutcome{
-				ID: reconciliation,
-				Reconciliation: review.ReconciliationResult{
-					Operation:   reconciliation,
-					Workspace:   request.Workspace,
-					Source:      request.Source,
-					Disposition: testCase.disposition,
-					Detail:      boundedOperationDetail("reconciliation result"),
-				},
+				ID: reconciliation, Reconciliation: prepared,
 			})
 			summary := model.review.PublicationSummary()
 			if summary.Status != testCase.wantSummary || summary.Target.Repository() == "" ||
@@ -330,7 +323,7 @@ func TestPublicationWorkerCommitBoundary(t *testing.T) {
 		outcome, ok := controlled.ClaimNext()
 		publication, typed := outcome.(PublicationCommitOutcome)
 		if !ok || !typed ||
-			publication.Publication.Disposition != review.PublicationDispositionCancelledBeforeCommit {
+			publication.Publication.Disposition() != review.PublicationDispositionCancelledBeforeCommit {
 			t.Fatalf("pre-claim outcome = (%T, %+v, %v)", outcome, publication, ok)
 		}
 		model.applyPublicationCommitOutcome(publication)
@@ -503,15 +496,20 @@ func TestInvalidPublicationResultsSettleToSafeStates(t *testing.T) {
 		model, coordinator := checkedPublicationModel(t)
 		id, request := beginTestPublication(t, model)
 		coordinator.StopAdmissionAndCancel()
-		model.applyPublicationCommitOutcome(PublicationCommitOutcome{
-			ID: id,
-			Publication: review.PublicationResult{
-				Operation:    id,
-				Workspace:    0,
-				Source:       request.Source,
-				Disposition:  review.PublicationDispositionCommitted,
-				RemoteReview: 42,
+		prepared, prepareErr := coordinator.preparePublicationResult(publicationJob{
+			ctx: t.Context(),
+			publication: PublicationWork{
+				ID: id, Request: request, Rebase: model.review.PendingRebaseSource(),
 			},
+		}, review.PublicationResult{
+			Operation:    id,
+			Workspace:    0,
+			Source:       request.Source,
+			Disposition:  review.PublicationDispositionCommitted,
+			RemoteReview: 42,
+		})
+		model.applyPublicationCommitOutcome(PublicationCommitOutcome{
+			ID: id, Publication: prepared, Err: prepareErr,
 		})
 		if summary := model.review.PublicationSummary(); summary.Status != review.PublicationUnknown || summary.Detail.IsEmpty() {
 			t.Fatalf("invalid commit summary = %+v", summary)
@@ -553,14 +551,19 @@ func TestInvalidPublicationResultsSettleToSafeStates(t *testing.T) {
 		}
 		model.review = next
 		model.publicationOperation = reconciliation
-		model.applyReconciliationOutcome(ReconciliationOutcome{
-			ID: reconciliation,
-			Reconciliation: review.ReconciliationResult{
-				Operation:   reconciliation,
-				Workspace:   0,
-				Source:      request.Source,
-				Disposition: review.ReconciliationCommitted,
+		prepared, prepareErr := model.coordinator.prepareReconciliationResult(publicationJob{
+			ctx: t.Context(),
+			reconciliation: ReconciliationWork{
+				ID: reconciliation, Request: request, Rebase: model.review.PendingRebaseSource(),
 			},
+		}, review.ReconciliationResult{
+			Operation:   reconciliation,
+			Workspace:   0,
+			Source:      request.Source,
+			Disposition: review.ReconciliationCommitted,
+		})
+		model.applyReconciliationOutcome(ReconciliationOutcome{
+			ID: reconciliation, Reconciliation: prepared, Err: prepareErr,
 		})
 		if summary := model.review.PublicationSummary(); summary.Status != review.PublicationUnknown || summary.Detail.IsEmpty() {
 			t.Fatalf("invalid reconciliation summary = %+v", summary)
@@ -653,4 +656,40 @@ func beginTestPublication(
 	model.review = next
 	model.publicationOperation = id
 	return id, request
+}
+
+func prepareTestPublicationResult(
+	t *testing.T,
+	model *Model,
+	request review.PublicationRequest,
+	result review.PublicationResult,
+) review.PreparedPublicationResult {
+	t.Helper()
+	prepared, err := review.PreparePublicationResult(
+		request,
+		model.review.PendingRebaseSource(),
+		result,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return prepared
+}
+
+func prepareTestReconciliationResult(
+	t *testing.T,
+	model *Model,
+	request review.ReconciliationRequest,
+	result review.ReconciliationResult,
+) review.PreparedReconciliationResult {
+	t.Helper()
+	prepared, err := review.PrepareReconciliationResult(
+		request,
+		model.review.PendingRebaseSource(),
+		result,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return prepared
 }

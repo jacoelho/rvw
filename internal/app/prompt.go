@@ -15,6 +15,8 @@ import (
 
 const maxPromptBytes = 64 << 10
 
+const promptInputLimitNotice = "prompt input limit reached: 65536 bytes"
+
 const (
 	draftConflictLocalValue  = "local"
 	draftConflictRemoteValue = "remote"
@@ -89,7 +91,7 @@ func (model *Model) updatePromptInput(message tea.Msg) tea.Cmd {
 	if paste, ok := message.(tea.PasteMsg); ok && len(paste.Content) > maxPromptBytes {
 		model.notice = &Notice{
 			Kind: NoticeWarning,
-			Text: "prompt input limit reached: 65536 bytes",
+			Text: promptInputLimitNotice,
 		}
 		return nil
 	}
@@ -97,12 +99,22 @@ func (model *Model) updatePromptInput(message tea.Msg) tea.Cmd {
 	previousPosition := input.Position()
 	updated, command := input.Update(message)
 	*input = updated
-	if len(input.Value()) > maxPromptBytes {
+	value := input.Value()
+	if len(value) > maxPromptBytes {
 		input.SetValue(previous)
 		input.SetCursor(previousPosition)
 		model.notice = &Notice{
 			Kind: NoticeWarning,
-			Text: "prompt input limit reached: 65536 bytes",
+			Text: promptInputLimitNotice,
+		}
+		return command
+	}
+	if containsBidiControl(value) {
+		input.SetValue(previous)
+		input.SetCursor(previousPosition)
+		model.notice = &Notice{
+			Kind: NoticeWarning,
+			Text: "command input contains bidirectional control",
 		}
 		return command
 	}
@@ -254,16 +266,19 @@ func (model *Model) executeCommand(value string) tea.Cmd {
 		model.openExportPicker(exportSelection{
 			format:      review.ExportMarkdown,
 			destination: delivery.DestinationClipboard,
+			options:     review.DefaultExportOptions(),
 		})
 	case commandExport:
 		model.openExportPicker(exportSelection{
 			format:      review.ExportMarkdown,
 			destination: delivery.DestinationStdout,
+			options:     review.DefaultExportOptions(),
 		})
 	case commandJSON:
 		model.openExportPicker(exportSelection{
 			format:      review.ExportJSON,
 			destination: delivery.DestinationStdout,
+			options:     review.DefaultExportOptions(),
 		})
 	case commandSubmit:
 		model.applyAction(KeyActionOpenSubmit, 1)
@@ -318,14 +333,11 @@ func (model *Model) resolvePendingConflict(value string) {
 	case draftConflictBaseValue:
 		resolution = review.PendingConflictBase
 	}
-	next, err := model.review.ResolvePendingConflict(comment.ID(), resolution)
-	if err != nil {
-		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
-		return
-	}
-	model.review = next
-	model.commentCursor = min(model.commentCursor, max(model.review.CommentCount()-1, 0))
-	model.notice = &Notice{Kind: NoticeInformation, Text: NoticeText("draft conflict resolved with " + value)}
+	model.startCommentMutation(
+		func(operation review.OperationID) (review.Review, review.CommentMutation, error) {
+			return model.review.StartResolvePendingConflict(operation, comment.ID(), resolution)
+		},
+	)
 }
 
 func patchContextForCommand(intent commandIntent) (review.PatchContext, error) {

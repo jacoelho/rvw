@@ -135,7 +135,7 @@ func (model *Model) openFind(scope findScope) tea.Cmd {
 		scope:       scope,
 		phase:       findPrompt,
 		generation:  1,
-		candidates:  slices.Clone(model.fileOrder),
+		candidates:  model.fileOrder,
 		returnState: model.captureFindReturnState(),
 	}
 	model.overlay = OverlayFind
@@ -182,9 +182,16 @@ func (model *Model) configureFindInput() {
 	}
 }
 
-func (model *Model) closeFind(accept bool) {
+type findCloseDisposition uint8
+
+const (
+	findCloseCancel findCloseDisposition = iota + 1
+	findCloseAccept
+)
+
+func (model *Model) closeFind(disposition findCloseDisposition) {
 	state := model.find.returnState
-	if !accept && model.find.phase == findSearching {
+	if disposition == findCloseCancel && model.find.phase == findSearching {
 		model.cancelSearch()
 	}
 	model.find.generation++
@@ -193,10 +200,16 @@ func (model *Model) closeFind(accept bool) {
 	model.overlay = OverlayNone
 	model.abandonChord()
 	model.find = findPalette{}
-	if accept {
+	if disposition == findCloseAccept {
+		if model.syntaxDeferred {
+			model.requestSyntax()
+		}
 		return
 	}
 	model.restoreFindReturnState(state)
+	if model.syntaxDeferred {
+		model.requestSyntax()
+	}
 }
 
 func (model *Model) restoreFindReturnState(state findReturnState) {
@@ -239,16 +252,18 @@ func (model *Model) applyFindReturnViewport(state findReturnState) {
 	model.clampFocus()
 }
 
-func (model *Model) applyPendingFindRestore(file review.FileID) {
+func (model *Model) applyPendingFindRestore(file review.FileID) bool {
 	if model.findRestore == nil || !model.findRestore.activeOK ||
 		model.findRestore.active != file {
-		return
+		return false
 	}
 	state := *model.findRestore
 	model.findRestore = nil
 	if model.review.Patch(file).Status == review.PatchReady {
 		model.applyFindReturnViewport(state)
+		return true
 	}
+	return false
 }
 
 func (model *Model) handleFindKey(message tea.KeyPressMsg) tea.Cmd {
@@ -259,7 +274,7 @@ func (model *Model) handleFindKey(message tea.KeyPressMsg) tea.Cmd {
 		}
 		switch action {
 		case KeyActionCancel, KeyActionInterrupt:
-			model.closeFind(false)
+			model.closeFind(findCloseCancel)
 		case KeyActionAccept:
 			return model.acceptFind()
 		case KeyActionNextSearchScope:
@@ -305,23 +320,35 @@ func (model *Model) updateFindInput(message tea.Msg) tea.Cmd {
 	}
 	previous := model.searchInput.Value()
 	previousPosition := model.searchInput.Position()
+	previousFind := model.find
 	updated, command := model.searchInput.Update(message)
 	model.searchInput = updated
-	if !utf8.ValidString(model.searchInput.Value()) {
+	value := model.searchInput.Value()
+	if !utf8.ValidString(value) {
 		model.searchInput.SetValue(previous)
 		model.searchInput.SetCursor(previousPosition)
 		model.find.phase = findFailed
 		model.find.failure = invalidFindQuery
 		return command
 	}
-	if len(model.searchInput.Value()) > limit {
+	if len(value) > limit {
 		model.searchInput.SetValue(previous)
 		model.searchInput.SetCursor(previousPosition)
 		model.find.phase = findFailed
 		model.find.failure = "find query exceeds " + strconv.Itoa(limit) + " bytes"
 		return command
 	}
-	if model.searchInput.Value() == previous {
+	if containsBidiControl(value) {
+		model.searchInput.SetValue(previous)
+		model.searchInput.SetCursor(previousPosition)
+		model.find = previousFind
+		model.notice = &Notice{
+			Kind: NoticeWarning,
+			Text: "find query contains bidirectional control",
+		}
+		return command
+	}
+	if value == previous {
 		return command
 	}
 	model.find.failure = ""
@@ -370,8 +397,8 @@ func (model *Model) acceptFind() tea.Cmd {
 		if model.find.phase != findReady || model.findResultCount() == 0 {
 			return nil
 		}
-		model.previewFindSelection(true)
-		model.closeFind(true)
+		model.previewFindSelection(findSelectionAccept)
+		model.closeFind(findCloseAccept)
 		return nil
 	}
 	if model.find.phase == findSearching {
@@ -379,8 +406,8 @@ func (model *Model) acceptFind() tea.Cmd {
 	}
 	if model.find.phase == findReady && model.find.submittedQuery == model.searchInput.Value() &&
 		model.findResultCount() != 0 {
-		model.previewFindSelection(true)
-		model.closeFind(true)
+		model.previewFindSelection(findSelectionAccept)
+		model.closeFind(findCloseAccept)
 		return nil
 	}
 	model.submitFindText()
@@ -409,18 +436,12 @@ func (model *Model) submitFindText() {
 	default:
 		return
 	}
-	target, err := review.NewSearchTarget(model.review.Snapshot(), files)
-	if err != nil {
-		model.find.phase = findFailed
-		model.find.failure = err.Error()
-		return
-	}
 	model.find.phase = findSearching
 	model.find.failure = ""
 	model.find.submittedQuery = query
 	model.find.cursor = 0
 	model.find.top = 0
-	model.startSearch(query, target)
+	model.startSearch(query, files)
 }
 
 func (model *Model) failFindSearch(err error) {
@@ -469,7 +490,7 @@ func (model *Model) prepareEmptyFileFind() {
 	model.find.totalMatches = len(model.find.candidates)
 	model.find.cursor = 0
 	if active, ok := model.review.ActiveFile(); ok {
-		if position := slices.Index(model.find.candidates, active); position >= 0 {
+		if position, exists := slices.BinarySearch(model.find.candidates, active); exists {
 			model.find.cursor = position
 		}
 	}
@@ -562,7 +583,7 @@ func (model *Model) advanceFileFind(message findChunkMsg) tea.Cmd {
 	model.find.cursor = 0
 	model.find.top = 0
 	if len(results) != 0 {
-		model.previewFindSelection(false)
+		model.previewFindSelection(findSelectionPreview)
 	}
 	return nil
 }
@@ -656,7 +677,7 @@ func (model *Model) moveFind(delta int) {
 	}
 	model.find.cursor = min(max(model.find.cursor+delta, 0), count-1)
 	model.clampFindTop()
-	model.previewFindSelection(false)
+	model.previewFindSelection(findSelectionPreview)
 }
 
 func (model *Model) clampFindTop() {
@@ -670,10 +691,17 @@ func (model *Model) clampFindTop() {
 	model.find.top = min(max(model.find.top, 0), maximum)
 }
 
-func (model *Model) previewFindSelection(accept bool) {
+type findSelectionDisposition uint8
+
+const (
+	findSelectionPreview findSelectionDisposition = iota + 1
+	findSelectionAccept
+)
+
+func (model *Model) previewFindSelection(disposition findSelectionDisposition) {
 	if model.find.scope == findFiles {
 		file, ok := model.findFileAt(model.find.cursor)
-		if !ok || !accept && !model.find.returnState.activeOK {
+		if !ok || disposition == findSelectionPreview && !model.find.returnState.activeOK {
 			return
 		}
 		model.foreground.clearPendingDiffTarget()

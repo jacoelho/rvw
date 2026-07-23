@@ -109,31 +109,24 @@ func (model *Model) beginComment(target review.CommentTarget) tea.Cmd {
 	model.mode = ModeCommentEdit
 	model.clampDiffTop()
 	model.abandonChord()
-	return model.commentEditor.Focus()
+	return nil
 }
 
-func (model *Model) beginEditComment() tea.Cmd {
+func (model *Model) beginEditComment() {
 	count := model.review.CommentCount()
 	if count == 0 || model.commentCursor >= count {
 		if model.commentCursor >= count && model.review.Snapshot().RemoteThreadCount() != 0 {
 			model.notice = &Notice{Kind: NoticeInformation, Text: "remote comments are read-only"}
 		}
-		return nil
+		return
 	}
 	model.commentCursor = min(max(model.commentCursor, 0), count-1)
 	comment, _ := model.review.CommentAt(model.commentCursor)
-	next, err := model.review.BeginEditComment(comment.ID())
-	if err != nil {
-		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
-		return nil
-	}
-	model.review = next
-	draft, _ := model.review.Draft()
-	model.commentEditor.SetValue(draft.Body())
-	model.resizeCommentEditor()
-	model.mode = ModeCommentEdit
-	model.clampDiffTop()
-	return model.commentEditor.Focus()
+	model.startCommentMutation(
+		func(operation review.OperationID) (review.Review, review.CommentMutation, error) {
+			return model.review.StartBeginEditComment(operation, comment.ID())
+		},
+	)
 }
 
 func (model *Model) cancelCommentEdit() {
@@ -141,34 +134,34 @@ func (model *Model) cancelCommentEdit() {
 	if err == nil {
 		model.review = next
 	}
-	model.commentEditor.Blur()
 	model.mode = ModeNormal
 }
 
 func (model *Model) saveComment() {
-	next, _, err := model.review.SaveDraft()
-	if err != nil {
-		model.notice = &Notice{
-			Kind: NoticeWarning,
-			Text: "comment must contain non-whitespace text within the configured byte limits",
-		}
-		return
+	if model.startCommentMutation(
+		func(operation review.OperationID) (review.Review, review.CommentMutation, error) {
+			return model.review.StartSaveComment(operation)
+		},
+	) {
+		model.mode = ModeNormal
 	}
-	model.review = next
-	model.commentEditor.Blur()
-	model.mode = ModeNormal
-	model.commentCursor = max(model.review.CommentCount()-1, 0)
-	model.notice = &Notice{Kind: NoticeInformation, Text: "comment saved"}
 }
 
-func (model *Model) deleteComment(id review.CommentID) {
-	next, err := model.review.DeleteComment(id)
+func (model *Model) cycleCommentKind(direction review.NavigationDirection) {
+	next, err := model.review.CycleDraftKind(direction)
 	if err != nil {
 		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
 		return
 	}
 	model.review = next
-	model.commentCursor = min(model.commentCursor, max(model.review.CommentCount()-1, 0))
+}
+
+func (model *Model) deleteComment(id review.CommentID) {
+	model.startCommentMutation(
+		func(operation review.OperationID) (review.Review, review.CommentMutation, error) {
+			return model.review.StartDeleteComment(operation, id)
+		},
+	)
 }
 
 func (model *Model) moveComment(delta int) {
@@ -198,9 +191,9 @@ func (model *Model) activateCommentSelection() {
 		model.activateLocalComment(comment)
 		return
 	}
-	threads := model.review.Snapshot().RemoteThreads(model.commentCursor-localCount, 1)
-	if len(threads) == 1 {
-		model.activateRemoteThread(threads[0])
+	thread, ok := model.review.Snapshot().RemoteThread(model.commentCursor - localCount)
+	if ok {
+		model.activateRemoteThread(thread)
 	}
 }
 
