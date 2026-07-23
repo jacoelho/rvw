@@ -19,6 +19,7 @@ func (model *Model) openPublication() {
 }
 
 func (model *Model) startPublicationCheck() {
+	model.publicationIntent = publicationOperationIntentNone
 	summary := model.review.PublicationSummary()
 	if summary.Status == review.PublicationUnknown {
 		model.startReconciliation()
@@ -69,7 +70,6 @@ func (model *Model) startPublicationCheck() {
 	}
 	model.review = next
 	model.publicationOperation = operationID
-	model.publicationCancel = false
 	model.overlay = OverlaySubmit
 	model.notice = &Notice{Kind: NoticeInformation, Text: "checking publication preflight"}
 }
@@ -148,6 +148,8 @@ func (model *Model) applyPublicationCheckOutcome(outcome PublicationCheckOutcome
 	if !model.claimPublicationOutcome(outcome.ID) {
 		return
 	}
+	intent := model.publicationIntent
+	model.publicationIntent = publicationOperationIntentNone
 	result := outcome.Check
 	if outcome.Err != nil {
 		result = review.PublicationCheckResult{
@@ -181,8 +183,7 @@ func (model *Model) applyPublicationCheckOutcome(outcome PublicationCheckOutcome
 		return
 	}
 	model.review = next
-	if model.publicationCancel {
-		model.publicationCancel = false
+	if intent == publicationOperationIntentCancel {
 		if result.Checked != nil {
 			if !model.cancelPublicationCheck() {
 				return
@@ -196,10 +197,15 @@ func (model *Model) applyPublicationCheckOutcome(outcome PublicationCheckOutcome
 		model.notice = &Notice{Kind: NoticeError, Text: NoticeText(result.Detail.String())}
 		return
 	}
+	if intent == publicationOperationIntentSubmit {
+		model.startPublication()
+		return
+	}
 	model.notice = &Notice{Kind: NoticeInformation, Text: "publication preflight is ready"}
 }
 
 func (model *Model) startPublication() {
+	model.publicationIntent = publicationOperationIntentNone
 	operationID, err := model.nextOperationID()
 	if err != nil {
 		model.notice = &Notice{Kind: NoticeError, Text: NoticeText(err.Error())}
@@ -235,7 +241,6 @@ func (model *Model) startPublication() {
 	}
 	model.review = next
 	model.publicationOperation = operationID
-	model.publicationCancel = false
 	model.notice = &Notice{Kind: NoticeInformation, Text: "publishing GitHub review"}
 }
 
@@ -268,7 +273,7 @@ func (model *Model) applyPublicationCommitOutcome(outcome PublicationCommitOutco
 		result.Detail(),
 	)
 	model.review = next
-	model.publicationCancel = false
+	model.publicationIntent = publicationOperationIntentNone
 	if result.Disposition() == review.PublicationDispositionUnknown {
 		model.notice = &Notice{
 			Kind: NoticeError,
@@ -415,7 +420,7 @@ func (model *Model) applyPublicationAction(action KeyAction) {
 	case KeyActionCancel, KeyActionInterrupt, KeyActionQuit:
 		switch summary.Status {
 		case review.PublicationChecking, review.PublicationPublishing:
-			model.publicationCancel = true
+			model.publicationIntent = publicationOperationIntentCancel
 			model.coordinator.Cancel(model.publicationOperation)
 			model.notice = &Notice{
 				Kind: NoticeInformation,
@@ -430,8 +435,16 @@ func (model *Model) applyPublicationAction(action KeyAction) {
 			model.overlay = OverlayNone
 		}
 	case KeyActionSubmitReview:
-		if summary.Status == review.PublicationChecked {
+		switch summary.Status {
+		case review.PublicationChecking:
+			model.publicationIntent = publicationOperationIntentSubmit
+			model.notice = &Notice{
+				Kind: NoticeInformation,
+				Text: "submission requested; waiting for publication preflight",
+			}
+		case review.PublicationChecked:
 			model.startPublication()
+		default:
 		}
 	case KeyActionSubmitRecheck:
 		if summary.Status == review.PublicationUnknown {
@@ -571,7 +584,11 @@ func (model *Model) publicationView(width, height int) string {
 	lines := []string{"GitHub review", model.publicationEventSelector()}
 	switch summary.Status {
 	case review.PublicationChecking:
-		lines = append(lines, "Checking immutable repository, pull request, and head…")
+		status := "Checking immutable repository, pull request, and head…"
+		if model.publicationIntent == publicationOperationIntentSubmit {
+			status = "Checking immutable repository, pull request, and head; submission is queued…"
+		}
+		lines = append(lines, status)
 	case review.PublicationChecked:
 		unmappablePolicy := "exclude"
 		if model.publicationMoveSummary {

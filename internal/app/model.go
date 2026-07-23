@@ -114,6 +114,14 @@ type Notice struct {
 	Kind NoticeKind
 }
 
+type publicationOperationIntent uint8
+
+const (
+	publicationOperationIntentNone publicationOperationIntent = iota
+	publicationOperationIntentSubmit
+	publicationOperationIntentCancel
+)
+
 // TerminalSize represents terminal size.
 type TerminalSize struct {
 	Width  int
@@ -233,7 +241,7 @@ type Model struct {
 	exportPicker              exportSelection
 	publicationAllowStale     bool
 	commentsVisible           bool
-	publicationCancel         bool
+	publicationIntent         publicationOperationIntent
 	quitting                  bool
 	publicationMoveSummary    bool
 	publicationDraftReady     bool

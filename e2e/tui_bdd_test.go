@@ -786,7 +786,6 @@ func launchCommentedPullRequest() bdd.Step[*world] {
 func publishReview() bdd.Step[*world] {
 	return func(t testing.TB, w *world) {
 		w.pty.send(t, "s")
-		w.pty.awaitScreen(t, "checked publication", containsScreen("checked at current head"))
 		w.pty.send(t, "\r")
 		screen := w.pty.awaitScreen(t, "draft synchronization or publication result", func(screen string) bool {
 			return strings.Contains(screen, "Submit pending draft as") ||

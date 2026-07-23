@@ -26,16 +26,47 @@ func TestPublicationCheckReadyAndCancellation(t *testing.T) {
 		model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 		settleModelWork(t, model, coordinator)
 		id, result := beginTestPublicationCheck(t, model)
-		model.publicationCancel = true
+		model.publicationIntent = publicationOperationIntentCancel
 		model.overlay = OverlaySubmit
 		model.applyPublicationCheckOutcome(PublicationCheckOutcome{ID: id, Check: result})
 		if summary := model.review.PublicationSummary(); summary.Status != review.PublicationIdle {
 			t.Fatalf("cancelled publication check summary = %+v", summary)
 		}
-		if model.overlay != OverlayNone || model.publicationCancel {
-			t.Fatalf("cancelled publication UI = overlay %v cancel %v", model.overlay, model.publicationCancel)
+		if model.overlay != OverlayNone || model.publicationIntent != publicationOperationIntentNone {
+			t.Fatalf("cancelled publication UI = overlay %v intent %v", model.overlay, model.publicationIntent)
 		}
 	})
+}
+
+func TestEnterDuringPublicationCheckSubmitsWhenPreflightIsReady(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	settleModelWork(t, model, coordinator)
+	setModelKeybindings(t, model, Keybinding{
+		Context: KeyContextSubmit,
+		Chord:   "enter",
+		Action:  KeyActionSubmitReview,
+	})
+	id, result := beginTestPublicationCheck(t, model)
+	model.overlay = OverlaySubmit
+
+	_, _ = model.Update(keyMessage("enter"))
+	if model.publicationIntent != publicationOperationIntentSubmit {
+		t.Fatalf("publication intent = %v, want submit", model.publicationIntent)
+	}
+	if summary := model.review.PublicationSummary(); summary.Status != review.PublicationChecking {
+		t.Fatalf("publication summary before check outcome = %+v", summary)
+	}
+
+	model.applyPublicationCheckOutcome(PublicationCheckOutcome{ID: id, Check: result})
+	if summary := model.review.PublicationSummary(); summary.Status != review.PublicationPublishing {
+		t.Fatalf("publication summary after check outcome = %+v", summary)
+	}
+	if model.publicationOperation == 0 || model.publicationOperation == id {
+		t.Fatalf("publication operation = %d, want a new active operation", model.publicationOperation)
+	}
+	if model.publicationIntent != publicationOperationIntentNone {
+		t.Fatalf("publication intent after admission = %v, want none", model.publicationIntent)
+	}
 }
 
 func TestPublicationEventSelectorCyclesFinalGitHubActions(t *testing.T) {
