@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"slices"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -30,6 +32,7 @@ type interactiveRequest struct {
 	service     *source.Service
 	document    *source.Document
 	termination *terminationOwner
+	environment []string
 	resolved    config.Config
 }
 
@@ -105,6 +108,10 @@ func runInteractive(request interactiveRequest) (returnErr error) {
 		tea.WithoutSignalHandler(),
 		tea.WithInput(request.input),
 		tea.WithOutput(request.output),
+		tea.WithEnvironment(interactiveProgramEnvironment(
+			request.environment,
+			request.resolved.UI().ExplicitTheme,
+		)),
 	)
 	_, runErr := program.Run()
 
@@ -112,6 +119,17 @@ func runInteractive(request interactiveRequest) (returnErr error) {
 		runErr = errors.Join(runErr, program.ReleaseTerminal())
 	}
 	return finishInteractive(request, model, coordinator, receiver, cancelReceiver, runErr)
+}
+
+func interactiveProgramEnvironment(environment []string, explicitTheme bool) []string {
+	owned := slices.Clone(environment)
+	if !explicitTheme {
+		return owned
+	}
+	return slices.DeleteFunc(owned, func(value string) bool {
+		name, _, _ := strings.Cut(value, "=")
+		return name == "NO_COLOR"
+	})
 }
 
 func finishInteractive(

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"unicode"
@@ -174,8 +175,17 @@ func TestSourceAndOutputContract(t *testing.T) {
 				} else {
 					golden.RequireEqual(t, string(w.last.stdout))
 				}
-				if got := len(w.calls(t)); got != example.externalCalls {
-					t.Fatalf("external helper calls = %d, want %d: %+v", got, example.externalCalls, w.calls(t))
+				calls := w.calls(t)
+				if example.externalCalls == 0 && len(calls) != 0 {
+					t.Fatalf("unexpected external activity: %+v", calls)
+				}
+				if example.externalCalls != 0 &&
+					(!slices.ContainsFunc(calls, func(call externalCall) bool {
+						return call.Command == "github-http"
+					}) || !slices.ContainsFunc(calls, func(call externalCall) bool {
+						return call.Command == "smart-git"
+					})) {
+					t.Fatalf("native GitHub/smart-Git activity is incomplete: %+v", calls)
 				}
 			})
 		})

@@ -56,12 +56,15 @@ type Invocation struct {
 }
 
 type argumentState struct {
-	repository   *source.OwnerRepository
-	command      string
-	rangeText    string
-	pullSelector string
-	invocation   Invocation
-	staged       bool
+	repositoryText string
+	command        string
+	rangeText      string
+	pullSelector   string
+	invocation     Invocation
+	repositorySet  bool
+	rangeSet       bool
+	pullSet        bool
+	staged         bool
 }
 
 func parseArgs(args []string) (Invocation, error) {
@@ -192,6 +195,7 @@ func (state *argumentState) consumeTargetArgument(args []string, index *int) err
 		}
 		*index = next
 		state.rangeText = value
+		state.rangeSet = true
 	case flagRepository:
 		if state.command != "pr" {
 			return fmt.Errorf("%w: --repo is valid only after pr", ErrUsage)
@@ -201,11 +205,8 @@ func (state *argumentState) consumeTargetArgument(args []string, index *int) err
 			return err
 		}
 		*index = next
-		parsed, err := source.NewOwnerRepository(value)
-		if err != nil {
-			return err
-		}
-		state.repository = new(parsed)
+		state.repositoryText = value
+		state.repositorySet = true
 	default:
 		return state.consumePositional(argument)
 	}
@@ -226,8 +227,9 @@ func (state *argumentState) consumePositional(argument string) error {
 		}
 	case argument != "" && argument[0] == '-':
 		return fmt.Errorf("%w: unknown option %s", ErrUsage, argument)
-	case state.command == "pr" && state.pullSelector == "":
+	case state.command == "pr" && !state.pullSet:
 		state.pullSelector = argument
+		state.pullSet = true
 	default:
 		return fmt.Errorf("%w: unexpected argument %q", ErrUsage, argument)
 	}
@@ -240,13 +242,13 @@ func (state *argumentState) finish() (Invocation, error) {
 	}
 	switch state.command {
 	case commandDiff:
-		if state.staged && state.rangeText != "" {
+		if state.staged && state.rangeSet {
 			return Invocation{}, fmt.Errorf("%w: --staged and --range are mutually exclusive", ErrUsage)
 		}
 		switch {
 		case state.staged:
 			state.invocation.Target = source.StagedTarget()
-		case state.rangeText != "":
+		case state.rangeSet:
 			target, err := source.NewRangeTarget(state.rangeText)
 			if err != nil {
 				return Invocation{}, err
@@ -256,10 +258,18 @@ func (state *argumentState) finish() (Invocation, error) {
 			state.invocation.Target = source.WorktreeTarget()
 		}
 	case "pr":
-		if state.pullSelector == "" {
+		if !state.pullSet || state.pullSelector == "" {
 			return Invocation{}, fmt.Errorf("%w: pr requires a selector", ErrUsage)
 		}
-		selector, err := source.NewPullRequestSelector(state.pullSelector, state.repository)
+		var repository *source.OwnerRepository
+		if state.repositorySet {
+			parsed, err := source.NewOwnerRepository(state.repositoryText)
+			if err != nil {
+				return Invocation{}, err
+			}
+			repository = new(parsed)
+		}
+		selector, err := source.NewPullRequestSelector(state.pullSelector, repository)
 		if err != nil {
 			return Invocation{}, err
 		}
@@ -285,14 +295,10 @@ func optionValue(args []string, index int, option string) (string, int, error) {
 func helpText(topic HelpTopic) string {
 	switch topic {
 	case HelpDiff:
-		return "usage: rvw diff [--staged | --range <base..head>] [common options]\n"
+		return diffHelpText
 	case HelpPullRequest:
-		return "usage: rvw pr <number | url> [--repo <owner/repository>] [common options]\n"
+		return pullRequestHelpText
 	default:
-		return "usage:\n" +
-			"  rvw diff [--staged | --range <base..head>] [common options]\n" +
-			"  rvw pr <number | url> [--repo <owner/repository>] [common options]\n\n" +
-			"common options: --stdout --json --no-mouse --theme <name> " +
-			"--appearance <dark|light|system> --include <pattern> --exclude <pattern>\n"
+		return globalHelpText
 	}
 }

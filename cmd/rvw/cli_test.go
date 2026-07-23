@@ -2,6 +2,7 @@ package main
 
 import (
 	"math"
+	"os"
 	"strings"
 	"testing"
 
@@ -68,9 +69,13 @@ func TestParseArgsRejectsInvalidGrammar(t *testing.T) {
 	tests := [][]string{
 		nil,
 		{"diff", "--staged", "--range", "a..b"},
+		{"diff", "--staged", "--range", ""},
+		{"diff", "--range", ""},
 		{"diff", "--range", "a...b"},
 		{"diff", "--range", "..b"},
 		{"pr", "0"},
+		{"pr", ""},
+		{"pr", "1", "--repo", ""},
 		{"pr", "+1"},
 		{"pr", "18446744073709551616"},
 		{"pr", "https://github.com/-owner/repo/pull/1"},
@@ -82,6 +87,13 @@ func TestParseArgsRejectsInvalidGrammar(t *testing.T) {
 		if invocation, err := parseArgs(args); err == nil {
 			t.Fatalf("parseArgs(%q) = %+v, want error", args, invocation)
 		}
+	}
+}
+
+func TestParseArgsChecksSelectorExclusionBeforeEmptyRangeValidation(t *testing.T) {
+	_, err := parseArgs([]string{"diff", "--staged", "--range", ""})
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("parseArgs() error = %v", err)
 	}
 }
 
@@ -106,5 +118,26 @@ func TestParseArgsHelp(t *testing.T) {
 		if !invocation.Help {
 			t.Fatalf("parseArgs(%q) did not select help", args)
 		}
+	}
+}
+
+func TestHelpTextMatchesCompleteGoldens(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		topic HelpTopic
+	}{
+		{name: "global", topic: HelpGlobal},
+		{name: "diff", topic: HelpDiff},
+		{name: "pr", topic: HelpPullRequest},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			contents, err := os.ReadFile("testdata/help_" + test.name + ".golden")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := helpText(test.topic); got != string(contents) {
+				t.Fatalf("help text differs from golden\n--- got ---\n%s\n--- want ---\n%s", got, contents)
+			}
+		})
 	}
 }

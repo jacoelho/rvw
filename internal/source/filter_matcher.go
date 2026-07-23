@@ -28,6 +28,7 @@ const (
 	filterTagInclude filterTagKind = iota + 1
 	filterTagExclude
 	filterTagIgnore
+	filterTagGitignore
 )
 
 type filterTag struct {
@@ -52,6 +53,7 @@ type filterDFAState struct {
 	transitions map[rune]int
 	nfa         []int
 	ignoreOrder uint32
+	gitOrder    uint32
 	flags       filterMatchFlags
 }
 
@@ -61,12 +63,14 @@ const (
 	filterMatchInclude filterMatchFlag = iota + 1
 	filterMatchExclude
 	filterMatchIgnore
+	filterMatchGitignore
 )
 
 const filterMatchKnownBits = uint8(
 	1<<(filterMatchInclude-1) |
 		1<<(filterMatchExclude-1) |
-		1<<(filterMatchIgnore-1),
+		1<<(filterMatchIgnore-1) |
+		1<<(filterMatchGitignore-1),
 )
 
 // filterMatchFlags is a closed set of independent matcher outcomes. Its raw
@@ -101,7 +105,7 @@ func (flags *filterMatchFlags) valid() bool {
 }
 
 func validFilterMatchFlag(flag filterMatchFlag) bool {
-	return flag >= filterMatchInclude && flag <= filterMatchIgnore
+	return flag >= filterMatchInclude && flag <= filterMatchGitignore
 }
 
 type compiledFilterSet struct {
@@ -164,8 +168,12 @@ func newCompiledFilterSet(
 		}
 	}
 	for index, rule := range ignore {
+		kind := filterTagIgnore
+		if rule.gitignore {
+			kind = filterTagGitignore
+		}
 		if compileErr := matcher.addGlob(rule.pattern, filterTag{
-			kind:    filterTagIgnore,
+			kind:    kind,
 			ordinal: uint32(index + 1),
 			ignored: !rule.negated,
 		}); compileErr != nil {
@@ -415,6 +423,20 @@ func (matcher *compiledFilterSet) addGlobTokens(current int, pattern string) (in
 			}
 			current = next
 			offset = closeOffset + 1
+		case '\\':
+			if offset+1 == len(pattern) {
+				return 0, errors.New("glob pattern has a trailing escape")
+			}
+			value, size := utf8.DecodeRuneInString(pattern[offset+1:])
+			next, stateErr := matcher.appendNFAState()
+			if stateErr != nil {
+				return 0, stateErr
+			}
+			if err := matcher.addTransition(current, next, value, value); err != nil {
+				return 0, err
+			}
+			current = next
+			offset += size + 1
 		default:
 			value, size := utf8.DecodeRuneInString(pattern[offset:])
 			next, stateErr := matcher.appendNFAState()
@@ -551,7 +573,7 @@ func (matcher *compiledFilterSet) matchPrepared(
 		// RuneLen returns one through four for values produced by ranging a string.
 		//nolint:gosec // The conversion is lossless for the documented RuneLen range.
 		matcher.inputBytes += uint64(size)
-		if processed >= maxSourceProtocolToken {
+		if processed >= sourceCPUPollBytes {
 			if err := context.Cause(matcher.ctx); err != nil {
 				return filterMatchFlags{}, err
 			}
@@ -700,32 +722,9 @@ func (matcher *compiledFilterSet) internDFAState(set []int) (int, error) {
 				matcher.release(charge)
 				return 0, err
 			}
-			switch tag.kind {
-			case filterTagInclude:
-				if err := state.flags.Add(filterMatchInclude); err != nil {
-					matcher.release(charge)
-					return 0, err
-				}
-			case filterTagExclude:
-				if err := state.flags.Add(filterMatchExclude); err != nil {
-					matcher.release(charge)
-					return 0, err
-				}
-			case filterTagIgnore:
-				if tag.ordinal >= state.ignoreOrder {
-					state.ignoreOrder = tag.ordinal
-					if tag.ignored {
-						if err := state.flags.Add(filterMatchIgnore); err != nil {
-							matcher.release(charge)
-							return 0, err
-						}
-					} else {
-						if err := state.flags.Remove(filterMatchIgnore); err != nil {
-							matcher.release(charge)
-							return 0, err
-						}
-					}
-				}
+			if err := state.applyTag(tag); err != nil {
+				matcher.release(charge)
+				return 0, err
 			}
 		}
 	}
@@ -737,6 +736,36 @@ func (matcher *compiledFilterSet) internDFAState(set []int) (int, error) {
 	}
 	matcher.stateByKey[key] = index
 	return index, nil
+}
+
+func (state *filterDFAState) applyTag(tag filterTag) error {
+	switch tag.kind {
+	case filterTagInclude:
+		return state.flags.Add(filterMatchInclude)
+	case filterTagExclude:
+		return state.flags.Add(filterMatchExclude)
+	case filterTagIgnore:
+		return state.applyOrderedIgnore(tag, filterMatchIgnore, &state.ignoreOrder)
+	case filterTagGitignore:
+		return state.applyOrderedIgnore(tag, filterMatchGitignore, &state.gitOrder)
+	default:
+		return errors.New("filter accept tag kind is invalid")
+	}
+}
+
+func (state *filterDFAState) applyOrderedIgnore(
+	tag filterTag,
+	flag filterMatchFlag,
+	order *uint32,
+) error {
+	if tag.ordinal < *order {
+		return nil
+	}
+	*order = tag.ordinal
+	if tag.ignored {
+		return state.flags.Add(flag)
+	}
+	return state.flags.Remove(flag)
 }
 
 func filterDFAStateRetainedBytes(stateCount int) int64 {
@@ -755,7 +784,7 @@ func (matcher *compiledFilterSet) nextMark() {
 
 func (matcher *compiledFilterSet) consumeCompileWork() error {
 	if matcher.compileWork == maxFilterCompileWork {
-		return &LimitError{Resource: LimitFilterAutomaton, Limit: uint32(maxFilterCompileWork)}
+		return &LimitError{Resource: LimitFilterAutomaton, Limit: maxFilterCompileWork}
 	}
 	matcher.compileWork++
 	if matcher.compileWork%2_048 == 0 {

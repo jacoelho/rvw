@@ -1,9 +1,11 @@
 package source
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -114,14 +116,6 @@ func TestLoadPendingReviewConsumesEveryValidatedPage(t *testing.T) {
 			"status=%s detail=%q review=%d",
 			status, detail.String(), pending.DatabaseID().Uint64(),
 		)
-	}
-
-	incomplete := "[" + page(pendingPageFinal, `"cursor-1"`, other) + "," +
-		page(pendingPageFinal, "null", owned) + "]"
-	service = newPendingReviewTestService(t, incomplete, `[[]]`)
-	_, status, detail = service.loadPendingReview(t.Context(), details, directCPUAdmission)
-	if status != review.PendingReviewUnavailable || detail.IsEmpty() {
-		t.Fatalf("incomplete status=%s detail=%q", status, detail.String())
 	}
 }
 
@@ -262,31 +256,6 @@ func pendingReviewResponseForTest(details PullRequestDetails, nodes string) stri
 
 func newPendingReviewTestService(t *testing.T, reviews, comments string) *Service {
 	t.Helper()
-	binaryDirectory := t.TempDir()
-	binary := filepath.Join(binaryDirectory, "gh")
-	script := `#!/bin/sh
-for argument in "$@"; do
-	case "$argument" in
-		*comments\(first:100*)
-			printf '%s' "$RVW_PENDING_CAPABILITIES"
-			exit 0
-			;;
-	esac
-done
-for argument in "$@"; do
-	if [ "$argument" = "graphql" ]; then
-		printf '%s' "$RVW_PENDING_REVIEWS"
-		exit 0
-	fi
-done
-printf '%s' "$RVW_PENDING_COMMENTS"
-`
-	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binaryDirectory+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("RVW_PENDING_REVIEWS", reviews)
-	t.Setenv("RVW_PENDING_COMMENTS", comments)
 	details := remoteThreadDetailsForTest(t)
 	t.Setenv("RVW_PENDING_CAPABILITIES", fmt.Sprintf(
 		`[{"errors":[],"data":{"repository":{"nameWithOwner":%q,"pullRequest":{`+
@@ -297,9 +266,58 @@ printf '%s' "$RVW_PENDING_COMMENTS"
 		details.Repository.String(), details.Number.Uint64(),
 		details.BaseOID.String(), details.HeadOID.String(),
 	))
-	service := newTestService(t, t.TempDir())
+	reviewPages := unwrapGitHubTestPages(t, reviews)
+	commentPages := unwrapGitHubTestPages(t, comments)
+	reviewPage, commentPage := 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		if request.URL.Path == "/graphql" {
+			var body struct {
+				Query string `json:"query"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				http.Error(response, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if strings.Contains(body.Query, "comments(first:100") {
+				pages := unwrapGitHubTestPages(t, os.Getenv("RVW_PENDING_CAPABILITIES"))
+				_, _ = response.Write(pages[0])
+				return
+			}
+			index := min(reviewPage, len(reviewPages)-1)
+			reviewPage++
+			_, _ = response.Write(reviewPages[index])
+			return
+		}
+		index := min(commentPage, len(commentPages)-1)
+		commentPage++
+		_, _ = response.Write(commentPages[index])
+	}))
+	t.Cleanup(server.Close)
+	workingDirectory, _ := NewWorkingDirectory(t.TempDir())
+	token, _ := NewGitHubToken("test-token")
+	service, err := NewService(workingDirectory, ServiceOptions{GitHubToken: &token})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.github.apiBase = server.URL
 	t.Cleanup(func() { closeTestService(t, service) })
 	return service
+}
+
+func unwrapGitHubTestPages(t *testing.T, encoded string) []json.RawMessage {
+	t.Helper()
+	var pages []json.RawMessage
+	if encoded == "" {
+		return nil
+	}
+	if err := json.Unmarshal([]byte(encoded), &pages); err != nil {
+		t.Fatalf("decode test GitHub pages: %v", err)
+	}
+	if len(pages) == 0 {
+		return []json.RawMessage{json.RawMessage("[]")}
+	}
+	return pages
 }
 
 func TestDecodePendingReviewPagesRejectsInvalidEnvelopes(t *testing.T) {

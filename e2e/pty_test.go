@@ -90,10 +90,11 @@ func (w *world) launchPTY(t testing.TB, width, height int, args ...string) *ptyS
 	for _, argument := range args {
 		commandLine += " " + shellQuote(argument)
 	}
+	stty := shellQuote(systemStty)
 	shell := fmt.Sprintf(
-		"stty cols %d rows %d; stty -pendin 2>/dev/null || true; "+
-			"before=$(stty -g); %s; status=$?; "+
-			"stty -pendin 2>/dev/null || true; after=$(stty -g); "+
+		stty+" cols %d rows %d; "+stty+" -pendin 2>/dev/null || true; "+
+			"before=$("+stty+" -g); %s; status=$?; "+
+			stty+" -pendin 2>/dev/null || true; after=$("+stty+" -g); "+
 			"printf '\\n__RVW_E2E_STATUS__=%%s __RVW_E2E_BEFORE__=%%s __RVW_E2E_AFTER__=%%s\\n' "+
 			"\"$status\" \"$before\" \"$after\"",
 		width,

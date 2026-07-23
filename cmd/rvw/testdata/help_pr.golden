@@ -1,0 +1,17 @@
+usage: rvw pr <number | url> [--repo <owner/repository>] [common options]
+
+Review a GitHub pull request. A canonical URL or explicit --repo is
+authoritative; a numeric selector otherwise requires exactly one inferred
+GitHub repository. Empty selectors and repositories are invalid.
+
+GITHUB_TOKEN is required and is the only GitHub credential. Pull-request path
+selection uses built-in defaults plus explicit include/exclude rules and
+retains at most 3,000 records.
+
+Common options:
+  --stdout, --json, --no-mouse, --theme NAME,
+  --appearance dark|light|system, --include PATTERN, --exclude PATTERN
+
+Examples:
+  rvw pr 42 --repo owner/repository
+  rvw pr https://github.com/owner/repository/pull/42 --json

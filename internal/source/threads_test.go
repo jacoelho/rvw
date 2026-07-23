@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -788,28 +790,48 @@ func newRemoteThreadTestService(
 	topLevel, nested string,
 ) *Service {
 	t.Helper()
-	binaryDirectory := t.TempDir()
-	binary := filepath.Join(binaryDirectory, "gh")
-	script := `#!/bin/sh
-if [ -n "$RVW_CPU_MARKER" ] && [ -e "$RVW_CPU_MARKER" ]; then
-	echo 'gh invoked during CPU admission' >&2
-	exit 97
-fi
-for argument in "$@"; do
-	if [ "$argument" = "id=thread-1" ]; then
-		printf '%s' "$RVW_THREAD_NESTED_RESPONSE"
-		exit 0
-	fi
-done
-printf '%s' "$RVW_THREAD_TOP_RESPONSE"
-`
-	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
+	topPages := unwrapGitHubTestPages(t, topLevel)
+	var nestedPages []json.RawMessage
+	if nested != "" {
+		nestedPages = unwrapGitHubTestPages(t, nested)
+	}
+	topPage, nestedPage := 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if marker := os.Getenv("RVW_CPU_MARKER"); marker != "" {
+			if _, err := os.Stat(marker); err == nil {
+				http.Error(response, "GitHub request during CPU admission", http.StatusConflict)
+				return
+			}
+		}
+		var body struct {
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			http.Error(response, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if _, continuation := body.Variables["id"]; continuation && len(nestedPages) != 0 {
+			index := min(nestedPage, len(nestedPages)-1)
+			nestedPage++
+			_, _ = response.Write(nestedPages[index])
+			return
+		}
+		if len(topPages) == 0 {
+			http.Error(response, "unexpected top-level request", http.StatusBadRequest)
+			return
+		}
+		index := min(topPage, len(topPages)-1)
+		topPage++
+		_, _ = response.Write(topPages[index])
+	}))
+	t.Cleanup(server.Close)
+	workingDirectory, _ := NewWorkingDirectory(t.TempDir())
+	token, _ := NewGitHubToken("test-token")
+	service, err := NewService(workingDirectory, ServiceOptions{GitHubToken: &token})
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", binaryDirectory+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("RVW_THREAD_TOP_RESPONSE", topLevel)
-	t.Setenv("RVW_THREAD_NESTED_RESPONSE", nested)
-	service := newTestService(t, t.TempDir())
+	service.github.apiBase = server.URL
 	t.Cleanup(func() {
 		closeTestService(t, service)
 	})

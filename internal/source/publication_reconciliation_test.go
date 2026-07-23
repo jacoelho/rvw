@@ -28,7 +28,7 @@ func TestPublicationReconciliationFinishRejectsInvalidUTF8AndClosesSpool(t *test
 		"<!-- rvw-publication:v1:0123456789abcdef0123456789abcdef -->",
 	)
 	acquisition := &PublicationReconciliationAcquisition{
-		spool: &commandSpool{file: file},
+		spool: &githubSpool{file: file},
 		request: review.ReconciliationRequest{
 			Operation: 1,
 			Workspace: 1,
@@ -64,7 +64,7 @@ func TestPublicationReconciliationFinishKeepsSpoolIOOutsideAdmission(t *testing.
 		"<!-- rvw-publication:v1:0123456789abcdef0123456789abcdef -->",
 	)
 	acquisition := &PublicationReconciliationAcquisition{
-		spool: &commandSpool{file: file},
+		spool: &githubSpool{file: file},
 		request: review.ReconciliationRequest{
 			Operation: 1,
 			Workspace: 1,

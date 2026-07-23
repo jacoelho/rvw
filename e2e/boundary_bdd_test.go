@@ -237,29 +237,20 @@ func TestLifecycleAndScaleContract(t *testing.T) {
 			})
 		})
 
-		feature.Scenario("a pull-request files-cap failure is recoverable by explicit reinvocation", func(scenario *bdd.ScenarioSpec[*world]) {
-			scenario.Given("GitHub reports more files than the accepted source limit", func(t testing.TB, w *world) {
+		feature.Scenario("GitHub changed-files metadata does not reject a filtered pull request", func(scenario *bdd.ScenarioSpec[*world]) {
+			scenario.Given("GitHub reports more changed files than the raw-record limit", func(t testing.TB, w *world) {
 				metadata := readJSONObject(t, w.metadata)
 				metadata["changed_files"] = 100_001
 				writeJSONObject(t, w, w.metadata, metadata)
 			})
-			scenario.When("the capped pull request is opened", invoke("pr", "7", "--repo", "fixture/repository", "--json"))
-			scenario.Then("startup fails before a remote Git fetch", func(t testing.TB, w *world) {
-				assertStartupFailure(t, w.last, "pull request has 100001 files; limit is 100000")
-				calls := w.calls(t)
-				if len(calls) != 1 || calls[0].Command != "gh" {
-					t.Fatalf("calls = %+v", calls)
-				}
-			})
-			scenario.When("the corrected metadata is explicitly reinvoked", func(t testing.TB, w *world) {
-				metadata := readJSONObject(t, w.metadata)
-				metadata["changed_files"] = 1
-				writeJSONObject(t, w, w.metadata, metadata)
-				w.run(t, "pr", "7", "--repo", "fixture/repository", "--json")
-			})
-			scenario.Then("the pull request opens successfully", func(t testing.TB, w *world) {
+			scenario.When("the pull request is opened", invoke("pr", "7", "--repo", "fixture/repository", "--json"))
+			scenario.Then("the retained records, not metadata, determine admission", func(t testing.TB, w *world) {
 				assertProcessSuccess(t, w.last)
 				assertJSONSource(t, w.last.stdout, "pr")
+				calls := w.calls(t)
+				if !slices.ContainsFunc(calls, func(call externalCall) bool { return call.Command == "smart-git" }) {
+					t.Fatalf("calls = %+v, want a smart-git fetch", calls)
+				}
 			})
 		})
 	})

@@ -1,7 +1,6 @@
 package source
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -21,16 +20,10 @@ const (
 	filterCancellationRecords       = 2_048
 )
 
-type gitignoreMode uint8
-
-const (
-	skipGitignore gitignoreMode = iota
-	useGitignore
-)
-
 type ignoreRule struct {
-	pattern string
-	negated bool
+	pattern   string
+	negated   bool
+	gitignore bool
 }
 
 type filterProjection struct {
@@ -60,11 +53,10 @@ func buildFilterProjection(
 	ctx context.Context,
 	options OpenOptions,
 	records []diffRecord,
-	ignored []bool,
 	rules []ignoreRule,
 	ledger *sourceLedger,
 ) (filterProjection, error) {
-	if len(ignored) != len(records) || ledger == nil {
+	if ledger == nil {
 		return filterProjection{}, errors.New("filter projection ownership is invalid")
 	}
 	matcher, err := newCompiledFilterSet(ctx, ledger, options.Include, options.Exclude, rules)
@@ -89,7 +81,7 @@ func buildFilterProjection(
 			return filterProjection{}, err
 		}
 		gitignore := filterNotGitignored
-		if ignored[index] {
+		if match.Has(filterMatchGitignore) {
 			gitignore = filterGitignored
 		}
 		projection.flags[index], err = filterFlags(
@@ -103,102 +95,6 @@ func buildFilterProjection(
 		}
 	}
 	return projection, nil
-}
-
-func (service *Service) gitignored(
-	ctx context.Context,
-	runCPU CPUAdmission,
-	repository *rootedRepository,
-	environment map[string]string,
-	records []diffRecord,
-	mode gitignoreMode,
-	ledger *sourceLedger,
-) ([]bool, error) {
-	ignored := make([]bool, len(records))
-	if mode != useGitignore || len(records) == 0 {
-		return ignored, nil
-	}
-	scratchBytes := gitignoreScratchBytes(len(records))
-	if err := ledger.reserve(scratchBytes); err != nil {
-		return nil, err
-	}
-	defer ledger.release(scratchBytes)
-
-	for start := 0; start < len(records); {
-		var input bytes.Buffer
-		var pathToIndexes map[string][]int
-		end := start
-		if err := runCPU(ctx, func() error {
-			pathToIndexes = make(map[string][]int)
-			for end < len(records) {
-				if cancellationErr := context.Cause(ctx); cancellationErr != nil {
-					return cancellationErr
-				}
-				path := primaryPath(records[end])
-				if input.Len() != 0 &&
-					int64(input.Len())+int64(len(path))+1 > maxGitIgnoreBatchBytes {
-					break
-				}
-				input.WriteString(path)
-				input.WriteByte(0)
-				pathToIndexes[path] = append(pathToIndexes[path], end)
-				end++
-			}
-			return nil
-		}); err != nil {
-			return nil, err
-		}
-		result, err := service.runGitWithInputIn(
-			ctx,
-			repository.gitDirectory(),
-			environment,
-			[]string{"check-ignore", "--no-index", "-z", gitStdin},
-			input.Bytes(),
-			[]int{0, 1},
-			maxGitIgnoreBatchBytes,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("evaluate .gitignore: %w", err)
-		}
-		if err := runCPU(ctx, func() error {
-			for output := result.Stdout; len(output) > 0; {
-				path, remaining, ok, splitErr := nextNULTerminatedCancellable(ctx, output)
-				if splitErr != nil {
-					return splitErr
-				}
-				if !ok {
-					return errors.New("git check-ignore returned an unterminated path")
-				}
-				output = remaining
-				indexes, exists := pathToIndexes[string(path)]
-				if !exists {
-					return errors.New("git check-ignore returned an unknown path")
-				}
-				for _, index := range indexes {
-					ignored[index] = true
-				}
-			}
-			return nil
-		}); err != nil {
-			return nil, err
-		}
-		start = end
-	}
-	return ignored, nil
-}
-
-func nextNULTerminatedCancellable(
-	ctx context.Context,
-	value []byte,
-) ([]byte, []byte, bool, error) {
-	index, err := indexSourceByteCancellable(ctx, value, 0)
-	if err != nil {
-		return nil, value, false, err
-	}
-	if index < 0 {
-		return nil, value, false, nil
-	}
-	return value[:index], value[index+1:], true, nil
 }
 
 func filterFlags(
@@ -266,13 +162,8 @@ func filterFlags(
 	return review.NewFlags(traits, hidden)
 }
 
-func gitignoreScratchBytes(records int) int64 {
-	return 2*maxGitIgnoreBatchBytes + int64(records)*80 +
-		MaxCommandErrorConstructionBytes + maxSourceProtocolToken
-}
-
 func readIgnoreRules(
-	repository *rootedRepository,
+	repository *repositorySession,
 	name IgnoreFile,
 ) ([]ignoreRule, error) {
 	contents, err := readIgnoreRuleContents(repository, name)
@@ -283,7 +174,7 @@ func readIgnoreRules(
 }
 
 func readIgnoreRuleContents(
-	repository *rootedRepository,
+	repository *repositorySession,
 	name IgnoreFile,
 ) (contents []byte, returnErr error) {
 	file, err := repository.filesystem.Open(name.String())

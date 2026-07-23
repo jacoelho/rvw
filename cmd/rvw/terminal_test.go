@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -32,14 +31,42 @@ func TestTerminalAdmissionRequiresInputAndOutputCapabilities(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			capabilities := testTerminalCapabilities(t, test.members...)
-			err := validateTerminalAdmission(interactive, capabilities)
+			err := validateTerminalAdmission(interactive, capabilities, nil)
 			if (err != nil) != test.wantErr {
 				t.Fatalf("interactive admission error = %v", err)
 			}
-			if err := validateTerminalAdmission(noninteractive, capabilities); err != nil {
+			if err := validateTerminalAdmission(noninteractive, capabilities, nil); err != nil {
 				t.Fatalf("noninteractive admission error = %v", err)
 			}
 		})
+	}
+}
+
+func TestTerminalAdmissionRejectsDumbOnlyForInteractiveOutput(t *testing.T) {
+	capabilities := testTerminalCapabilities(t, terminalInput, terminalOutput)
+	interactive, err := parseArgs([]string{"diff"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateTerminalAdmission(
+		interactive,
+		capabilities,
+		[]string{"TERM=xterm-256color", "TERM=dumb"},
+	); err == nil || err.Error() != dumbTerminalDiagnostic {
+		t.Fatalf("interactive TERM=dumb error = %v", err)
+	}
+	for _, option := range []string{"--stdout", "--json"} {
+		noninteractive, parseErr := parseArgs([]string{"diff", option})
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		if err := validateTerminalAdmission(
+			noninteractive,
+			terminalCapabilities{},
+			[]string{"TERM=dumb"},
+		); err != nil {
+			t.Fatalf("%s TERM=dumb admission error = %v", option, err)
+		}
 	}
 }
 
@@ -65,15 +92,7 @@ func TestRunRejectsInteractiveBeforeRepositoryDiscovery(t *testing.T) {
 	}
 }
 
-func TestRunRejectsNonterminalPullRequestWithoutCallingGitHub(t *testing.T) {
-	bin := t.TempDir()
-	marker := filepath.Join(bin, "gh-called")
-	gh := filepath.Join(bin, "gh")
-	writeRunFile(t, gh, "#!/bin/sh\nprintf called > "+marker+"\n")
-	if err := os.Chmod(gh, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+func TestRunRejectsNonterminalPullRequestBeforeSourceAcquisition(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	status := run(runRequest{
 		ctx:    t.Context(),
@@ -86,9 +105,6 @@ func TestRunRejectsNonterminalPullRequestWithoutCallingGitHub(t *testing.T) {
 	if status != 1 || stdout.Len() != 0 ||
 		!strings.Contains(stderr.String(), interactiveTerminalDiagnostic) {
 		t.Fatalf("status=%d stdout=%q stderr=%q", status, stdout.String(), stderr.String())
-	}
-	if _, err := os.Stat(marker); !os.IsNotExist(err) {
-		t.Fatalf("gh was invoked before terminal admission: %v", err)
 	}
 }
 

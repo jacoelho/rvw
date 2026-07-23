@@ -178,7 +178,8 @@ func TestInteractiveSourceContract(t *testing.T) {
 				w.pty.awaitScreen(t, "draft synchronized", containsScreen("Publication committed."))
 				calls := w.calls(t)
 				if !slices.ContainsFunc(calls, func(call externalCall) bool {
-					return slices.Equal(call.Args, []string{"api", "graphql", "--input", "-"}) &&
+					return call.Command == "github-http" &&
+						slices.Equal(call.Args, []string{"POST", "/graphql"}) &&
 						strings.Contains(call.Stdin, "updatePullRequestReviewComment") &&
 						strings.Contains(call.Stdin, "existing inline edited")
 				}) {
@@ -373,7 +374,7 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 				}
 				golden.RequireEqual(t, string(contents))
 				calls := w.calls(t)
-				if len(calls) != 1 || calls[0].Command == "gh" || calls[0].Stdin != string(contents) {
+				if len(calls) != 1 || calls[0].Command == "github-http" || calls[0].Stdin != string(contents) {
 					t.Fatalf("clipboard calls = %+v", calls)
 				}
 				w.pty.send(t, ":q!\r")
@@ -474,7 +475,7 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 			})
 			scenario.Then("the unknown delivery outcome is shown", func(t testing.TB, w *world) {
 				w.pty.awaitScreen(t, "clipboard failure", func(screen string) bool {
-					return strings.Contains(screen, "clipboard delivery") && strings.Contains(screen, "fenced")
+					return strings.Contains(screen, "clipboard command:") && strings.Contains(screen, "fenced")
 				})
 				w.pty.send(t, ":q!\r")
 				w.pty.awaitExit(t)
@@ -631,7 +632,7 @@ func TestGitHubPublicationContract(t *testing.T) {
 			})
 			scenario.Given("a pull request has one local comment", launchCommentedPullRequest())
 			scenario.When("preflight is accepted and publication is confirmed", publishReview())
-			scenario.Then("the exact event and marker shape reached gh", func(t testing.TB, w *world) {
+			scenario.Then("the exact event and marker shape reached GitHub HTTP", func(t testing.TB, w *world) {
 				call := publicationCall(t, w.calls(t))
 				var payload struct {
 					Event string `json:"event"`
@@ -669,7 +670,8 @@ func TestGitHubPublicationContract(t *testing.T) {
 				}
 				calls := w.calls(t)
 				if !slices.ContainsFunc(calls, func(call externalCall) bool {
-					return slices.Contains(call.Args, "--paginate")
+					return call.Command == "github-http" && len(call.Args) == 2 &&
+						call.Args[0] == "GET" && strings.HasSuffix(call.Args[1], "/reviews")
 				}) {
 					t.Fatalf("ambiguous publication was not reconciled: %+v", calls)
 				}
@@ -704,7 +706,8 @@ func publishReview() bdd.Step[*world] {
 func publicationCall(t testing.TB, calls []externalCall) externalCall {
 	t.Helper()
 	for _, call := range calls {
-		if call.Command == "gh" && slices.Contains(call.Args, "POST") {
+		if call.Command == "github-http" && len(call.Args) == 2 &&
+			call.Args[0] == "POST" && strings.HasSuffix(call.Args[1], "/reviews") {
 			return call
 		}
 	}

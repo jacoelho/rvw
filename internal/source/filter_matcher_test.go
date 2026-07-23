@@ -74,10 +74,10 @@ func TestFilterMatchFlagsRejectUnknownMembersAndBits(t *testing.T) {
 	if err := flags.Add(filterMatchFlag(0)); err == nil {
 		t.Fatal("zero filter match flag was accepted")
 	}
-	if err := flags.Add(filterMatchFlag(4)); err == nil {
+	if err := flags.Add(filterMatchFlag(5)); err == nil {
 		t.Fatal("unknown filter match flag was accepted")
 	}
-	if err := flags.Remove(filterMatchFlag(4)); err == nil {
+	if err := flags.Remove(filterMatchFlag(5)); err == nil {
 		t.Fatal("unknown filter match flag removal was accepted")
 	}
 	flags.bits = 1 << 7

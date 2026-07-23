@@ -394,8 +394,7 @@ the supplied revisions.
   base: object-id string,
   head: object-id string,
   base_ref: string,
-  head_ref: string,
-  files_api_cap_reached: boolean
+  head_ref: string
 }
 ```
 
@@ -413,8 +412,7 @@ For pull requests, `github` is also present:
   base_ref: string,
   base_oid: object-id string,
   head_ref: string,
-  head_oid: object-id string,
-  files_api_cap_reached: boolean
+  head_oid: object-id string
 }
 ```
 
@@ -532,9 +530,8 @@ cmd/rvw
   -> internal/app
 
 internal/app -> internal/review, internal/source, internal/delivery
-internal/delivery -> internal/subprocess
 internal/output -> internal/review, internal/source
-internal/source -> internal/review, internal/subprocess
+internal/source -> internal/review, go-git plumbing, GitHub HTTPS
 ```
 
 `cmd/rvw` parses CLI input, composes dependencies and distinct program/work contexts, opens the
@@ -551,18 +548,16 @@ marks, comments, drafts, reload reconciliation, export/publication state, and pu
 imports no terminal, filesystem, network, subprocess, clock, or concurrency package. It exposes
 concrete domain operations and immutable snapshots, not a generic effect interface.
 
-`internal/source` is the sole Git review-data, `gh`, snapshot, patch/blob, reload, search-input, and
-GitHub publication boundary. It discovers the Git root once and owns source-specific repository
-inputs including `.gitignore`, `.rvwignore`, and configured ignore files. It does not read general
-application configuration or themes.
+`internal/source` is the sole Git review-data, GitHub HTTPS/smart-Git, snapshot, patch/blob, reload,
+search-input, and GitHub publication boundary. It never invokes `git` or `gh`. A
+`repositorySession` owns local repositories and immutable pull-request object layers; a
+`githubClient` owns bounded REST, GraphQL, authentication, pagination, and publication. Source
+configuration is passed explicitly through `ServiceOptions`; `GITHUB_TOKEN` is the only GitHub
+credential admitted by the command boundary.
 
 `internal/delivery` owns destination permits and stdout/clipboard commit states. It returns an
-immutable stdout payload to the post-Program root adapter. Clipboard delivery uses
-`internal/subprocess` and never inherits the active terminal streams.
-
-`internal/subprocess` solely owns each live child, its captured pipes, and its process-group ID from
-start through `Wait`. It accepts structured executable/argument requests, never invokes a shell,
-and implements the Linux/macOS process-group contract in section 11.
+immutable stdout payload to the post-Program root adapter. Its private bounded helper may execute
+only `pbcopy`, `wl-copy`, or `xclip`; source acquisition and publication cannot use it.
 
 `internal/app` owns the one root Bubble Tea model, concrete child Bubbles, effective key bindings,
 responsive layout, semantic Lip Gloss styles, command constructors, and the closed coordinator
@@ -575,9 +570,6 @@ storage, component registries, queues, worker handles, process handles, or rende
 abstraction requires a current producer and consumer. Compatibility facades, duplicate execution
 paths, generic source registries, generic effect systems, component registries, and a second event
 loop are forbidden.
-
-No Go source file may exceed 1,000 lines. Splitting one cohesive implementation into shallow files
-only to satisfy that ceiling is nonconforming.
 
 ### 7. Review model
 
@@ -607,16 +599,29 @@ Comments require non-whitespace bodies. Line comments preserve old/new side and 
 Comments that cannot map to a GitHub review position remain valid local comments but are explicitly
 unmappable for publication.
 
-Filtering hides files without deleting them from identity, comments, review marks, counts, JSON, or
-reload reconciliation.
+Local filtering hides files without deleting them from local identity. Pull-request filtering is
+an acquisition projection: omitted paths are absent from identity, comments, marks, counts, TUI,
+stdout, JSON, export, reload, inline-comment mapping, and publication.
 
 ### 8. Source acquisition and materialization
 
-Local sources are rooted in a discovered Git repository. Worktree and staged review resolve the
+Local sources are rooted by descriptor-based parent traversal and read with go-git plumbing plus a
+minimal read-only filesystem adapter over pinned roots. Worktree and staged review resolve the
 `HEAD` tree, or the empty tree when `HEAD` is unborn. Worktree review compares that base with a
-synthesized tree for the worktree and includes untracked files by default. Staged review compares
-that base with the index tree. Range review compares the supplied base and head. Pull-request review
-resolves immutable base/head object IDs and metadata through `gh`.
+bounded projection of the live index and rooted worktree; staged review compares the base with
+ordinary stage-zero index entries and retains unmerged paths explicitly. Range review compares the
+supplied base and head. Local and advertised remote object formats must be SHA-1.
+
+Pull-request review fetches commit ancestry, trees, and selected blobs through filtered smart Git.
+It uses depth 1,000, computes all best common ancestors, and deterministically chooses the smallest
+raw SHA-1 when more than one is best. PR filters are built-in defaults plus explicit include and
+exclude patterns only; `.gitignore` and `.rvwignore` are disabled. No more than 3,000 filtered
+records or 6,000 selected blob OIDs are retained.
+
+GitHub REST and GraphQL requests use one bounded native HTTP client. `GITHUB_TOKEN` is required;
+`GH_TOKEN`, `gh` configuration/keychains, anonymous access, and ambient credential discovery are
+forbidden. Repository inference recognizes only canonical GitHub HTTPS and `git`-user SSH remotes
+without ports, escaping, query data, or fragments.
 
 External bytes are validated at acquisition boundaries. Paths preserve raw byte identity and have
 a separately escaped display form. Object IDs, modes, refs, URLs, process results, GitHub payloads,
@@ -786,7 +791,7 @@ Cancellation produces `cancelled` only when the owner proves pre-commit quiescen
 begins, the outcome is confirmed success, confirmed pre-commit failure, or unknown; cancellation,
 stale model state, and shutdown cannot manufacture a safe retry.
 
-### 11. Signals, subprocesses, and shutdown
+### 11. Signals, delivery helpers, and shutdown
 
 The application owns termination notifications. `cmd/rvw` creates the Program with
 `tea.WithContext(programContext)` and `tea.WithoutSignalHandler()`, registers `os/signal` exactly
@@ -796,17 +801,10 @@ handler. Raw-mode `Ctrl-c` is a key and follows the active modal/editing context
 as an operating-system notification.
 
 The first supported notification enters the same idempotent shutdown policy as an internal quit.
-A repeated notification requests immediate process-group escalation from the subprocess owner but
+A repeated notification requests immediate cancellation of any delivery-local clipboard helper but
 does not use `os.Exit` while the terminal is active. Uncatchable termination cannot promise
-cleanup.
-
-Every subprocess starts without a shell in a new Linux/macOS process group. `internal/subprocess`
-owns its structured arguments, pipes, direct-child handle, and group ID through `Wait`. It consumes
-stdout and stderr concurrently within their byte contracts. On cancellation it sends `TERM` to the
-owned group, waits the bounded grace period in section 14, sends `KILL` when required, and always
-calls `Wait` for the direct child. It does not claim that it can reap a descendant that is not its
-child. Escaped descendants or inability to prove group quiescence produce an explicit
-non-graceful-shutdown result.
+cleanup. Git and GitHub source operations are native Go operations and are cancelled through their
+contexts; they own no child process.
 
 Program and work cancellation scopes are distinct. Controlled shutdown is:
 
@@ -817,9 +815,8 @@ Program and work cancellation scopes are distinct. Controlled shutdown is:
 3. let `tea.Program.Run` return after Bubble Tea's terminal-restoration attempt;
 4. cancel the readiness receiver and wait for its bounded completion barrier before touching
    unclaimed outcomes;
-5. call the coordinator's one bounded shutdown/join operation, which settles retained outcomes,
-   escalates owned subprocess groups through `internal/subprocess`, and reaps every directly owned
-   child;
+5. call the coordinator's one bounded shutdown/join operation, which settles retained outcomes and
+   stops any delivery-local clipboard helper;
 6. write an immutable pending stdout export, then diagnostics, only after the Program is no longer
    active.
 
@@ -994,9 +991,18 @@ Default externally relevant limits are:
 | One export template | 256 KiB |
 | One prepared export body | 16 MiB |
 | One terminal-safe error detail | 16 KiB |
-| Captured subprocess stdout | 64 MiB |
-| Captured subprocess stderr | 1 MiB |
-| One external process attempt | 30 seconds |
+| Clipboard-helper stdout | 64 KiB |
+| Clipboard-helper stderr | 1 MiB |
+| One clipboard-helper attempt | 30 seconds |
+| Encoded index copy | 96 MiB |
+| Aggregate index paths | 64 MiB |
+| Aggregate index extensions | 16 MiB |
+| One regular worktree file | 128 MiB |
+| One symlink target | 16 KiB |
+| Retained pull-request records after filtering | 3,000 |
+| Selected pull-request blob OIDs | 6,000 |
+| Pull-request blob requests | 12 |
+| Pull-request workspace | 5 GiB |
 
 Reaching a limit produces a typed limited or failed result with enough context to identify the
 operation and bound. It must not truncate silently, panic, corrupt state, or fall back to an
@@ -1011,7 +1017,7 @@ Interactive runtime limits are:
 | Retained/result-construction bytes | 128 MiB |
 | I/O workers | 8 |
 | CPU workers | `max(1, min(GOMAXPROCS, 8))` |
-| Concurrent subprocesses | 4 |
+| Concurrent clipboard helpers | 1 |
 | Reserved publication/reconciliation capacity | 1 operation, worker, and outcome slot |
 | Required-operation bypasses | 8 |
 | Latest progress per operation | 8 KiB |

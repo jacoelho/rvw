@@ -45,7 +45,6 @@ func TestSnapshotAcceptsMaximumFilesAndPathOwnership(t *testing.T) {
 		directCPUAdmission,
 		review.SourceID(1),
 		nil,
-		nil,
 		records,
 		OpenOptions{},
 	)

@@ -520,8 +520,7 @@ func operationStatusForWorkError(err error) review.OperationStatus {
 			switch failure.Kind {
 			case source.FailureUnavailable,
 				source.FailureStale,
-				source.FailureFailed,
-				source.FailureNonGraceful:
+				source.FailureFailed:
 			case source.FailureCancelled:
 				return review.OperationCancelled
 			case source.FailureLimited:

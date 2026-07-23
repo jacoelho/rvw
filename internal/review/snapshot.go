@@ -205,8 +205,59 @@ func NewFileContent(oid ObjectID) FileContent {
 
 // FileContents represents file contents.
 type FileContents struct {
-	old *ObjectID
-	new *ObjectID
+	semantic *FileSemanticIdentity
+	old      *ObjectID
+	new      *ObjectID
+}
+
+// FileSemanticStage is one validated non-zero Git index stage used only for
+// source identity. Its fields are intentionally opaque to review consumers.
+type FileSemanticStage struct {
+	object GitObject
+	stage  uint8
+}
+
+// NewFileSemanticStage constructs one validated unmerged-index stage.
+func NewFileSemanticStage(stage uint8, object GitObject) (FileSemanticStage, error) {
+	if stage < 1 || stage > 3 {
+		return FileSemanticStage{}, fmt.Errorf("%w: semantic stage must be 1, 2, or 3", ErrInvalidSnapshot)
+	}
+	if _, err := NewGitObject(object.kind, object.oid, object.mode); err != nil {
+		return FileSemanticStage{}, fmt.Errorf("%w: semantic stage object is invalid", ErrInvalidSnapshot)
+	}
+	return FileSemanticStage{stage: stage, object: object}, nil
+}
+
+// FileSemanticIdentity retains an opaque validated tuple that participates in
+// reload identity without becoming patchable file content.
+type FileSemanticIdentity struct {
+	stages [3]GitObject
+	bits   uint8
+}
+
+const fileSemanticIdentityRetainedBytes int64 = 128
+
+// NewFileSemanticIdentity constructs a non-empty unique stage tuple.
+func NewFileSemanticIdentity(stages ...FileSemanticStage) (FileSemanticIdentity, error) {
+	var identity FileSemanticIdentity
+	for _, stage := range stages {
+		if stage.stage < 1 || stage.stage > 3 {
+			return FileSemanticIdentity{}, fmt.Errorf("%w: semantic stage is invalid", ErrInvalidSnapshot)
+		}
+		bit := uint8(1 << (stage.stage - 1))
+		if identity.bits&bit != 0 {
+			return FileSemanticIdentity{}, fmt.Errorf("%w: duplicate semantic stage %d", ErrInvalidSnapshot, stage.stage)
+		}
+		if _, err := NewGitObject(stage.object.kind, stage.object.oid, stage.object.mode); err != nil {
+			return FileSemanticIdentity{}, fmt.Errorf("%w: semantic stage object is invalid", ErrInvalidSnapshot)
+		}
+		identity.bits |= bit
+		identity.stages[stage.stage-1] = stage.object
+	}
+	if identity.bits == 0 {
+		return FileSemanticIdentity{}, fmt.Errorf("%w: semantic identity is empty", ErrInvalidSnapshot)
+	}
+	return identity, nil
 }
 
 // NewFileContents constructs and validates file contents.
@@ -242,6 +293,23 @@ func NewFileContents(values ...FileContent) (FileContents, error) {
 	return contents, nil
 }
 
+// NewFileContentsWithSemanticIdentity constructs file contents whose opaque
+// unmerged-stage tuple also participates in reload identity.
+func NewFileContentsWithSemanticIdentity(
+	identity FileSemanticIdentity,
+	values ...FileContent,
+) (FileContents, error) {
+	if identity.bits == 0 {
+		return FileContents{}, fmt.Errorf("%w: semantic identity is invalid", ErrInvalidSnapshot)
+	}
+	contents, err := NewFileContents(values...)
+	if err != nil {
+		return FileContents{}, err
+	}
+	contents.semantic = new(identity)
+	return contents, nil
+}
+
 // Object performs the object operation.
 func (contents FileContents) Object(side LineSide) (ObjectID, bool) {
 	if side == LineOld && contents.old != nil {
@@ -254,6 +322,7 @@ func (contents FileContents) Object(side LineSide) (ObjectID, bool) {
 }
 
 func (contents FileContents) clone() FileContents {
+	contents.semantic = cloneValue(contents.semantic)
 	contents.old = cloneValue(contents.old)
 	contents.new = cloneValue(contents.new)
 	return contents
@@ -300,6 +369,9 @@ func newFileWithContents(
 	}
 	if !flags.valid() {
 		return File{}, fmt.Errorf("%w: file flags are invalid", ErrInvalidSnapshot)
+	}
+	if contents.semantic != nil && contents.semantic.bits == 0 {
+		return File{}, fmt.Errorf("%w: file semantic identity is invalid", ErrInvalidSnapshot)
 	}
 	if patchHandle.FileID() != id {
 		return File{}, fmt.Errorf("%w: patch handle file ID does not match file", ErrInvalidSnapshot)
@@ -453,6 +525,7 @@ func newSnapshotCancellable(
 	}
 
 	var pathBytes int64
+	var semanticBytes int64
 	aliases := make([]remotePathAlias, 0, len(owned)*2)
 	objectIDWidth := 0
 	patchIDs := make(map[PatchID]bool, len(owned))
@@ -481,6 +554,14 @@ func newSnapshotCancellable(
 			}
 			objectIDWidth = len(objectID.String())
 		}
+		if file.contents.semantic != nil {
+			semanticBytes += fileSemanticIdentityRetainedBytes
+			for index, object := range file.contents.semantic.stages {
+				if file.contents.semantic.bits&(1<<index) != 0 {
+					semanticBytes += int64(len(object.oid) + len(object.mode))
+				}
+			}
+		}
 		if path, ok := file.OldPath(); ok {
 			pathBytes += int64(len(path.raw))
 			aliases = append(aliases, remotePathAlias{
@@ -507,7 +588,8 @@ func newSnapshotCancellable(
 		sourceID:       sourceID,
 		files:          owned,
 		pathProjection: projection,
-		retainedBytes:  int64(cap(owned))*256 + pathBytes + projection.metadataBytes,
+		retainedBytes: int64(cap(owned))*256 + pathBytes + semanticBytes +
+			projection.metadataBytes,
 	}
 	if snapshot.RetainedBytes() > MaxBaseSnapshotRetainedBytes {
 		return Snapshot{}, fmt.Errorf(

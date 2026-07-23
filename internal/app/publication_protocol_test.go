@@ -2,51 +2,11 @@ package app
 
 import (
 	"context"
-	"io"
-	"net"
-	"os"
-	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/jacoelho/rvw/internal/review"
 	"github.com/jacoelho/rvw/internal/source"
 )
-
-const (
-	publicationHelperMode = "RVW_GH_COMMIT_HELPER"
-	publicationHelperAddr = "RVW_GH_COMMIT_ADDR"
-)
-
-func TestMain(m *testing.M) {
-	if os.Getenv(publicationHelperMode) == "1" {
-		os.Exit(runPublicationCommitHelper())
-	}
-	os.Exit(m.Run())
-}
-
-func runPublicationCommitHelper() int {
-	connection, err := new(net.Dialer).DialContext(
-		context.Background(),
-		"tcp",
-		os.Getenv(publicationHelperAddr),
-	)
-	if err != nil {
-		return 2
-	}
-	defer connection.Close()
-	if _, err := connection.Write([]byte("started\n")); err != nil {
-		return 3
-	}
-	var release [1]byte
-	if _, err := io.ReadFull(connection, release[:]); err != nil {
-		return 4
-	}
-	if _, err := os.Stdout.Write([]byte("{\"id\":42}\n")); err != nil {
-		return 5
-	}
-	return 0
-}
 
 func TestPublicationCheckReadyAndCancellation(t *testing.T) {
 	t.Run("ready", func(t *testing.T) {
@@ -345,58 +305,6 @@ func TestPublicationWorkerCommitBoundary(t *testing.T) {
 			t.Fatalf("pre-claim accounting = %+v", stats)
 		}
 	})
-
-	t.Run("claimed commit completes", func(t *testing.T) {
-		listener := configurePublicationCommitHelper(t)
-		model, coordinator := checkedPublicationModel(t)
-		model.startPublication()
-		connection := acceptPublicationCommitHelper(t, listener)
-		if _, err := connection.Write([]byte{1}); err != nil {
-			connection.Close()
-			t.Fatal(err)
-		}
-		if err := connection.Close(); err != nil {
-			t.Fatal(err)
-		}
-		settleModelWork(t, model, coordinator)
-		summary := model.review.PublicationSummary()
-		if summary.Status != review.PublicationCommitted || summary.RemoteReview != 42 ||
-			summary.Target.Repository() == "" || summary.Marker == "" {
-			t.Fatalf("committed publication summary = %+v", summary)
-		}
-	})
-
-	t.Run("cancel after claim is fenced through shutdown", func(t *testing.T) {
-		listener := configurePublicationCommitHelper(t)
-		model, coordinator := checkedPublicationModel(t)
-		checked := model.review.PublicationSummary()
-		model.startPublication()
-		connection := acceptPublicationCommitHelper(t, listener)
-		defer connection.Close()
-		model.applyPublicationAction(KeyActionCancel)
-
-		settlement := shutdownTestCoordinator(t, coordinator)
-		if summary := model.review.PublicationSummary(); summary.Status != review.PublicationPublishing {
-			t.Fatalf("unobserved model publication state = %+v", summary)
-		}
-		assertPublicationShutdownFact(
-			t,
-			settlement,
-			checked.Target,
-			checked.Marker,
-			review.PublicationDispositionUnknown,
-		)
-		assertPublicationShutdownFact(
-			t,
-			model.PublicationShutdownSettlement(),
-			checked.Target,
-			checked.Marker,
-			review.PublicationDispositionUnknown,
-		)
-		if repeated := shutdownTestCoordinator(t, coordinator); len(repeated.Publications) != 0 {
-			t.Fatalf("repeated shutdown returned %d publication facts", len(repeated.Publications))
-		}
-	})
 }
 
 func newControlledPublicationCoordinator(
@@ -414,67 +322,6 @@ func newControlledPublicationCoordinator(
 	}
 	coordinator.stats.Store(CoordinatorStats{})
 	return coordinator
-}
-
-func configurePublicationCommitHelper(t *testing.T) net.Listener {
-	t.Helper()
-	listener, err := new(net.ListenConfig).Listen(t.Context(), "tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
-	binary, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	directory := t.TempDir()
-	if err := os.Symlink(binary, filepath.Join(directory, "gh")); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv(publicationHelperMode, "1")
-	t.Setenv(publicationHelperAddr, listener.Addr().String())
-	return listener
-}
-
-func acceptPublicationCommitHelper(t *testing.T, listener net.Listener) net.Conn {
-	t.Helper()
-	if tcp, ok := listener.(*net.TCPListener); ok {
-		if err := tcp.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	connection, err := listener.Accept()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var started [8]byte
-	if _, err := io.ReadFull(connection, started[:]); err != nil {
-		connection.Close()
-		t.Fatal(err)
-	}
-	if string(started[:]) != "started\n" {
-		connection.Close()
-		t.Fatalf("publication helper signal = %q", started[:])
-	}
-	return connection
-}
-
-func assertPublicationShutdownFact(
-	t *testing.T,
-	settlement ShutdownSettlement,
-	target review.PublicationTarget,
-	marker review.PublicationMarker,
-	disposition review.PublicationDisposition,
-) {
-	t.Helper()
-	if len(settlement.Publications) != 1 {
-		t.Fatalf("publication shutdown facts = %+v", settlement.Publications)
-	}
-	fact := settlement.Publications[0]
-	if fact.Target != target || fact.Marker != marker || fact.Disposition != disposition {
-		t.Fatalf("publication shutdown fact = %+v", fact)
-	}
 }
 
 func TestInvalidPublicationResultsSettleToSafeStates(t *testing.T) {

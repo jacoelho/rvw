@@ -203,7 +203,7 @@ func newSourceFixture(tb testing.TB, changed map[string]string) sourceFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := source.NewService(workingDirectory)
+	service, err := source.NewService(workingDirectory, source.ServiceOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

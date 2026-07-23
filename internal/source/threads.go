@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -121,13 +120,16 @@ func (service *Service) loadRemoteThreadsWithLedgerCPU(
 	if !ok {
 		return nil, errors.New("validated GitHub repository cannot be split")
 	}
-	spool, err := service.runGHToSpool(ctx, []string{
-		ghAPI, ghGraphQL, ghPaginate, ghSlurp,
-		"-f", "query=" + remoteThreadsQuery,
-		"-F", "owner=" + owner,
-		"-F", "name=" + repository,
-		"-F", "number=" + strconv.FormatUint(details.Number.Uint64(), 10),
-	}, review.MaxRemoteThreadBytes)
+	spool, err := service.graphQLSpool(
+		ctx,
+		remoteThreadsQuery,
+		"reviewThreads",
+		map[string]any{
+			githubFieldOwner: owner, githubFieldName: repository,
+			githubFieldNumber: details.Number.Uint64(),
+		},
+		review.MaxRemoteThreadBytes,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("load GitHub review threads: %w", err)
 	}
@@ -269,7 +271,7 @@ func (collector *remoteThreadCollector) addNode(node remoteThreadNode) (returnEr
 		node.Comments.PageInfo.HasNextPage != nil && *node.Comments.PageInfo.HasNextPage {
 		remaining := review.MaxRemoteThreadBytes - collector.responseBytes
 		if remaining <= 0 {
-			return &LimitError{Resource: LimitRemoteThreads, Limit: uint32(review.MaxRemoteThreadBytes)}
+			return &LimitError{Resource: LimitRemoteThreads, Limit: uint64(review.MaxRemoteThreadBytes)}
 		}
 		comments, used, err := collector.service.loadRemainingRemoteComments(
 			collector.ctx,
@@ -398,15 +400,17 @@ func (service *Service) loadRemainingRemoteComments(
 	if !ok {
 		return nil, 0, errors.New("validated GitHub repository cannot be split")
 	}
-	spool, err := service.runGHToSpool(ctx, []string{
-		ghAPI, "graphql", ghPaginate, ghSlurp,
-		"-f", "query=" + remoteThreadCommentsQuery,
-		"-F", "owner=" + owner,
-		"-F", "name=" + repository,
-		"-F", "number=" + strconv.FormatUint(details.Number.Uint64(), 10),
-		"-F", "id=" + threadID,
-		"-F", "endCursor=" + *initial.PageInfo.EndCursor,
-	}, byteLimit)
+	spool, err := service.graphQLSpool(
+		ctx,
+		remoteThreadCommentsQuery,
+		"comments",
+		map[string]any{
+			githubFieldOwner: owner, githubFieldName: repository,
+			githubFieldNumber: details.Number.Uint64(), "id": threadID,
+			githubFieldEndCursor: *initial.PageInfo.EndCursor,
+		},
+		byteLimit,
+	)
 	if err != nil {
 		return nil, 0, fmt.Errorf("load GitHub review thread comments: %w", err)
 	}
@@ -857,7 +861,7 @@ func validateRemoteComment(node remoteCommentNode) (review.RemoteComment, error)
 		return review.RemoteComment{}, errors.New("invalid GitHub review comment URL")
 	}
 	parsedURL, err := url.ParseRequestURI(node.URL)
-	if err != nil || parsedURL.Scheme != "https" || parsedURL.Host != "github.com" {
+	if err != nil || parsedURL.Scheme != "https" || parsedURL.Host != githubHost {
 		return review.RemoteComment{}, errors.New("invalid GitHub review comment URL")
 	}
 	author := ""

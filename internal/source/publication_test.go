@@ -3,7 +3,6 @@ package source
 import (
 	"context"
 	"errors"
-	"io"
 	"testing"
 )
 
@@ -44,33 +43,4 @@ func TestDecodePublicationReviewIDPropagatesCancellation(t *testing.T) {
 	if _, err := decodePublicationReviewID(ctx, []byte(`{"id":7}`)); !errors.Is(err, cause) {
 		t.Fatalf("publication response cancellation = %v", err)
 	}
-}
-
-func TestCancellationReaderCapsUnderlyingReads(t *testing.T) {
-	t.Parallel()
-
-	input := &recordingReader{remaining: maxSourceProtocolToken * 2}
-	reader := newCancellationReader(t.Context(), input)
-	buffer := make([]byte, maxSourceProtocolToken*2)
-	if count, err := reader.Read(buffer); err != nil || count != maxSourceProtocolToken {
-		t.Fatalf("first read = (%d, %v)", count, err)
-	}
-	if input.maximumRequest != maxSourceProtocolToken {
-		t.Fatalf("maximum underlying request = %d, want %d", input.maximumRequest, maxSourceProtocolToken)
-	}
-}
-
-type recordingReader struct {
-	remaining      int
-	maximumRequest int
-}
-
-func (reader *recordingReader) Read(value []byte) (int, error) {
-	reader.maximumRequest = max(reader.maximumRequest, len(value))
-	if reader.remaining == 0 {
-		return 0, io.EOF
-	}
-	count := min(len(value), reader.remaining)
-	reader.remaining -= count
-	return count, nil
 }

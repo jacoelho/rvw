@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -136,5 +137,29 @@ func TestInteractiveKeybindingsReportsInvalidBoundaryField(t *testing.T) {
 	}})
 	if err == nil || !strings.Contains(err.Error(), "keybinding 1 context") {
 		t.Fatalf("interactiveKeybindings error = %v", err)
+	}
+}
+
+func TestInteractiveProgramEnvironmentOwnsInputAndRemovesOnlyNoColor(t *testing.T) {
+	original := []string{
+		"TERM=xterm-256color",
+		"COLORTERM=truecolor",
+		"NO_COLOR=1",
+		"NO_COLOR=again",
+		"GITHUB_TOKEN=secret",
+	}
+	implicit := interactiveProgramEnvironment(original, false)
+	implicit[0] = "TERM=changed"
+	if original[0] != "TERM=xterm-256color" || len(implicit) != len(original) {
+		t.Fatalf("implicit environment aliases input: original=%q copied=%q", original, implicit)
+	}
+	explicit := interactiveProgramEnvironment(original, true)
+	want := []string{
+		"TERM=xterm-256color",
+		"COLORTERM=truecolor",
+		"GITHUB_TOKEN=secret",
+	}
+	if !slices.Equal(explicit, want) {
+		t.Fatalf("explicit environment = %q, want %q", explicit, want)
 	}
 }

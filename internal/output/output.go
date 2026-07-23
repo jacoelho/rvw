@@ -193,31 +193,29 @@ type localDetailsJSON struct {
 }
 
 type pullDetailsJSON struct {
-	Kind               source.SourceKind       `json:"kind"`
-	Owner              source.GitHubOwner      `json:"owner"`
-	Repo               source.GitHubRepository `json:"repo"`
-	Title              source.Title            `json:"title"`
-	Base               review.ObjectID         `json:"base"`
-	Head               review.ObjectID         `json:"head"`
-	BaseRef            source.GitReference     `json:"base_ref"`
-	HeadRef            source.GitReference     `json:"head_ref"`
-	Number             uint64                  `json:"number"`
-	FilesAPICapReached bool                    `json:"files_api_cap_reached"`
+	Kind    source.SourceKind       `json:"kind"`
+	Owner   source.GitHubOwner      `json:"owner"`
+	Repo    source.GitHubRepository `json:"repo"`
+	Title   source.Title            `json:"title"`
+	Base    review.ObjectID         `json:"base"`
+	Head    review.ObjectID         `json:"head"`
+	BaseRef source.GitReference     `json:"base_ref"`
+	HeadRef source.GitReference     `json:"head_ref"`
+	Number  uint64                  `json:"number"`
 }
 
 type githubJSON struct {
-	Author             *string             `json:"author"`
-	OwnerRepo          string              `json:"owner_repo"`
-	Title              source.Title        `json:"title"`
-	URL                source.GitHubURL    `json:"url"`
-	State              source.GitHubState  `json:"state"`
-	BaseRef            source.GitReference `json:"base_ref"`
-	BaseOID            review.ObjectID     `json:"base_oid"`
-	HeadRef            source.GitReference `json:"head_ref"`
-	HeadOID            review.ObjectID     `json:"head_oid"`
-	Number             uint64              `json:"number"`
-	IsDraft            bool                `json:"is_draft"`
-	FilesAPICapReached bool                `json:"files_api_cap_reached"`
+	Author    *string             `json:"author"`
+	OwnerRepo string              `json:"owner_repo"`
+	Title     source.Title        `json:"title"`
+	URL       source.GitHubURL    `json:"url"`
+	State     source.GitHubState  `json:"state"`
+	BaseRef   source.GitReference `json:"base_ref"`
+	BaseOID   review.ObjectID     `json:"base_oid"`
+	HeadRef   source.GitReference `json:"head_ref"`
+	HeadOID   review.ObjectID     `json:"head_oid"`
+	Number    uint64              `json:"number"`
+	IsDraft   bool                `json:"is_draft"`
 }
 
 type fileJSON struct {
@@ -305,16 +303,15 @@ func localDetailsValue(details source.LocalDetails) localDetailsJSON {
 
 func pullDetailsValue(details source.PullRequestDetails) pullDetailsJSON {
 	return pullDetailsJSON{
-		Kind:               source.SourceGitHubPR,
-		Owner:              details.Repository.Owner(),
-		Repo:               details.Repository.Repository(),
-		Number:             details.Number.Uint64(),
-		Title:              details.Title,
-		Base:               details.BaseOID,
-		Head:               details.HeadOID,
-		BaseRef:            details.BaseRef,
-		HeadRef:            details.HeadRef,
-		FilesAPICapReached: details.FilesAPICapReached,
+		Kind:    source.SourceGitHubPR,
+		Owner:   details.Repository.Owner(),
+		Repo:    details.Repository.Repository(),
+		Number:  details.Number.Uint64(),
+		Title:   details.Title,
+		Base:    details.BaseOID,
+		Head:    details.HeadOID,
+		BaseRef: details.BaseRef,
+		HeadRef: details.HeadRef,
 	}
 }
 
@@ -325,18 +322,17 @@ func githubValue(details source.PullRequestDetails) githubJSON {
 		author = new(value)
 	}
 	return githubJSON{
-		OwnerRepo:          details.Repository.String(),
-		Number:             details.Number.Uint64(),
-		Title:              details.Title,
-		URL:                details.URL,
-		State:              details.State,
-		IsDraft:            details.Draft,
-		Author:             author,
-		BaseRef:            details.BaseRef,
-		BaseOID:            details.BaseOID,
-		HeadRef:            details.HeadRef,
-		HeadOID:            details.HeadOID,
-		FilesAPICapReached: details.FilesAPICapReached,
+		OwnerRepo: details.Repository.String(),
+		Number:    details.Number.Uint64(),
+		Title:     details.Title,
+		URL:       details.URL,
+		State:     details.State,
+		IsDraft:   details.Draft,
+		Author:    author,
+		BaseRef:   details.BaseRef,
+		BaseOID:   details.BaseOID,
+		HeadRef:   details.HeadRef,
+		HeadOID:   details.HeadOID,
 	}
 }
 

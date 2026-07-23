@@ -181,12 +181,17 @@ func (model *Model) workspaceView(
 			}
 			sections = append(sections, fitCellWidth(commentLine, layout.commentsWidth))
 		}
-		body[row] = styles.panel.Render(
-			strings.Join(sections, separator),
-		)
+		body[row] = strings.Join(sections, separator)
+		if model.settings.colorEnabled {
+			body[row] = styles.panel.Render(body[row])
+		}
 	}
-	title := styles.panel.Render(model.titleLine(width, styles))
-	footer := styles.status.Render(model.statusLine(width, styles))
+	title := model.titleLine(width, styles)
+	footer := model.statusLine(width, styles)
+	if model.settings.colorEnabled {
+		title = styles.panel.Render(title)
+		footer = styles.status.Render(footer)
+	}
 	if model.mode == ModeCommand {
 		footer = model.commandBarLine(width, styles)
 	}
@@ -411,9 +416,9 @@ func (model *Model) commentLines(
 				state := model.review.PendingBindingState(comment.ID()).String()
 				target = "[" + state + "] " + target
 			}
-			line = clipStyled(prefix, 0, width)
+			line = model.commentPrefix(prefix, width)
 			remaining := max(width-lipgloss.Width(line), 0)
-			line += clipStyled(commentKindText(comment.Kind(), styles), 0, remaining)
+			line += model.commentKindCell(comment.Kind(), styles, remaining)
 			line = appendSafeAndClip(line, target+" — ", width)
 			remaining = max(width-lipgloss.Width(line), 0)
 			if remaining != 0 {
@@ -459,6 +464,24 @@ func (model *Model) commentLines(
 		rows = append(rows, index)
 	}
 	return lines, rows
+}
+
+func (model *Model) commentPrefix(prefix string, width int) string {
+	if !model.settings.colorEnabled {
+		return prefix
+	}
+	return clipStyled(prefix, 0, width)
+}
+
+func (model *Model) commentKindCell(
+	kind review.CommentKind,
+	styles semanticStyles,
+	width int,
+) string {
+	if !model.settings.colorEnabled {
+		return "[" + safeText(kind.String()) + "] "
+	}
+	return clipStyled(commentKindText(kind, styles), 0, width)
 }
 
 func appendSafeAndClip(line, value string, width int) string {
@@ -687,6 +710,18 @@ func fitCellWidth(value string, width int) string {
 	if width <= 0 {
 		return ""
 	}
+	if plainASCIIText(value) {
+		if len(value) >= width {
+			return value[:width]
+		}
+		var fitted strings.Builder
+		fitted.Grow(width)
+		fitted.WriteString(value)
+		for range width - len(value) {
+			fitted.WriteByte(' ')
+		}
+		return fitted.String()
+	}
 	value = lipgloss.NewStyle().MaxWidth(width).Render(value)
 	padding := width - lipgloss.Width(value)
 	if padding > 0 {
@@ -705,6 +740,15 @@ func safeAndClip(value string, width int) string {
 		value = value[:int(maxBytes)]
 		limited = true
 	}
+	if plainASCIIText(value) {
+		if !limited && len(value) <= width {
+			return value
+		}
+		if width == 1 {
+			return "…"
+		}
+		return value[:min(len(value), width-1)] + "…"
+	}
 	safeValue := safeText(value)
 	if limited || lipgloss.Width(safeValue) > width {
 		if width == 1 {
@@ -713,4 +757,13 @@ func safeAndClip(value string, width int) string {
 		return lipgloss.NewStyle().MaxWidth(width-1).Render(safeValue) + "…"
 	}
 	return safeValue
+}
+
+func plainASCIIText(value string) bool {
+	for index := range len(value) {
+		if value[index] < 0x20 || value[index] >= 0x7f {
+			return false
+		}
+	}
+	return true
 }

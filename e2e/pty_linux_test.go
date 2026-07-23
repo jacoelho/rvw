@@ -13,7 +13,7 @@ func newScriptCommand(ctx context.Context, shell string) *exec.Cmd {
 		systemScript,
 		"-q",
 		"-c",
-		"exec sh -c "+shellQuote(shell),
+		"exec "+shellQuote(systemShell)+" -c "+shellQuote(shell),
 		"/dev/null",
 	)
 }

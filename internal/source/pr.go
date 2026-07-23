@@ -5,19 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
 	"github.com/jacoelho/rvw/internal/review"
-	"github.com/jacoelho/rvw/internal/subprocess"
-)
-
-const (
-	githubFilesAPICap = 3_000
-	ghRepo            = "repo"
 )
 
 type pullRequestPayload struct {
@@ -68,15 +61,11 @@ func (service *Service) openPullRequest(
 	if err != nil {
 		return nil, err
 	}
-	if payload.ChangedFiles > review.MaxFiles {
-		return nil, fmt.Errorf("pull request has %d files; limit is %d", payload.ChangedFiles, review.MaxFiles)
-	}
-
 	workspace, err := os.MkdirTemp("", "rvw-pr-")
 	if err != nil {
 		return nil, fmt.Errorf("create pull-request workspace: %w", err)
 	}
-	var rootOwner *rootedRepository
+	var rootOwner *repositorySession
 	defer func() {
 		if returnErr != nil {
 			if rootOwner != nil {
@@ -86,21 +75,15 @@ func (service *Service) openPullRequest(
 			}
 		}
 	}()
-	bare, err := service.fetchPullRequest(ctx, workspace, details)
+	rootOwner, err = createPullRequestRepository(workspace, service.options)
 	if err != nil {
 		return nil, err
 	}
-	rootOwner, err = openRootedRepository(bare)
-	if err != nil {
-		return nil, err
-	}
-	rootOwner.cleanup = workspace
-	snapshot, preparedRevision, err := service.preparePullRequestSnapshot(
+	snapshot, preparedRevision, err := service.prepareNativePullRequest(
 		ctx,
 		runCPU,
 		rootOwner,
 		details,
-		payload,
 		options,
 	)
 	if err != nil {
@@ -231,101 +214,12 @@ func remoteThreadFailureStatus(err error) review.RemoteThreadStatus {
 	return review.RemoteThreadsUnavailable
 }
 
-func (service *Service) preparePullRequestSnapshot(
-	ctx context.Context,
-	runCPU CPUAdmission,
-	repository *rootedRepository,
-	details PullRequestDetails,
-	payload pullRequestPayload,
-	options OpenOptions,
-) (review.Snapshot, revision, error) {
-	baseCommit, err := service.resolveCommit(ctx, repository, RevisionRef("refs/rvw/base"))
-	if err != nil {
-		return review.Snapshot{}, revision{}, fmt.Errorf("validate fetched base: %w", err)
-	}
-	if baseCommit != details.BaseOID {
-		return review.Snapshot{}, revision{}, fmt.Errorf(
-			"%w: pull-request base changed while opening; retry explicitly",
-			ErrSourceStale,
-		)
-	}
-	headCommit, err := service.resolveCommit(ctx, repository, RevisionRef("refs/rvw/head"))
-	if err != nil {
-		return review.Snapshot{}, revision{}, fmt.Errorf("validate fetched head: %w", err)
-	}
-	if headCommit != details.HeadOID {
-		return review.Snapshot{}, revision{}, fmt.Errorf(
-			"%w: pull-request head changed while opening; retry explicitly",
-			ErrSourceStale,
-		)
-	}
-	mergeBase, err := service.mergeBase(ctx, repository, baseCommit, headCommit)
-	if err != nil {
-		return review.Snapshot{}, revision{}, err
-	}
-	baseTree, err := service.resolveTree(ctx, repository, nil, RevisionRef(mergeBase.String()))
-	if err != nil {
-		return review.Snapshot{}, revision{}, fmt.Errorf("resolve pull-request base tree: %w", err)
-	}
-	headTree, err := service.resolveTree(ctx, repository, nil, RevisionRef(headCommit.String()))
-	if err != nil {
-		return review.Snapshot{}, revision{}, fmt.Errorf("resolve pull-request head tree: %w", err)
-	}
-	files, err := service.diffMetadata(ctx, repository, nil, baseTree, headTree, runCPU)
-	if err != nil {
-		return review.Snapshot{}, revision{}, err
-	}
-	if uint64(len(files)) != payload.ChangedFiles {
-		return review.Snapshot{}, revision{}, fmt.Errorf(
-			"%w: pull-request metadata changed while opening: API reports %d files, Git reports %d",
-			ErrSourceStale,
-			payload.ChangedFiles,
-			len(files),
-		)
-	}
-	options.Gitignore = false
-	options.RVWIgnore = false
-	sourceID, err := service.newSourceID()
-	if err != nil {
-		return review.Snapshot{}, revision{}, err
-	}
-	snapshot, err := service.snapshot(
-		ctx,
-		runCPU,
-		sourceID,
-		repository,
-		nil,
-		files,
-		options,
-	)
-	if err != nil {
-		return review.Snapshot{}, revision{}, err
-	}
-	return snapshot, revision{
-		kind:       revisionTree,
-		repository: repository,
-		base:       baseTree,
-		head:       headTree,
-	}, nil
-}
-
 func (service *Service) currentGitHubRepository(
 	ctx context.Context,
 	runCPU CPUAdmission,
 ) (OwnerRepository, error) {
-	result, err := service.runGH(
-		ctx,
-		[]string{ghRepo, "view", "--json", jsonFieldNameWithOwner},
-		256<<10,
-	)
-	if err != nil {
-		return OwnerRepository{}, fmt.Errorf("resolve GitHub repository: %w", err)
-	}
-	name, err := decodeRepositoryJSON(ctx, result.Stdout, runCPU)
-	if err != nil {
-		return OwnerRepository{}, fmt.Errorf("decode GitHub repository: %w", err)
-	}
-	return NewOwnerRepository(name)
+	_ = runCPU
+	return service.inferGitHubRepository(ctx)
 }
 
 func (service *Service) pullRequestMetadata(
@@ -334,111 +228,12 @@ func (service *Service) pullRequestMetadata(
 	number PullRequestNumber,
 	runCPU CPUAdmission,
 ) (pullRequestPayload, error) {
-	endpoint := "repos/" + repository.String() + "/pulls/" + strconv.FormatUint(number.Uint64(), 10)
-	result, err := service.runGH(ctx, []string{ghAPI, endpoint}, 1<<20)
+	_ = runCPU
+	payload, err := service.github.pullRequest(ctx, repository, number)
 	if err != nil {
 		return pullRequestPayload{}, fmt.Errorf("read pull-request metadata: %w", err)
 	}
-	payload, err := decodePullRequestJSON(ctx, result.Stdout, runCPU)
-	if err != nil {
-		return pullRequestPayload{}, fmt.Errorf("decode pull-request metadata: %w", err)
-	}
 	return payload, nil
-}
-
-func (service *Service) fetchPullRequest(
-	ctx context.Context,
-	workspace string,
-	details PullRequestDetails,
-) (RepositoryPath, error) {
-	barePath := filepath.Join(workspace, "repository.git")
-	if _, err := service.runGit(
-		ctx,
-		workspace,
-		nil,
-		[]string{"init", "--bare", barePath},
-		nil,
-		256<<10,
-	); err != nil {
-		return "", fmt.Errorf("initialize pull-request object store: %w", err)
-	}
-	bare := RepositoryPath(barePath)
-	baseSpec := "+refs/heads/" + details.BaseRef.String() + ":refs/rvw/base"
-	headSpec := "+" + pullReference(details.Number) + ":refs/rvw/head"
-	cloneURL := "https://github.com/" + details.Repository.String() + ".git"
-	if _, err := service.runGit(
-		ctx,
-		bare.String(),
-		nil,
-		[]string{
-			"fetch", "--no-tags", "--quiet", "--filter=blob:none", "--depth=1000",
-			cloneURL, baseSpec, headSpec,
-		},
-		nil,
-		256<<10,
-	); err != nil {
-		return "", fmt.Errorf("fetch pull-request revisions: %w", err)
-	}
-	return bare, nil
-}
-
-func (service *Service) resolveCommit(
-	ctx context.Context,
-	repository *rootedRepository,
-	ref RevisionRef,
-) (review.ObjectID, error) {
-	result, err := service.runGitWithInputIn(
-		ctx,
-		repository.gitDirectory(),
-		nil,
-		[]string{gitRevParse, gitVerify, gitEndOfOptions, ref.String() + "^{commit}"},
-		nil,
-		nil,
-		64<<10,
-	)
-	if err != nil {
-		return "", err
-	}
-	return parseObjectID(result.Stdout)
-}
-
-func (service *Service) mergeBase(
-	ctx context.Context,
-	repository *rootedRepository,
-	base, head review.ObjectID,
-) (review.ObjectID, error) {
-	result, err := service.runGitWithInputIn(
-		ctx,
-		repository.gitDirectory(),
-		nil,
-		[]string{"merge-base", base.String(), head.String()},
-		nil,
-		[]int{0, 1},
-		64<<10,
-	)
-	if err != nil {
-		return "", fmt.Errorf("resolve pull-request merge base: %w", err)
-	}
-	if result.ExitCode != 0 {
-		return "", &LimitError{Resource: LimitPullRequestDepth, Limit: 1_000}
-	}
-	return parseObjectID(result.Stdout)
-}
-
-func (service *Service) runGH(
-	ctx context.Context,
-	arguments []string,
-	stdoutLimit int64,
-) (subprocess.Result, error) {
-	return service.runner.Run(ctx, subprocess.Request{
-		Name:            "gh",
-		Args:            arguments,
-		Dir:             service.cwd.String(),
-		Env:             map[string]string{localeAllKey: "C", localeLanguageKey: "C", ghPromptDisabled: "1"},
-		StdoutLimit:     stdoutLimit,
-		StderrLimit:     MaxCommandStderrBytes,
-		OperationDetail: "gh " + strings.Join(arguments[:min(2, len(arguments))], " "),
-	})
 }
 
 func validatePullRequestPayload(
@@ -505,18 +300,17 @@ func validatePullRequestPayload(
 		author = new(value)
 	}
 	return PullRequestDetails{
-		Repository:         repository,
-		Number:             number,
-		Title:              Title(payload.Title),
-		BaseOID:            baseOID,
-		HeadOID:            headOID,
-		BaseRef:            baseRef,
-		HeadRef:            headRef,
-		FilesAPICapReached: payload.ChangedFiles >= githubFilesAPICap,
-		URL:                GitHubURL(expectedURL),
-		State:              state,
-		Draft:              payload.Draft,
-		Author:             author,
+		Repository: repository,
+		Number:     number,
+		Title:      Title(payload.Title),
+		BaseOID:    baseOID,
+		HeadOID:    headOID,
+		BaseRef:    baseRef,
+		HeadRef:    headRef,
+		URL:        GitHubURL(expectedURL),
+		State:      state,
+		Draft:      payload.Draft,
+		Author:     author,
 	}, nil
 }
 

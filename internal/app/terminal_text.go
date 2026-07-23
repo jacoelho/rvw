@@ -19,6 +19,10 @@ func safeText(value string) string {
 }
 
 func (renderer *terminalTextRenderer) render(value string) string {
+	if terminalTextIsSafe(value) {
+		renderer.column += lipgloss.Width(value)
+		return value
+	}
 	var safe strings.Builder
 	safe.Grow(len(value))
 	plainStart := 0
@@ -60,6 +64,18 @@ func (renderer *terminalTextRenderer) render(value string) string {
 	}
 	flushPlain(len(value))
 	return safe.String()
+}
+
+func terminalTextIsSafe(value string) bool {
+	for offset := 0; offset < len(value); {
+		character, size := utf8.DecodeRuneInString(value[offset:])
+		if character == '\t' || character == utf8.RuneError && size == 1 ||
+			unicode.IsControl(character) || isBidiControl(character) {
+			return false
+		}
+		offset += size
+	}
+	return true
 }
 
 func writeByteEscape(output *strings.Builder, value byte) {

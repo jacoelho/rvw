@@ -6,10 +6,10 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 
 	"github.com/jacoelho/rvw/internal/review"
-	"github.com/jacoelho/rvw/internal/subprocess"
 )
 
 // PublicationCheckAcquisition is the validated network phase of preflight.
@@ -247,32 +247,28 @@ func (service *Service) Publish(
 	target := checked.Target()
 	endpoint := "repos/" + target.Repository() + "/pulls/" +
 		strconv.FormatUint(target.PullRequest(), 10) + "/reviews"
-	result, err := service.runner.Run(ctx, subprocess.Request{
-		Name: "gh",
-		Args: []string{
-			ghAPI,
-			"--method", "POST",
-			endpoint,
-			"--input", "-",
-		},
-		Dir:             service.cwd.String(),
-		Env:             map[string]string{localeAllKey: "C", localeLanguageKey: "C", ghPromptDisabled: "1"},
-		Stdin:           []byte(checked.Payload()),
-		StdoutLimit:     1 << 20,
-		StderrLimit:     MaxCommandStderrBytes,
-		OperationDetail: "gh api publication",
-	})
+	result, err := service.github.mutation(
+		ctx, http.MethodPost, "/"+endpoint, []byte(checked.Payload()), 1<<20,
+	)
 	if err != nil {
-		disposition := review.PublicationDispositionFailedBeforeCommit
-		if result.Started {
-			disposition = review.PublicationDispositionUnknown
+		disposition := review.PublicationDispositionUnknown
+		if githubMutationFailedBeforeCommit(err) {
+			disposition = review.PublicationDispositionFailedBeforeCommit
 		}
 		return PublicationCommit{
 			Disposition: disposition,
 			Detail:      boundedOperationDetail(err.Error()),
 		}
 	}
-	reviewID, err := decodePublicationReviewID(ctx, result.Stdout)
+	if result.status != http.StatusOK {
+		return PublicationCommit{
+			Disposition: review.PublicationDispositionUnknown,
+			Detail: boundedOperationDetail(
+				"GitHub publication returned an undocumented success status",
+			),
+		}
+	}
+	reviewID, err := decodePublicationReviewID(ctx, result.body)
 	if err != nil {
 		return PublicationCommit{
 			Disposition: review.PublicationDispositionUnknown,
@@ -421,7 +417,7 @@ func (service *Service) ReconcilePublication(
 // PublicationReconciliationAcquisition owns one bounded GitHub history spool
 // awaiting cancellable CPU validation.
 type PublicationReconciliationAcquisition struct {
-	spool   *commandSpool
+	spool   *githubSpool
 	request review.ReconciliationRequest
 }
 
@@ -436,13 +432,9 @@ func (service *Service) AcquirePublicationReconciliation(
 		return nil, errors.New("publication reconciliation request is invalid")
 	}
 	target := request.Target
-	endpoint := "repos/" + target.Repository() + "/pulls/" +
+	endpoint := "/repos/" + target.Repository() + "/pulls/" +
 		strconv.FormatUint(target.PullRequest(), 10) + "/reviews"
-	spool, err := service.runGHToSpool(
-		ctx,
-		[]string{ghAPI, endpoint, ghPaginate, ghSlurp},
-		review.MaxPublicationBytes,
-	)
+	spool, err := service.restSpool(ctx, endpoint, review.MaxPublicationBytes)
 	if err != nil {
 		return nil, err
 	}

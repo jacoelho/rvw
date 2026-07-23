@@ -210,14 +210,16 @@ func (service *Service) attachPendingCommentCapabilitiesWithLedger(
 	if !ok {
 		return nil, errors.New("validated GitHub repository cannot be split")
 	}
-	spool, err := service.runGHToSpool(ctx, []string{
-		ghAPI, ghGraphQL, ghPaginate, ghSlurp,
-		"-f", "query=" + pendingCommentCapabilitiesQuery,
-		"-F", "owner=" + owner,
-		"-F", "name=" + repository,
-		"-F", "number=" + strconv.FormatUint(details.Number.Uint64(), 10),
-		"-F", "id=" + node.ID,
-	}, review.MaxPendingReviewBytes)
+	spool, err := service.graphQLSpool(
+		ctx,
+		pendingCommentCapabilitiesQuery,
+		"comments",
+		map[string]any{
+			githubFieldOwner: owner, githubFieldName: repository,
+			githubFieldNumber: details.Number.Uint64(), "id": node.ID,
+		},
+		review.MaxPendingReviewBytes,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("load GitHub pending comment capabilities: %w", err)
 	}
@@ -369,13 +371,16 @@ func (service *Service) findPendingReviewWithLedger(
 	if !ok {
 		return pendingReviewNode{}, 0, errors.New("validated GitHub repository cannot be split")
 	}
-	spool, err := service.runGHToSpool(ctx, []string{
-		ghAPI, ghGraphQL, ghPaginate, ghSlurp,
-		"-f", "query=" + pendingReviewsQuery,
-		"-F", "owner=" + owner,
-		"-F", "name=" + repository,
-		"-F", "number=" + strconv.FormatUint(details.Number.Uint64(), 10),
-	}, review.MaxPendingReviewBytes)
+	spool, err := service.graphQLSpool(
+		ctx,
+		pendingReviewsQuery,
+		"reviews",
+		map[string]any{
+			githubFieldOwner: owner, githubFieldName: repository,
+			githubFieldNumber: details.Number.Uint64(),
+		},
+		review.MaxPendingReviewBytes,
+	)
 	if err != nil {
 		return pendingReviewNode{}, 0, fmt.Errorf("load GitHub pending reviews: %w", err)
 	}
@@ -571,13 +576,10 @@ func (service *Service) loadPendingReviewCommentsWithLedger(
 ) ([]pendingReviewCommentPayload, error) {
 	checkpoint := ledger.checkpoint()
 	defer checkpoint.rollback()
-	endpoint := "repos/" + details.Repository.String() + "/pulls/" +
+	endpoint := "/repos/" + details.Repository.String() + "/pulls/" +
 		strconv.FormatUint(details.Number.Uint64(), 10) + "/reviews/" +
-		strconv.FormatUint(uint64(node.FullDatabaseID), 10) + "/comments"
-	spool, err := service.runGHToSpool(ctx, []string{
-		ghAPI, "--method", "GET", ghPaginate, ghSlurp,
-		"-f", "per_page=100", endpoint,
-	}, review.MaxPendingReviewBytes)
+		strconv.FormatUint(uint64(node.FullDatabaseID), 10) + "/comments?per_page=100"
+	spool, err := service.restSpool(ctx, endpoint, review.MaxPendingReviewBytes)
 	if err != nil {
 		return nil, fmt.Errorf("load GitHub pending review comments: %w", err)
 	}

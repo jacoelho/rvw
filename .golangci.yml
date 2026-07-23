@@ -111,6 +111,9 @@ linters:
             - github.com/charmbracelet/x/ansi
             - github.com/charmbracelet/x/exp/golden
             - github.com/charmbracelet/x/vt
+            - github.com/go-git/gcfg
+            - github.com/go-git/go-billy/v5
+            - github.com/go-git/go-git/v5
             - github.com/jacoelho/bdd
             - github.com/jacoelho/rvw
             - github.com/rivo/uniseg
@@ -164,7 +167,6 @@ linters:
             - "!**/*_test.go"
           allow:
             - $gostd
-            - github.com/jacoelho/rvw/internal/subprocess$
 
         output-production:
           list-mode: strict
@@ -206,17 +208,11 @@ linters:
             - "!**/*_test.go"
           allow:
             - $gostd
+            - github.com/go-git/gcfg$
+            - github.com/go-git/go-billy/v5
+            - github.com/go-git/go-git/v5
             - github.com/jacoelho/rvw/internal/review$
-            - github.com/jacoelho/rvw/internal/subprocess$
             - golang.org/x/sys/unix$
-
-        subprocess-production:
-          list-mode: strict
-          files:
-            - "**/internal/subprocess/*.go"
-            - "!**/*_test.go"
-          allow:
-            - $gostd
 
     revive:
       enable-default-rules: true

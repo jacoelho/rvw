@@ -1,0 +1,89 @@
+package main
+
+const globalHelpText = `usage:
+  rvw diff [--staged | --range <base..head>] [common options]
+  rvw pr <number | url> [--repo <owner/repository>] [common options]
+  rvw help [diff | pr]
+
+Review sources:
+  diff                 Review the local worktree, including untracked files by default.
+  diff --staged        Review the index against HEAD.
+  diff --range A..B    Review the explicit two-dot Git range A..B.
+  pr NUMBER            Review a GitHub pull request inferred from one GitHub remote.
+  pr URL               Review an authoritative canonical GitHub pull-request URL.
+  pr NUMBER --repo O/R Review an authoritative owner/repository and pull-request number.
+
+Output:
+  (default)            Open the interactive terminal UI.
+  --stdout             Write the complete human-readable review to standard output.
+  --json               Write the complete machine-readable review to standard output.
+  Repeated --stdout and --json options use the last occurrence.
+
+Filtering:
+  --include PATTERN    Add a path include rule; repeatable.
+  --exclude PATTERN    Add a path exclude rule; repeatable.
+  Local reviews also use configured built-in, .gitignore, and .rvwignore rules.
+  Pull requests use built-in and explicit include/exclude rules only and retain
+  at most 3,000 selected records.
+
+Interface:
+  --no-mouse           Disable mouse input.
+  --theme NAME         Select a configured theme and override NO_COLOR.
+  --appearance MODE    Select dark, light, or system appearance.
+  -h, --help           Show global or subcommand help.
+
+Authentication and publication:
+  GITHUB_TOKEN is the only GitHub credential. Pull-request reads, remote
+  threads, pending reviews, and publication do not use GH_TOKEN, gh config,
+  keychains, anonymous access, or ambient credentials. Publication is
+  available from the interactive pull-request review flow and reconciles an
+  unknown write before any retry.
+
+Configuration precedence and defaults:
+  Built-in defaults < $XDG_CONFIG_HOME/rvw/config.toml (or
+  $HOME/.config/rvw/config.toml) < the first project .rvw.toml or rvw.toml <
+  command-line overrides. Worktree review, interactive output, mouse input,
+  configured default theme, and built-in/local ignore filtering are defaults.
+
+Examples:
+  rvw diff
+  rvw diff --staged --stdout
+  rvw diff --range main..feature --json
+  rvw pr 42 --repo owner/repository
+  rvw pr https://github.com/owner/repository/pull/42 --exclude 'vendor/**'
+`
+
+const diffHelpText = `usage: rvw diff [--staged | --range <base..head>] [common options]
+
+Review the local worktree by default. --staged compares the index with HEAD;
+--range compares the two required commit-ish values in an exact A..B range.
+--staged and --range are mutually exclusive and an empty range is invalid.
+
+Common options:
+  --stdout, --json, --no-mouse, --theme NAME,
+  --appearance dark|light|system, --include PATTERN, --exclude PATTERN
+
+Examples:
+  rvw diff
+  rvw diff --staged --stdout
+  rvw diff --range HEAD~3..HEAD --json
+`
+
+const pullRequestHelpText = `usage: rvw pr <number | url> [--repo <owner/repository>] [common options]
+
+Review a GitHub pull request. A canonical URL or explicit --repo is
+authoritative; a numeric selector otherwise requires exactly one inferred
+GitHub repository. Empty selectors and repositories are invalid.
+
+GITHUB_TOKEN is required and is the only GitHub credential. Pull-request path
+selection uses built-in defaults plus explicit include/exclude rules and
+retains at most 3,000 records.
+
+Common options:
+  --stdout, --json, --no-mouse, --theme NAME,
+  --appearance dark|light|system, --include PATTERN, --exclude PATTERN
+
+Examples:
+  rvw pr 42 --repo owner/repository
+  rvw pr https://github.com/owner/repository/pull/42 --json
+`

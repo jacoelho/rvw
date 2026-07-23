@@ -3,11 +3,72 @@ package source
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/jacoelho/rvw/internal/review"
 )
+
+func TestPendingPublicationDocumentedGraphQLFailuresArePreCommit(t *testing.T) {
+	for _, status := range []int{
+		http.StatusBadRequest,
+		http.StatusUnauthorized,
+		http.StatusForbidden,
+		http.StatusNotFound,
+		http.StatusUnprocessableEntity,
+	} {
+		for _, submission := range []bool{false, true} {
+			name := http.StatusText(status) + "/mutation"
+			if submission {
+				name = http.StatusText(status) + "/submission"
+			}
+			t.Run(name, func(t *testing.T) {
+				requests := 0
+				server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+					requests++
+					http.Error(response, http.StatusText(status), status)
+				}))
+				t.Cleanup(server.Close)
+
+				token, err := NewGitHubToken("test-token")
+				if err != nil {
+					t.Fatal(err)
+				}
+				client := newGitHubClient(&token)
+				client.apiBase = server.URL
+				t.Cleanup(client.close)
+				service := &Service{github: client}
+				state := &pendingPublicationExecutionState{
+					reconciliation: pendingPublicationNoReconciliation,
+					progress:       pendingPublicationUncommitted,
+					status:         pendingPublicationExecutionOpen,
+				}
+				batch := pendingMutationBatch{payload: `{}`, effects: []pendingWireEffect{{}}}
+				if submission {
+					state.submission = batch
+				} else {
+					state.batches = []pendingMutationBatch{batch}
+				}
+
+				step := service.AcquirePendingPublication(
+					t.Context(), PendingPublicationExecution{state: state}, directCPUAdmission,
+				)
+				commit, err := step.TakeCommit()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if commit.Disposition != review.PublicationDispositionFailedBeforeCommit {
+					t.Fatalf("disposition = %v, want failed-before-commit", commit.Disposition)
+				}
+				if requests != 1 {
+					t.Fatalf("requests = %d, want one write and no reconciliation", requests)
+				}
+			})
+		}
+	}
+}
 
 func TestPendingPublicationExecutionCopiesSharePrivateState(t *testing.T) {
 	state := &pendingPublicationExecutionState{
