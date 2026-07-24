@@ -1105,17 +1105,24 @@ func TestPublicationPreflightRendersCanonicalPayloadAndDecision(t *testing.T) {
 	}
 	model.review = current
 	model.overlay = OverlaySubmit
+	model.publicationDraftReady = true
 	_, _ = model.Update(tea.WindowSizeMsg{Width: 100, Height: 25})
 	payloadView := model.View().Content
-	if !strings.Contains(payloadView, "[payload] canonical GitHub request") ||
-		!strings.Contains(payloadView, `"commit_id":"`+head.String()+`"`) {
+	plainPayloadView := ansi.Strip(payloadView)
+	if !strings.Contains(plainPayloadView, "Publish GitHub review") ||
+		!strings.Contains(plainPayloadView, "▸ Comment") ||
+		!strings.Contains(plainPayloadView, publicationEventApproveLabel) ||
+		!strings.Contains(plainPayloadView, publicationEventRequestChangesLabel) ||
+		!strings.Contains(plainPayloadView, "[payload] canonical GitHub request") ||
+		!strings.Contains(plainPayloadView, `"commit_id":"`+head.String()+`"`) {
 		t.Fatalf("preflight omitted canonical payload:\n%s", payloadView)
 	}
 
 	model.publicationCursor = 1
 	commentView := model.View().Content
-	if !strings.Contains(commentView, "[summary] full publication comment") ||
-		!strings.Contains(commentView, "Full comment #0") {
+	plainCommentView := ansi.Strip(commentView)
+	if !strings.Contains(plainCommentView, "[summary] full publication comment") ||
+		!strings.Contains(plainCommentView, "Full comment #0") {
 		t.Fatalf("preflight omitted comment decision/detail:\n%s", commentView)
 	}
 }

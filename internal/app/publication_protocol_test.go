@@ -2,7 +2,10 @@ package app
 
 import (
 	"context"
+	"strings"
 	"testing"
+
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
@@ -70,21 +73,52 @@ func TestEnterDuringPublicationCheckSubmitsWhenPreflightIsReady(t *testing.T) {
 	}
 }
 
-func TestPublicationEventSelectorCyclesFinalGitHubActions(t *testing.T) {
+func TestPublicationEventChoicesExposeAndCycleFinalGitHubActions(t *testing.T) {
 	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	settleModelWork(t, model, coordinator)
-	if got := model.publicationEventSelector(); got !=
-		"Submit as (h/l): [Comment]  Approve  Request changes" {
-		t.Fatalf("default selector = %q", got)
+	setModelKeybindings(t, model,
+		keymap.Binding{Context: keymap.ContextSubmit, Chord: "h", Action: keymap.ActionPreviousSubmitEvent},
+		keymap.Binding{Context: keymap.ContextSubmit, Chord: "l", Action: keymap.ActionNextSubmitEvent},
+	)
+	draftChoices := ansi.Strip(strings.Join(
+		model.publicationEventLines(newSemanticStyles(model.settings)),
+		"\n",
+	))
+	if !strings.Contains(draftChoices, "Synchronize draft comments") ||
+		strings.Contains(draftChoices, "Leave feedback without approving") {
+		t.Fatalf("draft choices = %q", draftChoices)
 	}
 	options, err := model.publicationOptions()
 	if err != nil || options.Event() != review.PublicationEventDraft {
 		t.Fatalf("initial publication options = (%s, %v), want draft", options.Event(), err)
 	}
+
+	model.publicationDraftReady = true
+	choices := ansi.Strip(strings.Join(
+		model.publicationEventLines(newSemanticStyles(model.settings)),
+		"\n",
+	))
+	for _, want := range []string{
+		"h or l to change",
+		"▸ Comment",
+		publicationEventApproveLabel,
+		publicationEventRequestChangesLabel,
+		"Leave feedback without approving",
+		"Approve the pull request",
+		"Require updates before merge",
+	} {
+		if !strings.Contains(choices, want) {
+			t.Fatalf("choices omitted %q:\n%s", want, choices)
+		}
+	}
 	model.applyPublicationAction(keymap.ActionNextSubmitEvent)
+	choices = ansi.Strip(strings.Join(
+		model.publicationEventLines(newSemanticStyles(model.settings)),
+		"\n",
+	))
 	if model.publicationEvent != review.PublicationEventApprove ||
-		model.publicationEventSelector() != "Submit as (h/l): Comment  [Approve]  Request changes" {
-		t.Fatalf("next selector = %q (%s)", model.publicationEventSelector(), model.publicationEvent)
+		!strings.Contains(choices, "▸ Approve") {
+		t.Fatalf("next choices = %q (%s)", choices, model.publicationEvent)
 	}
 	model.applyPublicationAction(keymap.ActionPreviousSubmitEvent)
 	if model.publicationEvent != review.PublicationEventComment {
@@ -94,10 +128,63 @@ func TestPublicationEventSelectorCyclesFinalGitHubActions(t *testing.T) {
 	if model.publicationEvent != review.PublicationEventRequestChanges {
 		t.Fatalf("wrapped event = %s", model.publicationEvent)
 	}
-	model.publicationDraftReady = true
 	options, err = model.publicationOptions()
 	if err != nil || options.Event() != review.PublicationEventRequestChanges {
 		t.Fatalf("final publication options = (%s, %v)", options.Event(), err)
+	}
+}
+
+func TestPublicationEventChoicesUseConfiguredNavigationBindings(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	settleModelWork(t, model, coordinator)
+	setModelKeybindings(t, model,
+		keymap.Binding{Context: keymap.ContextSubmit, Chord: "ctrl-c", Action: keymap.ActionInterrupt},
+		keymap.Binding{Context: keymap.ContextSubmit, Chord: "esc", Action: keymap.ActionCancel},
+		keymap.Binding{Context: keymap.ContextSubmit, Chord: "enter", Action: keymap.ActionSubmitReview},
+		keymap.Binding{Context: keymap.ContextSubmit, Chord: "[", Action: keymap.ActionPreviousSubmitEvent},
+		keymap.Binding{Context: keymap.ContextSubmit, Chord: "]", Action: keymap.ActionNextSubmitEvent},
+	)
+	model.publicationDraftReady = true
+	if got := model.publicationEventNavigationHint(); got != "[ or ] to change" {
+		t.Fatalf("navigation hint = %q", got)
+	}
+	controls := model.publicationBindingSummary()
+	for _, want := range []string{
+		"Enter publish review",
+		"[ previous review action",
+		"] next review action",
+		"Esc cancel",
+	} {
+		if !strings.Contains(controls, want) {
+			t.Fatalf("controls omitted %q: %q", want, controls)
+		}
+	}
+}
+
+func TestPublicationChoiceAndPrimaryActionSurviveMinimumViewport(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	settleModelWork(t, model, coordinator)
+	setModelKeybindings(t, model,
+		keymap.Binding{Context: keymap.ContextSubmit, Chord: "enter", Action: keymap.ActionSubmitReview},
+		keymap.Binding{Context: keymap.ContextSubmit, Chord: "h", Action: keymap.ActionPreviousSubmitEvent},
+		keymap.Binding{Context: keymap.ContextSubmit, Chord: "l", Action: keymap.ActionNextSubmitEvent},
+		keymap.Binding{Context: keymap.ContextSubmit, Chord: "esc", Action: keymap.ActionCancel},
+	)
+	model.publicationDraftReady = true
+	view := ansi.Strip(model.publicationView(20, 6))
+	lines := strings.Split(view, "\n")
+	if len(lines) != 6 {
+		t.Fatalf("publication view rows = %d, want 6:\n%s", len(lines), view)
+	}
+	for _, want := range []string{
+		"Comment",
+		publicationEventApproveLabel,
+		publicationEventRequestChangesLabel,
+		"Enter publish review",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("minimum publication view omitted %q:\n%s", want, view)
+		}
 	}
 }
 

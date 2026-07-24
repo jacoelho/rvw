@@ -196,7 +196,8 @@ func TestInteractiveSourceContract(t *testing.T) {
 				w.pty.send(t, "s")
 				w.pty.awaitScreen(t, "draft preflight", func(screen string) bool {
 					return strings.Contains(screen, "Synchronize comments to a pending GitHub draft") &&
-						strings.Contains(screen, "Submit as (h/l): [Comment]") &&
+						strings.Contains(screen, "Review action · draft synchronization required") &&
+						strings.Contains(screen, "▸ Synchronize draft comments") &&
 						strings.Contains(screen, "Source/head: checked at current head") &&
 						strings.Contains(screen, "Pending review: continue 9001 · 1 changed · 0 conflicts") &&
 						strings.Contains(screen, "[modified · inline] existing inline edited")
