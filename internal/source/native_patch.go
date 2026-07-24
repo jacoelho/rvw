@@ -129,7 +129,7 @@ func prepareNativePatch(
 	if err != nil {
 		return nil, err
 	}
-	if oldSize+newSize > 1<<20 {
+	if !nativeDiffFitsMemory(oldSize, newSize) {
 		return prepareNativeDiskPatch(ctx, input, lines, oldSize, newSize)
 	}
 	oldContents, err := readNativePatchSide(ctx, input, review.LineOld)
@@ -139,6 +139,9 @@ func prepareNativePatch(
 	newContents, err := readNativePatchSide(ctx, input, review.LineNew)
 	if err != nil {
 		return nil, err
+	}
+	if !nativeDiffLinesFitMemory(oldContents, newContents) {
+		return prepareNativeDiskPatch(ctx, input, lines, oldSize, newSize)
 	}
 	oldLines, err := tokenizeNativeLines(ctx, oldContents)
 	if err != nil {

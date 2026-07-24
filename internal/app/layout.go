@@ -2,12 +2,14 @@ package app
 
 import tea "charm.land/bubbletea/v2"
 
+const applicationName = "rvw"
+
 func (model *Model) completeView(content string, mouseHits mouseHitMap) tea.View {
 	view := tea.NewView(content)
 	view.AltScreen = true
 	view.ReportFocus = true
 	view.DisableBracketedPasteMode = false
-	view.WindowTitle = "rvw"
+	view.WindowTitle = applicationName
 	view.KeyboardEnhancements.ReportEventTypes = true
 	if model.settings.mouse {
 		view.MouseMode = tea.MouseModeCellMotion
@@ -53,17 +55,19 @@ func (model *Model) workspaceLayout(width, height int) workspaceLayout {
 		if model.fileTreeVisible {
 			layout.treeWidth = min(max(width/4, 24), 40)
 		}
-		layout.commentsWidth = min(max(width/5, 32), 40)
+		if model.commentPaneVisibility != paneVisibilityHidden {
+			layout.commentsWidth = min(max(width/5, 32), 40)
+		}
 	case width >= normalWidth && height >= 24:
 		if model.fileTreeVisible {
 			layout.treeWidth = min(max(width/5, 24), 40)
 		}
-		if model.commentsVisible &&
+		if model.commentPaneVisibility == paneVisibilityShown &&
 			width-layout.treeWidth-32-2 >= unifiedDiffContentWidth+diffCommentAnchorColumns {
 			layout.commentsWidth = 32
 		}
 	case width >= compactWidth && height >= 18:
-		if model.commentsVisible {
+		if model.commentPaneVisibility == paneVisibilityShown {
 			if width >= unifiedDiffContentWidth+diffCommentAnchorColumns+32+1 {
 				layout.commentsWidth = 32
 			}
@@ -71,13 +75,40 @@ func (model *Model) workspaceLayout(width, height int) workspaceLayout {
 			layout.treeWidth = 24
 		}
 	}
-	layout.diffWidth = max(
-		width-layout.treeWidth-layout.commentsWidth-
-			separatorWidth(layout.treeWidth, layout.commentsWidth),
-		1,
-	)
+	layout.diffWidth = max(width-layout.treeWidth-layout.commentsWidth-
+		separatorWidth(layout.treeWidth, layout.commentsWidth), 1)
+	switch model.singlePaneOverride {
+	case FocusFileTree:
+		if model.fileTreeVisible && layout.treeWidth == 0 {
+			layout.treeWidth = width
+			layout.diffWidth = 0
+			layout.commentsWidth = 0
+		}
+	case FocusComments:
+		if model.commentPaneVisibility != paneVisibilityHidden && layout.commentsWidth == 0 {
+			layout.treeWidth = 0
+			layout.diffWidth = 0
+			layout.commentsWidth = width
+		}
+	case 0, FocusDiff:
+	}
 	layout.sideBySideFallback =
 		model.settings.diffView == DiffViewSideBySide &&
+			layout.diffWidth != 0 &&
 			layout.diffWidth < sideBySideContentWidth+diffCommentAnchorColumns
 	return layout
+}
+
+func (layout workspaceLayout) paneCount() int {
+	count := 0
+	if layout.treeWidth != 0 {
+		count++
+	}
+	if layout.diffWidth != 0 {
+		count++
+	}
+	if layout.commentsWidth != 0 {
+		count++
+	}
+	return count
 }

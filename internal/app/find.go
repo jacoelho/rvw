@@ -14,6 +14,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 )
 
@@ -45,18 +46,18 @@ const (
 )
 
 type findReturnState struct {
-	treeCursor    treeNodeIdentity
-	diffLeft      int
-	commentCursor int
-	active        review.FileID
-	selected      review.FileID
-	diffTop       uint32
-	diffCursor    uint32
-	visualAnchor  uint32
-	focus         FocusOwner
-	focusReturn   FocusOwner
-	activeOK      bool
-	selectedOK    bool
+	treeCursor       treeNodeIdentity
+	commentSelection commentRowIdentity
+	diffLeft         int
+	active           review.FileID
+	selected         review.FileID
+	diffTop          uint32
+	diffCursor       uint32
+	visualAnchor     uint32
+	focus            FocusOwner
+	focusReturn      FocusOwner
+	activeOK         bool
+	selectedOK       bool
 }
 
 type fileFindResult struct {
@@ -152,18 +153,18 @@ func (model *Model) captureFindReturnState() findReturnState {
 	active, activeOK := model.review.ActiveFile()
 	selected, selectedOK := model.review.SelectedFile()
 	return findReturnState{
-		treeCursor:    model.treeCursor,
-		active:        active,
-		selected:      selected,
-		focus:         model.focus,
-		focusReturn:   model.focusReturn,
-		diffLeft:      model.diffLeft,
-		commentCursor: model.commentCursor,
-		diffTop:       model.diffTop,
-		diffCursor:    model.diffCursor,
-		visualAnchor:  model.visualAnchor,
-		activeOK:      activeOK,
-		selectedOK:    selectedOK,
+		treeCursor:       model.treeCursor,
+		active:           active,
+		selected:         selected,
+		focus:            model.focus,
+		focusReturn:      model.focusReturn,
+		diffLeft:         model.diffLeft,
+		commentSelection: model.currentCommentSelection(),
+		diffTop:          model.diffTop,
+		diffCursor:       model.diffCursor,
+		visualAnchor:     model.visualAnchor,
+		activeOK:         activeOK,
+		selectedOK:       selectedOK,
 	}
 }
 
@@ -229,7 +230,7 @@ func (model *Model) restoreFindReturnState(state findReturnState) {
 		}
 	}
 	model.treeCursor = state.treeCursor
-	model.commentCursor = state.commentCursor
+	model.reconcileCommentSelection(state.commentSelection)
 	model.focus = state.focus
 	model.focusReturn = state.focusReturn
 	if !state.activeOK {
@@ -269,32 +270,32 @@ func (model *Model) applyPendingFindRestore(file review.FileID) bool {
 func (model *Model) handleFindKey(message tea.KeyPressMsg) tea.Cmd {
 	stroke := keyStrokeFrom(message)
 	if action, consumed, command := model.resolveKeyStroke(stroke); consumed {
-		if action == KeyActionNone {
+		if action == keymap.ActionNone {
 			return command
 		}
 		switch action {
-		case KeyActionCancel, KeyActionInterrupt:
+		case keymap.ActionCancel, keymap.ActionInterrupt:
 			model.closeFind(findCloseCancel)
-		case KeyActionAccept:
+		case keymap.ActionAccept:
 			return model.acceptFind()
-		case KeyActionNextSearchScope:
+		case keymap.ActionNextSearchScope:
 			return model.switchFindScope(1)
-		case KeyActionPreviousSearchScope:
+		case keymap.ActionPreviousSearchScope:
 			return model.switchFindScope(-1)
-		case KeyActionMoveUp:
+		case keymap.ActionMoveUp:
 			model.moveFind(-1)
-		case KeyActionMoveDown:
+		case keymap.ActionMoveDown:
 			model.moveFind(1)
-		case KeyActionPageUp:
+		case keymap.ActionPageUp:
 			model.moveFind(-max(model.findResultRows(), 1))
-		case KeyActionPageDown:
+		case keymap.ActionPageDown:
 			model.moveFind(max(model.findResultRows(), 1))
-		case KeyActionDeleteBackward:
+		case keymap.ActionDeleteBackward:
 			message = tea.KeyPressMsg(tea.Key{Code: tea.KeyBackspace})
 		default:
 			return nil
 		}
-		if action != KeyActionDeleteBackward {
+		if action != keymap.ActionDeleteBackward {
 			return nil
 		}
 	}
@@ -740,7 +741,7 @@ func (model *Model) findStatusText() string {
 		}
 		return "Searching changed patches…"
 	case findFailed:
-		return model.find.failure
+		return "Error: " + model.find.failure
 	case findReady:
 		count := model.findResultCount()
 		if model.find.scope != findFiles {
@@ -753,7 +754,7 @@ func (model *Model) findStatusText() string {
 			case review.SearchCancelled:
 				return "Search cancelled"
 			case review.SearchFailed:
-				return summary.Detail.String()
+				return "Error: " + summary.Detail.String()
 			case review.SearchIdle, review.SearchActive, review.SearchComplete,
 				review.SearchSuperseded:
 			}
@@ -824,7 +825,6 @@ type findModalLayout struct {
 	inputY      int
 	resultY     int
 	resultRows  int
-	bordered    bool
 }
 
 func newFindModalLayout(width, height int) findModalLayout {
@@ -834,18 +834,13 @@ func newFindModalLayout(width, height int) findModalLayout {
 		layout.height = min(height-4, 20)
 		layout.x = (width - layout.width) / 2
 		layout.y = (height - layout.height) / 2
-		layout.bordered = true
 	}
-	border := 0
-	if layout.bordered {
-		border = 1
-	}
-	layout.innerWidth = max(layout.width-border*2, 1)
-	layout.innerHeight = max(layout.height-border*2, 1)
-	layout.inputX = layout.x + border
-	layout.inputY = layout.y + border + 1
-	layout.resultY = layout.y + border + 3
-	layout.resultRows = max(layout.innerHeight-4, 1)
+	layout.innerWidth = max(layout.width, 1)
+	layout.innerHeight = max(layout.height, 1)
+	layout.inputX = layout.x
+	layout.inputY = layout.y + 1
+	layout.resultY = layout.y + 3
+	layout.resultRows = max(layout.innerHeight-5, 1)
 	return layout
 }
 
@@ -861,9 +856,18 @@ func (model *Model) findModalView(
 	layout := newFindModalLayout(width, height)
 	innerWidth := layout.innerWidth
 	lines := make([]string, 0, layout.innerHeight)
-	title := styles.heading.Render("Find") + "  " + findTabs(model.find.scope, styles)
+	title := modalTitle(styles, "Find") + "  " + findTabs(model.find.scope, styles)
 	lines = append(lines, fitCellWidth(title, innerWidth))
-	lines = append(lines, fitCellWidth(model.searchInput.View(), innerWidth))
+	searchInput := model.searchInput
+	inputStyles := searchInput.Styles()
+	inputStyles.Focused.Prompt = styles.heading.Inherit(styles.panel)
+	inputStyles.Focused.Text = styles.panel
+	inputStyles.Focused.Placeholder = styles.muted.Inherit(styles.panel)
+	inputStyles.Focused.Suggestion = styles.muted.Inherit(styles.panel)
+	inputStyles.Blurred = inputStyles.Focused
+	inputStyles.Cursor.Color = styles.panel.GetForeground()
+	searchInput.SetStyles(inputStyles)
+	lines = append(lines, fitCellWidth(searchInput.View(), innerWidth))
 	status := safeAndClip(model.findStatusText(), innerWidth)
 	if model.find.phase == findFailed {
 		status = styles.failure.Render(status)
@@ -889,17 +893,42 @@ func (model *Model) findModalView(
 		}
 		lines = append(lines, fitCellWidth(line, innerWidth))
 	}
-	help := styles.muted.Render("Tab scope  ↑↓ preview  Enter select  Esc close")
-	lines = append(lines, fitCellWidth(help, innerWidth))
-	for len(lines) < layout.innerHeight {
+	actions := []keymap.Action{keymap.ActionCancel}
+	acceptLabel := model.findAcceptLabel()
+	if acceptLabel != "" {
+		actions = append(actions, keymap.ActionAccept)
+	}
+	actions = append(actions, keymap.ActionNextSearchScope, keymap.ActionMoveDown)
+	controls := bindingBar{
+		bindings: bindingsForActions(model.effectiveBindings(keymap.ContextSearch), actions),
+		labels:   map[keymap.Action]string{keymap.ActionAccept: acceptLabel},
+	}.RenderRows(innerWidth, 2, styles, styles.panel)
+	for len(lines)+len(controls) < layout.innerHeight {
 		lines = append(lines, strings.Repeat(" ", innerWidth))
+	}
+	for _, control := range controls {
+		lines = append(lines, fitStyledCellWidth(control, innerWidth, styles.panel))
 	}
 	content := strings.Join(lines[:layout.innerHeight], "\n")
 	modalStyle := styles.panel.Width(layout.innerWidth).Height(layout.innerHeight)
-	if layout.bordered {
-		modalStyle = modalStyle.Border(lipgloss.RoundedBorder())
-	}
 	return modalStyle.Render(content), layout, rows
+}
+
+func (model *Model) findAcceptLabel() string {
+	if model.find.phase == findSearching {
+		return ""
+	}
+	if model.find.scope == findFiles {
+		if model.find.phase == findReady && model.findResultCount() != 0 {
+			return "open file"
+		}
+		return ""
+	}
+	if model.find.phase == findReady && model.find.submittedQuery == model.searchInput.Value() &&
+		model.findResultCount() != 0 {
+		return "open result"
+	}
+	return searchLabel
 }
 
 func (model *Model) findResultLine(index, width int, styles semanticStyles) string {

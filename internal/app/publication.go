@@ -8,10 +8,12 @@ import (
 
 	"charm.land/lipgloss/v2"
 
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 )
 
 func (model *Model) openPublication() {
+	model.reconcilePublicationSelection(model.currentPublicationSelection())
 	pending := model.review.PendingReviewSummary()
 	model.publicationDraftReady = pending.Status == review.PendingReviewReady &&
 		pending.Dirty == 0 && pending.Conflicts == 0
@@ -248,6 +250,7 @@ func (model *Model) applyPublicationCommitOutcome(outcome PublicationCommitOutco
 	if !model.claimPublicationOutcome(outcome.ID) {
 		return
 	}
+	selections := model.captureReviewSelections()
 	result := outcome.Publication
 	next, err := model.review.ApplyPreparedPublication(result)
 	if err != nil {
@@ -273,6 +276,7 @@ func (model *Model) applyPublicationCommitOutcome(outcome PublicationCommitOutco
 		result.Detail(),
 	)
 	model.review = next
+	model.reconcileReviewSelections(selections)
 	model.publicationIntent = publicationOperationIntentNone
 	if result.Disposition() == review.PublicationDispositionUnknown {
 		model.notice = &Notice{
@@ -284,7 +288,7 @@ func (model *Model) applyPublicationCommitOutcome(outcome PublicationCommitOutco
 	}
 	if result.Disposition() == review.PublicationDispositionCommitted {
 		message := "GitHub review published"
-		kind := NoticeInformation
+		kind := NoticeSuccess
 		if model.review.PublicationSummary().Event == review.PublicationEventDraft {
 			message = "GitHub draft review synchronized"
 			if !result.Detail().IsEmpty() {
@@ -343,6 +347,7 @@ func (model *Model) applyReconciliationOutcome(outcome ReconciliationOutcome) {
 	if !model.claimPublicationOutcome(outcome.ID) {
 		return
 	}
+	selections := model.captureReviewSelections()
 	attempt, hasAttempt := model.review.UnknownPublicationOperation()
 	result := outcome.Reconciliation
 	next, err := model.review.ApplyPreparedReconciliation(result)
@@ -378,6 +383,7 @@ func (model *Model) applyReconciliationOutcome(outcome ReconciliationOutcome) {
 		}
 	}
 	model.review = next
+	model.reconcileReviewSelections(selections)
 	if refreshErr := result.LocalRefreshError(); refreshErr != nil {
 		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(refreshErr.Error())}
 		return
@@ -385,7 +391,7 @@ func (model *Model) applyReconciliationOutcome(outcome ReconciliationOutcome) {
 	switch result.Disposition() {
 	case review.ReconciliationCommitted:
 		model.notice = &Notice{
-			Kind: NoticeInformation,
+			Kind: NoticeSuccess,
 			Text: "GitHub publication confirmed from exact remote state",
 		}
 	case review.ReconciliationNotCommitted:
@@ -414,10 +420,10 @@ func resolvePublicationOperation(
 	return next
 }
 
-func (model *Model) applyPublicationAction(action KeyAction) {
+func (model *Model) applyPublicationAction(action keymap.Action) {
 	summary := model.review.PublicationSummary()
 	switch action {
-	case KeyActionCancel, KeyActionInterrupt, KeyActionQuit:
+	case keymap.ActionCancel, keymap.ActionInterrupt, keymap.ActionQuit:
 		switch summary.Status {
 		case review.PublicationChecking, review.PublicationPublishing:
 			model.publicationIntent = publicationOperationIntentCancel
@@ -434,9 +440,23 @@ func (model *Model) applyPublicationAction(action KeyAction) {
 		default:
 			model.overlay = OverlayNone
 		}
-	case KeyActionStatusDetails:
+	case keymap.ActionStatusDetails:
+		model.statusReturn = OverlaySubmit
 		model.overlay = OverlayStatus
-	case KeyActionSubmitReview:
+	case keymap.ActionSubmitReview:
+		if model.publicationIntent == publicationOperationIntentCancel {
+			model.notice = &Notice{
+				Kind: NoticeInformation,
+				Text: "publication cancellation is settling; submission remains disabled",
+			}
+			return
+		}
+		if model.publicationIntent == publicationOperationIntentSubmit {
+			return
+		}
+		if publicationPrimaryAction(summary.Status) != keymap.ActionSubmitReview {
+			return
+		}
 		switch summary.Status {
 		case review.PublicationChecking:
 			model.publicationIntent = publicationOperationIntentSubmit
@@ -447,47 +467,41 @@ func (model *Model) applyPublicationAction(action KeyAction) {
 		case review.PublicationChecked:
 			model.startPublication()
 		default:
+			model.recheckPublication(summary.Status)
 		}
-	case KeyActionSubmitRecheck:
-		if summary.Status == review.PublicationUnknown {
-			model.startReconciliation()
-		} else if model.publicationOperation == 0 {
-			model.restartPublicationCheck()
-		}
-	case KeyActionToggleStaleOverride:
-		if model.publicationOperation == 0 {
+	case keymap.ActionSubmitRecheck:
+		model.recheckPublication(summary.Status)
+	case keymap.ActionToggleStaleOverride:
+		if model.publicationOptionsEditable() {
 			model.publicationAllowStale = !model.publicationAllowStale
 			model.restartPublicationCheck()
 		}
-	case KeyActionToggleSubmitSummary:
-		if model.publicationOperation == 0 {
+	case keymap.ActionToggleSubmitSummary:
+		if model.publicationOptionsEditable() {
 			model.publicationMoveSummary = !model.publicationMoveSummary
 			model.restartPublicationCheck()
 		}
-	case KeyActionToggleSubmitExclude:
-		if model.publicationOperation == 0 {
+	case keymap.ActionToggleSubmitExclude:
+		if model.publicationOptionsEditable() {
 			model.togglePublicationExclusion()
 			model.restartPublicationCheck()
 		}
-	case KeyActionPreviousSubmitEvent:
+	case keymap.ActionPreviousSubmitEvent:
 		model.movePublicationEvent(-1)
-	case KeyActionNextSubmitEvent:
+	case keymap.ActionNextSubmitEvent:
 		model.movePublicationEvent(1)
-	case KeyActionMoveUp:
-		model.publicationCursor = max(model.publicationCursor-1, 0)
+	case keymap.ActionMoveUp:
+		model.selectPublicationIndex(model.publicationCursor - 1)
 		model.publicationDetailTop = 0
-	case KeyActionMoveDown:
-		model.publicationCursor = min(
-			model.publicationCursor+1,
-			model.review.CommentCount(),
-		)
+	case keymap.ActionMoveDown:
+		model.selectPublicationIndex(model.publicationCursor + 1)
 		model.publicationDetailTop = 0
-	case KeyActionPageUp:
+	case keymap.ActionPageUp:
 		model.publicationDetailTop = max(
 			model.publicationDetailTop-model.publicationDetailStep(),
 			0,
 		)
-	case KeyActionPageDown:
+	case keymap.ActionPageDown:
 		model.publicationDetailTop = min(
 			model.publicationDetailTop+model.publicationDetailStep(),
 			review.MaxPublicationBytes,
@@ -502,8 +516,14 @@ var publicationEvents = [...]review.PublicationEvent{
 	review.PublicationEventRequestChanges,
 }
 
+const (
+	publicationEventCommentLabel        = "Comment"
+	publicationEventApproveLabel        = "Approve"
+	publicationEventRequestChangesLabel = "Request changes"
+)
+
 func (model *Model) movePublicationEvent(delta int) {
-	if delta == 0 || model.publicationOperation != 0 {
+	if delta == 0 || !model.publicationEventEditable() {
 		return
 	}
 	index := 0
@@ -522,6 +542,52 @@ func (model *Model) movePublicationEvent(delta int) {
 		summary.Event != review.PublicationEventDraft {
 		model.restartPublicationCheck()
 	}
+}
+
+func publicationPrimaryAction(status review.PublicationStatus) keymap.Action {
+	switch status {
+	case review.PublicationChecking, review.PublicationChecked,
+		review.PublicationIdle, review.PublicationFailedBeforeCommit,
+		review.PublicationUnknown, review.PublicationConfirmedAbsent:
+		return keymap.ActionSubmitReview
+	default:
+		return keymap.ActionNone
+	}
+}
+
+func publicationStatusRequiresRecheck(status review.PublicationStatus) bool {
+	switch status {
+	case review.PublicationIdle, review.PublicationFailedBeforeCommit,
+		review.PublicationUnknown, review.PublicationConfirmedAbsent:
+		return true
+	default:
+		return false
+	}
+}
+
+func (model *Model) recheckPublication(status review.PublicationStatus) {
+	if model.publicationOperation != 0 || !publicationStatusRequiresRecheck(status) {
+		return
+	}
+	if status == review.PublicationUnknown {
+		model.startReconciliation()
+		return
+	}
+	model.restartPublicationCheck()
+}
+
+func publicationStatusAllowsEventSelection(status review.PublicationStatus) bool {
+	return status == review.PublicationIdle || status == review.PublicationChecked
+}
+
+func (model *Model) publicationEventEditable() bool {
+	return model.publicationDraftReady && model.publicationOptionsEditable()
+}
+
+func (model *Model) publicationOptionsEditable() bool {
+	return model.publicationOperation == 0 &&
+		model.publicationIntent != publicationOperationIntentCancel &&
+		publicationStatusAllowsEventSelection(model.review.PublicationSummary().Status)
 }
 
 func (model *Model) restartPublicationCheck() {
@@ -584,76 +650,249 @@ func (model *Model) publicationView(width, height int) string {
 	summary := model.review.PublicationSummary()
 	pending := model.review.PendingReviewSummary()
 	pendingProblem := pendingReviewProblemLine(pending)
-	lines := []string{"GitHub review", model.publicationEventSelector()}
+	styles := newSemanticStyles(model.settings)
+	controls := model.publicationBindingRows(width, styles)
+	if model.publicationIntent == publicationOperationIntentCancel {
+		status := "Cancelling publication work…"
+		if summary.Status == review.PublicationPublishing {
+			status = "Cancelling publication; any claimed remote commit remains fenced."
+		}
+		return blockingSurface([]string{
+			modalTitle(styles, "Publish GitHub review"),
+			"",
+			styles.heading.Render("Cancelling"),
+			status,
+		}, controls, width, height, styles)
+	}
+	if height <= minimumHeight {
+		body := publicationCompactStateLines(summary, model.publicationIntent, styles)
+		if model.publicationEventEditable() {
+			body = model.publicationEventLines(width, styles)
+			body[0] = styles.focused.Render("▌ ") + body[0]
+		}
+		return blockingSurface(body, controls, width, height, styles)
+	}
+	lines := []string{modalTitle(styles, "Publish GitHub review")}
+	if model.publicationEventEditable() {
+		lines = append(lines, model.publicationEventLines(width, styles)...)
+	}
 	if pendingProblem != "" {
-		lines = append(lines, pendingProblem)
+		lines = append(lines, safeText(pendingProblem))
 	}
 	switch summary.Status {
 	case review.PublicationChecking:
 		status := "Checking immutable repository, pull request, and head…"
-		if model.publicationIntent == publicationOperationIntentSubmit {
-			status = "Checking immutable repository, pull request, and head; submission is queued…"
+		switch model.publicationIntent {
+		case publicationOperationIntentSubmit:
+			status = "Submission queued; checking immutable repository, pull request, and head…"
+		case publicationOperationIntentCancel:
+			status = "Cancelling publication preflight…"
+		case publicationOperationIntentNone:
 		}
-		lines = append(lines, status)
+		lines = append(lines, "", styles.heading.Render("Submission"), status)
+		context := model.publicationEventLines(width, styles)
+		if width >= compactWidth && height-len(controls) >= len(lines)+1+len(context) {
+			lines = append(lines, "")
+			lines = append(lines, context...)
+		}
 	case review.PublicationChecked:
-		unmappablePolicy := "exclude"
-		if model.publicationMoveSummary {
-			unmappablePolicy = "move to summary"
-		}
-		headStatus := "checked at current head"
-		if summary.StaleHead {
-			headStatus = "stale head explicitly overridden"
-		}
-		stage := "Submit pending draft as " + model.publicationEvent.String()
-		if summary.Event == review.PublicationEventDraft {
-			stage = "Synchronize comments to a pending GitHub draft"
-		}
-		lines = append(lines,
-			"Target: "+summary.Target.Repository()+"#"+
-				fmt.Sprintf("%d", summary.Target.PullRequest()),
-			"Next step: "+stage,
-			fmt.Sprintf("Comments: %d included, %d excluded", summary.Included, summary.Excluded),
-			"Unmappable policy: "+unmappablePolicy,
-			"Source/head: "+headStatus,
-		)
-		if pending.Status == review.PendingReviewReady {
-			lines = append(lines, fmt.Sprintf(
-				"Pending review: continue %d · %d changed · %d conflicts",
-				pending.ReviewID.Uint64(), pending.Dirty, pending.Conflicts,
-			))
-		} else if pendingProblem == "" {
-			lines = append(lines, "Pending review: "+pending.Status.String())
-		}
-		chooserHeight := min(max(height-len(lines)-5, 1), 6)
-		lines = append(lines, model.publicationCommentLines(chooserHeight)...)
-		detailHeight := max(height-len(lines)-2, 0)
 		lines = append(
 			lines,
-			model.publicationDetailLines(width, detailHeight)...,
+			model.publicationCheckedLines(
+				summary, pending, pendingProblem, width, height, len(lines), styles,
+			)...,
 		)
 	case review.PublicationPublishing:
-		lines = append(lines, "Publishing; cancellation after the commit claim produces an unknown result.")
+		status := "Publishing; cancellation after the commit claim produces an unknown result."
+		if model.publicationIntent == publicationOperationIntentCancel {
+			status = "Cancelling publication; a claimed remote commit remains fenced until settlement."
+		}
+		lines = append(lines,
+			"",
+			styles.heading.Render("Submission"),
+			status,
+		)
 	case review.PublicationUnknown:
 		lines = append(lines,
+			"",
+			styles.heading.Render("Submission"),
 			"Outcome unknown; retry is fenced.",
-			"Target: "+summary.Target.Repository()+"#"+
+			safeText("Target: "+summary.Target.Repository()+"#"+
 				fmt.Sprintf("%d", summary.Target.PullRequest()),
-			"Marker: "+summary.Marker.String(),
-			"Use submit-recheck to verify exact remote state.",
+			),
+			safeText("Marker: "+summary.Marker.String()),
+			"Recheck to verify exact remote state before retrying.",
 		)
 	case review.PublicationReconciling:
-		lines = append(lines, "Checking exact GitHub publication state…")
+		lines = append(lines, "", styles.heading.Render("Submission"),
+			"Checking exact GitHub publication state…")
 	case review.PublicationCommitted:
-		lines = append(lines, "Publication committed.")
+		lines = append(lines, "", styles.heading.Render("Submission"),
+			"Publication committed.")
 	case review.PublicationConfirmedAbsent:
-		lines = append(lines, "Marker confirmed absent; a new checked attempt may be submitted safely.")
+		lines = append(lines, "", styles.heading.Render("Submission"),
+			"Marker confirmed absent; a new checked attempt may be submitted safely.")
 	case review.PublicationFailedBeforeCommit:
-		lines = append(lines, "Publication failed before commit: "+summary.Detail.String())
+		lines = append(lines, "", styles.heading.Render("Submission"),
+			safeText("Publication failed before commit: "+summary.Detail.String()))
 	default:
-		lines = append(lines, "No publication preflight is active.")
+		lines = append(lines, "", styles.heading.Render("Submission"),
+			"No publication preflight is active.")
 	}
-	lines = append(lines, model.bindingSummary(KeyContextSubmit))
-	return constrainedLines(lines, width, height)
+	return blockingSurface(lines, controls, width, height, styles)
+}
+
+func (model *Model) publicationCheckedLines(
+	summary review.PublicationSummary,
+	pending review.PendingReviewSummary,
+	pendingProblem string,
+	width, height, prefixRows int,
+	styles semanticStyles,
+) []string {
+	unmappablePolicy := "exclude"
+	if model.publicationMoveSummary {
+		unmappablePolicy = "move to summary"
+	}
+	headStatus := "checked at current head"
+	if summary.StaleHead {
+		headStatus = "stale head explicitly overridden"
+	}
+	stage := "Submit pending draft as " + model.publicationEvent.String()
+	if summary.Event == review.PublicationEventDraft {
+		stage = "Synchronize comments to a pending GitHub draft"
+	}
+	lines := []string{
+		"",
+		styles.heading.Render("Submission"),
+		safeText("Target: " + summary.Target.Repository() + "#" +
+			fmt.Sprintf("%d", summary.Target.PullRequest()),
+		),
+		"Next step: " + stage,
+		fmt.Sprintf("Comments: %d included, %d excluded", summary.Included, summary.Excluded),
+		model.publicationLineWithBindings(
+			"Unmappable: "+unmappablePolicy,
+			width,
+			styles,
+			publicationBindingHint{
+				action: keymap.ActionToggleSubmitSummary,
+				label:  "toggle",
+			},
+		),
+		model.publicationLineWithBindings(
+			"Head: "+headStatus,
+			width,
+			styles,
+			publicationBindingHint{
+				action: keymap.ActionToggleStaleOverride,
+				label:  "allow stale",
+			},
+		),
+	}
+	if pending.Status == review.PendingReviewReady {
+		lines = append(lines, fmt.Sprintf(
+			"Pending review: continue %d · %d changed · %d conflicts",
+			pending.ReviewID.Uint64(), pending.Dirty, pending.Conflicts,
+		))
+	} else if pendingProblem == "" {
+		lines = append(lines, safeText("Pending review: "+pending.Status.String()))
+	}
+	contentHints := []publicationBindingHint{
+		{action: keymap.ActionMoveDown, label: "select"},
+		{action: keymap.ActionMoveUp, label: "select"},
+	}
+	if model.review.CommentCount() != 0 {
+		contentHints = append([]publicationBindingHint{
+			{action: keymap.ActionToggleSubmitExclude, label: "include/exclude"},
+		}, contentHints...)
+	}
+	lines = append(lines, "", model.publicationLineWithBindings(
+		styles.heading.Render("Contents"),
+		width,
+		styles,
+		contentHints...,
+	))
+	bodyHeight := max(height-1, 0)
+	chooserHeight := min(max(bodyHeight-prefixRows-len(lines)-4, 1), 6)
+	lines = append(lines, model.publicationCommentLines(chooserHeight)...)
+	detailHeight := max(bodyHeight-prefixRows-len(lines), 0)
+	return append(lines, model.publicationDetailLines(width, detailHeight, styles)...)
+}
+
+func publicationCompactStateLines(
+	summary review.PublicationSummary,
+	intent publicationOperationIntent,
+	styles semanticStyles,
+) []string {
+	lines := []string{modalTitle(styles, "Publish GitHub review"), ""}
+	var status string
+	switch summary.Status {
+	case review.PublicationChecking:
+		status = "Checking preflight…"
+		if intent == publicationOperationIntentSubmit {
+			lines = append(lines, styles.heading.Render(status))
+			status = "Submission queued"
+		}
+	case review.PublicationChecked:
+		status = "Ready to publish"
+		if summary.Event == review.PublicationEventDraft {
+			status = "Ready to sync draft"
+		}
+	case review.PublicationPublishing:
+		status = "Publishing review…"
+		if summary.Event == review.PublicationEventDraft {
+			status = "Syncing draft…"
+		}
+	case review.PublicationCommitted:
+		status = "Review published"
+		if summary.Event == review.PublicationEventDraft {
+			status = "Draft synchronized"
+		}
+	case review.PublicationFailedBeforeCommit:
+		status = "Failed before commit"
+	case review.PublicationUnknown:
+		lines = append(lines, styles.warning.Render("Outcome unknown"))
+		status = "Recheck remote state"
+	case review.PublicationReconciling:
+		status = "Reconciling review…"
+	case review.PublicationConfirmedAbsent:
+		status = "Remote review absent"
+	default:
+		status = "No preflight active"
+	}
+	return append(lines, styles.heading.Render(status))
+}
+
+type publicationBindingHint struct {
+	action keymap.Action
+	label  string
+}
+
+func (model *Model) publicationLineWithBindings(
+	base string,
+	width int,
+	styles semanticStyles,
+	hints ...publicationBindingHint,
+) string {
+	remaining := width - lipgloss.Width(base) - lipgloss.Width(" · ")
+	if remaining <= 0 {
+		return base
+	}
+	bindings := make([]keymap.Binding, 0, len(hints))
+	labels := make(map[keymap.Action]string, len(hints))
+	effective := model.effectiveBindings(keymap.ContextSubmit)
+	for _, hint := range hints {
+		matches := bindingsForActions(effective, []keymap.Action{hint.action})
+		if len(matches) == 0 {
+			continue
+		}
+		bindings = append(bindings, matches[0])
+		labels[hint.action] = hint.label
+	}
+	rendered := bindingBar{bindings: bindings, labels: labels}.Render(remaining, styles)
+	if rendered == "" {
+		return base
+	}
+	return base + styles.muted.Render(" · ") + rendered
 }
 
 func pendingReviewProblemLine(pending review.PendingReviewSummary) string {
@@ -671,35 +910,153 @@ func pendingReviewProblemLine(pending review.PendingReviewSummary) string {
 	return line
 }
 
-func (model *Model) publicationEventSelector() string {
-	var selector strings.Builder
-	selector.WriteString("Submit as (h/l): ")
-	for index, event := range publicationEvents {
-		if index != 0 {
-			selector.WriteString("  ")
-		}
-		label := publicationEventLabel(event)
-		if event == model.publicationEvent {
-			selector.WriteByte('[')
-			selector.WriteString(label)
-			selector.WriteByte(']')
-		} else {
-			selector.WriteString(label)
+func (model *Model) publicationEventLines(width int, styles semanticStyles) []string {
+	if !model.publicationDraftReady {
+		return []string{
+			styles.heading.Render("Review action · draft synchronization required"),
+			styles.selected.Render("▸ Synchronize draft comments"),
+			styles.muted.Render(
+				"  Comment, Approve, and Request changes follow after the draft is current.",
+			),
 		}
 	}
-	return selector.String()
+	headingWidth := max(width-lipgloss.Width("▌ "), 1)
+	heading := "Review action · " + model.publicationEventNavigationHint(width, false)
+	if lipgloss.Width(heading) > headingWidth {
+		heading = "Action"
+		available := max(headingWidth-lipgloss.Width("Action · "), 0)
+		if hint := model.publicationEventNavigationHint(available, true); hint != "" {
+			heading += " · " + hint
+		}
+	}
+	lines := []string{styles.heading.Render(safeText(heading))}
+	for _, event := range publicationEvents {
+		label := fmt.Sprintf("%-15s", publicationEventLabel(event))
+		description := publicationEventDescription(event)
+		if event == model.publicationEvent {
+			lines = append(lines, styles.selected.Render("▸ "+label+" "+description))
+			continue
+		}
+		lines = append(lines, "  "+label+" "+styles.muted.Render(description))
+	}
+	return lines
+}
+
+func (model *Model) publicationEventNavigationHint(width int, compact bool) string {
+	if !model.publicationEventEditable() {
+		if model.publicationOperation != 0 {
+			return "selection locked while publication work is active"
+		}
+		return "selection unavailable in this state"
+	}
+	bindings := bindingsForActions(
+		model.effectiveBindings(keymap.ContextSubmit),
+		[]keymap.Action{
+			keymap.ActionPreviousSubmitEvent,
+			keymap.ActionNextSubmitEvent,
+		},
+	)
+	if len(bindings) == 2 {
+		if compact {
+			previous := bindings[0].Chord.Display()
+			next := bindings[1].Chord.Display()
+			pair := previous + "/" + next
+			switch {
+			case lipgloss.Width(pair) <= width:
+				return pair
+			case lipgloss.Width(previous) <= width:
+				return previous
+			case lipgloss.Width(next) <= width:
+				return next
+			default:
+				return ""
+			}
+		}
+		return bindings[0].Chord.Display() + " or " + bindings[1].Chord.Display() + " to change"
+	}
+	if len(bindings) == 1 {
+		if compact {
+			chord := bindings[0].Chord.Display()
+			if lipgloss.Width(chord) <= width {
+				return chord
+			}
+			return ""
+		}
+		return bindings[0].Chord.Display() + " to change"
+	}
+	return "selection unavailable"
+}
+
+func (model *Model) publicationBindingSummary() string {
+	actions := model.publicationBindingActions()
+	bindings := bindingsForActions(model.effectiveBindings(keymap.ContextSubmit), actions)
+	var summary strings.Builder
+	for index, binding := range bindings {
+		writeBindingSummary(&summary, index, binding.Chord, binding.Action)
+	}
+	return summary.String()
+}
+
+func (model *Model) publicationBindingRows(width int, styles semanticStyles) []string {
+	summary := model.review.PublicationSummary()
+	bar := bindingBar{bindings: bindingsForActions(
+		model.effectiveBindings(keymap.ContextSubmit),
+		model.publicationBindingActions(),
+	)}
+	switch {
+	case publicationStatusRequiresRecheck(summary.Status):
+		bar.labels = map[keymap.Action]string{
+			keymap.ActionSubmitReview: keymap.ActionSubmitRecheck.Description(),
+		}
+	case summary.Event == review.PublicationEventDraft:
+		bar.labels = map[keymap.Action]string{
+			keymap.ActionSubmitReview: "sync draft",
+		}
+	}
+	return bar.RenderRows(width, 2, styles, styles.panel)
+}
+
+func (model *Model) publicationBindingActions() []keymap.Action {
+	actions := []keymap.Action{keymap.ActionCancel}
+	if model.publicationIntent == publicationOperationIntentCancel ||
+		model.publicationIntent == publicationOperationIntentSubmit {
+		return actions
+	}
+	if primary := publicationPrimaryAction(model.review.PublicationSummary().Status); primary != keymap.ActionNone {
+		actions = append(actions, primary)
+	}
+	if model.publicationEventEditable() {
+		actions = append(actions,
+			keymap.ActionPreviousSubmitEvent,
+			keymap.ActionNextSubmitEvent,
+		)
+	}
+	return actions
 }
 
 func publicationEventLabel(event review.PublicationEvent) string {
 	switch event {
 	case review.PublicationEventComment:
-		return "Comment"
+		return publicationEventCommentLabel
 	case review.PublicationEventApprove:
-		return "Approve"
+		return publicationEventApproveLabel
 	case review.PublicationEventRequestChanges:
-		return "Request changes"
+		return publicationEventRequestChangesLabel
 	default:
 		return event.String()
+	}
+}
+
+func publicationEventDescription(event review.PublicationEvent) string {
+	switch event {
+	case review.PublicationEventComment:
+		return "Leave feedback without approving"
+	case review.PublicationEventApprove:
+		return "Approve the pull request"
+	case review.PublicationEventRequestChanges:
+		return "Require updates before merge"
+	default:
+		return ""
 	}
 }
 
@@ -741,7 +1098,10 @@ func (model *Model) publicationCommentLines(limit int) []string {
 	return lines
 }
 
-func (model *Model) publicationDetailLines(width, height int) []string {
+func (model *Model) publicationDetailLines(
+	width, height int,
+	styles semanticStyles,
+) []string {
 	if width <= 0 || height <= 0 {
 		return nil
 	}
@@ -762,7 +1122,13 @@ func (model *Model) publicationDetailLines(width, height int) []string {
 	for end > top && end < len(value) && !utf8.RuneStart(value[end]) {
 		end--
 	}
-	header := fmt.Sprintf("%s · bytes %d–%d/%d", label, top, end, len(value))
+	header := model.publicationLineWithBindings(
+		fmt.Sprintf("%s · bytes %d–%d/%d", label, top, end, len(value)),
+		width,
+		styles,
+		publicationBindingHint{action: keymap.ActionPageDown, label: "details"},
+		publicationBindingHint{action: keymap.ActionPageUp, label: "details"},
+	)
 	if value == "" {
 		return []string{header, "(empty)"}
 	}

@@ -199,7 +199,7 @@ func TestLifecycleAndScaleContract(t *testing.T) {
 			scenario.Given("help owns the terminal", func(t testing.TB, w *world) {
 				launchStableWorktree()(t, w)
 				w.pty.send(t, "?")
-				w.pty.awaitScreen(t, "help", containsScreen("Effective help"))
+				w.pty.awaitScreen(t, "help", containsScreen("Keybindings"))
 			})
 			scenario.When("Ctrl-c is entered", func(t testing.TB, w *world) {
 				w.pty.send(t, "\x03")
@@ -227,7 +227,7 @@ func TestLifecycleAndScaleContract(t *testing.T) {
 			scenario.When("the interactive review is opened and quit", func(t testing.TB, w *world) {
 				w.launchPTY(t, 120, 24, "diff")
 				w.pty.awaitScreen(t, "exact scale worktree", func(screen string) bool {
-					return strings.Contains(screen, "000000.txt") && strings.Contains(screen, "work 0/64")
+					return strings.Contains(screen, "000000.txt") && strings.Contains(screen, "Ready")
 				})
 				w.pty.send(t, "q")
 				w.pty.awaitExit(t)

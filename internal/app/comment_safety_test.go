@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 )
 
@@ -145,13 +146,67 @@ func TestModelRemainsUsableWithUnavailableUnsafePendingCapture(t *testing.T) {
 	} else if !strings.Contains(view, detail.String()) {
 		t.Fatalf("submit view omitted pending-review failure detail: %q", view)
 	}
-	setModelKeybindings(t, model, Keybinding{
-		Context: KeyContextSubmit,
-		Chord:   "F2",
-		Action:  KeyActionStatusDetails,
+	setModelKeybindings(t, model, keymap.Binding{
+		Context: keymap.ContextSubmit,
+		Chord:   "f2",
+		Action:  keymap.ActionStatusDetails,
+	}, keymap.Binding{
+		Context: keymap.ContextStatusDetails,
+		Chord:   "esc",
+		Action:  keymap.ActionCancel,
 	})
 	_, _ = model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyF2}))
 	if model.overlay != OverlayStatus {
 		t.Fatalf("F2 left overlay = %d, want status details", model.overlay)
+	}
+	_, _ = model.Update(keyMessage("esc"))
+	if model.overlay != OverlaySubmit {
+		t.Fatalf("closing status left overlay = %d, want publication", model.overlay)
+	}
+}
+
+func TestRowOwnedReviewActionsRequireTheirFocusedPane(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	settleModelWork(t, model, coordinator)
+	active, ok := model.review.ActiveFile()
+	if !ok {
+		t.Fatal("missing active file")
+	}
+	model.requestActivePatch()
+	waitForPatch(t, model, coordinator, active)
+
+	tests := []struct {
+		name   string
+		action keymap.Action
+		focus  FocusOwner
+	}{
+		{name: "visual from files", action: keymap.ActionVisualLine, focus: FocusFileTree},
+		{name: "hunk review from comments", action: keymap.ActionToggleHunkReviewed, focus: FocusComments},
+		{name: "comment edit from diff", action: keymap.ActionEditComment, focus: FocusDiff},
+		{name: "comment delete from files", action: keymap.ActionDeleteComment, focus: FocusFileTree},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			model.focus = test.focus
+			model.mode = ModeNormal
+			model.overlay = OverlayNone
+			before := model.review.StateRevision()
+			_, handled := model.applyReviewAction(test.action)
+			if !handled || model.mode != ModeNormal || model.overlay != OverlayNone ||
+				model.review.StateRevision() != before {
+				t.Fatalf(
+					"action %s escaped focus guard: handled %v mode %v overlay %v revision %d→%d",
+					test.action,
+					handled,
+					model.mode,
+					model.overlay,
+					before,
+					model.review.StateRevision(),
+				)
+			}
+			if model.notice == nil || !strings.Contains(string(model.notice.Text), "requires the") {
+				t.Fatalf("action %s omitted focus guidance: %+v", test.action, model.notice)
+			}
+		})
 	}
 }

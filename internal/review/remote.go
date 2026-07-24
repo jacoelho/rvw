@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
 	"unicode/utf8"
 )
@@ -14,6 +15,7 @@ const (
 	MaxRemoteComments               = 100_000
 	MaxRemoteThreadBytes      int64 = 64 << 20
 	remoteThreadStorageBytes        = 96
+	remoteThreadPositionBytes       = 24
 	remoteCommentStorageBytes       = 96
 	remoteAnchorStorageBytes        = 32
 )
@@ -317,6 +319,11 @@ const (
 	takeRemoteThreads
 )
 
+type remoteThreadPosition struct {
+	id    string
+	index int
+}
+
 // WithRemoteThreads performs the with remote threads operation.
 func (snapshot Snapshot) WithRemoteThreads(threads []RemoteThread) (Snapshot, error) {
 	return snapshot.withRemoteThreads(threads, cloneRemoteThreads)
@@ -374,6 +381,7 @@ func (snapshot Snapshot) withRemoteThreadsCancellable(
 	if err := cancellationError(cancelled); err != nil {
 		return Snapshot{}, err
 	}
+	positions := make([]remoteThreadPosition, len(owned))
 	for index, thread := range owned {
 		if index%256 == 0 {
 			if err := cancellationError(cancelled); err != nil {
@@ -394,12 +402,24 @@ func (snapshot Snapshot) withRemoteThreadsCancellable(
 			}] = struct{}{}
 		}
 		owned[index] = thread
+		positions[index] = remoteThreadPosition{id: thread.id, index: index}
 	}
 	if err := cancellationError(cancelled); err != nil {
 		return Snapshot{}, err
 	}
+	if err := sortRemoteThreadPositionsCancellable(cancelled, positions); err != nil {
+		return Snapshot{}, err
+	}
+	retained += int64(cap(positions)) * remoteThreadPositionBytes
+	if retained > MaxRemoteThreadBytes {
+		return Snapshot{}, fmt.Errorf(
+			"%w: remote thread data exceeds its retained bound",
+			ErrInvalidRemoteThread,
+		)
+	}
 	next := snapshot
 	next.remoteThreads = owned
+	next.remoteThreadPositions = positions
 	next.remoteCommentAnchors = anchors
 	next.remoteThreadStatus = RemoteThreadsReady
 	next.remoteThreadDetail = EmptyOperationDetail()
@@ -412,6 +432,54 @@ func (snapshot Snapshot) withRemoteThreadsCancellable(
 		return Snapshot{}, err
 	}
 	return updated, nil
+}
+
+func sortRemoteThreadPositionsCancellable(
+	cancelled func() error,
+	positions []remoteThreadPosition,
+) error {
+	work := 0
+	poll := func() error {
+		work++
+		if work%256 != 0 {
+			return nil
+		}
+		return cancellationError(cancelled)
+	}
+	less := func(left, right remoteThreadPosition) bool {
+		return left.id < right.id
+	}
+	siftDown := func(root, end int) error {
+		for child := root*2 + 1; child < end; child = root*2 + 1 {
+			if err := poll(); err != nil {
+				return err
+			}
+			if child+1 < end && less(positions[child], positions[child+1]) {
+				child++
+			}
+			if !less(positions[root], positions[child]) {
+				return nil
+			}
+			positions[root], positions[child] = positions[child], positions[root]
+			root = child
+		}
+		return nil
+	}
+	if err := cancellationError(cancelled); err != nil {
+		return err
+	}
+	for root := len(positions)/2 - 1; root >= 0; root-- {
+		if err := siftDown(root, len(positions)); err != nil {
+			return err
+		}
+	}
+	for end := len(positions) - 1; end > 0; end-- {
+		positions[0], positions[end] = positions[end], positions[0]
+		if err := siftDown(0, end); err != nil {
+			return err
+		}
+	}
+	return cancellationError(cancelled)
 }
 
 func validateRemoteThreadsCancellable(
@@ -483,11 +551,64 @@ func (snapshot Snapshot) WithRemoteThreadFailure(
 		return Snapshot{}, ErrInvalidRemoteThread
 	}
 	next := snapshot
-	next.remoteThreads = nil
-	next.remoteCommentAnchors = nil
 	next.remoteThreadStatus = status
 	next.remoteThreadDetail = detail
-	return next.withRemoteRetainedBytes(detail.Bytes(), ErrInvalidRemoteThread)
+	retained := snapshot.remoteRetainedBytes - snapshot.remoteThreadDetail.Bytes() + detail.Bytes()
+	if retained > MaxRemoteThreadBytes {
+		return Snapshot{}, ErrInvalidRemoteThread
+	}
+	return next.withRemoteRetainedBytes(retained, ErrInvalidRemoteThread)
+}
+
+func retainRemoteThreadsAfterFailure(
+	cancelled func() error,
+	previous, replacement Snapshot,
+) (Snapshot, error) {
+	status := replacement.remoteThreadStatus
+	if status != RemoteThreadsUnavailable && status != RemoteThreadsLimited ||
+		len(previous.remoteThreads) == 0 {
+		return replacement, nil
+	}
+	detail := replacement.remoteThreadDetail
+	threads := slices.Clone(previous.remoteThreads)
+	next, err := replacement.withRemoteThreadsCancellable(
+		cancelled,
+		threads,
+		takeRemoteThreads,
+	)
+	if err != nil {
+		if cause := cancellationError(cancelled); cause != nil {
+			return Snapshot{}, cause
+		}
+		if errors.Is(err, ErrInvalidRemoteThread) || errors.Is(err, ErrInvalidSnapshot) {
+			return replacement, nil
+		}
+		return Snapshot{}, err
+	}
+	if replacement.pendingReviewStatus == PendingReviewReady &&
+		replacement.pendingReview != nil {
+		next, err = next.withoutPendingRemoteCommentsCancellable(
+			cancelled,
+			*replacement.pendingReview,
+		)
+		if err != nil {
+			if cause := cancellationError(cancelled); cause != nil {
+				return Snapshot{}, cause
+			}
+			if errors.Is(err, ErrInvalidRemoteThread) || errors.Is(err, ErrInvalidSnapshot) {
+				return replacement, nil
+			}
+			return Snapshot{}, err
+		}
+	}
+	if next.remoteRetainedBytes+detail.Bytes() > MaxRemoteThreadBytes {
+		return replacement, nil
+	}
+	retained, err := next.WithRemoteThreadFailure(status, detail)
+	if err != nil && (errors.Is(err, ErrInvalidRemoteThread) || errors.Is(err, ErrInvalidSnapshot)) {
+		return replacement, nil
+	}
+	return retained, err
 }
 
 type remotePathMapping struct {
@@ -536,6 +657,18 @@ func (snapshot Snapshot) RemoteThread(index int) (RemoteThread, bool) {
 		return RemoteThread{}, false
 	}
 	return snapshot.remoteThreads[index], true
+}
+
+// RemoteThreadIndex returns the immutable row index for one stable thread ID.
+func (snapshot Snapshot) RemoteThreadIndex(id string) (int, bool) {
+	index := sort.Search(len(snapshot.remoteThreadPositions), func(index int) bool {
+		return snapshot.remoteThreadPositions[index].id >= id
+	})
+	if index == len(snapshot.remoteThreadPositions) ||
+		snapshot.remoteThreadPositions[index].id != id {
+		return 0, false
+	}
+	return snapshot.remoteThreadPositions[index].index, true
 }
 
 // RemoteThreads performs the remote threads operation.

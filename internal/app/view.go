@@ -2,11 +2,13 @@ package app
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 )
 
@@ -15,7 +17,7 @@ const (
 	minimumHeight    = 6
 	compactWidth     = 80
 	normalWidth      = 120
-	wideWidth        = 180
+	wideWidth        = 160
 	maxRenderWidth   = 1_000
 	maxRenderHeight  = 300
 	viewportOverscan = 8
@@ -28,28 +30,6 @@ const (
 	commentEditorMaxHeight       = 6
 	commentEditorWorkspaceHeight = 3
 )
-
-type semanticStyles struct {
-	heading       lipgloss.Style
-	muted         lipgloss.Style
-	focused       lipgloss.Style
-	selected      lipgloss.Style
-	added         lipgloss.Style
-	deleted       lipgloss.Style
-	context       lipgloss.Style
-	hunk          lipgloss.Style
-	pending       lipgloss.Style
-	reviewed      lipgloss.Style
-	commentAnchor lipgloss.Style
-	keyword       lipgloss.Style
-	literal       lipgloss.Style
-	comment       lipgloss.Style
-	number        lipgloss.Style
-	warning       lipgloss.Style
-	failure       lipgloss.Style
-	status        lipgloss.Style
-	panel         lipgloss.Style
-}
 
 type workspaceLayout struct {
 	treeWidth          int
@@ -93,6 +73,24 @@ const (
 type diffLineNumberWidths struct {
 	old int
 	new int
+}
+
+type paneHeaderState uint8
+
+const (
+	paneHeaderQuiet paneHeaderState = iota + 1
+	paneHeaderFocused
+)
+
+var workspaceBindingLabels = map[keymap.Action]string{
+	keymap.ActionMoveDown:        nextRowLabel,
+	keymap.ActionCommentAtCursor: commentLabel,
+	keymap.ActionFileComment:     "file comment",
+	keymap.ActionEditComment:     "edit",
+	keymap.ActionFocusNextPane:   "next pane",
+	keymap.ActionNextFile:        "next",
+	keymap.ActionPreviousFile:    "prev",
+	keymap.ActionHelp:            helpLabel,
 }
 
 // View returns the receiver's view value.
@@ -148,14 +146,28 @@ func (model *Model) workspaceView(
 ) (string, mouseHitMap) {
 	styles := newSemanticStyles(model.settings)
 	bodyHeight := max(height-2, 1)
-	treeLines, treeRows := model.fileTreeLines(layout.treeWidth, bodyHeight, styles)
-	diffLines, diffRows := model.diffLines(layout.diffWidth, bodyHeight, styles)
-	commentLines, commentRows := model.commentLines(
-		layout.commentsWidth,
-		bodyHeight,
-		styles,
+	var (
+		treeLines    []string
+		treeRows     []treeNodeIdentity
+		diffLines    []string
+		diffRows     []uint32
+		commentLines []string
+		commentRows  []int
 	)
-	separator := styles.muted.Render("│")
+	if layout.treeWidth != 0 {
+		treeLines, treeRows = model.fileTreeLines(layout.treeWidth, bodyHeight, styles)
+	}
+	if layout.diffWidth != 0 {
+		diffLines, diffRows = model.diffLines(layout.diffWidth, bodyHeight, styles)
+	}
+	if layout.commentsWidth != 0 {
+		commentLines, commentRows = model.commentLines(
+			layout.commentsWidth,
+			bodyHeight,
+			styles,
+		)
+	}
+	separator := styles.muted.Inherit(styles.panel).Render("│")
 
 	body := make([]string, bodyHeight)
 	for row := range bodyHeight {
@@ -169,27 +181,31 @@ func (model *Model) workspaceView(
 			if row < len(treeLines) {
 				treeLine = treeLines[row]
 			}
-			sections = append(sections, fitCellWidth(treeLine, layout.treeWidth))
+			sections = append(
+				sections,
+				fitStyledCellWidth(treeLine, layout.treeWidth, styles.panel),
+			)
 		}
-		sections = append(sections, fitCellWidth(diffLine, layout.diffWidth))
+		if layout.diffWidth != 0 {
+			sections = append(
+				sections,
+				fitStyledCellWidth(diffLine, layout.diffWidth, styles.panel),
+			)
+		}
 		if layout.commentsWidth != 0 {
 			commentLine := ""
 			if row < len(commentLines) {
 				commentLine = commentLines[row]
 			}
-			sections = append(sections, fitCellWidth(commentLine, layout.commentsWidth))
+			sections = append(
+				sections,
+				fitStyledCellWidth(commentLine, layout.commentsWidth, styles.panel),
+			)
 		}
 		body[row] = strings.Join(sections, separator)
-		if model.settings.colorEnabled {
-			body[row] = styles.panel.Render(body[row])
-		}
 	}
-	title := model.titleLine(width, styles)
+	title := model.workspaceHeaderLine(layout, styles)
 	footer := model.statusLine(width, styles)
-	if model.settings.colorEnabled {
-		title = styles.panel.Render(title)
-		footer = styles.status.Render(footer)
-	}
 	if model.mode == ModeCommand {
 		footer = model.commandBarLine(width, styles)
 	}
@@ -215,7 +231,7 @@ func (hits mouseHitMap) command(message tea.MouseMsg) tea.Cmd {
 	if hits.bodyHeight == 0 || mouse.Y < 1 || mouse.Y > hits.bodyHeight {
 		return nil
 	}
-	focus := FocusDiff
+	var focus FocusOwner
 	diffStart := 0
 	if hits.layout.treeWidth != 0 {
 		if mouse.X < hits.layout.treeWidth {
@@ -224,9 +240,19 @@ func (hits mouseHitMap) command(message tea.MouseMsg) tea.Cmd {
 			diffStart = hits.layout.treeWidth + 1
 		}
 	}
-	commentsStart := diffStart + hits.layout.diffWidth + 1
-	if hits.layout.commentsWidth != 0 && mouse.X >= commentsStart {
+	if focus == 0 && hits.layout.diffWidth != 0 {
+		focus = FocusDiff
+	}
+	commentsStart := diffStart + hits.layout.diffWidth
+	if hits.layout.diffWidth != 0 {
+		commentsStart++
+	}
+	if hits.layout.commentsWidth != 0 &&
+		(hits.layout.diffWidth == 0 || mouse.X >= commentsStart) {
 		focus = FocusComments
+	}
+	if focus == 0 {
+		return nil
 	}
 	action := mouseActionMsg{reviewState: hits.reviewState, focus: focus}
 	switch message.(type) {
@@ -247,7 +273,7 @@ func (hits mouseHitMap) command(message tea.MouseMsg) tea.Cmd {
 				action.diffLine = hits.diffRows[row]
 			}
 		case FocusComments:
-			if row < len(hits.commentRows) {
+			if row < len(hits.commentRows) && hits.commentRows[row] >= 0 {
 				action.target = mouseTargetComment
 				action.commentIndex = hits.commentRows[row]
 			}
@@ -305,25 +331,44 @@ func (model *Model) fileTreeLines(
 	styles semanticStyles,
 ) ([]string, []treeNodeIdentity) {
 	tree := model.currentFileTree()
-	if width == 0 || tree.empty() {
+	if width == 0 {
 		return nil, nil
+	}
+	if tree.empty() {
+		message := model.emptyFileProjectionText()
+		style := styles.muted
+		if strings.HasPrefix(message, "Error:") {
+			style = styles.failure
+		} else if strings.HasPrefix(message, "Loading") ||
+			strings.HasPrefix(message, "Filtering") {
+			style = styles.pending
+		}
+		return []string{style.Render(safeAndClip(message, width))}, nil
 	}
 	window := tree.window(model.treeCursor, height, model.collapsedTree)
 	lines := make([]string, 0, len(window))
 	rows := make([]treeNodeIdentity, 0, len(window))
 	active, activeOK := model.review.ActiveFile()
+	snapshot := model.review.Snapshot()
 	for _, node := range window {
 		label := node.label
-		if label == "" && !node.identity.directory {
-			if file, ok := model.review.Snapshot().File(node.identity.file); ok {
-				label = file.DisplayPath()
+		badge := " "
+		badgeStyle := lipgloss.NewStyle()
+		if !node.identity.directory {
+			if file, ok := snapshot.File(node.identity.file); ok {
+				if label == "" {
+					label = file.DisplayPath()
+				}
+				badge = fileChangeBadge(file.Change().Kind())
+				badgeStyle = fileChangeBadgeStyle(file.Change().Kind(), styles)
 			}
 		}
 		cursor := "  "
-		if node.identity == model.treeCursor {
+		selected := node.identity == model.treeCursor
+		if selected {
 			cursor = "› "
-			if model.focus == FocusFileTree {
-				cursor = styles.focused.Render("▸") + " "
+			if model.workspaceOwnsInput() && model.focus == FocusFileTree {
+				cursor = "▸ "
 			}
 		}
 		activeMarker := " "
@@ -343,15 +388,56 @@ func (model *Model) fileTreeLines(
 			}
 		}
 		indent := strings.Repeat("  ", min(node.depth, max(width/2, 0)))
-		line := cursor + activeMarker + reviewed + disclosure + indent +
-			safeAndClip(label, max(width-7-len(indent), 1))
-		if node.identity == model.treeCursor {
-			line = styles.selected.Render(line)
+		prefix := cursor + activeMarker + reviewed + disclosure
+		suffix := " " + indent + safeAndClip(label, max(width-9-len(indent), 1))
+		suffix = fitCellWidth(suffix, max(width-lipgloss.Width(prefix)-1, 0))
+		base := lipgloss.NewStyle()
+		if model.settings.colorEnabled {
+			base = styles.panel
+		}
+		renderedBadge := badgeStyle.Inherit(base).Render(badge)
+		line := base.Render(prefix) + renderedBadge + base.Render(suffix)
+		if selected {
+			line = styles.selected.Render(prefix + badge + suffix)
 		}
 		lines = append(lines, line)
 		rows = append(rows, node.identity)
 	}
 	return lines, rows
+}
+
+func fileChangeBadge(kind review.ChangeKind) string {
+	switch kind {
+	case review.ChangeAdded:
+		return "A"
+	case review.ChangeDeleted:
+		return "D"
+	case review.ChangeModified:
+		return "M"
+	case review.ChangeRenamed, review.ChangeRenameOnly:
+		return "R"
+	case review.ChangeCopied:
+		return "C"
+	case review.ChangeBinary:
+		return "B"
+	case review.ChangeModeOnly, review.ChangeObjectTypeChanged:
+		return "T"
+	case review.ChangeSubmodule:
+		return "S"
+	default:
+		return "?"
+	}
+}
+
+func fileChangeBadgeStyle(kind review.ChangeKind, styles semanticStyles) lipgloss.Style {
+	switch kind {
+	case review.ChangeAdded:
+		return styles.added
+	case review.ChangeDeleted:
+		return styles.deleted
+	default:
+		return styles.heading
+	}
 }
 
 func (model *Model) wrappedLine(value string, width int) []string {
@@ -397,10 +483,10 @@ func (model *Model) commentLines(
 		review.PendingReviewReady
 	for index := start; index < min(start+height, count); index++ {
 		prefix := "  "
-		if index == cursor {
+		if index == cursor && model.commentRowSelected(index) {
 			prefix = "› "
-			if model.focus == FocusComments {
-				prefix = styles.focused.Render("▸") + " "
+			if model.workspaceOwnsInput() && model.focus == FocusComments {
+				prefix = "▸ "
 			}
 		}
 		var line string
@@ -453,11 +539,21 @@ func (model *Model) commentLines(
 				}
 			}
 		}
+		line = fitCellWidth(line, width)
 		if index == cursor {
 			line = styles.selected.Render(line)
 		}
 		lines = append(lines, line)
 		rows = append(rows, index)
+	}
+	remote := snapshot.RemoteThreadSummary()
+	if len(lines) < height && (remote.Status == review.RemoteThreadsUnavailable ||
+		remote.Status == review.RemoteThreadsLimited) {
+		lines = append(lines, styles.warning.Render(safeAndClip(
+			"Remote comments "+remote.Status.String()+": "+remote.Detail.String(),
+			width,
+		)))
+		rows = append(rows, -1)
 	}
 	return lines, rows
 }
@@ -526,11 +622,11 @@ func (model *Model) commentEditorView(width, height int) string {
 		}, "\n")
 	}
 	title := "Comment · " + commentTargetText(draft.Target())
-	help := model.commentEditorBindingSummary()
+	help := bindingBar{bindings: model.commentEditorBindings()}.Render(width, styles)
 	return strings.Join([]string{
 		workspace,
 		fitCellWidth(styles.focused.Render(safeAndClip(title, width)), width),
-		fitCellWidth(styles.muted.Render(safeAndClip(help, width)), width),
+		fitCellWidth(help, width),
 		model.commentEditor.View(),
 	}, "\n")
 }
@@ -548,42 +644,160 @@ func newCommentEditorLayout(height int) commentEditorLayout {
 	}
 }
 
-func (model *Model) titleLine(width int, styles semanticStyles) string {
+func (model *Model) workspaceHeaderLine(layout workspaceLayout, styles semanticStyles) string {
 	activeText := "no active file"
 	if active, ok := model.review.ActiveFile(); ok {
 		if file, exists := model.review.Snapshot().File(active); exists {
 			activeText = file.DisplayPath()
+			if layout.treeWidth == 0 {
+				if position, found := slices.BinarySearch(model.fileOrder, active); found && len(model.fileOrder) > 1 {
+					activeText = fmt.Sprintf("%d/%d · %s", position+1, len(model.fileOrder), activeText)
+				}
+			}
 		}
 	}
-	focus := "diff"
-	switch {
-	case model.mode == ModeCommentEdit:
-		focus = "comment"
-	case model.mode == ModeCommand:
-		focus = KeyContextCommand.String()
-	case model.focus == FocusFileTree:
-		focus = "files"
-	case model.focus == FocusComments:
-		focus = "comments"
+	diffTitle := "DIFF · " + activeText
+	switch model.mode {
+	case ModeCommentEdit:
+		diffTitle += " · COMMENT"
+	case ModeCommand:
+		diffTitle += " · COMMAND"
+	case ModeVisual:
+		diffTitle += " · VISUAL"
+	case ModeNormal:
 	}
-	title := fmt.Sprintf(
-		"rvw  [focus:%s]  %s  [source:%d workspace:%d]",
-		focus,
-		activeText,
-		model.review.Snapshot().SourceID().Uint64(),
-		model.review.WorkspaceRevision().Uint64(),
+	sections := make([]string, 0, 3)
+	if layout.treeWidth != 0 {
+		visibleFiles := len(model.fileOrder)
+		totalFiles := model.review.Snapshot().FileCount()
+		fileCount := fmt.Sprint(totalFiles)
+		if visibleFiles != totalFiles {
+			fileCount = fmt.Sprintf("%d/%d", visibleFiles, totalFiles)
+		}
+		title := "FILES · " + fileCount + model.fileProjectionHeaderSuffix()
+		sections = append(sections, paneHeader(
+			title,
+			layout.treeWidth,
+			model.workspacePaneHeaderState(FocusFileTree),
+			styles,
+		))
+	}
+	if layout.diffWidth != 0 {
+		sections = append(sections, paneHeader(
+			diffTitle,
+			layout.diffWidth,
+			model.workspacePaneHeaderState(FocusDiff),
+			styles,
+		))
+	}
+	if layout.commentsWidth != 0 {
+		sections = append(sections, paneHeader(
+			fmt.Sprintf("COMMENTS · %d%s", model.commentRowCount(), model.commentSourceHeaderSuffix()),
+			layout.commentsWidth,
+			model.workspacePaneHeaderState(FocusComments),
+			styles,
+		))
+	}
+	return strings.Join(sections, styles.muted.Inherit(styles.panel).Render("│"))
+}
+
+func (model *Model) emptyFileProjectionText() string {
+	switch model.fileProjection.workspace {
+	case projectionInitial, projectionLoading:
+		return "Loading changed files…"
+	case projectionFailed:
+		return "Error: changed files unavailable — " + string(model.fileProjection.workspaceDetail)
+	case projectionReady:
+	}
+	if model.fileProjection.requestedQuery != model.fileProjection.appliedQuery {
+		switch model.fileProjection.filter {
+		case projectionLoading:
+			return "Filtering files…"
+		case projectionFailed:
+			return "Error: file filter failed — " + string(model.fileProjection.filterDetail)
+		case projectionInitial, projectionReady:
+		}
+	}
+	if model.fileProjection.appliedQuery != "" {
+		return "No files match the filter."
+	}
+	return "No changed files."
+}
+
+func (model *Model) fileProjectionHeaderSuffix() string {
+	switch model.fileProjection.workspace {
+	case projectionInitial, projectionLoading:
+		return " · LOADING"
+	case projectionFailed:
+		return " · ! ERROR"
+	case projectionReady:
+	}
+	if model.fileProjection.requestedQuery != model.fileProjection.appliedQuery {
+		switch model.fileProjection.filter {
+		case projectionLoading:
+			return " · FILTERING"
+		case projectionFailed:
+			return " · ! FILTER ERROR"
+		case projectionInitial, projectionReady:
+		}
+	}
+	return ""
+}
+
+func (model *Model) commentSourceHeaderSuffix() string {
+	remote := model.review.Snapshot().RemoteThreadSummary()
+	if model.foreground.reloadActive() && remote.Status != review.RemoteThreadsNotRequested {
+		return " · REMOTE LOADING"
+	}
+	switch remote.Status {
+	case review.RemoteThreadsUnavailable, review.RemoteThreadsLimited:
+		return " · ! REMOTE " + strings.ToUpper(remote.Status.String())
+	case review.RemoteThreadsNotRequested, review.RemoteThreadsReady:
+		return ""
+	default:
+		return " · ! REMOTE ERROR"
+	}
+}
+
+func (model *Model) workspacePaneHeaderState(focus FocusOwner) paneHeaderState {
+	if model.workspaceOwnsInput() && model.focus == focus {
+		return paneHeaderFocused
+	}
+	return paneHeaderQuiet
+}
+
+func (model *Model) workspaceOwnsInput() bool {
+	return model.overlay == OverlayNone && (model.mode == ModeNormal || model.mode == ModeVisual)
+}
+
+func paneHeader(
+	title string,
+	width int,
+	state paneHeaderState,
+	styles semanticStyles,
+) string {
+	if width <= 0 {
+		return ""
+	}
+	marker := "  "
+	style := styles.paneHeader
+	if state == paneHeaderFocused {
+		marker = "▌ "
+		style = styles.focusedPaneHeader
+	}
+	titleWidth := max(width-lipgloss.Width(marker), 0)
+	return style.Inherit(styles.panel).Render(
+		fitCellWidth(marker+safeAndClip(title, titleWidth), width),
 	)
-	return fitCellWidth(styles.heading.Render(safeAndClip(title, width)), width)
 }
 
 func (model *Model) statusLine(width int, styles semanticStyles) string {
 	status := model.operationSummary()
-	if model.mode == ModeCommentEdit {
-		status += "  comment editor owns input"
-	} else {
-		status += "  " + model.normalStatusBindingSummary()
+	if conditions := model.workspaceConditionSummary(); conditions != "" {
+		status = conditions + "  " + status
 	}
 	_, height := model.renderSize()
+	layout := model.workspaceLayout(width, height)
 	if model.size.Width > maxRenderWidth || model.size.Height > maxRenderHeight {
 		status = fmt.Sprintf(
 			"presentation clipped to %d×%d  %s",
@@ -592,20 +806,135 @@ func (model *Model) statusLine(width int, styles semanticStyles) string {
 			status,
 		)
 	}
-	if model.workspaceLayout(width, height).sideBySideFallback {
+	if layout.sideBySideFallback {
 		status = "unified fallback: side-by-side needs 100 columns  " + status
 	}
 	if model.notice != nil {
-		status = string(model.notice.Text) + "  " + status
+		prefix := ""
 		switch model.notice.Kind {
 		case NoticeInformation:
+		case NoticeSuccess:
+			prefix = "Success: "
 		case NoticeWarning:
-			return fitCellWidth(styles.warning.Render(safeAndClip(status, width)), width)
+			prefix = "Warning: "
 		case NoticeError:
-			return fitCellWidth(styles.failure.Render(safeAndClip(status, width)), width)
+			prefix = "Error: "
+		}
+		status = prefix + string(model.notice.Text) + "  " + status
+	}
+	if model.mode == ModeCommentEdit {
+		status = safeAndClip(status+"  comment editor owns input", width)
+	} else {
+		bindingBudget := min(max(width/2, 0), 48)
+		if width >= compactWidth {
+			bindingBudget = min(width-20, 72)
+		}
+		bindings := bindingBar{
+			bindings: model.workspaceStatusBindings(layout),
+			labels:   workspaceBindingLabels,
+		}.RenderWithBase(bindingBudget, styles, styles.status)
+		if bindings != "" {
+			statusWidth := max(width-lipgloss.Width(bindings)-2, 0)
+			status = fitCellWidth(safeAndClip(status, statusWidth), statusWidth) + "  " + bindings
+		} else {
+			status = safeAndClip(status, width)
 		}
 	}
-	return fitCellWidth(styles.muted.Render(safeAndClip(status, width)), width)
+	if model.notice != nil {
+		switch model.notice.Kind {
+		case NoticeInformation:
+		case NoticeSuccess:
+			return fitStyledCellWidth(status, width, styles.success.Inherit(styles.status))
+		case NoticeWarning:
+			return fitStyledCellWidth(status, width, styles.warning.Inherit(styles.status))
+		case NoticeError:
+			return fitStyledCellWidth(status, width, styles.failure.Inherit(styles.status))
+		}
+	}
+	return fitStyledCellWidth(status, width, styles.status)
+}
+
+func (model *Model) workspaceConditionSummary() string {
+	conditions := make([]string, 0, 3)
+	switch model.fileProjection.workspace {
+	case projectionInitial, projectionLoading:
+		conditions = append(conditions, "Loading files…")
+	case projectionFailed:
+		conditions = append(conditions, "Error: file index unavailable")
+	case projectionReady:
+	}
+	if model.fileProjection.requestedQuery != model.fileProjection.appliedQuery {
+		switch model.fileProjection.filter {
+		case projectionLoading:
+			conditions = append(conditions, "Filtering files…")
+		case projectionFailed:
+			conditions = append(conditions, "Error: file filter failed")
+		case projectionInitial, projectionReady:
+		}
+	}
+	remote := model.review.Snapshot().RemoteThreadSummary()
+	if model.foreground.reloadActive() && remote.Status != review.RemoteThreadsNotRequested {
+		conditions = append(conditions, "Loading remote comments; prior results retained")
+		return strings.Join(conditions, " · ")
+	}
+	switch remote.Status {
+	case review.RemoteThreadsUnavailable, review.RemoteThreadsLimited:
+		condition := "Remote comments " + remote.Status.String()
+		if remote.Count != 0 {
+			condition += "; prior results retained"
+		}
+		conditions = append(conditions, condition)
+	case review.RemoteThreadsNotRequested, review.RemoteThreadsReady:
+	default:
+		conditions = append(conditions, "Error: remote comments failed")
+	}
+	return strings.Join(conditions, " · ")
+}
+
+func (model *Model) workspaceStatusBindings(layout workspaceLayout) []keymap.Binding {
+	if model.mode == ModeVisual {
+		return bindingsForActions(model.effectiveBindings(keymap.ContextVisual), []keymap.Action{
+			keymap.ActionExtendDown,
+			keymap.ActionCommentSelection,
+			keymap.ActionCancel,
+		})
+	}
+	if _, active := model.review.ActiveFile(); !active {
+		return bindingsForActions(model.effectiveBindings(keymap.ContextNormal), []keymap.Action{
+			keymap.ActionReload,
+			keymap.ActionHelp,
+		})
+	}
+	if layout.treeWidth != 0 || layout.commentsWidth != 0 {
+		if model.focus == FocusComments && !model.editableLocalCommentSelected() {
+			return bindingsForActions(model.effectiveBindings(keymap.ContextNormal), []keymap.Action{
+				keymap.ActionHelp,
+				keymap.ActionFocusNextPane,
+				keymap.ActionFileComment,
+			})
+		}
+		return model.normalStatusBindings()
+	}
+	if len(model.fileOrder) < 2 {
+		return bindingsForActions(model.effectiveBindings(keymap.ContextNormal), []keymap.Action{
+			keymap.ActionMoveDown,
+			keymap.ActionHelp,
+			keymap.ActionCommentAtCursor,
+		})
+	}
+	actions := make([]keymap.Action, 0, 4)
+	if active, ok := model.review.ActiveFile(); ok {
+		if position, found := slices.BinarySearch(model.fileOrder, active); found {
+			if position < len(model.fileOrder)-1 {
+				actions = append(actions, keymap.ActionNextFile)
+			}
+			if position > 0 {
+				actions = append(actions, keymap.ActionPreviousFile)
+			}
+		}
+	}
+	actions = append(actions, keymap.ActionHelp, keymap.ActionCommentAtCursor)
+	return bindingsForActions(model.effectiveBindings(keymap.ContextNormal), actions)
 }
 
 func (model *Model) renderSize() (int, int) {
@@ -627,6 +956,18 @@ func (model *Model) showFileTree() bool {
 	}
 	width, height := model.renderSize()
 	return model.workspaceLayout(width, height).treeWidth != 0
+}
+
+func (model *Model) currentWorkspaceLayout() workspaceLayout {
+	width, height := model.renderSize()
+	return model.workspaceLayout(width, height)
+}
+
+func (model *Model) showDiffPane() bool {
+	if !model.size.Known {
+		return false
+	}
+	return model.currentWorkspaceLayout().diffWidth != 0
 }
 
 func (model *Model) showCommentsPane() bool {
@@ -659,18 +1000,125 @@ func separatorWidth(treeWidth, commentsWidth int) int {
 	return width
 }
 
-func constrainedLines(lines []string, width, height int) string {
-	lines = lines[:min(len(lines), height)]
-	for index := range lines {
-		lines[index] = safeAndClip(lines[index], width)
-	}
-	return constrainedStyledLines(lines, width, height)
-}
-
 func constrainedStyledLines(lines []string, width, height int) string {
 	lines = lines[:min(len(lines), height)]
 	for index := range lines {
 		lines[index] = fitCellWidth(lines[index], width)
+	}
+	return strings.Join(lines, "\n")
+}
+
+type blockingDialogSize struct {
+	width, height int
+}
+
+type blockingDialogLayout struct {
+	x, y          int
+	width, height int
+}
+
+func contentSizedBlockingDialog(
+	maximum blockingDialogSize,
+	body, controls []string,
+) blockingDialogSize {
+	maximum.height = min(maximum.height, max(len(body)+len(controls), 1))
+	return maximum
+}
+
+func newBlockingDialogLayout(
+	width, height int,
+	preferred blockingDialogSize,
+) blockingDialogLayout {
+	layout := blockingDialogLayout{
+		width:  min(max(width, 0), preferred.width),
+		height: min(max(height, 0), preferred.height),
+	}
+	layout.x = max((width-layout.width)/2, 0)
+	layout.y = max((height-layout.height)/2, 0)
+	return layout
+}
+
+func boundedBlockingSurface(
+	body, controls []string,
+	width, height int,
+	preferred blockingDialogSize,
+	styles semanticStyles,
+) string {
+	layout := newBlockingDialogLayout(width, height, preferred)
+	if layout.width == 0 || layout.height == 0 {
+		return ""
+	}
+	modal := blockingSurface(body, controls, layout.width, layout.height, styles)
+	modalRows := strings.Split(modal, "\n")
+	canvasRows := make([]string, height)
+	blank := strings.Repeat(" ", max(width, 0))
+	left := strings.Repeat(" ", layout.x)
+	right := strings.Repeat(" ", max(width-layout.x-layout.width, 0))
+	for row := range height {
+		if row < layout.y || row >= layout.y+len(modalRows) {
+			canvasRows[row] = blank
+			continue
+		}
+		canvasRows[row] = left + modalRows[row-layout.y] + right
+	}
+	return strings.Join(canvasRows, "\n")
+}
+
+func boundedBlockingOverlay(
+	background string,
+	body, controls []string,
+	width, height int,
+	preferred blockingDialogSize,
+	styles semanticStyles,
+) string {
+	layout := newBlockingDialogLayout(width, height, preferred)
+	if layout.width == 0 || layout.height == 0 {
+		return ""
+	}
+	modalRows := strings.Split(
+		blockingSurface(body, controls, layout.width, layout.height, styles),
+		"\n",
+	)
+	backgroundRows := strings.Split(background, "\n")
+	rows := make([]string, height)
+	for row := range height {
+		backgroundRow := ""
+		if row < len(backgroundRows) {
+			backgroundRow = backgroundRows[row]
+		}
+		backgroundRow = fitStyledCellWidth(backgroundRow, width, styles.panel)
+		if row < layout.y || row >= layout.y+len(modalRows) {
+			rows[row] = backgroundRow
+			continue
+		}
+		rightStart := layout.x + layout.width
+		rows[row] = clipStyled(backgroundRow, 0, layout.x) +
+			modalRows[row-layout.y] +
+			clipStyled(backgroundRow, rightStart, width-rightStart)
+	}
+	return strings.Join(rows, "\n")
+}
+
+func blockingSurface(
+	body, controls []string,
+	width, height int,
+	styles semanticStyles,
+) string {
+	if width <= 0 || height <= 0 {
+		return ""
+	}
+	controls = controls[:min(len(controls), height)]
+	bodyRows := max(height-len(controls), 0)
+	body = body[:min(len(body), bodyRows)]
+	lines := make([]string, 0, height)
+	for _, line := range body {
+		lines = append(lines, fitStyledCellWidth(line, width, styles.panel))
+	}
+	for len(lines) < bodyRows {
+		lines = append(lines, fitStyledCellWidth("", width, styles.panel))
+	}
+	for _, line := range controls {
+		lines = append(lines, fitStyledCellWidth(line, width, styles.panel))
 	}
 	return strings.Join(lines, "\n")
 }

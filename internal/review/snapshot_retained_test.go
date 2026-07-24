@@ -303,12 +303,13 @@ func snapshotRetainedBytesForTest(snapshot Snapshot) int64 {
 
 func snapshotRetainedComponentsForTest(snapshot Snapshot) (int64, int64, int64) {
 	const (
-		fileSlotBytes            int64 = 256
-		remoteThreadSlotBytes    int64 = 96
-		remoteCommentSlotBytes   int64 = 96
-		remoteAnchorEntryBytes   int64 = 32
-		pendingReviewHeaderBytes int64 = 64
-		pendingCommentSlotBytes  int64 = 256
+		fileSlotBytes             int64 = 256
+		remoteThreadSlotBytes     int64 = 96
+		remoteThreadPositionBytes int64 = 24
+		remoteCommentSlotBytes    int64 = 96
+		remoteAnchorEntryBytes    int64 = 32
+		pendingReviewHeaderBytes  int64 = 64
+		pendingCommentSlotBytes   int64 = 256
 	)
 	base := int64(cap(snapshot.files))*fileSlotBytes + snapshot.pathProjection.metadataBytes
 	for _, file := range snapshot.files {
@@ -321,6 +322,7 @@ func snapshotRetainedComponentsForTest(snapshot Snapshot) (int64, int64, int64) 
 	}
 
 	remote := int64(cap(snapshot.remoteThreads))*remoteThreadSlotBytes +
+		int64(cap(snapshot.remoteThreadPositions))*remoteThreadPositionBytes +
 		int64(len(snapshot.remoteCommentAnchors))*remoteAnchorEntryBytes +
 		snapshot.remoteThreadDetail.Bytes()
 	for _, thread := range snapshot.remoteThreads {

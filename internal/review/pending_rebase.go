@@ -3,29 +3,30 @@ package review
 import "fmt"
 
 const (
-	pendingRebaseSourceMetadataBytes   int64 = 304
-	preparedPendingRebaseMetadataBytes int64 = 280
+	pendingRebaseSourceMetadataBytes   int64 = 328
+	preparedPendingRebaseMetadataBytes int64 = 304
 )
 
 // PendingRebaseSource is the narrow immutable state needed to merge one fresh
 // pending-review capture. It excludes files, patch handles, and presentation state.
 type PendingRebaseSource struct {
-	remoteCommentAnchors map[commentAnchor]struct{}
-	remoteThreadDetail   OperationDetail
-	pendingReviewDetail  OperationDetail
-	remoteThreads        []RemoteThread
-	publicationDecisions []PublicationCommentDecision
-	paths                remotePathProjection
-	state                commentState
-	workspace            WorkspaceRevision
-	source               SourceID
-	baseRetainedBytes    int64
-	remoteRetainedBytes  int64
-	retainedBytes        int64
-	commentRevision      uint64
-	remoteThreadStatus   RemoteThreadStatus
-	pendingReviewStatus  PendingReviewStatus
-	createdDraft         bool
+	remoteCommentAnchors  map[commentAnchor]struct{}
+	remoteThreadDetail    OperationDetail
+	pendingReviewDetail   OperationDetail
+	remoteThreads         []RemoteThread
+	remoteThreadPositions []remoteThreadPosition
+	publicationDecisions  []PublicationCommentDecision
+	paths                 remotePathProjection
+	state                 commentState
+	workspace             WorkspaceRevision
+	source                SourceID
+	baseRetainedBytes     int64
+	remoteRetainedBytes   int64
+	retainedBytes         int64
+	commentRevision       uint64
+	remoteThreadStatus    RemoteThreadStatus
+	pendingReviewStatus   PendingReviewStatus
+	createdDraft          bool
 }
 
 // PendingRebaseSource captures an O(1), revision-fenced pending-rebase input.
@@ -36,20 +37,21 @@ func (review Review) PendingRebaseSource() PendingRebaseSource {
 		snapshot.pendingReviewDetail.Bytes() + snapshot.pathProjection.retainedBytes() +
 		pendingRebaseSourceMetadataBytes
 	return PendingRebaseSource{
-		state:                review.commentState,
-		paths:                snapshot.pathProjection,
-		remoteCommentAnchors: snapshot.remoteCommentAnchors,
-		remoteThreads:        snapshot.remoteThreads,
-		remoteThreadDetail:   snapshot.remoteThreadDetail,
-		pendingReviewDetail:  snapshot.pendingReviewDetail,
-		workspace:            review.workspace,
-		source:               snapshot.SourceID(),
-		baseRetainedBytes:    base,
-		remoteRetainedBytes:  snapshot.remoteRetainedBytes,
-		retainedBytes:        retained,
-		commentRevision:      review.revision,
-		remoteThreadStatus:   snapshot.remoteThreadStatus,
-		pendingReviewStatus:  snapshot.pendingReviewStatus,
+		state:                 review.commentState,
+		paths:                 snapshot.pathProjection,
+		remoteCommentAnchors:  snapshot.remoteCommentAnchors,
+		remoteThreads:         snapshot.remoteThreads,
+		remoteThreadPositions: snapshot.remoteThreadPositions,
+		remoteThreadDetail:    snapshot.remoteThreadDetail,
+		pendingReviewDetail:   snapshot.pendingReviewDetail,
+		workspace:             review.workspace,
+		source:                snapshot.SourceID(),
+		baseRetainedBytes:     base,
+		remoteRetainedBytes:   snapshot.remoteRetainedBytes,
+		retainedBytes:         retained,
+		commentRevision:       review.revision,
+		remoteThreadStatus:    snapshot.remoteThreadStatus,
+		pendingReviewStatus:   snapshot.pendingReviewStatus,
 	}
 }
 
@@ -125,28 +127,30 @@ func (source PendingRebaseSource) constructionBytesCancellable(
 }
 
 type pendingSnapshotDelta struct {
-	pendingReview        *PendingReview
-	remoteCommentAnchors map[commentAnchor]struct{}
-	remoteThreadDetail   OperationDetail
-	pendingReviewDetail  OperationDetail
-	remoteThreads        []RemoteThread
-	remoteRetainedBytes  int64
-	pendingRetainedBytes int64
-	remoteThreadStatus   RemoteThreadStatus
-	pendingReviewStatus  PendingReviewStatus
+	pendingReview         *PendingReview
+	remoteCommentAnchors  map[commentAnchor]struct{}
+	remoteThreadDetail    OperationDetail
+	pendingReviewDetail   OperationDetail
+	remoteThreads         []RemoteThread
+	remoteThreadPositions []remoteThreadPosition
+	remoteRetainedBytes   int64
+	pendingRetainedBytes  int64
+	remoteThreadStatus    RemoteThreadStatus
+	pendingReviewStatus   PendingReviewStatus
 }
 
 func pendingSnapshotDeltaFrom(snapshot Snapshot) pendingSnapshotDelta {
 	return pendingSnapshotDelta{
-		pendingReview:        snapshot.pendingReview,
-		remoteCommentAnchors: snapshot.remoteCommentAnchors,
-		remoteThreads:        snapshot.remoteThreads,
-		remoteThreadDetail:   snapshot.remoteThreadDetail,
-		pendingReviewDetail:  snapshot.pendingReviewDetail,
-		remoteRetainedBytes:  snapshot.remoteRetainedBytes,
-		pendingRetainedBytes: snapshot.pendingRetainedBytes,
-		remoteThreadStatus:   snapshot.remoteThreadStatus,
-		pendingReviewStatus:  snapshot.pendingReviewStatus,
+		pendingReview:         snapshot.pendingReview,
+		remoteCommentAnchors:  snapshot.remoteCommentAnchors,
+		remoteThreads:         snapshot.remoteThreads,
+		remoteThreadPositions: snapshot.remoteThreadPositions,
+		remoteThreadDetail:    snapshot.remoteThreadDetail,
+		pendingReviewDetail:   snapshot.pendingReviewDetail,
+		remoteRetainedBytes:   snapshot.remoteRetainedBytes,
+		pendingRetainedBytes:  snapshot.pendingRetainedBytes,
+		remoteThreadStatus:    snapshot.remoteThreadStatus,
+		pendingReviewStatus:   snapshot.pendingReviewStatus,
 	}
 }
 
@@ -155,6 +159,7 @@ func (delta pendingSnapshotDelta) install(snapshot Snapshot) Snapshot {
 	next.pendingReview = delta.pendingReview
 	next.remoteCommentAnchors = delta.remoteCommentAnchors
 	next.remoteThreads = delta.remoteThreads
+	next.remoteThreadPositions = delta.remoteThreadPositions
 	next.remoteThreadDetail = delta.remoteThreadDetail
 	next.pendingReviewDetail = delta.pendingReviewDetail
 	next.remoteRetainedBytes = delta.remoteRetainedBytes
@@ -217,16 +222,17 @@ func PreparePendingRebaseCancellable(
 	}
 	owned.comments = comments
 	temporary := Snapshot{
-		remoteCommentAnchors: source.remoteCommentAnchors,
-		remoteThreadDetail:   source.remoteThreadDetail,
-		pendingReviewDetail:  source.pendingReviewDetail,
-		remoteThreads:        source.remoteThreads,
-		pathProjection:       source.paths,
-		sourceID:             source.source,
-		retainedBytes:        source.baseRetainedBytes + source.remoteRetainedBytes,
-		remoteRetainedBytes:  source.remoteRetainedBytes,
-		remoteThreadStatus:   source.remoteThreadStatus,
-		pendingReviewStatus:  source.pendingReviewStatus,
+		remoteCommentAnchors:  source.remoteCommentAnchors,
+		remoteThreadDetail:    source.remoteThreadDetail,
+		pendingReviewDetail:   source.pendingReviewDetail,
+		remoteThreads:         source.remoteThreads,
+		remoteThreadPositions: source.remoteThreadPositions,
+		pathProjection:        source.paths,
+		sourceID:              source.source,
+		retainedBytes:         source.baseRetainedBytes + source.remoteRetainedBytes,
+		remoteRetainedBytes:   source.remoteRetainedBytes,
+		remoteThreadStatus:    source.remoteThreadStatus,
+		pendingReviewStatus:   source.pendingReviewStatus,
 	}
 	updated, err := temporary.takePendingReviewCancellable(cancelled, owned)
 	if err != nil {

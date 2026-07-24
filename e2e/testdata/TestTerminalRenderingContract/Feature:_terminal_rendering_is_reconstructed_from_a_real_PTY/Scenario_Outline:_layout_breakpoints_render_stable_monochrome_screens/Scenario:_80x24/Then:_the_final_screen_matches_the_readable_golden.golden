@@ -1,4 +1,4 @@
-rvw  [focus:diff]  staged.txt  [source:1 workspace:1]
+▌ DIFF · 1/3 · staged.txt
 ▸       diff --git a/staged.txt b/staged.txt
         new file mode 100644
         index 0000000..4480ae4
@@ -15,4 +15,10 @@ rvw  [focus:diff]  staged.txt  [source:1 workspace:1]
 
 
 
-work 0/64  Tab focus-next-pane  Enter activate  ? help  q quit
+
+
+
+
+
+
+Ready                                                ] f next  ? help  c comment

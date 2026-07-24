@@ -30,6 +30,7 @@ type ReloadReport struct {
 // PreparedReplacement represents prepared replacement.
 type PreparedReplacement struct {
 	next          Review
+	snapshotDelta int64
 	baseWorkspace WorkspaceRevision
 	baseSource    SourceID
 	baseState     uint64
@@ -43,7 +44,7 @@ func (prepared PreparedReplacement) RetainedBytes() int64 {
 	if !prepared.valid {
 		return 0
 	}
-	return prepared.next.retainedBytesWithoutSnapshot()
+	return prepared.next.retainedBytesWithoutSnapshot() + prepared.snapshotDelta
 }
 
 func (review Review) retainedBytesWithoutSnapshot() int64 {
@@ -108,7 +109,29 @@ func ReplacementConstructionBytes(current Review, candidate Snapshot) int64 {
 	aliasScratch := (oldFiles + newFiles) * 320
 	remapScratch := min(oldFiles, newFiles) * 48
 	commentScratch := (comments + pendingComments) * 320
-	return result + aliasScratch + remapScratch + commentScratch
+	remoteRetained, remoteScratch := staleRemoteReplacementBytes(current.snapshot, candidate)
+	return result + aliasScratch + remapScratch + commentScratch +
+		remoteRetained + remoteScratch
+}
+
+func staleRemoteReplacementBytes(current, candidate Snapshot) (int64, int64) {
+	if candidate.remoteThreadStatus != RemoteThreadsUnavailable &&
+		candidate.remoteThreadStatus != RemoteThreadsLimited ||
+		len(current.remoteThreads) == 0 {
+		return 0, 0
+	}
+	comments := 0
+	for _, thread := range current.remoteThreads {
+		comments += len(thread.comments)
+	}
+	pendingComments := 0
+	if candidate.pendingReview != nil {
+		pendingComments = len(candidate.pendingReview.comments)
+	}
+	scratch := int64(len(current.remoteThreads)+comments)*64 +
+		int64(len(current.remoteThreads)+comments)*96 +
+		int64(pendingComments)*64 + 1_024
+	return current.remoteRetainedBytes, scratch
 }
 
 // PrepareReplacement prepares replacement.
@@ -166,26 +189,30 @@ func PrepareReplacementCancellable(
 	preparation.next.mutationKind = 0
 	preparation.next.publication.pendingRefresh = false
 	preparation.next.refresh()
+	snapshotDelta := preparation.next.snapshot.RetainedBytes() - preparation.candidateRetained
+	snapshotDelta = max(snapshotDelta, 0)
 	return PreparedReplacement{
 		baseWorkspace: review.workspace,
 		baseSource:    review.snapshot.SourceID(),
 		baseState:     review.state,
 		next:          preparation.next,
 		report:        preparation.report,
+		snapshotDelta: snapshotDelta,
 		valid:         true,
 	}, nil
 }
 
 type replacementPreparation struct {
-	cancelled      func() error
-	aliases        map[string]FileID
-	remapped       map[FileID]FileID
-	commentIndexes map[CommentID]int
-	pendingFiles   remotePathProjection
-	snapshot       Snapshot
-	original       Review
-	next           Review
-	report         ReloadReport
+	cancelled         func() error
+	aliases           map[string]FileID
+	remapped          map[FileID]FileID
+	commentIndexes    map[CommentID]int
+	pendingFiles      remotePathProjection
+	snapshot          Snapshot
+	original          Review
+	next              Review
+	report            ReloadReport
+	candidateRetained int64
 }
 
 func newReplacementPreparation(
@@ -193,11 +220,17 @@ func newReplacementPreparation(
 	review Review,
 	snapshot Snapshot,
 ) (*replacementPreparation, error) {
-	if err := validateReplacementInput(cancelled, review, snapshot); err != nil {
+	candidateRetained := snapshot.RetainedBytes()
+	var err error
+	snapshot, err = retainRemoteThreadsAfterFailure(cancelled, review.snapshot, snapshot)
+	if err != nil {
 		return nil, err
 	}
-	if _, err := uniqueFilesByAlias(cancelled, review.snapshot); err != nil {
-		return nil, err
+	if validationErr := validateReplacementInput(cancelled, review, snapshot); validationErr != nil {
+		return nil, validationErr
+	}
+	if _, aliasErr := uniqueFilesByAlias(cancelled, review.snapshot); aliasErr != nil {
+		return nil, aliasErr
 	}
 	aliases, err := uniqueFilesByAlias(cancelled, snapshot)
 	if err != nil {
@@ -216,13 +249,14 @@ func newReplacementPreparation(
 	next.operations = maps.Clone(review.operations)
 	next.search = searchState{status: SearchIdle}
 	return &replacementPreparation{
-		cancelled:    cancelled,
-		aliases:      aliases,
-		remapped:     remapped,
-		pendingFiles: snapshot.remotePathMappings(),
-		original:     review,
-		next:         next,
-		snapshot:     snapshot,
+		cancelled:         cancelled,
+		candidateRetained: candidateRetained,
+		aliases:           aliases,
+		remapped:          remapped,
+		pendingFiles:      snapshot.remotePathMappings(),
+		original:          review,
+		next:              next,
+		snapshot:          snapshot,
 		report: ReloadReport{
 			FilesPreserved: uint32FromInt(len(remapped)),
 			FilesRemoved:   uint32FromInt(review.snapshot.FileCount() - len(remapped)),

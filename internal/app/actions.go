@@ -5,6 +5,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/jacoelho/rvw/internal/delivery"
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 )
 
@@ -13,7 +14,7 @@ const (
 	maxHorizontalScroll  = 4_096
 )
 
-func (model *Model) applyAction(action KeyAction, repeat int) tea.Cmd {
+func (model *Model) applyAction(action keymap.Action, repeat int) tea.Cmd {
 	if command, handled := model.applyRestrictedAction(action, repeat); handled {
 		return command
 	}
@@ -46,12 +47,17 @@ func (model *Model) applyAction(action KeyAction, repeat int) tea.Cmd {
 	return nil
 }
 
-func (model *Model) applyRestrictedAction(action KeyAction, repeat int) (tea.Cmd, bool) {
+func (model *Model) applyRestrictedAction(action keymap.Action, repeat int) (tea.Cmd, bool) {
 	if model.belowMinimum() {
-		if action == KeyActionQuit || action == KeyActionInterrupt {
-			if model.overlay == OverlayConfirm {
+		if model.overlay == OverlayConfirm {
+			switch action {
+			case keymap.ActionCancel, keymap.ActionConfirmNo, keymap.ActionInterrupt:
+				return model.applyConfirmationAction(action), true
+			default:
 				return nil, true
 			}
+		}
+		if action == keymap.ActionQuit || action == keymap.ActionInterrupt {
 			return model.requestQuit(), true
 		}
 		return nil, true
@@ -61,9 +67,9 @@ func (model *Model) applyRestrictedAction(action KeyAction, repeat int) (tea.Cmd
 	}
 	if model.mode == ModeCommentEdit {
 		switch action {
-		case KeyActionCancel, KeyActionInterrupt:
+		case keymap.ActionCancel, keymap.ActionInterrupt:
 			model.cancelCommentEdit()
-		case KeyActionSaveComment:
+		case keymap.ActionSaveComment:
 			model.saveComment()
 		default:
 		}
@@ -74,17 +80,17 @@ func (model *Model) applyRestrictedAction(action KeyAction, repeat int) (tea.Cmd
 			model.foreground.clearPendingDiffTarget()
 		}
 		switch action {
-		case KeyActionCancel, KeyActionInterrupt:
+		case keymap.ActionCancel, keymap.ActionInterrupt:
 			model.mode = ModeNormal
-		case KeyActionMoveUp, KeyActionExtendUp:
+		case keymap.ActionMoveUp, keymap.ActionExtendUp:
 			model.moveDiff(-repeat)
-		case KeyActionMoveDown, KeyActionExtendDown:
+		case keymap.ActionMoveDown, keymap.ActionExtendDown:
 			model.moveDiff(repeat)
-		case KeyActionPageUp:
+		case keymap.ActionPageUp:
 			model.moveDiff(-max(model.diffHeight(), 1) * repeat)
-		case KeyActionPageDown:
+		case keymap.ActionPageDown:
 			model.moveDiff(max(model.diffHeight(), 1) * repeat)
-		case KeyActionCommentSelection:
+		case keymap.ActionCommentSelection:
 			return model.beginSelectionComment(), true
 		default:
 		}
@@ -106,55 +112,55 @@ func (model *Model) applyRestrictedAction(action KeyAction, repeat int) (tea.Cmd
 		model.applyStatusAction(action, repeat)
 		return nil, true
 	default:
-		if action == KeyActionCancel || action == KeyActionQuit ||
-			action == KeyActionInterrupt {
+		if action == keymap.ActionCancel || action == keymap.ActionQuit ||
+			action == keymap.ActionInterrupt {
 			model.overlay = OverlayNone
 		}
 		return nil, true
 	}
 }
 
-func (model *Model) applyNavigationAction(action KeyAction, repeat int) (tea.Cmd, bool) {
+func (model *Model) applyNavigationAction(action keymap.Action, repeat int) (tea.Cmd, bool) {
 	switch action {
-	case KeyActionFocusNextPane:
+	case keymap.ActionFocusNextPane:
 		model.cycleFocus(repeat)
-	case KeyActionFocusPreviousPane:
+	case keymap.ActionFocusPreviousPane:
 		model.cycleFocus(-repeat)
-	case KeyActionMoveUp:
+	case keymap.ActionMoveUp:
 		return model.move(-repeat), true
-	case KeyActionMoveDown:
+	case keymap.ActionMoveDown:
 		return model.move(repeat), true
-	case KeyActionScrollLeft:
+	case keymap.ActionScrollLeft:
 		model.scrollDiffHorizontally(-repeat)
-	case KeyActionScrollRight:
+	case keymap.ActionScrollRight:
 		model.scrollDiffHorizontally(repeat)
-	case KeyActionPageUp:
+	case keymap.ActionPageUp:
 		return model.movePage(-repeat), true
-	case KeyActionPageDown:
+	case keymap.ActionPageDown:
 		return model.movePage(repeat), true
-	case KeyActionHalfPageUp:
+	case keymap.ActionHalfPageUp:
 		model.moveDiff(-max(model.diffHeight()/2, 1) * repeat)
-	case KeyActionHalfPageDown:
+	case keymap.ActionHalfPageDown:
 		model.moveDiff(max(model.diffHeight()/2, 1) * repeat)
-	case KeyActionFirst:
+	case keymap.ActionFirst:
 		model.moveFirst()
-	case KeyActionLast:
+	case keymap.ActionLast:
 		model.moveLast()
-	case KeyActionNextFile:
+	case keymap.ActionNextFile:
 		model.moveAndActivateFile(repeat)
-	case KeyActionPreviousFile:
+	case keymap.ActionPreviousFile:
 		model.moveAndActivateFile(-repeat)
-	case KeyActionNextHunk:
+	case keymap.ActionNextHunk:
 		model.moveHunk(repeat)
-	case KeyActionPreviousHunk:
+	case keymap.ActionPreviousHunk:
 		model.moveHunk(-repeat)
-	case KeyActionNextComment:
+	case keymap.ActionNextComment:
 		model.moveAndActivateComment(repeat)
-	case KeyActionPreviousComment:
+	case keymap.ActionPreviousComment:
 		model.moveAndActivateComment(-repeat)
-	case KeyActionNextSearchHit:
+	case keymap.ActionNextSearchHit:
 		model.moveSearchHit(repeat)
-	case KeyActionPreviousSearchHit:
+	case keymap.ActionPreviousSearchHit:
 		model.moveSearchHit(-repeat)
 	default:
 		return nil, false
@@ -162,34 +168,43 @@ func (model *Model) applyNavigationAction(action KeyAction, repeat int) (tea.Cmd
 	return nil, true
 }
 
-func (model *Model) applyReviewAction(action KeyAction) (tea.Cmd, bool) {
+func (model *Model) applyReviewAction(action keymap.Action) (tea.Cmd, bool) {
+	if !model.reviewActionFocusAllowed(action) {
+		model.notice = &Notice{
+			Kind: NoticeInformation,
+			Text: NoticeText(action.Description() + " requires the " +
+				model.reviewActionFocusName(action) + " pane"),
+		}
+		return nil, true
+	}
 	switch action {
-	case KeyActionActivate, KeyActionAccept:
+	case keymap.ActionActivate, keymap.ActionAccept:
 		model.activateSelection()
-	case KeyActionCommentAtCursor:
+	case keymap.ActionCommentAtCursor:
 		return model.beginCursorComment(), true
-	case KeyActionFileComment:
+	case keymap.ActionFileComment:
 		return model.beginFileComment(), true
-	case KeyActionSummaryComment:
+	case keymap.ActionSummaryComment:
 		return model.beginSummaryComment(), true
-	case KeyActionEditComment:
+	case keymap.ActionEditComment:
 		model.beginEditComment()
-	case KeyActionDeleteComment:
+	case keymap.ActionDeleteComment:
 		model.requestCommentDelete()
-	case KeyActionExpandContext:
+	case keymap.ActionExpandContext:
 		model.expandPatchContext()
-	case KeyActionVisualLine, KeyActionVisualLines:
-		model.mode = ModeVisual
-		model.visualAnchor = model.diffCursor
-	case KeyActionVisualHunk:
+	case keymap.ActionVisualLine, keymap.ActionVisualLines:
+		if !model.beginVisualSelection() {
+			return nil, true
+		}
+	case keymap.ActionVisualHunk:
 		model.beginVisualHunk()
-	case KeyActionToggleFileReviewed:
+	case keymap.ActionToggleFileReviewed:
 		if active, ok := model.review.ActiveFile(); ok {
 			if next, err := model.review.ToggleFileReviewed(active); err == nil {
 				model.review = next
 			}
 		}
-	case KeyActionToggleHunkReviewed:
+	case keymap.ActionToggleHunkReviewed:
 		model.toggleCurrentHunkReviewed()
 	default:
 		return nil, false
@@ -197,47 +212,105 @@ func (model *Model) applyReviewAction(action KeyAction) (tea.Cmd, bool) {
 	return nil, true
 }
 
-func (model *Model) applyViewAction(action KeyAction) (tea.Cmd, bool) {
+func (model *Model) reviewActionFocusAllowed(action keymap.Action) bool {
 	switch action {
-	case KeyActionToggleWrap:
+	case keymap.ActionCommentAtCursor,
+		keymap.ActionExpandContext,
+		keymap.ActionVisualLine,
+		keymap.ActionVisualLines,
+		keymap.ActionVisualHunk,
+		keymap.ActionToggleHunkReviewed:
+		return model.focus == FocusDiff
+	case keymap.ActionEditComment, keymap.ActionDeleteComment:
+		return model.focus == FocusComments
+	default:
+		return true
+	}
+}
+
+func (*Model) reviewActionFocusName(action keymap.Action) string {
+	switch action {
+	case keymap.ActionEditComment, keymap.ActionDeleteComment:
+		return "comments"
+	default:
+		return "diff"
+	}
+}
+
+func (model *Model) applyViewAction(action keymap.Action) (tea.Cmd, bool) {
+	switch action {
+	case keymap.ActionToggleWrap:
 		model.settings.wrap = !model.settings.wrap
-	case KeyActionToggleView:
+	case keymap.ActionToggleView:
 		if model.settings.diffView == DiffViewUnified {
 			model.settings.diffView = DiffViewSideBySide
 		} else {
 			model.settings.diffView = DiffViewUnified
 		}
-	case KeyActionAlignTop:
+	case keymap.ActionAlignTop:
 		model.alignDiff(alignTop)
-	case KeyActionAlignCenter:
+	case keymap.ActionAlignCenter:
 		model.alignDiff(alignCenter)
-	case KeyActionAlignBottom:
+	case keymap.ActionAlignBottom:
 		model.alignDiff(alignBottom)
-	case KeyActionToggleDirectory:
+	case keymap.ActionToggleDirectory:
 		model.toggleTreeDirectory(treeDirectoryToggle)
-	case KeyActionExpandDirectory:
+	case keymap.ActionExpandDirectory:
 		model.toggleTreeDirectory(treeDirectoryExpand)
-	case KeyActionCollapseDirectory:
+	case keymap.ActionCollapseDirectory:
 		model.toggleTreeDirectory(treeDirectoryCollapse)
-	case KeyActionToggleHiddenFiles:
+	case keymap.ActionToggleHiddenFiles:
 		if model.review.ShowHidden() {
 			model.review = model.review.HideHiddenFiles()
 		} else {
 			model.review = model.review.ShowHiddenFiles()
 		}
-		if model.filterQuery != "" {
-			return model.startFileFilter(model.filterQuery), true
+		query := model.fileProjection.requestedQuery
+		if query == "" {
+			query = model.fileProjection.appliedQuery
+		}
+		if query != "" {
+			return model.startFileFilter(query), true
 		}
 		model.selectFileOrder()
-	case KeyActionToggleComments:
-		model.commentsVisible = !model.commentsVisible
-		model.clampFocus()
-	case KeyActionToggleFilePanel:
-		model.fileTreeVisible = !model.fileTreeVisible
-		model.clampFocus()
-	case KeyActionHelp:
+	case keymap.ActionToggleComments:
+		layout := model.currentWorkspaceLayout()
+		if layout.commentsWidth != 0 {
+			if layout.paneCount() == 1 {
+				model.singlePaneOverride = 0
+			} else {
+				model.commentPaneVisibility = paneVisibilityHidden
+				model.singlePaneOverride = 0
+			}
+			model.clampFocus()
+		} else {
+			model.commentPaneVisibility = paneVisibilityShown
+			model.singlePaneOverride = 0
+			if model.currentWorkspaceLayout().commentsWidth == 0 {
+				model.singlePaneOverride = FocusComments
+			}
+			model.setFocus(FocusComments)
+		}
+	case keymap.ActionToggleFilePanel:
+		layout := model.currentWorkspaceLayout()
+		if layout.treeWidth != 0 {
+			if layout.paneCount() != 1 {
+				model.fileTreeVisible = false
+			}
+			model.singlePaneOverride = 0
+			model.clampFocus()
+		} else {
+			model.fileTreeVisible = true
+			model.singlePaneOverride = 0
+			if model.currentWorkspaceLayout().treeWidth == 0 {
+				model.singlePaneOverride = FocusFileTree
+			}
+			model.setFocus(FocusFileTree)
+		}
+	case keymap.ActionHelp:
 		model.overlay = OverlayHelp
-	case KeyActionStatusDetails:
+	case keymap.ActionStatusDetails:
+		model.statusReturn = OverlayNone
 		model.overlay = OverlayStatus
 	default:
 		return nil, false
@@ -245,11 +318,11 @@ func (model *Model) applyViewAction(action KeyAction) (tea.Cmd, bool) {
 	return nil, true
 }
 
-func (model *Model) applyCommandAction(action KeyAction) (tea.Cmd, bool) {
+func (model *Model) applyCommandAction(action keymap.Action) (tea.Cmd, bool) {
 	switch action {
-	case KeyActionQuit, KeyActionInterrupt:
+	case keymap.ActionQuit, keymap.ActionInterrupt:
 		return model.requestQuit(), true
-	case KeyActionCancel:
+	case keymap.ActionCancel:
 		if operationID := model.foreground.reloadOperation(); operationID != 0 {
 			if !model.cancelReloadCollapseCapture() {
 				model.coordinator.Cancel(operationID)
@@ -259,39 +332,39 @@ func (model *Model) applyCommandAction(action KeyAction) (tea.Cmd, bool) {
 				}
 			}
 		}
-	case KeyActionReload:
+	case keymap.ActionReload:
 		model.requestReload()
-	case KeyActionSearch:
+	case keymap.ActionSearch:
 		return model.openFind(findCurrent), true
-	case KeyActionSearchVisible:
+	case keymap.ActionSearchVisible:
 		return model.openFind(findReview), true
-	case KeyActionFindFile:
+	case keymap.ActionFindFile:
 		return model.openFind(findFiles), true
-	case KeyActionFilter:
+	case keymap.ActionFilter:
 		command := model.beginCommandPrompt()
 		model.commandInput.SetValue("filter ")
 		return command, true
-	case KeyActionCommand:
+	case keymap.ActionCommand:
 		return model.beginCommandPrompt(), true
-	case KeyActionCopyMarkdown:
+	case keymap.ActionCopyMarkdown:
 		model.openExportPicker(exportSelection{
 			format:      review.ExportMarkdown,
 			destination: delivery.DestinationClipboard,
 			options:     review.DefaultExportOptions(),
 		})
-	case KeyActionExportMarkdown:
+	case keymap.ActionExportMarkdown:
 		model.openExportPicker(exportSelection{
 			format:      review.ExportMarkdown,
 			destination: delivery.DestinationStdout,
 			options:     review.DefaultExportOptions(),
 		})
-	case KeyActionExportJSON:
+	case keymap.ActionExportJSON:
 		model.openExportPicker(exportSelection{
 			format:      review.ExportJSON,
 			destination: delivery.DestinationStdout,
 			options:     review.DefaultExportOptions(),
 		})
-	case KeyActionOpenSubmit:
+	case keymap.ActionOpenSubmit:
 		model.openPublication()
 	default:
 		return nil, false
@@ -299,40 +372,40 @@ func (model *Model) applyCommandAction(action KeyAction) (tea.Cmd, bool) {
 	return nil, true
 }
 
-func actionSupersedesDiffTarget(action KeyAction) bool {
+func actionSupersedesDiffTarget(action keymap.Action) bool {
 	switch action {
-	case KeyActionMoveUp, KeyActionMoveDown,
-		KeyActionPageUp, KeyActionPageDown,
-		KeyActionHalfPageUp, KeyActionHalfPageDown,
-		KeyActionFirst, KeyActionLast,
-		KeyActionActivate, KeyActionAccept,
-		KeyActionExpandContext,
-		KeyActionNextFile, KeyActionPreviousFile,
-		KeyActionNextHunk, KeyActionPreviousHunk,
-		KeyActionNextComment, KeyActionPreviousComment,
-		KeyActionNextSearchHit, KeyActionPreviousSearchHit:
+	case keymap.ActionMoveUp, keymap.ActionMoveDown,
+		keymap.ActionPageUp, keymap.ActionPageDown,
+		keymap.ActionHalfPageUp, keymap.ActionHalfPageDown,
+		keymap.ActionFirst, keymap.ActionLast,
+		keymap.ActionActivate, keymap.ActionAccept,
+		keymap.ActionExpandContext,
+		keymap.ActionNextFile, keymap.ActionPreviousFile,
+		keymap.ActionNextHunk, keymap.ActionPreviousHunk,
+		keymap.ActionNextComment, keymap.ActionPreviousComment,
+		keymap.ActionNextSearchHit, keymap.ActionPreviousSearchHit:
 		return true
 	default:
 		return false
 	}
 }
 
-func actionAllowedDuringReload(action KeyAction) bool {
+func actionAllowedDuringReload(action keymap.Action) bool {
 	switch action {
-	case KeyActionQuit, KeyActionInterrupt, KeyActionCancel,
-		KeyActionFocusNextPane, KeyActionFocusPreviousPane,
-		KeyActionMoveUp, KeyActionMoveDown,
-		KeyActionScrollLeft, KeyActionScrollRight,
-		KeyActionPageUp, KeyActionPageDown,
-		KeyActionHalfPageUp, KeyActionHalfPageDown,
-		KeyActionFirst, KeyActionLast,
-		KeyActionNextFile, KeyActionPreviousFile,
-		KeyActionNextHunk, KeyActionPreviousHunk,
-		KeyActionNextComment, KeyActionPreviousComment,
-		KeyActionToggleWrap, KeyActionToggleView,
-		KeyActionAlignTop, KeyActionAlignCenter, KeyActionAlignBottom,
-		KeyActionToggleHiddenFiles, KeyActionToggleComments,
-		KeyActionToggleFilePanel, KeyActionHelp, KeyActionStatusDetails:
+	case keymap.ActionQuit, keymap.ActionInterrupt, keymap.ActionCancel,
+		keymap.ActionFocusNextPane, keymap.ActionFocusPreviousPane,
+		keymap.ActionMoveUp, keymap.ActionMoveDown,
+		keymap.ActionScrollLeft, keymap.ActionScrollRight,
+		keymap.ActionPageUp, keymap.ActionPageDown,
+		keymap.ActionHalfPageUp, keymap.ActionHalfPageDown,
+		keymap.ActionFirst, keymap.ActionLast,
+		keymap.ActionNextFile, keymap.ActionPreviousFile,
+		keymap.ActionNextHunk, keymap.ActionPreviousHunk,
+		keymap.ActionNextComment, keymap.ActionPreviousComment,
+		keymap.ActionToggleWrap, keymap.ActionToggleView,
+		keymap.ActionAlignTop, keymap.ActionAlignCenter, keymap.ActionAlignBottom,
+		keymap.ActionToggleHiddenFiles, keymap.ActionToggleComments,
+		keymap.ActionToggleFilePanel, keymap.ActionHelp, keymap.ActionStatusDetails:
 		return true
 	default:
 		return false
@@ -422,42 +495,44 @@ func (model *Model) expandPatchContext() {
 	model.setPatchContext(context)
 }
 
-func (model *Model) applyHelpAction(action KeyAction, repeat int) {
-	page := max(model.diffHeight()-4, 1)
-	limit := len(model.effectiveBindings(KeyContextNormal))
+func (model *Model) applyHelpAction(action keymap.Action, repeat int) {
+	width, height := model.renderSize()
+	page := model.helpPageSize(width, height)
+	limit := len(model.effectiveBindings(keymap.ContextNormal))
 	switch action {
-	case KeyActionCancel, KeyActionInterrupt, KeyActionQuit:
+	case keymap.ActionCancel, keymap.ActionInterrupt, keymap.ActionQuit:
 		model.overlay = OverlayNone
-	case KeyActionNextHelpPage, KeyActionHelpPageDown:
+	case keymap.ActionNextHelpPage, keymap.ActionHelpPageDown:
 		model.helpTop += page * repeat
-	case KeyActionPreviousHelpPage, KeyActionHelpPageUp:
+	case keymap.ActionPreviousHelpPage, keymap.ActionHelpPageUp:
 		model.helpTop -= page * repeat
-	case KeyActionHelpLineDown:
+	case keymap.ActionHelpLineDown:
 		model.helpTop += repeat
-	case KeyActionHelpLineUp:
+	case keymap.ActionHelpLineUp:
 		model.helpTop -= repeat
-	case KeyActionHelpHome:
+	case keymap.ActionHelpHome:
 		model.helpTop = 0
-	case KeyActionHelpEnd:
+	case keymap.ActionHelpEnd:
 		model.helpTop = limit
 	default:
 	}
 	model.helpTop = min(max(model.helpTop, 0), max(limit-page, 0))
 }
 
-func (model *Model) applyStatusAction(action KeyAction, repeat int) {
+func (model *Model) applyStatusAction(action keymap.Action, repeat int) {
 	_, height := model.renderSize()
 	page := max(model.statusOperationRows(height), 1)
 	switch action {
-	case KeyActionCancel, KeyActionInterrupt, KeyActionQuit:
-		model.overlay = OverlayNone
-	case KeyActionMoveDown:
+	case keymap.ActionCancel, keymap.ActionInterrupt, keymap.ActionQuit:
+		model.overlay = model.statusReturn
+		model.statusReturn = OverlayNone
+	case keymap.ActionMoveDown:
 		model.statusTop += repeat
-	case KeyActionMoveUp:
+	case keymap.ActionMoveUp:
 		model.statusTop -= repeat
-	case KeyActionPageDown:
+	case keymap.ActionPageDown:
 		model.statusTop += page * repeat
-	case KeyActionPageUp:
+	case keymap.ActionPageUp:
 		model.statusTop -= page * repeat
 	default:
 	}

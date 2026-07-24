@@ -43,8 +43,8 @@ func TestCoordinatorAcceptsExactPatchAndSearchReservationsAndRejectsPlusOne(t *t
 	searchReservation := request + patchResultReservation + review.MaxSearchHitBytes +
 		review.MaxSearchBatchConstructionBytes
 	for name, resultBytes := range map[string]int64{
-		"patch":  patchResultReservation,
-		"search": searchReservation,
+		"patch":     patchResultReservation,
+		searchLabel: searchReservation,
 	} {
 		t.Run(name, func(t *testing.T) {
 			coordinator := &Coordinator{

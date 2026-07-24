@@ -1,0 +1,40 @@
+FILES · 3/6           │▌ DIFF · staged.txt
+› •  A staged.txt       │▸       diff --git a/staged.txt b/staged.txt
+     M tracked.txt      │        new file mode 100644
+     A untracked.txt    │        index 0000000..4480ae4
+                        │        --- /dev/null
+                        │        +++ b/staged.txt
+                        │        @@ -0,0 +1 @@
+                        │     1  +staged contents
+                        │
+                        │
+                        │
+                        │
+                        │
+                        │
+                        │
+                        │
+                        │
+                        │
+                        │
+                        │
+                        │
+                        │
+                        │
+                        │
+                        │
+                        │
+                        │
+                        │
+                        │
+                        │
+                        │
+                        │
+                        │
+                        │
+                        │
+                        │
+                        │
+                        │
+                        │
+Ready                                                                    Down next row  c comment  Tab next pane  ? help

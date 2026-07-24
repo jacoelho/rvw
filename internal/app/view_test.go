@@ -11,7 +11,10 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/vt"
 
+	"github.com/jacoelho/rvw/internal/delivery"
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 )
 
@@ -43,6 +46,336 @@ func TestMinimumSizeOwnsInput(t *testing.T) {
 	}
 }
 
+func TestFileChangeBadgesCoverEveryReviewChangeKind(t *testing.T) {
+	tests := []struct {
+		kind review.ChangeKind
+		want string
+	}{
+		{kind: review.ChangeAdded, want: "A"},
+		{kind: review.ChangeDeleted, want: "D"},
+		{kind: review.ChangeModified, want: "M"},
+		{kind: review.ChangeRenamed, want: "R"},
+		{kind: review.ChangeRenameOnly, want: "R"},
+		{kind: review.ChangeCopied, want: "C"},
+		{kind: review.ChangeBinary, want: "B"},
+		{kind: review.ChangeModeOnly, want: "T"},
+		{kind: review.ChangeObjectTypeChanged, want: "T"},
+		{kind: review.ChangeSubmodule, want: "S"},
+		{kind: review.ChangeKind("future"), want: "?"},
+	}
+	for _, test := range tests {
+		if got := fileChangeBadge(test.kind); got != test.want {
+			t.Fatalf("badge for %q = %q, want %q", test.kind, got, test.want)
+		}
+	}
+}
+
+func TestSelectedFileTreeRowEmphasizesItsFullWidth(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	model.settings.colorEnabled = false
+	active, ok := model.review.ActiveFile()
+	if !ok {
+		t.Fatal("missing active file")
+	}
+	tree := model.currentFileTree()
+	model.treeCursor = tree.nodes[tree.files[active]].identity
+	const width = 30
+	lines, _ := model.fileTreeLines(width, 1, newSemanticStyles(model.settings))
+	if len(lines) != 1 || lipgloss.Width(lines[0]) != width {
+		t.Fatalf("tree selection width = %d across %d rows", lipgloss.Width(lines[0]), len(lines))
+	}
+	if plain := ansi.Strip(lines[0]); !strings.Contains(plain, "M alpha.txt") {
+		t.Fatalf("tree row omitted the modified badge: %q", plain)
+	}
+	terminal := vt.NewEmulator(width, 1)
+	t.Cleanup(func() { _ = terminal.Close() })
+	if _, err := terminal.WriteString(lines[0]); err != nil {
+		t.Fatal(err)
+	}
+	last := terminal.CellAt(width-1, 0)
+	if last == nil || last.Style.Attrs&(1<<5) == 0 {
+		t.Fatalf("last selection cell lacks reverse emphasis: cell=%#v row=%q", last, lines[0])
+	}
+}
+
+func TestStatusLineNeverClipsPartOfABindingHint(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	model.notice = &Notice{Kind: NoticeInformation, Text: "reload complete"}
+	styles := newSemanticStyles(model.settings)
+	prefix := string(model.notice.Text) + "  " + model.operationSummary()
+	model.size = TerminalSize{Width: minimumWidth, Height: 24, Known: true}
+	first := model.workspaceStatusBindings(model.workspaceLayout(minimumWidth, 24))[0]
+	firstHint := first.Chord.Display() + " " + first.Action.Description()
+	width := lipgloss.Width(prefix) + 2 + lipgloss.Width(firstHint) + 1
+	model.size = TerminalSize{Width: width, Height: 24, Known: true}
+
+	got := ansi.Strip(model.statusLine(width, styles))
+	if !strings.HasPrefix(got, "reload complete") || !strings.Contains(got, "j next row") {
+		t.Fatalf("status line clipped or displaced a binding hint: %q (first %q)", got, firstHint)
+	}
+}
+
+func TestStatusOnlyUpdatesKeepFooterBindingsAnchored(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	model.size = TerminalSize{Width: 80, Height: 24, Known: true}
+	styles := newSemanticStyles(model.settings)
+	model.notice = &Notice{Kind: NoticeInformation, Text: "short"}
+	shortLine := ansi.Strip(model.statusLine(80, styles))
+	model.notice = &Notice{
+		Kind: NoticeInformation,
+		Text: "a substantially longer status update that must not shift controls",
+	}
+	longLine := ansi.Strip(model.statusLine(80, styles))
+	shortAnchor := -1
+	longAnchor := -1
+	if prefix, _, found := strings.Cut(shortLine, "j next row"); found {
+		shortAnchor = lipgloss.Width(prefix)
+	}
+	if prefix, _, found := strings.Cut(longLine, "j next row"); found {
+		longAnchor = lipgloss.Width(prefix)
+	}
+	if shortAnchor < 0 || shortAnchor != longAnchor {
+		t.Fatalf("binding anchor shifted from %d to %d:\n%s\n%s", shortAnchor, longAnchor, shortLine, longLine)
+	}
+}
+
+func TestBlockingSurfacesPreserveAtomicControlsAtMinimumSize(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	setModelKeybindings(t, model,
+		keymap.Binding{Context: keymap.ContextHelp, Chord: "esc", Action: keymap.ActionCancel},
+		keymap.Binding{Context: keymap.ContextStatusDetails, Chord: "esc", Action: keymap.ActionCancel},
+		keymap.Binding{Context: keymap.ContextConfirm, Chord: "esc", Action: keymap.ActionCancel},
+		keymap.Binding{Context: keymap.ContextConfirm, Chord: "y", Action: keymap.ActionConfirmYes},
+		keymap.Binding{Context: keymap.ContextConfirm, Chord: "n", Action: keymap.ActionConfirmNo},
+		keymap.Binding{Context: keymap.ContextExportPicker, Chord: "esc", Action: keymap.ActionCancel},
+		keymap.Binding{Context: keymap.ContextExportPicker, Chord: "enter", Action: keymap.ActionExportSelected},
+		keymap.Binding{Context: keymap.ContextExportPicker, Chord: "u", Action: keymap.ActionToggleExportUnmap},
+		keymap.Binding{Context: keymap.ContextSubmit, Chord: "esc", Action: keymap.ActionCancel},
+		keymap.Binding{Context: keymap.ContextSubmit, Chord: "enter", Action: keymap.ActionSubmitReview},
+	)
+	model.confirmation = confirmation{kind: confirmationQuit}
+	model.publicationDraftReady = true
+	publicationID, publicationCheck := beginTestPublicationCheck(t, model)
+	model.applyPublicationCheckOutcome(PublicationCheckOutcome{
+		ID: publicationID, Check: publicationCheck,
+	})
+
+	tests := []struct {
+		name string
+		view string
+		want []string
+	}{
+		{name: helpLabel, view: model.helpView(minimumWidth, minimumHeight), want: []string{"Esc cancel"}},
+		{name: "status", view: model.statusView(minimumWidth, minimumHeight), want: []string{"Esc cancel"}},
+		{name: "confirmation", view: model.confirmationView(minimumWidth, minimumHeight), want: []string{"Esc cancel", "y yes", "n no"}},
+		{name: exportLabel, view: model.exportPickerView(minimumWidth, minimumHeight), want: []string{"Esc cancel", "Enter export"}},
+		{name: "publication", view: model.publicationView(minimumWidth, minimumHeight), want: []string{"Esc cancel", "Enter publish review", publicationEventCommentLabel, publicationEventApproveLabel, publicationEventRequestChangesLabel}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			plain := ansi.Strip(test.view)
+			lines := strings.Split(plain, "\n")
+			if len(lines) != minimumHeight {
+				t.Fatalf("rows = %d, want %d:\n%s", len(lines), minimumHeight, plain)
+			}
+			for _, want := range test.want {
+				if !strings.Contains(plain, want) {
+					t.Fatalf("minimum view omitted complete %q:\n%s", want, plain)
+				}
+			}
+		})
+	}
+}
+
+func TestConfirmationPromptsAreCompleteAtMinimumSize(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	pendingID := installPendingTestComment(t, model)
+	ids := appendTestReviewComments(t, model, "delete me")
+	setModelKeybindings(t, model,
+		keymap.Binding{Context: keymap.ContextConfirm, Chord: "esc", Action: keymap.ActionCancel},
+		keymap.Binding{Context: keymap.ContextConfirm, Chord: "y", Action: keymap.ActionConfirmYes},
+		keymap.Binding{Context: keymap.ContextConfirm, Chord: "n", Action: keymap.ActionConfirmNo},
+	)
+	tests := []struct {
+		name         string
+		confirmation confirmation
+		prompt       string
+	}{
+		{name: "none", prompt: "Confirm action?"},
+		{name: "quit", confirmation: confirmation{kind: confirmationQuit}, prompt: "Discard local review changes and quit?"},
+		{name: "delete", confirmation: confirmation{kind: confirmationDeleteComment, comment: ids[0]}, prompt: "Delete the selected comment?"},
+		{name: "delete GitHub draft", confirmation: confirmation{kind: confirmationDeleteComment, comment: pendingID}, prompt: "Delete this GitHub draft on the next save?"},
+		{name: reloadLabel, confirmation: confirmation{kind: confirmationReload}, prompt: "Reload and discard review state that cannot be reconciled?"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			model.confirmation = test.confirmation
+			plain := ansi.Strip(model.confirmationView(minimumWidth, minimumHeight))
+			normalized := strings.Join(strings.Fields(plain), " ")
+			if !strings.Contains(normalized, test.prompt) {
+				t.Fatalf("minimum confirmation omitted complete prompt %q:\n%s", test.prompt, plain)
+			}
+		})
+	}
+}
+
+func installPendingTestComment(t *testing.T, model *Model) review.CommentID {
+	t.Helper()
+	path, err := review.NewPathString("alpha.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit, err := review.NewObjectID(strings.Repeat("1", 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	line, err := review.NewLineNumber(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := review.NewPendingCommentTarget(review.PendingCommentTargetDescriptor{
+		Path: path, Commit: commit, OriginalCommit: commit,
+		Line: new(line), Subject: review.PendingSubjectLine, Side: review.LineNew,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commentNode, err := review.NewCommentNodeID("PRRC_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	commentDatabase, err := review.NewCommentDatabaseID(101)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capabilities, err := review.NewPendingCapabilities(
+		review.PendingCapabilityUpdate,
+		review.PendingCapabilityDelete,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingComment, err := review.NewPendingComment(review.PendingCommentDescriptor{
+		NodeID: commentNode, DatabaseID: commentDatabase,
+		Body:   "GitHub draft\n\n<!-- rvw-draft-comment:v1:0123456789abcdef0123456789abcdef -->",
+		Target: target, Capabilities: capabilities,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewNode, err := review.NewReviewNodeID("PRR_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewDatabase, err := review.NewReviewDatabaseID(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := review.NewPendingReview(review.PendingReviewDescriptor{
+		NodeID: reviewNode, DatabaseID: reviewDatabase, Commit: commit,
+		Body: "test summary", Comments: []review.PendingComment{pendingComment}, ViewerUpdate: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := model.review.Snapshot().WithPendingReview(pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.review, err = review.NewReview(testReviewRequest(snapshot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	comment, ok := model.review.CommentAt(0)
+	if !ok || model.review.PendingBindingState(comment.ID()) != review.PendingBindingClean {
+		t.Fatal("pending test comment was not imported as an editable GitHub draft")
+	}
+	return comment.ID()
+}
+
+func TestExportOptionStateIsVisibleAcrossCompactBoundary(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	setModelKeybindings(t, model,
+		keymap.Binding{Context: keymap.ContextExportPicker, Chord: "esc", Action: keymap.ActionCancel},
+		keymap.Binding{Context: keymap.ContextExportPicker, Chord: "enter", Action: keymap.ActionExportSelected},
+		keymap.Binding{Context: keymap.ContextExportPicker, Chord: "x", Action: keymap.ActionToggleExportUnmap},
+	)
+	for _, width := range []int{minimumWidth, 52} {
+		for _, height := range []int{minimumHeight, minimumHeight + 1, minimumHeight + 2} {
+			model.openExportPicker(exportSelection{
+				format: review.ExportMarkdown, destination: delivery.DestinationClipboard,
+				options: review.DefaultExportOptions(),
+			})
+			plain := ansi.Strip(model.exportPickerView(width, height))
+			for _, want := range []string{"[ ] x", "Esc cancel", "Enter export"} {
+				if !strings.Contains(plain, want) {
+					t.Fatalf("%dx%d export view omitted %q:\n%s", width, height, want, plain)
+				}
+			}
+			model.applyExportPickerAction(keymap.ActionToggleExportUnmap)
+			plain = ansi.Strip(model.exportPickerView(width, height))
+			if !strings.Contains(plain, "[x] x") {
+				t.Fatalf("%dx%d export view hid toggled state:\n%s", width, height, plain)
+			}
+		}
+	}
+	setModelKeybindings(t, model,
+		keymap.Binding{Context: keymap.ContextExportPicker, Chord: "esc", Action: keymap.ActionCancel},
+		keymap.Binding{Context: keymap.ContextExportPicker, Chord: "enter", Action: keymap.ActionExportSelected},
+		keymap.Binding{
+			Context: keymap.ContextExportPicker,
+			Chord:   "ctrl-a ctrl-b ctrl-c ctrl-d",
+			Action:  keymap.ActionToggleExportUnmap,
+		},
+	)
+	model.openExportPicker(exportSelection{
+		format: review.ExportMarkdown, destination: delivery.DestinationClipboard,
+		options: review.DefaultExportOptions(),
+	})
+	plain := ansi.Strip(model.exportPickerView(minimumWidth, minimumHeight))
+	if strings.Contains(plain, "Ctrl+") || !strings.Contains(plain, "[ ] unmappable") {
+		t.Fatalf("over-width export chord was partially rendered:\n%s", plain)
+	}
+}
+
+func TestStatusLineSanitizesPlainStateBeforeStyledBindings(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		notice NoticeText
+		want   string
+	}{
+		{
+			name:   "controls",
+			notice: "clipboard failure\nfenced\x1b[31m",
+			want:   `clipboard failure\x0Afenced\x1B[31m`,
+		},
+		{
+			name:   "bounded oversized detail",
+			notice: NoticeText("\n" + strings.Repeat("x", 10_000)),
+			want:   `\x0A`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+			model.notice = &Notice{Kind: NoticeInformation, Text: test.notice}
+			const width = 200
+			status := model.statusLine(width, semanticStyles{})
+			if strings.ContainsAny(status, "\n\r\x1b") {
+				t.Fatalf("status retained terminal controls: %q", status)
+			}
+			if !strings.Contains(status, test.want) {
+				t.Fatalf("status omitted escaped notice detail: %q", status)
+			}
+			if got := lipgloss.Width(status); got != width {
+				t.Fatalf("status width = %d, want %d", got, width)
+			}
+			if test.name == "bounded oversized detail" && !strings.Contains(status, "…") {
+				t.Fatalf("oversized status omitted truncation marker: %q", status)
+			}
+		})
+	}
+}
+
 func TestCommentEditorDockKeepsCodeVisibleWithoutEscapedWidgetStyles(t *testing.T) {
 	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	waitContext, cancelWait := context.WithTimeout(t.Context(), 5*time.Second)
@@ -59,7 +392,7 @@ func TestCommentEditorDockKeepsCodeVisibleWithoutEscapedWidgetStyles(t *testing.
 	if !strings.Contains(plain, "changed") {
 		t.Fatalf("comment editor hid the selected code:\n%s", plain)
 	}
-	if !strings.Contains(plain, "Comment ·") || !strings.Contains(plain, "[focus:comment]") {
+	if !strings.Contains(plain, "Comment ·") || !strings.Contains(plain, "DIFF · alpha.txt · COMMENT") {
 		t.Fatalf("comment editor omitted its visible focus state:\n%s", plain)
 	}
 	if strings.Contains(plain, "enter activate") || !strings.Contains(plain, "comment editor owns input") {
@@ -86,6 +419,59 @@ func TestHelpViewPreservesWidgetStyles(t *testing.T) {
 	}
 	if !strings.Contains(view.Content, "\x1b[") {
 		t.Fatalf("help discarded widget styling:\n%q", view.Content)
+	}
+}
+
+func TestHelpViewPreservesWorkspaceContextOutsideBoundedDialog(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	const width, height = 120, 40
+	_, _ = model.Update(tea.WindowSizeMsg{Width: width, Height: height})
+	model.overlay = OverlayHelp
+
+	workspace, _ := model.workspaceView(width, height, model.workspaceLayout(width, height))
+	workspaceRows := strings.Split(ansi.Strip(workspace), "\n")
+	helpRows := strings.Split(ansi.Strip(model.helpView(width, height)), "\n")
+	layout := newHelpDialogLayout(width, height)
+	if layout.width == width || layout.height == height {
+		t.Fatalf("help dialog unexpectedly occupies the %dx%d viewport: %+v", width, height, layout)
+	}
+	if len(helpRows) != height {
+		t.Fatalf("help rows = %d, want %d", len(helpRows), height)
+	}
+	for row := range height {
+		if row < layout.y || row >= layout.y+layout.height {
+			if helpRows[row] != workspaceRows[row] {
+				t.Fatalf("workspace row %d changed outside help dialog:\n%s\n%s", row, workspaceRows[row], helpRows[row])
+			}
+			continue
+		}
+		if got, want := ansi.Cut(helpRows[row], 0, layout.x), ansi.Cut(workspaceRows[row], 0, layout.x); got != want {
+			t.Fatalf("workspace prefix changed on help row %d: %q != %q", row, got, want)
+		}
+		right := layout.x + layout.width
+		if got, want := ansi.Cut(helpRows[row], right, width), ansi.Cut(workspaceRows[row], right, width); got != want {
+			t.Fatalf("workspace suffix changed on help row %d: %q != %q", row, got, want)
+		}
+	}
+	prefix, _, found := strings.Cut(helpRows[layout.y], "▌ Keybindings")
+	if !found || lipgloss.Width(prefix) != layout.x {
+		t.Fatalf("help title is not at dialog origin (%d,%d): %q", layout.x, layout.y, helpRows[layout.y])
+	}
+}
+
+func TestHelpPagingUsesBoundedDialogHeight(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	_, _ = model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	model.overlay = OverlayHelp
+
+	page := model.helpPageSize(120, 40)
+	if page >= model.diffHeight()-4 {
+		t.Fatalf("help page = %d, want less than full-workspace page %d", page, model.diffHeight()-4)
+	}
+	limit := len(model.effectiveBindings(keymap.ContextNormal))
+	model.applyHelpAction(keymap.ActionNextHelpPage, 1)
+	if want := min(page, max(limit-page, 0)); model.helpTop != want {
+		t.Fatalf("help offset = %d, want %d", model.helpTop, want)
 	}
 }
 
@@ -117,7 +503,7 @@ func TestCommandPromptUsesFocusedWorkspaceFooter(t *testing.T) {
 	if len(lines) != 24 {
 		t.Fatalf("command prompt rendered %d lines, want 24", len(lines))
 	}
-	if !strings.Contains(lines[0], "[focus:command]") ||
+	if !strings.Contains(lines[0], "DIFF · alpha.txt · COMMAND") ||
 		!strings.Contains(lines[0], "alpha.txt") {
 		t.Fatalf("command prompt hid or misidentified the workspace:\n%s", plain)
 	}
@@ -132,6 +518,287 @@ func TestCommandPromptUsesFocusedWorkspaceFooter(t *testing.T) {
 	}
 	if !strings.Contains(view.Content, "\x1b[") {
 		t.Fatalf("command footer discarded widget styling:\n%q", view.Content)
+	}
+}
+
+func TestWorkspaceHeadersIdentifyTheFocusedPaneWithoutChangingGeometry(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	_, _ = model.Update(tea.WindowSizeMsg{Width: normalWidth, Height: 24})
+
+	model.focus = FocusDiff
+	diffHeader := strings.Split(ansi.Strip(model.View().Content), "\n")[0]
+	if !strings.Contains(diffHeader, "  FILES · 1") ||
+		!strings.Contains(diffHeader, "▌ DIFF · alpha.txt") {
+		t.Fatalf("diff-focused header = %q", diffHeader)
+	}
+
+	model.focus = FocusFileTree
+	treeHeader := strings.Split(ansi.Strip(model.View().Content), "\n")[0]
+	if !strings.Contains(treeHeader, "▌ FILES · 1") ||
+		!strings.Contains(treeHeader, "  DIFF · alpha.txt") {
+		t.Fatalf("file-focused header = %q", treeHeader)
+	}
+	if lipgloss.Width(diffHeader) != normalWidth || lipgloss.Width(treeHeader) != normalWidth {
+		t.Fatalf(
+			"header widths = diff %d tree %d, want %d",
+			lipgloss.Width(diffHeader),
+			lipgloss.Width(treeHeader),
+			normalWidth,
+		)
+	}
+
+	model.mode = ModeVisual
+	model.focus = FocusDiff
+	visualHeader := strings.Split(ansi.Strip(model.View().Content), "\n")[0]
+	if !strings.Contains(visualHeader, "▌ DIFF · alpha.txt") {
+		t.Fatalf("visual-mode header = %q", visualHeader)
+	}
+}
+
+func TestSinglePaneWorkspaceExposesFilePositionAndUsefulActions(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{
+		"alpha.txt": "changed\n",
+		"beta.txt":  "changed\n",
+	})
+	setModelKeybindings(t, model,
+		keymap.Binding{Context: keymap.ContextNormal, Chord: "tab", Action: keymap.ActionFocusNextPane},
+		keymap.Binding{Context: keymap.ContextNormal, Chord: "] f", Action: keymap.ActionNextFile},
+		keymap.Binding{Context: keymap.ContextNormal, Chord: "[ f", Action: keymap.ActionPreviousFile},
+		keymap.Binding{Context: keymap.ContextNormal, Chord: "?", Action: keymap.ActionHelp},
+		keymap.Binding{Context: keymap.ContextNormal, Chord: "c", Action: keymap.ActionCommentAtCursor},
+	)
+	_, _ = model.Update(tea.WindowSizeMsg{Width: 48, Height: 14})
+
+	lines := strings.Split(ansi.Strip(model.View().Content), "\n")
+	if !strings.Contains(lines[0], "DIFF · 1/2 · alpha.txt") {
+		t.Fatalf("single-pane header omitted file position: %q", lines[0])
+	}
+	footer := lines[len(lines)-1]
+	if !strings.Contains(footer, "? help") ||
+		!strings.Contains(footer, "] f next") ||
+		strings.Contains(footer, "next pane") {
+		t.Fatalf("single-pane footer advertised unavailable or hid essential actions: %q", footer)
+	}
+
+	if !model.activateFile(model.fileOrder[len(model.fileOrder)-1]) {
+		t.Fatal("could not activate final file")
+	}
+	lines = strings.Split(ansi.Strip(model.View().Content), "\n")
+	footer = lines[len(lines)-1]
+	if !strings.Contains(footer, "[ f prev") || strings.Contains(footer, "] f next") {
+		t.Fatalf("final-file footer did not expose the usable direction: %q", footer)
+	}
+
+	_, _ = model.Update(tea.WindowSizeMsg{Width: minimumWidth, Height: minimumHeight})
+	if !model.activateFile(model.fileOrder[0]) {
+		t.Fatal("could not reactivate first file")
+	}
+	settleModelWork(t, model, coordinator)
+	lines = strings.Split(ansi.Strip(model.View().Content), "\n")
+	footer = lines[len(lines)-1]
+	if !strings.Contains(footer, "] f next") {
+		t.Fatalf("supported-minimum footer omitted its usable action: %q", footer)
+	}
+}
+
+func TestEmptyWorkspaceAdvertisesOnlyViableRecoveryActions(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	settleModelWork(t, model, coordinator)
+	emptySnapshot, err := review.NewSnapshot(model.review.Snapshot().SourceID(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyReview, err := review.NewReview(testReviewRequest(emptySnapshot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.review = emptyReview
+	model.allFileOrder = nil
+	model.visibleFileOrder = nil
+	model.fileOrder = nil
+	model.allFileTree = fileTree{}
+	model.visibleFileTree = fileTree{}
+	setModelKeybindings(t, model,
+		keymap.Binding{Context: keymap.ContextNormal, Chord: "r", Action: keymap.ActionReload},
+		keymap.Binding{Context: keymap.ContextNormal, Chord: "?", Action: keymap.ActionHelp},
+		keymap.Binding{Context: keymap.ContextNormal, Chord: "j", Action: keymap.ActionMoveDown},
+		keymap.Binding{Context: keymap.ContextNormal, Chord: "c", Action: keymap.ActionCommentAtCursor},
+		keymap.Binding{Context: keymap.ContextNormal, Chord: "C", Action: keymap.ActionFileComment},
+	)
+	for _, test := range []struct {
+		name   string
+		width  int
+		height int
+		focus  FocusOwner
+	}{
+		{name: "narrow", width: 48, height: 24, focus: FocusDiff},
+		{name: "wide comments", width: wideWidth, height: 30, focus: FocusComments},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, _ = model.Update(tea.WindowSizeMsg{Width: test.width, Height: test.height})
+			model.focus = test.focus
+			layout := model.workspaceLayout(test.width, test.height)
+			if test.focus == FocusComments && layout.commentsWidth == 0 {
+				t.Fatalf("wide layout omitted comments pane: %+v", layout)
+			}
+			bindings := model.workspaceStatusBindings(layout)
+			if len(bindings) != 2 || bindings[0].Action != keymap.ActionReload ||
+				bindings[1].Action != keymap.ActionHelp {
+				t.Fatalf("empty bindings = %+v", bindings)
+			}
+			lines := strings.Split(ansi.Strip(model.View().Content), "\n")
+			footer := lines[len(lines)-1]
+			if !strings.Contains(footer, "r reload") || !strings.Contains(footer, "? help") ||
+				strings.Contains(footer, "move down") || strings.Contains(footer, commentLabel) {
+				t.Fatalf("empty footer = %q", footer)
+			}
+		})
+	}
+	_, _ = model.Update(tea.KeyPressMsg(tea.Key{Text: "?", Code: '?'}))
+	if model.overlay != OverlayHelp {
+		t.Fatalf("advertised help key left overlay at %v", model.overlay)
+	}
+	model.overlay = OverlayNone
+	_, _ = model.Update(tea.KeyPressMsg(tea.Key{Text: "r", Code: 'r'}))
+	if model.foreground.reloadOperation() == 0 {
+		t.Fatal("advertised reload key did not request a reload")
+	}
+}
+
+func TestFileHeaderDistinguishesProjectionFromReviewTotal(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{
+		"alpha.txt": "changed\n",
+		"beta.txt":  "changed\n",
+	})
+	model.fileOrder = model.fileOrder[:1]
+	_, _ = model.Update(tea.WindowSizeMsg{Width: normalWidth, Height: 24})
+
+	header := strings.Split(ansi.Strip(model.View().Content), "\n")[0]
+	if !strings.Contains(header, "FILES · 1/2") {
+		t.Fatalf("file header conflated projection with total: %q", header)
+	}
+}
+
+func TestEmptyCommentsPaneDoesNotAdvertiseDeadEditAction(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	setModelKeybindings(t, model,
+		keymap.Binding{Context: keymap.ContextNormal, Chord: "?", Action: keymap.ActionHelp},
+		keymap.Binding{Context: keymap.ContextNormal, Chord: "tab", Action: keymap.ActionFocusNextPane},
+		keymap.Binding{Context: keymap.ContextNormal, Chord: "C", Action: keymap.ActionFileComment},
+		keymap.Binding{Context: keymap.ContextNormal, Chord: "e", Action: keymap.ActionEditComment},
+	)
+	_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
+	model.focus = FocusComments
+
+	lines := strings.Split(ansi.Strip(model.View().Content), "\n")
+	footer := lines[len(lines)-1]
+	if strings.Contains(footer, " edit") || !strings.Contains(footer, "C file comment") {
+		t.Fatalf("empty comments footer = %q", footer)
+	}
+	_, handled := model.applyReviewAction(keymap.ActionEditComment)
+	if !handled || model.notice == nil || model.notice.Text != "no editable local comment selected" {
+		t.Fatalf("empty edit = handled %v notice %+v", handled, model.notice)
+	}
+}
+
+func TestSelectedRemoteCommentDoesNotAdvertiseLocalEdit(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "first\nchanged\n"})
+	active, ok := model.review.ActiveFile()
+	if !ok {
+		t.Fatal("missing active file")
+	}
+	file, _ := model.review.Snapshot().File(active)
+	line, _ := review.NewLineNumber(2)
+	comment, err := review.NewRemoteComment(review.RemoteCommentDescriptor{ID: "remote", Body: "remote"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	thread, err := review.NewRemoteThread(review.RemoteThreadDescriptor{
+		ID: "thread", Path: file.IdentityPath(), Line: &line, Side: review.LineNew,
+		Comments: []review.RemoteComment{comment},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := model.review.Snapshot().WithRemoteThreads([]review.RemoteThread{thread})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.review, err = review.NewReview(testReviewRequest(snapshot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.requestActivePatch()
+	waitForPatch(t, model, coordinator, active)
+	beginTestLineComment(t, model)
+	_, _ = model.Update(tea.PasteMsg{Content: "local"})
+	_, _ = model.Update(tea.KeyPressMsg(tea.Key{Code: 's', Mod: tea.ModCtrl}))
+	settleModelWork(t, model, coordinator)
+	if model.review.CommentCount() != 1 {
+		t.Fatalf("local comments = %d, want 1", model.review.CommentCount())
+	}
+	setModelKeybindings(t, model,
+		keymap.Binding{Context: keymap.ContextNormal, Chord: "?", Action: keymap.ActionHelp},
+		keymap.Binding{Context: keymap.ContextNormal, Chord: "tab", Action: keymap.ActionFocusNextPane},
+		keymap.Binding{Context: keymap.ContextNormal, Chord: "C", Action: keymap.ActionFileComment},
+		keymap.Binding{Context: keymap.ContextNormal, Chord: "e", Action: keymap.ActionEditComment},
+	)
+	_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
+	model.focus = FocusComments
+	model.commentCursor = model.review.CommentCount()
+
+	lines := strings.Split(ansi.Strip(model.View().Content), "\n")
+	footer := lines[len(lines)-1]
+	if strings.Contains(footer, " edit") || !strings.Contains(footer, "C file comment") {
+		t.Fatalf("remote-selection footer = %q", footer)
+	}
+	model.beginEditComment()
+	if model.notice == nil || model.notice.Text != remoteCommentsReadOnly {
+		t.Fatalf("remote edit notice = %+v", model.notice)
+	}
+}
+
+func TestColoredWorkspaceRowsPreserveBackgroundAcrossStyledSegments(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	palette, err := NewPalette(map[PaletteRole]string{
+		PalettePanelBackground:  "#111111",
+		PaletteStatusBackground: "#222222",
+		PalettePrimary:          "#ffffff",
+		PaletteSecondary:        "#cccccc",
+		PaletteDiffContext:      "#aaaaaa",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.settings.colorEnabled = true
+	model.settings.palette = palette
+	model.treeCursor = treeNodeIdentity{path: "not-present"}
+	styles := newSemanticStyles(model.settings)
+	const width = 30
+	treeLines, _ := model.fileTreeLines(width, 1, styles)
+	if len(treeLines) != 1 {
+		t.Fatalf("tree lines = %d, want 1", len(treeLines))
+	}
+	rows := []string{
+		paneHeader("FILES", width, paneHeaderFocused, styles),
+		treeLines[0],
+		model.statusLine(width, styles),
+	}
+	terminal := vt.NewEmulator(width, len(rows))
+	t.Cleanup(func() { _ = terminal.Close() })
+	if _, err := terminal.WriteString(strings.Join(rows, "\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	for _, column := range []int{0, 7, width - 1} {
+		if got := terminalColor(terminal.CellAt(column, 0).Style.Bg); got != "#111111" {
+			t.Fatalf("header cell %d background = %q, want panel", column, got)
+		}
+		if got := terminalColor(terminal.CellAt(column, 1).Style.Bg); got != "#111111" {
+			t.Fatalf("tree cell %d background = %q, want panel", column, got)
+		}
+		if got := terminalColor(terminal.CellAt(column, 2).Style.Bg); got != "#222222" {
+			t.Fatalf("status cell %d background = %q, want status", column, got)
+		}
 	}
 }
 
@@ -237,6 +904,15 @@ func TestFocusedCommentPanePreservesStyleSequences(t *testing.T) {
 			if !strings.HasPrefix(plain, test.marker) || !strings.Contains(plain, "comment body") {
 				t.Fatalf("comment row = %q", plain)
 			}
+			terminal := vt.NewEmulator(40, 1)
+			t.Cleanup(func() { _ = terminal.Close() })
+			if _, err := terminal.WriteString(lines[0]); err != nil {
+				t.Fatal(err)
+			}
+			last := terminal.CellAt(39, 0)
+			if last == nil || last.Style.Attrs&(1<<5) == 0 {
+				t.Fatalf("comment selection did not reach the final cell: %#v", last)
+			}
 		})
 	}
 }
@@ -253,7 +929,7 @@ func TestRemoteCommentRowPreservesRenderedText(t *testing.T) {
 	}
 	line, _ := review.NewLineNumber(2)
 	comment, err := review.NewRemoteComment(review.RemoteCommentDescriptor{
-		ID: "comment", Body: "remote body",
+		ID: commentLabel, Body: "remote body",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -279,7 +955,7 @@ func TestRemoteCommentRowPreservesRenderedText(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("remote comment lines = %d, want 1", len(lines))
 	}
-	if got, want := ansi.Strip(lines[0]),
+	if got, want := strings.TrimRight(ansi.Strip(lines[0]), " "),
 		"› [remote open] alpha.txt:2 — deleted user: remote body"; got != want {
 		t.Fatalf("remote comment row = %q, want %q", got, want)
 	}
@@ -332,34 +1008,40 @@ func TestMinimumSizeRetainsPendingConfirmation(t *testing.T) {
 	} {
 		t.Run(fmt.Sprint(pending.kind), func(t *testing.T) {
 			model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+			setModelKeybindings(t, model,
+				keymap.Binding{Context: keymap.ContextConfirm, Chord: "esc", Action: keymap.ActionCancel},
+				keymap.Binding{Context: keymap.ContextConfirm, Chord: "n", Action: keymap.ActionConfirmNo},
+				keymap.Binding{Context: keymap.ContextConfirm, Chord: "y", Action: keymap.ActionConfirmYes},
+				keymap.Binding{Context: keymap.ContextConfirm, Chord: "ctrl-c", Action: keymap.ActionInterrupt},
+			)
 			model.confirmation = pending
 			model.overlay = OverlayConfirm
 
 			_, _ = model.Update(tea.WindowSizeMsg{Width: minimumWidth - 1, Height: minimumHeight})
-			if model.keyContext() != KeyContextMinimumSize {
-				t.Fatalf("key context = %q, want %q", model.keyContext(), KeyContextMinimumSize)
+			if model.keyContext() != keymap.ContextConfirm {
+				t.Fatalf("key context = %q, want %q", model.keyContext(), keymap.ContextConfirm)
 			}
-			if content := model.View().Content; !strings.Contains(content, "decision pending") ||
-				!strings.Contains(content, "resize to decide") || strings.Contains(content, "Confirmation") {
+			if content := ansi.Strip(model.View().Content); !strings.Contains(content, "Decision pending") ||
+				!strings.Contains(strings.ToLower(content), "esc cancel") || strings.Contains(content, "Confirmation") {
 				t.Fatalf("minimum view did not own pending decision:\n%s", content)
 			}
 
-			for _, key := range []string{"y", "n", "esc", "q"} {
-				_, command := model.Update(keyMessage(key))
-				if command != nil {
-					t.Fatalf("key %q returned a command while decision was blocked", key)
-				}
-				if model.overlay != OverlayConfirm || model.confirmation != pending {
-					t.Fatalf("key %q changed pending confirmation to overlay=%v confirmation=%+v", key, model.overlay, model.confirmation)
-				}
+			_, command := model.Update(keyMessage("y"))
+			if command != nil || model.overlay != OverlayConfirm || model.confirmation != pending {
+				t.Fatalf("destructive confirmation changed below minimum: command=%v overlay=%v confirmation=%+v", command, model.overlay, model.confirmation)
 			}
 
 			_, _ = model.Update(tea.WindowSizeMsg{Width: normalWidth, Height: 24})
-			if model.keyContext() != KeyContextConfirm || model.overlay != OverlayConfirm || model.confirmation != pending {
+			if model.keyContext() != keymap.ContextConfirm || model.overlay != OverlayConfirm || model.confirmation != pending {
 				t.Fatalf("resize did not restore confirmation: context=%q overlay=%v confirmation=%+v", model.keyContext(), model.overlay, model.confirmation)
 			}
-			if content := model.View().Content; !strings.Contains(content, "Confirmation") {
+			if content := ansi.Strip(model.View().Content); !strings.Contains(content, "Confirmation") {
 				t.Fatalf("restored view omitted confirmation:\n%s", content)
+			}
+			_, _ = model.Update(tea.WindowSizeMsg{Width: minimumWidth - 1, Height: minimumHeight})
+			_, command = model.Update(keyMessage("esc"))
+			if command != nil || model.overlay != OverlayNone || model.confirmation != (confirmation{}) {
+				t.Fatalf("cancel below minimum = command=%v overlay=%v confirmation=%+v", command, model.overlay, model.confirmation)
 			}
 		})
 	}
@@ -372,7 +1054,7 @@ func TestConfirmedQuitPreservesLastViewUntilTerminalRestoration(t *testing.T) {
 	model.overlay = OverlayConfirm
 	before := model.View()
 
-	command := model.applyConfirmationAction(KeyActionConfirmYes)
+	command := model.applyConfirmationAction(keymap.ActionConfirmYes)
 	if command == nil {
 		t.Fatal("confirmed quit returned no command")
 	}
@@ -389,20 +1071,37 @@ func TestConfirmedQuitPreservesLastViewUntilTerminalRestoration(t *testing.T) {
 	}
 }
 
-func TestMinimumHeightPrioritizesPendingConfirmationWarning(t *testing.T) {
+func TestMinimumHeightPrioritizesPendingConfirmationCancellation(t *testing.T) {
 	for height := 1; height < minimumHeight; height++ {
 		t.Run(fmt.Sprintf("height-%d", height), func(t *testing.T) {
 			model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+			setModelKeybindings(t, model,
+				keymap.Binding{Context: keymap.ContextConfirm, Chord: "esc", Action: keymap.ActionCancel},
+			)
 			model.confirmation = confirmation{kind: confirmationQuit}
 			model.overlay = OverlayConfirm
 			_, _ = model.Update(tea.WindowSizeMsg{Width: normalWidth, Height: height})
 
-			content := model.View().Content
-			if !strings.Contains(content, "decision pending") ||
-				!strings.Contains(content, "resize to decide") {
-				t.Fatalf("height %d hid pending-decision warning: %q", height, content)
+			content := ansi.Strip(model.View().Content)
+			if !strings.Contains(strings.ToLower(content), "esc cancel") {
+				t.Fatalf("height %d hid pending-decision cancellation: %q", height, content)
 			}
 		})
+	}
+}
+
+func TestMinimumViewPreservesExactRecoveryAtBreakpointEdges(t *testing.T) {
+	for _, size := range []TerminalSize{
+		{Width: 19, Height: 5, Known: true},
+		{Width: 19, Height: 6, Known: true},
+		{Width: 20, Height: 5, Known: true},
+	} {
+		model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+		_, _ = model.Update(tea.WindowSizeMsg{Width: size.Width, Height: size.Height})
+		content := ansi.Strip(model.View().Content)
+		if !strings.Contains(content, "Resize to 20×6") || !strings.Contains(content, "q quit") {
+			t.Fatalf("minimum view %dx%d omitted exact recovery or exit: %q", size.Width, size.Height, content)
+		}
 	}
 }
 
@@ -546,7 +1245,43 @@ func TestCommentAnchorsRemainSideSpecificStableAndVisibleWithoutColor(t *testing
 			t.Fatalf("wrapped continuation reused marker cells: %q", plain)
 		}
 	}
-	if marker := model.commentAnchorCell(active, review.LineNew, lineTwo, styles); !strings.Contains(marker, "\x1b[1m") || ansi.Strip(marker) != "●" {
+	contextIndex := -1
+	for index, row := range unified {
+		if strings.Contains(ansi.Strip(row), "original") {
+			contextIndex = index
+			break
+		}
+	}
+	if contextIndex < 0 {
+		t.Fatal("context row is absent")
+	}
+	model.diffCursor = rows[contextIndex]
+	selected, _ := model.diffLines(62, 20, styles)
+	selectedContext := ""
+	for _, row := range selected {
+		if strings.Contains(ansi.Strip(row), "original") {
+			selectedContext = row
+			break
+		}
+	}
+	if selectedContext == "" {
+		t.Fatal("selected context row is absent")
+	}
+	terminal := vt.NewEmulator(62, 1)
+	t.Cleanup(func() { _ = terminal.Close() })
+	if _, err := terminal.WriteString(selectedContext); err != nil {
+		t.Fatal(err)
+	}
+	if last := terminal.CellAt(61, 0); last == nil || last.Style.Attrs&(1<<5) == 0 {
+		t.Fatalf("selection did not continue after styled anchors: cell=%#v row=%q", last, selectedContext)
+	}
+	if marker := model.commentAnchorCell(
+		active,
+		review.LineNew,
+		lineTwo,
+		diffCellPresentation{},
+		styles,
+	); !strings.Contains(marker, "\x1b[1m") || ansi.Strip(marker) != "●" {
 		t.Fatalf("monochrome marker lacks bold non-color emphasis: %q", marker)
 	}
 
@@ -697,7 +1432,7 @@ func TestRenderSyntaxSpansStopsAtViewportBoundary(t *testing.T) {
 	styles := semanticStyles{number: lipgloss.NewStyle().Bold(true)}
 	want, wantLimited := renderSyntaxSpans(raw, func(yield func(review.SyntaxSpan) bool) {
 		yield(visible)
-	}, styles)
+	}, styles, lipgloss.NewStyle())
 
 	pulls := 0
 	stopped := false
@@ -719,7 +1454,7 @@ func TestRenderSyntaxSpansStopsAtViewportBoundary(t *testing.T) {
 			}
 		}
 	}
-	got, gotLimited := renderSyntaxSpans(raw, spans, styles)
+	got, gotLimited := renderSyntaxSpans(raw, spans, styles, lipgloss.NewStyle())
 	if got != want || gotLimited != wantLimited {
 		t.Fatalf(
 			"syntax render = (%q, %t), want visible-only result (%q, %t)",
@@ -784,7 +1519,7 @@ func TestRenderSyntaxSpansPreservesBoundarySemantics(t *testing.T) {
 						return
 					}
 				}
-			}, styles)
+			}, styles, lipgloss.NewStyle())
 			if got != test.want || limited != test.limited {
 				t.Fatalf(
 					"syntax render = (%q, %t), want (%q, %t)",
@@ -873,17 +1608,24 @@ func TestPublicationPreflightRendersCanonicalPayloadAndDecision(t *testing.T) {
 	}
 	model.review = current
 	model.overlay = OverlaySubmit
+	model.publicationDraftReady = true
 	_, _ = model.Update(tea.WindowSizeMsg{Width: 100, Height: 25})
 	payloadView := model.View().Content
-	if !strings.Contains(payloadView, "[payload] canonical GitHub request") ||
-		!strings.Contains(payloadView, `"commit_id":"`+head.String()+`"`) {
+	plainPayloadView := ansi.Strip(payloadView)
+	if !strings.Contains(plainPayloadView, "Publish GitHub review") ||
+		!strings.Contains(plainPayloadView, "▸ Comment") ||
+		!strings.Contains(plainPayloadView, publicationEventApproveLabel) ||
+		!strings.Contains(plainPayloadView, publicationEventRequestChangesLabel) ||
+		!strings.Contains(plainPayloadView, "[payload] canonical GitHub request") ||
+		!strings.Contains(plainPayloadView, `"commit_id":"`+head.String()+`"`) {
 		t.Fatalf("preflight omitted canonical payload:\n%s", payloadView)
 	}
 
 	model.publicationCursor = 1
 	commentView := model.View().Content
-	if !strings.Contains(commentView, "[summary] full publication comment") ||
-		!strings.Contains(commentView, "Full comment #0") {
+	plainCommentView := ansi.Strip(commentView)
+	if !strings.Contains(plainCommentView, "[summary] full publication comment") ||
+		!strings.Contains(plainCommentView, "Full comment #0") {
 		t.Fatalf("preflight omitted comment decision/detail:\n%s", commentView)
 	}
 }

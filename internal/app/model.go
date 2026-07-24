@@ -13,6 +13,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/jacoelho/rvw/internal/delivery"
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 	"github.com/jacoelho/rvw/internal/source"
 )
@@ -20,10 +21,18 @@ import (
 const (
 	chordTimeout               = 750 * time.Millisecond
 	commentFileOutsideReview   = "comment file is not in this review"
+	commentLabel               = "comment"
+	exportLabel                = "export"
+	helpLabel                  = "help"
+	nextRowLabel               = "next row"
 	operationIdentityExhausted = "operation identity exhausted"
 	keyEnter                   = "enter"
 	keyEscape                  = "esc"
 	keyReturn                  = "return"
+	remoteCommentsReadOnly     = NoticeText("remote comments are read-only")
+	readyStatusText            = "Ready"
+	reloadLabel                = "reload"
+	searchLabel                = "search"
 	unknownValue               = "unknown"
 )
 
@@ -101,6 +110,7 @@ type NoticeKind uint8
 // NoticeInformation identifies a supported notice information value.
 const (
 	NoticeInformation NoticeKind = iota + 1
+	NoticeSuccess
 	NoticeWarning
 	NoticeError
 )
@@ -177,6 +187,7 @@ type Model struct {
 	commandContext            context.Context
 	deliveryOperations        map[review.OperationID]delivery.Destination
 	filteredFileTree          *fileTree
+	commentSelection          commentRowIdentity
 	receiver                  *ReadyReceiver
 	operationProgress         map[review.OperationID]Progress
 	filterBuild               *fileFilterBuild
@@ -195,7 +206,7 @@ type Model struct {
 	findRestore               *findReturnState
 	searchAfterSyntax         *pendingSearch
 	help                      help.Model
-	filterQuery               string
+	fileProjection            fileProjectionState
 	visibleFileTree           fileTree
 	allFileTree               fileTree
 	filterTreeFiles           []review.FileID
@@ -225,6 +236,7 @@ type Model struct {
 	commentCursor             int
 	publicationDetailTop      int
 	publicationCursor         int
+	publicationSelection      publicationRowIdentity
 	helpTop                   int
 	statusTop                 int
 	nextOperation             uint64
@@ -240,7 +252,8 @@ type Model struct {
 	repeat                    uint16
 	exportPicker              exportSelection
 	publicationAllowStale     bool
-	commentsVisible           bool
+	commentSelectionKnown     bool
+	commentPaneVisibility     paneVisibility
 	publicationIntent         publicationOperationIntent
 	quitting                  bool
 	publicationMoveSummary    bool
@@ -250,19 +263,29 @@ type Model struct {
 	fileTreeVisible           bool
 	filterTreeBuilding        bool
 	overlay                   Overlay
+	statusReturn              Overlay
 	syntaxDeferred            bool
 	focus                     FocusOwner
+	singlePaneOverride        FocusOwner
 	mode                      InteractionMode
 	initialized               bool
 	coordinatorClosed         bool
 }
 
 type pendingKeyChord struct {
-	context    KeyContext
-	focus      KeyFocus
+	context    keymap.Context
+	focus      keymap.Focus
 	strokes    []string
 	generation uint64
 }
+
+type paneVisibility uint8
+
+const (
+	paneVisibilityAuto paneVisibility = iota
+	paneVisibilityShown
+	paneVisibilityHidden
+)
 
 type keyStroke struct {
 	value    string
@@ -301,23 +324,26 @@ func NewModel(
 	commandInput.Prompt = ": "
 	commandInput.CharLimit = maxPromptBytes
 	model := &Model{
-		commandContext:     ctx,
-		document:           document,
-		coordinator:        coordinator,
-		receiver:           receiver,
-		settings:           settings,
-		publicationEvent:   settings.publication.Event(),
-		help:               helpModel,
-		commentEditor:      editor,
-		searchInput:        searchInput,
-		commandInput:       commandInput,
-		review:             current,
-		focus:              FocusDiff,
-		mode:               ModeNormal,
-		commentsVisible:    false,
-		fileTreeVisible:    true,
-		nextOperation:      1,
-		foreground:         newForegroundState(),
+		commandContext:   ctx,
+		document:         document,
+		coordinator:      coordinator,
+		receiver:         receiver,
+		settings:         settings,
+		publicationEvent: settings.publication.Event(),
+		help:             helpModel,
+		commentEditor:    editor,
+		searchInput:      searchInput,
+		commandInput:     commandInput,
+		review:           current,
+		focus:            FocusDiff,
+		mode:             ModeNormal,
+		fileTreeVisible:  true,
+		nextOperation:    1,
+		foreground:       newForegroundState(),
+		fileProjection: fileProjectionState{
+			workspace: projectionInitial,
+			filter:    projectionReady,
+		},
 		operationProgress:  make(map[review.OperationID]Progress),
 		exportOperations:   make(map[review.OperationID]exportRequest),
 		deliveryOperations: make(map[review.OperationID]delivery.Destination),
@@ -475,7 +501,7 @@ func (model *Model) applyMouseAction(message mouseActionMsg) tea.Cmd {
 		model.diffCursor = message.diffLine
 		model.moveDiff(0)
 	case mouseTargetComment:
-		model.commentCursor = message.commentIndex
+		model.selectCommentIndex(message.commentIndex)
 	}
 	return command
 }
@@ -871,7 +897,10 @@ func (model *Model) applyForegroundEffect(effect foregroundEffect) {
 
 func (model *Model) operationSummary() string {
 	stats := model.coordinatorStats
-	return "work " + strconv.Itoa(stats.Accepted) + "/" + strconv.Itoa(MaxAcceptedOperations)
+	if stats.Accepted == 0 {
+		return readyStatusText
+	}
+	return "Working " + strconv.Itoa(stats.Accepted)
 }
 
 func (model *Model) refreshCoordinatorStats() {

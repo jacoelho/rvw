@@ -43,6 +43,35 @@ type histogramTask struct {
 	fixed    bool
 }
 
+const (
+	nativeInMemoryDiffByteLimit uint64 = 2 << 20
+	nativeInMemoryDiffLineLimit        = 65_536
+	maxDiffHistogramProbes      uint64 = 512_000_000
+	diffCancellationStride             = 4_096
+)
+
+func nativeDiffFitsMemory(oldSize, newSize uint64) bool {
+	return oldSize <= nativeInMemoryDiffByteLimit &&
+		newSize <= nativeInMemoryDiffByteLimit-oldSize
+}
+
+func nativeDiffLinesFitMemory(oldContents, newContents []byte) bool {
+	oldLines := nativeDiffLineCount(oldContents)
+	return oldLines <= nativeInMemoryDiffLineLimit &&
+		nativeDiffLineCount(newContents) <= nativeInMemoryDiffLineLimit-oldLines
+}
+
+func nativeDiffLineCount(contents []byte) int {
+	if len(contents) == 0 {
+		return 0
+	}
+	count := bytes.Count(contents, []byte{'\n'})
+	if contents[len(contents)-1] != '\n' {
+		count++
+	}
+	return count
+}
+
 func populateNativeDiff(
 	ctx context.Context,
 	session *repositorySession,
@@ -66,7 +95,7 @@ func populateNativeDiff(
 	if err != nil {
 		return err
 	}
-	if oldSize+newSize > 1<<20 {
+	if !nativeDiffFitsMemory(oldSize, newSize) {
 		return populateNativeDiskDiff(ctx, session, record, oldSize, newSize)
 	}
 	oldContents, err := readNativeRecordSide(ctx, session, record.oldOID)
@@ -85,7 +114,7 @@ func populateNativeDiff(
 		record.binary = true
 		return nil
 	}
-	if bytes.Count(oldContents, []byte{'\n'})+bytes.Count(newContents, []byte{'\n'})+2 > 65_536 {
+	if !nativeDiffLinesFitMemory(oldContents, newContents) {
 		return populateNativeDiskDiff(ctx, session, record, oldSize, newSize)
 	}
 	oldLines, err := tokenizeNativeLines(ctx, oldContents)
@@ -285,7 +314,7 @@ func tokenizeNativeLines(ctx context.Context, contents []byte) ([]nativeLine, er
 	lines := make([]nativeLine, 0, bytes.Count(contents, []byte{'\n'})+1)
 	start := 0
 	for start < len(contents) {
-		if len(lines)%4_096 == 0 {
+		if len(lines)%diffCancellationStride == 0 {
 			if err := context.Cause(ctx); err != nil {
 				return nil, err
 			}
@@ -333,11 +362,15 @@ func histogramEdits(
 			continue
 		}
 		oldStart, newStart := task.oldStart, task.newStart
-		for oldStart < task.oldEnd && newStart < task.newEnd &&
-			nativeLinesEqual(oldContents, newContents, oldLines[oldStart], newLines[newStart]) {
+		for oldStart < task.oldEnd && newStart < task.newEnd {
+			if err := chargeNativeHistogramProbe(ctx, &probes); err != nil {
+				return nil, err
+			}
+			if !nativeLinesEqual(oldContents, newContents, oldLines[oldStart], newLines[newStart]) {
+				break
+			}
 			oldStart++
 			newStart++
-			probes++
 		}
 		prefix := oldStart - task.oldStart
 		if prefix > 0 {
@@ -346,11 +379,15 @@ func histogramEdits(
 			})
 		}
 		oldEnd, newEnd := task.oldEnd, task.newEnd
-		for oldEnd > oldStart && newEnd > newStart &&
-			nativeLinesEqual(oldContents, newContents, oldLines[oldEnd-1], newLines[newEnd-1]) {
+		for oldEnd > oldStart && newEnd > newStart {
+			if err := chargeNativeHistogramProbe(ctx, &probes); err != nil {
+				return nil, err
+			}
+			if !nativeLinesEqual(oldContents, newContents, oldLines[oldEnd-1], newLines[newEnd-1]) {
+				break
+			}
 			oldEnd--
 			newEnd--
-			probes++
 		}
 		suffix := task.oldEnd - oldEnd
 		if oldStart == oldEnd || newStart == newEnd {
@@ -371,12 +408,12 @@ func histogramEdits(
 			}
 			continue
 		}
-		oldAnchor, newAnchor, run, occurrence, anchorProbes := nativeHistogramAnchor(
-			oldContents, newContents, oldLines, newLines, oldStart, oldEnd, newStart, newEnd,
+		oldAnchor, newAnchor, run, occurrence, err := nativeHistogramAnchor(
+			ctx, &probes, oldContents, newContents, oldLines, newLines,
+			oldStart, oldEnd, newStart, newEnd,
 		)
-		probes += anchorProbes
-		if probes > 512_000_000 {
-			return nil, &LimitError{Resource: LimitDiffHistogramProbes, Limit: 512_000_000}
+		if err != nil {
+			return nil, err
 		}
 		if occurrence == 0 {
 			appendNativeEdit(&edits, nativeEdit{
@@ -408,26 +445,41 @@ func histogramEdits(
 	return edits, nil
 }
 
+//nolint:gocognit // Anchor selection and bounded cancellation form one kernel.
 func nativeHistogramAnchor(
+	ctx context.Context,
+	probes *uint64,
 	oldContents, newContents []byte,
 	oldLines, newLines []nativeLine,
 	oldStart, oldEnd, newStart, newEnd int,
-) (bestOld, bestNew, bestRun, bestOccurrence int, probes uint64) {
+) (bestOld, bestNew, bestRun, bestOccurrence int, returnErr error) {
 	occurrences := make(map[uint64][]int, min(oldEnd-oldStart, 4_096))
 	for index := oldStart; index < oldEnd; index++ {
+		if (index-oldStart)%diffCancellationStride == 0 {
+			if err := context.Cause(ctx); err != nil {
+				return 0, 0, 0, 0, err
+			}
+		}
 		positions := occurrences[oldLines[index].hash]
 		if len(positions) <= 64 {
 			occurrences[oldLines[index].hash] = append(positions, index)
 		}
 	}
 	for newIndex := newStart; newIndex < newEnd; newIndex++ {
+		if (newIndex-newStart)%diffCancellationStride == 0 {
+			if err := context.Cause(ctx); err != nil {
+				return 0, 0, 0, 0, err
+			}
+		}
 		positions := occurrences[newLines[newIndex].hash]
 		if len(positions) == 0 || len(positions) > 64 {
 			continue
 		}
 		matches := make([]int, 0, len(positions))
 		for _, oldIndex := range positions {
-			probes++
+			if err := chargeNativeHistogramProbe(ctx, probes); err != nil {
+				return 0, 0, 0, 0, err
+			}
 			if nativeLinesEqual(oldContents, newContents, oldLines[oldIndex], newLines[newIndex]) {
 				matches = append(matches, oldIndex)
 			}
@@ -438,21 +490,29 @@ func nativeHistogramAnchor(
 		}
 		for _, matchedOld := range matches {
 			anchorOld, anchorNew := matchedOld, newIndex
-			for anchorOld > oldStart && anchorNew > newStart &&
-				nativeLinesEqual(
+			for anchorOld > oldStart && anchorNew > newStart {
+				if err := chargeNativeHistogramProbe(ctx, probes); err != nil {
+					return 0, 0, 0, 0, err
+				}
+				if !nativeLinesEqual(
 					oldContents, newContents, oldLines[anchorOld-1], newLines[anchorNew-1],
 				) {
+					break
+				}
 				anchorOld--
 				anchorNew--
-				probes++
 			}
 			run := 1 + matchedOld - anchorOld
-			for anchorOld+run < oldEnd && anchorNew+run < newEnd &&
-				nativeLinesEqual(
+			for anchorOld+run < oldEnd && anchorNew+run < newEnd {
+				if err := chargeNativeHistogramProbe(ctx, probes); err != nil {
+					return 0, 0, 0, 0, err
+				}
+				if !nativeLinesEqual(
 					oldContents, newContents, oldLines[anchorOld+run], newLines[anchorNew+run],
 				) {
+					break
+				}
 				run++
-				probes++
 			}
 			if bestOccurrence == 0 || occurrence < bestOccurrence ||
 				occurrence == bestOccurrence && (run > bestRun ||
@@ -463,7 +523,21 @@ func nativeHistogramAnchor(
 			}
 		}
 	}
-	return bestOld, bestNew, bestRun, bestOccurrence, probes
+	return bestOld, bestNew, bestRun, bestOccurrence, nil
+}
+
+func chargeNativeHistogramProbe(ctx context.Context, probes *uint64) error {
+	(*probes)++
+	if *probes > maxDiffHistogramProbes {
+		return &LimitError{
+			Resource: LimitDiffHistogramProbes,
+			Limit:    maxDiffHistogramProbes,
+		}
+	}
+	if *probes%diffCancellationStride == 0 {
+		return context.Cause(ctx)
+	}
+	return nil
 }
 
 func nativeLinesEqual(

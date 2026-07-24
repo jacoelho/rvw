@@ -10,6 +10,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/jacoelho/rvw/internal/delivery"
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 )
 
@@ -66,19 +67,19 @@ func (model *Model) beginCommandPrompt() tea.Cmd {
 func (model *Model) handlePromptKey(message tea.KeyPressMsg) tea.Cmd {
 	stroke := keyStrokeFrom(message)
 	if action, consumed, command := model.resolveKeyStroke(stroke); consumed {
-		if action == KeyActionNone {
+		if action == keymap.ActionNone {
 			return command
 		}
-		if action == KeyActionCancel || action == KeyActionInterrupt {
+		if action == keymap.ActionCancel || action == keymap.ActionInterrupt {
 			model.cancelPrompt()
 			return nil
 		}
-		if action == KeyActionAccept {
+		if action == keymap.ActionAccept {
 			command := model.commandInput.Value()
 			model.cancelPrompt()
 			return model.executeCommand(command)
 		}
-		if action == KeyActionDeleteBackward {
+		if action == keymap.ActionDeleteBackward {
 			message = tea.KeyPressMsg(tea.Key{Code: tea.KeyBackspace})
 		}
 	}
@@ -142,7 +143,16 @@ func (model *Model) resizePrompts() {
 }
 
 func (model *Model) commandBarLine(width int, styles semanticStyles) string {
-	return styles.status.Render(fitCellWidth(model.commandInput.View(), width))
+	commandInput := model.commandInput
+	inputStyles := commandInput.Styles()
+	inputStyles.Focused.Prompt = styles.heading.Inherit(styles.status)
+	inputStyles.Focused.Text = styles.status
+	inputStyles.Focused.Placeholder = styles.muted.Inherit(styles.status)
+	inputStyles.Focused.Suggestion = styles.muted.Inherit(styles.status)
+	inputStyles.Blurred = inputStyles.Focused
+	inputStyles.Cursor.Color = styles.status.GetForeground()
+	commandInput.SetStyles(inputStyles)
+	return styles.status.Render(fitCellWidth(commandInput.View(), width))
 }
 
 func parseCommand(value string) (commandIntent, error) { //nolint:funlen // One closed switch owns the complete command grammar.
@@ -165,13 +175,13 @@ func parseCommand(value string) (commandIntent, error) { //nolint:funlen // One 
 		intent, err := noArguments(commandQuit)
 		intent.force = true
 		return intent, err
-	case "reload":
+	case reloadLabel:
 		return noArguments(commandReload)
 	case "diff":
 		return noArguments(commandToggleDiff)
 	case "copy":
 		return noArguments(commandCopy)
-	case "export":
+	case exportLabel:
 		return noArguments(commandExport)
 	case "json":
 		return noArguments(commandJSON)
@@ -181,7 +191,7 @@ func parseCommand(value string) (commandIntent, error) { //nolint:funlen // One 
 		return parseResolveDraftCommand(arguments)
 	case "ack-submit":
 		return noArguments(commandAcknowledgeSubmit)
-	case "help":
+	case helpLabel:
 		return noArguments(commandHelp)
 	case "filter":
 		return commandIntent{kind: commandFilter, text: arguments}, nil
@@ -261,7 +271,7 @@ func (model *Model) executeCommand(value string) tea.Cmd {
 	case commandReload:
 		model.requestReload()
 	case commandToggleDiff:
-		model.applyAction(KeyActionToggleView, 1)
+		model.applyAction(keymap.ActionToggleView, 1)
 	case commandCopy:
 		model.openExportPicker(exportSelection{
 			format:      review.ExportMarkdown,
@@ -281,7 +291,7 @@ func (model *Model) executeCommand(value string) tea.Cmd {
 			options:     review.DefaultExportOptions(),
 		})
 	case commandSubmit:
-		model.applyAction(KeyActionOpenSubmit, 1)
+		model.applyAction(keymap.ActionOpenSubmit, 1)
 	case commandResolveDraft:
 		model.resolvePendingConflict(intent.text)
 	case commandAcknowledgeSubmit:

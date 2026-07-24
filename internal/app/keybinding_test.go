@@ -7,29 +7,30 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/jacoelho/rvw/internal/keymap"
 )
 
 func TestRuntimeKeybindingMatrixRoutesAndRendersEveryDeclaredPair(t *testing.T) {
-	seenActions := make(map[KeyAction]struct{})
-	for context, actions := range contextKeyActions {
-		focuses := []KeyFocus{KeyFocusNone}
-		if context == KeyContextNormal {
-			focuses = append(focuses, KeyFocusFileTree, KeyFocusDiff, KeyFocusComments)
+	seenActions := make(map[keymap.Action]struct{})
+	for _, context := range keymap.Contexts() {
+		focuses := []keymap.Focus{keymap.FocusNone}
+		if context == keymap.ContextNormal {
+			focuses = append(focuses, keymap.FocusFileTree, keymap.FocusDiff, keymap.FocusComments)
 		}
-		for action := range actions {
+		for _, action := range keymap.AllowedActions(context) {
 			seenActions[action] = struct{}{}
 			for _, focus := range focuses {
 				name := fmt.Sprintf("%s/%s/%s", context, focus, action)
 				t.Run(name, func(t *testing.T) {
-					const chord = KeyChord("rvw-contract")
+					const chord = keymap.Chord("rvw-contract")
 					model := modelForKeyContext(context)
-					setModelKeybindings(t, model, Keybinding{
+					setModelKeybindings(t, model, keymap.Binding{
 						Context: context,
 						Focus:   focus,
 						Chord:   chord,
 						Action:  action,
 					})
-					if focus != KeyFocusNone {
+					if focus != keymap.FocusNone {
 						model.focus = focusOwner(focus)
 					}
 					if got := model.keyContext(); got != context {
@@ -45,14 +46,15 @@ func TestRuntimeKeybindingMatrixRoutesAndRendersEveryDeclaredPair(t *testing.T) 
 						)
 					}
 					visible := model.bindingSummary(context)
-					if !strings.Contains(visible, chord.String()) || !strings.Contains(visible, action.String()) {
+					if !strings.Contains(visible, chord.Display()) ||
+						!strings.Contains(visible, action.Description()) {
 						t.Fatalf("visible binding summary = %q", visible)
 					}
 				})
 			}
 		}
 	}
-	for action := range validKeyActions {
+	for _, action := range keymap.Actions() {
 		if _, exists := seenActions[action]; !exists {
 			t.Errorf("valid action %q is unreachable from every runtime context", action)
 		}
@@ -60,16 +62,16 @@ func TestRuntimeKeybindingMatrixRoutesAndRendersEveryDeclaredPair(t *testing.T) 
 }
 
 func TestRuntimeKeybindingVocabularyRejectsUnknownValues(t *testing.T) {
-	if _, err := NewKeyContext("unknown"); err == nil {
+	if _, err := keymap.NewContext("unknown"); err == nil {
 		t.Fatal("unknown context was accepted")
 	}
-	if _, err := NewKeyFocus("unknown"); err == nil {
+	if _, err := keymap.NewFocus("unknown"); err == nil {
 		t.Fatal("unknown focus was accepted")
 	}
-	if _, err := NewKeyAction("unknown"); err == nil {
+	if _, err := keymap.NewAction("unknown"); err == nil {
 		t.Fatal("unknown action was accepted")
 	}
-	if _, err := NewKeyChord(" \t "); err == nil {
+	if _, err := keymap.NewChord(" \t "); err == nil {
 		t.Fatal("empty chord was accepted")
 	}
 }
@@ -89,10 +91,10 @@ func TestCommentEditorTabFallsThroughUnlessExplicitlyBound(t *testing.T) {
 		}
 	}
 
-	setModelKeybindings(t, model, Keybinding{
-		Context: KeyContextCommentEdit,
-		Chord:   "Tab",
-		Action:  KeyActionInsertNewline,
+	setModelKeybindings(t, model, keymap.Binding{
+		Context: keymap.ContextCommentEdit,
+		Chord:   "tab",
+		Action:  keymap.ActionInsertNewline,
 	})
 	_, _ = model.Update(tea.KeyPressMsg(tea.Key{Text: "a", Code: 'a'}))
 	_, _ = model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyTab}))
@@ -105,10 +107,10 @@ func TestRepeatedInterruptDoesNotCrossIntoConfirmationContext(t *testing.T) {
 	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	settleModelWork(t, model, coordinator)
 	_, _ = model.Update(tea.WindowSizeMsg{Width: normalWidth, Height: 24})
-	setModelKeybindings(t, model, Keybinding{
-		Context: KeyContextConfirm,
+	setModelKeybindings(t, model, keymap.Binding{
+		Context: keymap.ContextConfirm,
 		Chord:   "ctrl-c",
-		Action:  KeyActionInterrupt,
+		Action:  keymap.ActionInterrupt,
 	})
 	model.confirmation = confirmation{kind: confirmationQuit}
 	model.overlay = OverlayConfirm
@@ -154,21 +156,21 @@ func TestModalContextsExecuteSequentialMultiStrokeBindings(t *testing.T) {
 	testCases := []struct {
 		inputValue func(*Model) string
 		name       string
-		context    KeyContext
+		context    keymap.Context
 		mode       InteractionMode
 		overlay    Overlay
 	}{
 		{
 			name:    "comment edit",
-			context: KeyContextCommentEdit,
+			context: keymap.ContextCommentEdit,
 			mode:    ModeCommentEdit,
 			inputValue: func(model *Model) string {
 				return model.commentEditor.Value()
 			},
 		},
 		{
-			name:    "search",
-			context: KeyContextSearch,
+			name:    searchLabel,
+			context: keymap.ContextSearch,
 			mode:    ModeNormal,
 			overlay: OverlayFind,
 			inputValue: func(model *Model) string {
@@ -177,7 +179,7 @@ func TestModalContextsExecuteSequentialMultiStrokeBindings(t *testing.T) {
 		},
 		{
 			name:    "command",
-			context: KeyContextCommand,
+			context: keymap.ContextCommand,
 			mode:    ModeCommand,
 			inputValue: func(model *Model) string {
 				return model.commandInput.Value()
@@ -191,10 +193,10 @@ func TestModalContextsExecuteSequentialMultiStrokeBindings(t *testing.T) {
 			model.commandContext = context.Background()
 			model.mode = testCase.mode
 			model.overlay = testCase.overlay
-			setModelKeybindings(t, model, Keybinding{
+			setModelKeybindings(t, model, keymap.Binding{
 				Context: testCase.context,
 				Chord:   "g x",
-				Action:  KeyActionCancel,
+				Action:  keymap.ActionCancel,
 			})
 
 			_, _ = model.Update(keyMessage("g"))
@@ -232,10 +234,10 @@ func TestCompletedOrAbandonedChordTimeoutDoesNotClearLaterRepeat(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 			settleModelWork(t, model, coordinator)
-			setModelKeybindings(t, model, Keybinding{
-				Context: KeyContextNormal,
+			setModelKeybindings(t, model, keymap.Binding{
+				Context: keymap.ContextNormal,
 				Chord:   "g g",
-				Action:  KeyActionToggleWrap,
+				Action:  keymap.ActionToggleWrap,
 			})
 
 			_, _ = model.Update(keyMessage("g"))
@@ -256,10 +258,10 @@ func TestCompletedOrAbandonedChordTimeoutDoesNotClearLaterRepeat(t *testing.T) {
 func TestReloadPreparationRoutesMultiStrokeQuit(t *testing.T) {
 	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	settleModelWork(t, model, coordinator)
-	setModelKeybindings(t, model, Keybinding{
-		Context: KeyContextNormal,
+	setModelKeybindings(t, model, keymap.Binding{
+		Context: keymap.ContextNormal,
 		Chord:   "g q",
-		Action:  KeyActionQuit,
+		Action:  keymap.ActionQuit,
 	})
 	model.foreground.reload = reloadFlow{
 		phase:     reloadPreparing,
@@ -281,10 +283,10 @@ func TestReloadPreparationActionConsumesPriorRepeat(t *testing.T) {
 	settleModelWork(t, model, coordinator)
 	_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
 	model.focus = FocusFileTree
-	model.commentsVisible = true
+	model.commentPaneVisibility = paneVisibilityShown
 	setModelKeybindings(t, model,
-		Keybinding{Context: KeyContextNormal, Focus: KeyFocusFileTree, Chord: "g c", Action: KeyActionInterrupt},
-		Keybinding{Context: KeyContextNormal, Focus: KeyFocusFileTree, Chord: "j", Action: KeyActionFocusNextPane},
+		keymap.Binding{Context: keymap.ContextNormal, Focus: keymap.FocusFileTree, Chord: "g c", Action: keymap.ActionInterrupt},
+		keymap.Binding{Context: keymap.ContextNormal, Focus: keymap.FocusFileTree, Chord: "j", Action: keymap.ActionFocusNextPane},
 	)
 	model.foreground.reload = reloadFlow{phase: reloadAcquiring, operation: 10_000}
 
@@ -311,10 +313,10 @@ func TestDisallowedReloadPreparationActionConsumesPriorRepeat(t *testing.T) {
 	settleModelWork(t, model, coordinator)
 	_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
 	model.focus = FocusFileTree
-	model.commentsVisible = true
+	model.commentPaneVisibility = paneVisibilityShown
 	setModelKeybindings(t, model,
-		Keybinding{Context: KeyContextNormal, Focus: KeyFocusFileTree, Chord: "g x", Action: KeyActionToggleWrap},
-		Keybinding{Context: KeyContextNormal, Focus: KeyFocusFileTree, Chord: "j", Action: KeyActionFocusNextPane},
+		keymap.Binding{Context: keymap.ContextNormal, Focus: keymap.FocusFileTree, Chord: "g x", Action: keymap.ActionToggleWrap},
+		keymap.Binding{Context: keymap.ContextNormal, Focus: keymap.FocusFileTree, Chord: "j", Action: keymap.ActionFocusNextPane},
 	)
 	model.foreground.reload = reloadFlow{phase: reloadAcquiring, operation: 10_000}
 	initialWrap := model.settings.wrap
@@ -369,11 +371,11 @@ func TestPendingChordCannotCrossFocusOwner(t *testing.T) {
 			_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
 			model.focus = FocusFileTree
 			setModelKeybindings(t, model,
-				Keybinding{
-					Context: KeyContextNormal,
-					Focus:   KeyFocusFileTree,
+				keymap.Binding{
+					Context: keymap.ContextNormal,
+					Focus:   keymap.FocusFileTree,
 					Chord:   "x t",
-					Action:  KeyActionToggleWrap,
+					Action:  keymap.ActionToggleWrap,
 				},
 			)
 			initialWrap := model.settings.wrap
@@ -407,10 +409,10 @@ func TestAbandonedChordClearsNumericRepeat(t *testing.T) {
 		settleModelWork(t, model, coordinator)
 		_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
 		model.focus = FocusFileTree
-		model.commentsVisible = true
+		model.commentPaneVisibility = paneVisibilityShown
 		setModelKeybindings(t, model,
-			Keybinding{Context: KeyContextNormal, Focus: KeyFocusFileTree, Chord: "g g", Action: KeyActionToggleWrap},
-			Keybinding{Context: KeyContextNormal, Focus: KeyFocusFileTree, Chord: "j", Action: KeyActionFocusNextPane},
+			keymap.Binding{Context: keymap.ContextNormal, Focus: keymap.FocusFileTree, Chord: "g g", Action: keymap.ActionToggleWrap},
+			keymap.Binding{Context: keymap.ContextNormal, Focus: keymap.FocusFileTree, Chord: "j", Action: keymap.ActionFocusNextPane},
 		)
 
 		_, _ = model.Update(keyMessage("5"))
@@ -425,8 +427,8 @@ func TestAbandonedChordClearsNumericRepeat(t *testing.T) {
 		model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 		settleModelWork(t, model, coordinator)
 		setModelKeybindings(t, model,
-			Keybinding{Context: KeyContextNormal, Chord: "g g", Action: KeyActionToggleWrap},
-			Keybinding{Context: KeyContextNormal, Chord: "j j", Action: KeyActionToggleWrap},
+			keymap.Binding{Context: keymap.ContextNormal, Chord: "g g", Action: keymap.ActionToggleWrap},
+			keymap.Binding{Context: keymap.ContextNormal, Chord: "j j", Action: keymap.ActionToggleWrap},
 		)
 
 		_, _ = model.Update(keyMessage("5"))
@@ -438,43 +440,43 @@ func TestAbandonedChordClearsNumericRepeat(t *testing.T) {
 	})
 }
 
-func modelForKeyContext(context KeyContext) *Model {
+func modelForKeyContext(context keymap.Context) *Model {
 	model := &Model{
 		size:  TerminalSize{Width: normalWidth, Height: 24, Known: true},
 		focus: FocusDiff,
 		mode:  ModeNormal,
 	}
 	switch context {
-	case KeyContextNormal:
-	case KeyContextVisual:
+	case keymap.ContextNormal:
+	case keymap.ContextVisual:
 		model.mode = ModeVisual
-	case KeyContextCommentEdit:
+	case keymap.ContextCommentEdit:
 		model.mode = ModeCommentEdit
-	case KeyContextSearch:
+	case keymap.ContextSearch:
 		model.overlay = OverlayFind
-	case KeyContextCommand:
+	case keymap.ContextCommand:
 		model.mode = ModeCommand
-	case KeyContextHelp:
+	case keymap.ContextHelp:
 		model.overlay = OverlayHelp
-	case KeyContextStatusDetails:
+	case keymap.ContextStatusDetails:
 		model.overlay = OverlayStatus
-	case KeyContextConfirm:
+	case keymap.ContextConfirm:
 		model.overlay = OverlayConfirm
-	case KeyContextExportPicker:
+	case keymap.ContextExportPicker:
 		model.overlay = OverlayExport
-	case KeyContextSubmit:
+	case keymap.ContextSubmit:
 		model.overlay = OverlaySubmit
-	case KeyContextMinimumSize:
+	case keymap.ContextMinimumSize:
 		model.size.Width = minimumWidth - 1
 	}
 	return model
 }
 
-func focusOwner(focus KeyFocus) FocusOwner {
+func focusOwner(focus keymap.Focus) FocusOwner {
 	switch focus {
-	case KeyFocusFileTree:
+	case keymap.FocusFileTree:
 		return FocusFileTree
-	case KeyFocusComments:
+	case keymap.FocusComments:
 		return FocusComments
 	default:
 		return FocusDiff

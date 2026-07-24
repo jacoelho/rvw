@@ -13,6 +13,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/jacoelho/rvw/internal/keymap"
 )
 
 // LoadRequest describes load request.
@@ -276,10 +278,10 @@ func applyLayer(config *Config, layer decodedLayer) error {
 			config.ui.Keybindings = make([]Keybinding, len(raw.UI.Keybindings))
 			for index, binding := range raw.UI.Keybindings {
 				config.ui.Keybindings[index] = Keybinding{
-					Context: KeyContext(binding.Context),
-					Focus:   KeyFocus(binding.Focus),
-					Chord:   KeyChord(binding.Chord),
-					Action:  KeyAction(binding.Action),
+					Context: keymap.Context(binding.Context),
+					Focus:   keymap.Focus(binding.Focus),
+					Chord:   keymap.Chord(binding.Chord),
+					Action:  keymap.Action(binding.Action),
 					Unbind:  binding.Unbind,
 				}
 			}

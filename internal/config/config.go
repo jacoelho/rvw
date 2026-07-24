@@ -4,6 +4,8 @@ package config
 import (
 	"maps"
 	"slices"
+
+	"github.com/jacoelho/rvw/internal/keymap"
 )
 
 // MaxConfigBytes defines the supported config bytes limit.
@@ -13,7 +15,6 @@ const (
 	MaxPatternBytes   int64 = 4_096
 	MaxTemplateBytes  int64 = 256 << 10
 	MaxTemplateTokens       = 4_096
-	MaxKeybindings          = 4_096
 )
 
 // Appearance represents appearance.
@@ -139,133 +140,8 @@ func (path SyntaxThemePath) String() string {
 	return string(path)
 }
 
-// KeyContext represents key context.
-type KeyContext string
-
-// KeyContextNormal identifies a supported key context normal value.
-const (
-	KeyContextNormal        KeyContext = "normal"
-	KeyContextVisual        KeyContext = "visual"
-	KeyContextCommentEdit   KeyContext = "comment-edit"
-	KeyContextSearch        KeyContext = "search"
-	KeyContextCommand       KeyContext = "command"
-	KeyContextHelp          KeyContext = "help"
-	KeyContextStatusDetails KeyContext = "status-details"
-	KeyContextConfirm       KeyContext = "confirm"
-	KeyContextExportPicker  KeyContext = "export-picker"
-	KeyContextSubmit        KeyContext = "submit-preflight"
-	KeyContextMinimumSize   KeyContext = "minimum-size"
-)
-
-// String returns the receiver's string value.
-func (context KeyContext) String() string {
-	return string(context)
-}
-
-// KeyFocus represents key focus.
-type KeyFocus string
-
-// KeyFocusFileTree identifies a supported key focus file tree value.
-const (
-	KeyFocusFileTree KeyFocus = "file-tree"
-	KeyFocusDiff     KeyFocus = "diff"
-	KeyFocusComments KeyFocus = "comments"
-)
-
-// String returns the receiver's string value.
-func (focus KeyFocus) String() string {
-	return string(focus)
-}
-
-// KeyAction represents key action.
-type KeyAction string
-
-// KeyActionQuit identifies a supported key action quit value.
-const (
-	KeyActionQuit                KeyAction = "quit"
-	KeyActionInterrupt           KeyAction = "interrupt"
-	KeyActionFocusNextPane       KeyAction = "focus-next-pane"
-	KeyActionFocusPreviousPane   KeyAction = "focus-previous-pane"
-	KeyActionMoveUp              KeyAction = "move-up"
-	KeyActionMoveDown            KeyAction = "move-down"
-	KeyActionFirst               KeyAction = "first"
-	KeyActionLast                KeyAction = "last"
-	KeyActionPageUp              KeyAction = "page-up"
-	KeyActionPageDown            KeyAction = "page-down"
-	KeyActionHalfPageUp          KeyAction = "half-page-up"
-	KeyActionHalfPageDown        KeyAction = "half-page-down"
-	KeyActionActivate            KeyAction = "activate"
-	KeyActionToggleFileReviewed  KeyAction = "toggle-file-reviewed"
-	KeyActionToggleHunkReviewed  KeyAction = "toggle-hunk-reviewed"
-	KeyActionCommentAtCursor     KeyAction = "comment-at-cursor"
-	KeyActionFileComment         KeyAction = "file-comment"
-	KeyActionSummaryComment      KeyAction = "summary-comment"
-	KeyActionEditComment         KeyAction = "edit-comment"
-	KeyActionDeleteComment       KeyAction = "delete-comment"
-	KeyActionVisualLine          KeyAction = "visual-line"
-	KeyActionVisualLines         KeyAction = "visual-lines"
-	KeyActionVisualHunk          KeyAction = "visual-hunk"
-	KeyActionExtendUp            KeyAction = "extend-up"
-	KeyActionExtendDown          KeyAction = "extend-down"
-	KeyActionCommentSelection    KeyAction = "comment-selection"
-	KeyActionSaveComment         KeyAction = "save-comment"
-	KeyActionNextFile            KeyAction = "next-file"
-	KeyActionPreviousFile        KeyAction = "previous-file"
-	KeyActionNextHunk            KeyAction = "next-hunk"
-	KeyActionPreviousHunk        KeyAction = "previous-hunk"
-	KeyActionNextComment         KeyAction = "next-comment"
-	KeyActionPreviousComment     KeyAction = "previous-comment"
-	KeyActionNextSearchHit       KeyAction = "next-search-hit"
-	KeyActionPreviousSearchHit   KeyAction = "previous-search-hit"
-	KeyActionSearch              KeyAction = "search"
-	KeyActionSearchVisible       KeyAction = "search-visible"
-	KeyActionFindFile            KeyAction = "find-file"
-	KeyActionNextSearchScope     KeyAction = "next-search-scope"
-	KeyActionPreviousSearchScope KeyAction = "previous-search-scope"
-	KeyActionCommand             KeyAction = "command"
-	KeyActionCopyMarkdown        KeyAction = "copy-markdown"
-	KeyActionExportMarkdown      KeyAction = "export-markdown"
-	KeyActionExportJSON          KeyAction = "export-json"
-	KeyActionOpenSubmit          KeyAction = "open-submit"
-	KeyActionPreviousSubmitEvent KeyAction = "previous-submit-event"
-	KeyActionNextSubmitEvent     KeyAction = "next-submit-event"
-	KeyActionHelp                KeyAction = "help"
-	KeyActionStatusDetails       KeyAction = "status-details"
-	KeyActionReload              KeyAction = "reload"
-	KeyActionToggleHiddenFiles   KeyAction = "toggle-hidden-files"
-	KeyActionToggleView          KeyAction = "toggle-view"
-	KeyActionToggleWrap          KeyAction = "toggle-wrap"
-	KeyActionToggleDirectory     KeyAction = "toggle-directory"
-	KeyActionToggleFilePanel     KeyAction = "toggle-file-panel"
-	KeyActionToggleComments      KeyAction = "toggle-comments"
-	KeyActionHelpLineDown        KeyAction = "help-line-down"
-	KeyActionHelpLineUp          KeyAction = "help-line-up"
-	KeyActionHelpPageDown        KeyAction = "help-page-down"
-	KeyActionHelpPageUp          KeyAction = "help-page-up"
-	KeyActionHelpHome            KeyAction = "help-home"
-	KeyActionHelpEnd             KeyAction = "help-end"
-	KeyActionNextHelpPage        KeyAction = "next-help-page"
-	KeyActionPreviousHelpPage    KeyAction = "previous-help-page"
-	KeyActionToggleExportUnmap   KeyAction = "toggle-export-unmappable"
-	KeyActionToggleSubmitExclude KeyAction = "toggle-submit-exclusion"
-	KeyActionToggleSubmitSummary KeyAction = "toggle-submit-summary"
-	KeyActionToggleStaleOverride KeyAction = "toggle-stale-head-override"
-	KeyActionSubmitRecheck       KeyAction = "submit-recheck"
-	KeyActionCancel              KeyAction = "cancel"
-)
-
-// String returns the receiver's string value.
-func (action KeyAction) String() string {
-	return string(action)
-}
-
-// KeyChord represents key chord.
-type KeyChord string
-
-// String returns the receiver's string value.
-func (chord KeyChord) String() string {
-	return string(chord)
-}
+// Keybinding aliases the canonical keyboard domain value for config callers.
+type Keybinding = keymap.Binding
 
 // UI represents ui.
 type UI struct {
@@ -431,15 +307,6 @@ func (overrides *Overrides) AddInclude(pattern Pattern) {
 // AddExclude performs the add exclude operation.
 func (overrides *Overrides) AddExclude(pattern Pattern) {
 	overrides.exclude = append(overrides.exclude, pattern)
-}
-
-// Keybinding represents keybinding.
-type Keybinding struct {
-	Context KeyContext
-	Focus   KeyFocus
-	Chord   KeyChord
-	Action  KeyAction
-	Unbind  bool
 }
 
 func cloneThemeColors(colors map[ThemeColor]Color) map[ThemeColor]Color {

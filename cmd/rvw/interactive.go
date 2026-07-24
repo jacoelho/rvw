@@ -15,6 +15,7 @@ import (
 	"github.com/jacoelho/rvw/internal/app"
 	"github.com/jacoelho/rvw/internal/config"
 	"github.com/jacoelho/rvw/internal/delivery"
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/output"
 	"github.com/jacoelho/rvw/internal/review"
 	"github.com/jacoelho/rvw/internal/source"
@@ -338,11 +339,15 @@ func interactiveSettings(resolved config.Config) (app.Settings, error) {
 }
 
 func interactivePalette(resolved config.Config, activeTheme config.ThemeName) (app.Palette, error) {
-	paletteValues := make(map[app.PaletteRole]string)
 	theme, ok := resolved.Theme(activeTheme)
 	if !ok {
-		return app.NewPalette(paletteValues)
+		return app.NewPalette(nil)
 	}
+	return app.NewPalette(interactivePaletteValues(theme))
+}
+
+func interactivePaletteValues(theme config.Theme) map[app.PaletteRole]string {
+	paletteValues := make(map[app.PaletteRole]string)
 	roles := map[config.ThemeColor]app.PaletteRole{
 		"panel_bg":           app.PalettePanelBackground,
 		"fg_primary":         app.PalettePrimary,
@@ -360,6 +365,10 @@ func interactivePalette(resolved config.Config, activeTheme config.ThemeName) (a
 		"diff_hunk_header":   app.PaletteDiffHunk,
 		"message_warning_fg": app.PaletteWarningForeground,
 		"message_warning_bg": app.PaletteWarningBackground,
+		"message_error_fg":   app.PaletteErrorForeground,
+		"message_error_bg":   app.PaletteErrorBackground,
+		"message_success_fg": app.PaletteSuccessForeground,
+		"message_success_bg": app.PaletteSuccessBackground,
 	}
 	for name, role := range roles {
 		if color := theme.Colors[name].String(); color != "" {
@@ -377,37 +386,16 @@ func interactivePalette(resolved config.Config, activeTheme config.ThemeName) (a
 			paletteValues[role] = color
 		}
 	}
-	return app.NewPalette(paletteValues)
+	return paletteValues
 }
 
-func interactiveKeybindings(bindings []config.Keybinding) ([]app.Keybinding, error) {
-	keybindings := make([]app.Keybinding, 0, len(bindings))
+func interactiveKeybindings(bindings []config.Keybinding) ([]keymap.Binding, error) {
+	keybindings := make([]keymap.Binding, 0, len(bindings))
 	for index, binding := range bindings {
-		if binding.Unbind {
-			continue
+		if err := keymap.ValidateBinding(binding); err != nil {
+			return nil, fmt.Errorf("keybinding %d: %w", index+1, err)
 		}
-		contextName, err := app.NewKeyContext(binding.Context.String())
-		if err != nil {
-			return nil, fmt.Errorf("keybinding %d context: %w", index+1, err)
-		}
-		focus, err := app.NewKeyFocus(binding.Focus.String())
-		if err != nil {
-			return nil, fmt.Errorf("keybinding %d focus: %w", index+1, err)
-		}
-		chord, err := app.NewKeyChord(binding.Chord.String())
-		if err != nil {
-			return nil, fmt.Errorf("keybinding %d chord: %w", index+1, err)
-		}
-		action, err := app.NewKeyAction(binding.Action.String())
-		if err != nil {
-			return nil, fmt.Errorf("keybinding %d action: %w", index+1, err)
-		}
-		keybindings = append(keybindings, app.Keybinding{
-			Context: contextName,
-			Focus:   focus,
-			Chord:   chord,
-			Action:  action,
-		})
+		keybindings = append(keybindings, binding)
 	}
 	return keybindings, nil
 }

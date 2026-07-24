@@ -1,8 +1,12 @@
 package app
 
 import (
-	tea "charm.land/bubbletea/v2"
+	"strings"
 
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 )
 
@@ -43,13 +47,14 @@ func (model *Model) quit() tea.Cmd {
 
 func (model *Model) requestCommentDelete() {
 	count := model.review.CommentCount()
-	if count == 0 || model.commentCursor >= count {
+	if count == 0 || model.commentCursor >= count ||
+		!model.commentRowSelected(model.commentCursor) {
 		if model.commentCursor >= count && model.review.Snapshot().RemoteThreadCount() != 0 {
-			model.notice = &Notice{Kind: NoticeInformation, Text: "remote comments are read-only"}
+			model.notice = &Notice{Kind: NoticeInformation, Text: remoteCommentsReadOnly}
 		}
 		return
 	}
-	model.commentCursor = min(max(model.commentCursor, 0), count-1)
+	model.selectCommentIndex(model.commentCursor)
 	comment, ok := model.review.CommentAt(model.commentCursor)
 	if !ok {
 		return
@@ -72,12 +77,12 @@ func (model *Model) requestReload() {
 	model.startReload()
 }
 
-func (model *Model) applyConfirmationAction(action KeyAction) tea.Cmd {
+func (model *Model) applyConfirmationAction(action keymap.Action) tea.Cmd {
 	switch action {
-	case KeyActionCancel, KeyActionConfirmNo, KeyActionInterrupt:
+	case keymap.ActionCancel, keymap.ActionConfirmNo, keymap.ActionInterrupt:
 		model.confirmation = confirmation{}
 		model.overlay = OverlayNone
-	case KeyActionConfirmYes:
+	case keymap.ActionConfirmYes:
 		pending := model.confirmation
 		if pending.kind == confirmationQuit {
 			return model.quit()
@@ -110,9 +115,34 @@ func (model *Model) confirmationView(width, height int) string {
 	case confirmationReload:
 		prompt = "Reload and discard review state that cannot be reconciled?"
 	}
-	return constrainedLines(
-		[]string{"Confirmation", "", prompt, "", model.bindingSummary(KeyContextConfirm)},
+	styles := newSemanticStyles(model.settings)
+	dialogSize := blockingDialogSize{width: 40, height: 7}
+	dialogLayout := newBlockingDialogLayout(width, height, dialogSize)
+	controls := model.modalBindingRows(
+		keymap.ContextConfirm,
+		[]keymap.Action{keymap.ActionCancel, keymap.ActionConfirmYes, keymap.ActionConfirmNo},
+		dialogLayout.width,
+		styles,
+	)
+	promptLines := strings.Split(
+		lipgloss.Wrap(safeText(prompt), max(dialogLayout.width, 1), ""),
+		"\n",
+	)
+	body := []string{modalTitle(styles, "Confirmation")}
+	if dialogLayout.height > minimumHeight {
+		body = append(body, "")
+	}
+	body = append(body, promptLines...)
+	if len(body)+len(controls) > dialogLayout.height {
+		body = promptLines
+	}
+	dialogSize = contentSizedBlockingDialog(dialogSize, body, controls)
+	return boundedBlockingSurface(
+		body,
+		controls,
 		width,
 		height,
+		dialogSize,
+		styles,
 	)
 }

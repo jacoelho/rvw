@@ -2,22 +2,22 @@ package config
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/jacoelho/rvw/internal/keymap"
 )
 
 func TestKeybindingContextActionMatrixAcceptsExactlyDeclaredPairs(t *testing.T) {
-	for context := range keyContexts {
-		allowed, exists := contextActions[context]
-		if !exists {
-			t.Fatalf("accepted context %q has no action matrix", context)
-		}
-		focuses := []KeyFocus{""}
-		if context == KeyContextNormal {
-			focuses = append(focuses, KeyFocusFileTree, KeyFocusDiff, KeyFocusComments)
+	for _, context := range keymap.Contexts() {
+		allowed := keymap.AllowedActions(context)
+		focuses := []keymap.Focus{""}
+		if context == keymap.ContextNormal {
+			focuses = append(focuses, keymap.FocusFileTree, keymap.FocusDiff, keymap.FocusComments)
 		}
 		for _, focus := range focuses {
-			for action := range keyActions {
+			for _, action := range keymap.Actions() {
 				binding := Keybinding{
 					Context: context,
 					Focus:   focus,
@@ -25,23 +25,12 @@ func TestKeybindingContextActionMatrixAcceptsExactlyDeclaredPairs(t *testing.T) 
 					Action:  action,
 				}
 				_, err := resolveKeybindings([]Keybinding{binding})
-				if allowed[action] && err != nil {
+				if slices.Contains(allowed, action) && err != nil {
 					t.Errorf("accepted %q/%q/%q: %v", context, focus, action, err)
 				}
-				if !allowed[action] && err == nil {
+				if !slices.Contains(allowed, action) && err == nil {
 					t.Errorf("disallowed %q/%q/%q was accepted", context, focus, action)
 				}
-			}
-		}
-	}
-
-	for context, allowed := range contextActions {
-		if !keyContexts[context] {
-			t.Errorf("action matrix contains unknown context %q", context)
-		}
-		for action := range allowed {
-			if !keyActions[action] {
-				t.Errorf("context %q accepts action absent from vocabulary: %q", context, action)
 			}
 		}
 	}
@@ -49,9 +38,9 @@ func TestKeybindingContextActionMatrixAcceptsExactlyDeclaredPairs(t *testing.T) 
 
 func TestKeybindingSchemaRejectsUnknownScopeAndInvalidFocus(t *testing.T) {
 	for _, binding := range []Keybinding{
-		{Context: "unknown", Chord: "x", Action: KeyActionQuit},
-		{Context: KeyContextNormal, Focus: "unknown", Chord: "x", Action: KeyActionQuit},
-		{Context: KeyContextHelp, Focus: KeyFocusDiff, Chord: "x", Action: KeyActionCancel},
+		{Context: "unknown", Chord: "x", Action: keymap.ActionQuit},
+		{Context: keymap.ContextNormal, Focus: "unknown", Chord: "x", Action: keymap.ActionQuit},
+		{Context: keymap.ContextHelp, Focus: keymap.FocusDiff, Chord: "x", Action: keymap.ActionCancel},
 	} {
 		if _, err := resolveKeybindings([]Keybinding{binding}); err == nil {
 			t.Errorf("resolveKeybindings(%+v) succeeded", binding)
@@ -60,8 +49,12 @@ func TestKeybindingSchemaRejectsUnknownScopeAndInvalidFocus(t *testing.T) {
 }
 
 func TestKeybindingChordBoundaries(t *testing.T) {
-	for _, chord := range []KeyChord{"x", "x y z w", KeyChord(strings.Repeat("x", 128))} {
-		binding, err := normalizeBinding(Keybinding{Context: KeyContextNormal, Chord: chord})
+	for _, chord := range []keymap.Chord{"x", "x y z w", keymap.Chord(strings.Repeat("x", 128))} {
+		binding, err := keymap.NormalizeUserBinding(Keybinding{
+			Context: keymap.ContextNormal,
+			Chord:   chord,
+			Action:  keymap.ActionQuit,
+		})
 		if err != nil {
 			t.Errorf("accepted chord %q: %v", chord, err)
 			continue
@@ -70,36 +63,41 @@ func TestKeybindingChordBoundaries(t *testing.T) {
 			t.Errorf("normalized chord = %q, want %q", binding.Chord, chord)
 		}
 	}
-	for _, chord := range []KeyChord{
+	for _, chord := range []keymap.Chord{
 		"",
 		"x y z w v",
-		KeyChord(strings.Repeat("x", 129)),
+		keymap.Chord(strings.Repeat("x", 129)),
 		"Ctrl-c",
 		"x CTRL-C",
 	} {
-		if _, err := normalizeBinding(Keybinding{Context: KeyContextNormal, Chord: chord}); err == nil {
+		if _, err := keymap.NormalizeUserBinding(Keybinding{
+			Context: keymap.ContextNormal,
+			Chord:   chord,
+			Action:  keymap.ActionQuit,
+		}); err == nil {
 			t.Errorf("invalid chord %q was accepted", chord)
 		}
 	}
 }
 
 func TestEveryContextRequiresItsDeclaredActions(t *testing.T) {
-	for context, required := range requiredActions {
-		focus := KeyFocus("")
-		if context == KeyContextNormal {
-			focus = KeyFocusDiff
+	for _, context := range keymap.Contexts() {
+		required := keymap.RequiredActions(context)
+		focus := keymap.Focus("")
+		if context == keymap.ContextNormal {
+			focus = keymap.FocusDiff
 		}
-		scope := make(map[KeyChord]Keybinding, len(required))
+		scope := make(map[keymap.Chord]Keybinding, len(required))
 		for index, action := range required {
-			chord := KeyChord(fmt.Sprintf("required-%d", index))
+			chord := keymap.Chord(fmt.Sprintf("required-%d", index))
 			scope[chord] = Keybinding{Context: context, Focus: focus, Chord: chord, Action: action}
 		}
-		if err := validateRuntimeKeyScope(context, focus, scope); err != nil {
+		if err := keymap.ValidateScope(context, focus, scope); err != nil {
 			t.Fatalf("complete required scope %q: %v", context, err)
 		}
 		for chord, binding := range scope {
 			delete(scope, chord)
-			if err := validateRuntimeKeyScope(context, focus, scope); err == nil {
+			if err := keymap.ValidateScope(context, focus, scope); err == nil {
 				t.Errorf("context %q accepted scope missing %q", context, binding.Action)
 			}
 			scope[chord] = binding
@@ -113,13 +111,13 @@ func TestDefaultKeybindingsReserveInterruptInEveryContext(t *testing.T) {
 		t.Fatalf("resolve default keybindings: %v", err)
 	}
 
-	contexts := make(map[KeyContext]bool, len(keyContexts))
+	contexts := make(map[keymap.Context]bool, len(keymap.Contexts()))
 	for _, binding := range bindings {
-		if binding.Chord == "Ctrl-c" && binding.Action == KeyActionInterrupt {
+		if binding.Chord == "ctrl-c" && binding.Action == keymap.ActionInterrupt {
 			contexts[binding.Context] = true
 		}
 	}
-	for context := range keyContexts {
+	for _, context := range keymap.Contexts() {
 		if !contexts[context] {
 			t.Errorf("context %q has no reserved Ctrl-c interrupt binding", context)
 		}
@@ -132,8 +130,8 @@ func TestDefaultSubmitKeybindingsExposeStatusDetails(t *testing.T) {
 		t.Fatalf("resolve default keybindings: %v", err)
 	}
 	for _, binding := range bindings {
-		if binding.Context == KeyContextSubmit && binding.Chord == "F2" &&
-			binding.Action == KeyActionStatusDetails {
+		if binding.Context == keymap.ContextSubmit && binding.Chord == "f2" &&
+			binding.Action == keymap.ActionStatusDetails {
 			return
 		}
 	}
@@ -146,18 +144,18 @@ func TestDefaultVisualKeybindingsPreserveNavigationAlternatives(t *testing.T) {
 		t.Fatalf("resolve default keybindings: %v", err)
 	}
 
-	want := map[KeyContext]map[KeyChord]KeyAction{
-		KeyContextNormal: {
-			"j":    KeyActionMoveDown,
-			"down": KeyActionMoveDown,
-			"k":    KeyActionMoveUp,
-			"up":   KeyActionMoveUp,
+	want := map[keymap.Context]map[keymap.Chord]keymap.Action{
+		keymap.ContextNormal: {
+			"j":    keymap.ActionMoveDown,
+			"down": keymap.ActionMoveDown,
+			"k":    keymap.ActionMoveUp,
+			"up":   keymap.ActionMoveUp,
 		},
-		KeyContextVisual: {
-			"j":    KeyActionExtendDown,
-			"down": KeyActionExtendDown,
-			"k":    KeyActionExtendUp,
-			"up":   KeyActionExtendUp,
+		keymap.ContextVisual: {
+			"j":    keymap.ActionExtendDown,
+			"down": keymap.ActionExtendDown,
+			"k":    keymap.ActionExtendUp,
+			"up":   keymap.ActionExtendUp,
 		},
 	}
 	for _, binding := range bindings {
@@ -178,21 +176,21 @@ func TestDefaultFindKeybindingsExposeScopesAndResultNavigation(t *testing.T) {
 		t.Fatalf("resolve default keybindings: %v", err)
 	}
 
-	want := map[KeyContext]map[KeyChord]KeyAction{
-		KeyContextNormal: {
-			"/":      KeyActionSearch,
-			"g /":    KeyActionSearchVisible,
-			"Ctrl-p": KeyActionFindFile,
+	want := map[keymap.Context]map[keymap.Chord]keymap.Action{
+		keymap.ContextNormal: {
+			"/":      keymap.ActionSearch,
+			"g /":    keymap.ActionSearchVisible,
+			"ctrl-p": keymap.ActionFindFile,
 		},
-		KeyContextSearch: {
-			"Tab":       KeyActionNextSearchScope,
-			"Shift-Tab": KeyActionPreviousSearchScope,
-			"up":        KeyActionMoveUp,
-			"down":      KeyActionMoveDown,
-			"Ctrl-p":    KeyActionMoveUp,
-			"Ctrl-n":    KeyActionMoveDown,
-			"pgup":      KeyActionPageUp,
-			"pgdown":    KeyActionPageDown,
+		keymap.ContextSearch: {
+			"tab":       keymap.ActionNextSearchScope,
+			"shift-tab": keymap.ActionPreviousSearchScope,
+			"up":        keymap.ActionMoveUp,
+			"down":      keymap.ActionMoveDown,
+			"ctrl-p":    keymap.ActionMoveUp,
+			"ctrl-n":    keymap.ActionMoveDown,
+			"pgup":      keymap.ActionPageUp,
+			"pgdown":    keymap.ActionPageDown,
 		},
 	}
 	for _, binding := range bindings {
@@ -208,23 +206,23 @@ func TestDefaultFindKeybindingsExposeScopesAndResultNavigation(t *testing.T) {
 }
 
 func TestKeybindingPrefixAmbiguityIsRejectedInEitherOrder(t *testing.T) {
-	short := Keybinding{Context: KeyContextNormal, Chord: "g", Action: KeyActionQuit}
-	long := Keybinding{Context: KeyContextNormal, Chord: "g g", Action: KeyActionInterrupt}
+	short := Keybinding{Context: keymap.ContextNormal, Chord: "g", Action: keymap.ActionQuit}
+	long := Keybinding{Context: keymap.ContextNormal, Chord: "g g", Action: keymap.ActionInterrupt}
 	for _, bindings := range [][]Keybinding{{short, long}, {long, short}} {
-		scope := make(map[KeyChord]Keybinding, len(bindings))
+		scope := make(map[keymap.Chord]Keybinding, len(bindings))
 		for _, binding := range bindings {
 			scope[binding.Chord] = binding
 		}
-		if err := validateRuntimeKeyScope(KeyContextNormal, "", scope); err == nil {
+		if err := keymap.ValidateScope(keymap.ContextNormal, "", scope); err == nil {
 			t.Errorf("prefix-conflicting order %+v was accepted", bindings)
 		}
 	}
 
-	nonconflicting := map[KeyChord]Keybinding{
-		"g g": {Context: KeyContextNormal, Chord: "g g", Action: KeyActionQuit},
-		"g h": {Context: KeyContextNormal, Chord: "g h", Action: KeyActionInterrupt},
+	nonconflicting := map[keymap.Chord]Keybinding{
+		"g g": {Context: keymap.ContextNormal, Chord: "g g", Action: keymap.ActionQuit},
+		"g h": {Context: keymap.ContextNormal, Chord: "g h", Action: keymap.ActionInterrupt},
 	}
-	if err := validateRuntimeKeyScope(KeyContextNormal, "", nonconflicting); err != nil {
+	if err := keymap.ValidateScope(keymap.ContextNormal, "", nonconflicting); err != nil {
 		t.Fatalf("non-conflicting chords: %v", err)
 	}
 }

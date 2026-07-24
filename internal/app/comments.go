@@ -114,19 +114,26 @@ func (model *Model) beginComment(target review.CommentTarget) tea.Cmd {
 
 func (model *Model) beginEditComment() {
 	count := model.review.CommentCount()
-	if count == 0 || model.commentCursor >= count {
+	if !model.editableLocalCommentSelected() {
 		if model.commentCursor >= count && model.review.Snapshot().RemoteThreadCount() != 0 {
-			model.notice = &Notice{Kind: NoticeInformation, Text: "remote comments are read-only"}
+			model.notice = &Notice{Kind: NoticeInformation, Text: remoteCommentsReadOnly}
+		} else {
+			model.notice = &Notice{Kind: NoticeInformation, Text: "no editable local comment selected"}
 		}
 		return
 	}
-	model.commentCursor = min(max(model.commentCursor, 0), count-1)
+	model.selectCommentIndex(model.commentCursor)
 	comment, _ := model.review.CommentAt(model.commentCursor)
 	model.startCommentMutation(
 		func(operation review.OperationID) (review.Review, review.CommentMutation, error) {
 			return model.review.StartBeginEditComment(operation, comment.ID())
 		},
 	)
+}
+
+func (model *Model) editableLocalCommentSelected() bool {
+	return model.commentCursor >= 0 && model.commentCursor < model.review.CommentCount() &&
+		model.commentRowSelected(model.commentCursor)
 }
 
 func (model *Model) cancelCommentEdit() {
@@ -158,10 +165,18 @@ func (model *Model) deleteComment(id review.CommentID) {
 func (model *Model) moveComment(delta int) {
 	count := model.commentRowCount()
 	if count == 0 {
-		model.commentCursor = 0
+		model.selectCommentIndex(0)
 		return
 	}
-	model.commentCursor = min(max(model.commentCursor+delta, 0), count-1)
+	if model.commentSelectionKnown && model.commentSelection.kind == 0 {
+		if delta < 0 {
+			model.selectCommentIndex(count - 1)
+		} else {
+			model.selectCommentIndex(0)
+		}
+		return
+	}
+	model.selectCommentIndex(model.commentCursor + delta)
 }
 
 func (model *Model) moveAndActivateComment(delta int) {
@@ -172,6 +187,9 @@ func (model *Model) moveAndActivateComment(delta int) {
 func (model *Model) activateCommentSelection() {
 	localCount := model.review.CommentCount()
 	if model.commentCursor < 0 || model.commentCursor >= model.commentRowCount() {
+		return
+	}
+	if !model.commentRowSelected(model.commentCursor) {
 		return
 	}
 	if model.commentCursor < localCount {
@@ -307,6 +325,9 @@ func (model *Model) commentRowCount() int {
 }
 
 func (model *Model) beginVisualHunk() {
+	if !model.beginVisualSelection() {
+		return
+	}
 	active, ok := model.review.ActiveFile()
 	if !ok {
 		return
@@ -328,7 +349,22 @@ func (model *Model) beginVisualHunk() {
 	model.visualAnchor = first
 	model.diffCursor = last
 	model.moveDiff(0)
+}
+
+func (model *Model) beginVisualSelection() bool {
+	if model.focus != FocusDiff {
+		model.notice = &Notice{Kind: NoticeWarning, Text: "visual selection requires diff focus"}
+		return false
+	}
+	active, ok := model.review.ActiveFile()
+	if !ok || model.review.Patch(active).Status != review.PatchReady {
+		model.notice = &Notice{Kind: NoticeWarning, Text: "visual selection requires a ready patch"}
+		return false
+	}
 	model.mode = ModeVisual
+	model.visualAnchor = model.diffCursor
+	model.abandonChord()
+	return true
 }
 
 func (model *Model) toggleCurrentHunkReviewed() {

@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 )
 
@@ -19,326 +20,16 @@ const (
 	DiffViewSideBySide
 )
 
-// KeyContext represents key context.
-type KeyContext string
-
-// KeyContextNormal identifies a supported key context normal value.
-const (
-	KeyContextNormal        KeyContext = "normal"
-	KeyContextVisual        KeyContext = "visual"
-	KeyContextCommentEdit   KeyContext = "comment-edit"
-	KeyContextSearch        KeyContext = "search"
-	KeyContextCommand       KeyContext = "command"
-	KeyContextHelp          KeyContext = "help"
-	KeyContextStatusDetails KeyContext = "status-details"
-	KeyContextConfirm       KeyContext = "confirm"
-	KeyContextExportPicker  KeyContext = "export-picker"
-	KeyContextSubmit        KeyContext = "submit-preflight"
-	KeyContextMinimumSize   KeyContext = "minimum-size"
-)
-
-// NewKeyContext constructs and validates key context.
-func NewKeyContext(value string) (KeyContext, error) {
-	context := KeyContext(value)
-	switch context {
-	case KeyContextNormal, KeyContextVisual, KeyContextCommentEdit,
-		KeyContextSearch, KeyContextCommand, KeyContextHelp,
-		KeyContextStatusDetails, KeyContextConfirm, KeyContextExportPicker,
-		KeyContextSubmit, KeyContextMinimumSize:
-		return context, nil
-	default:
-		return "", errors.New("unknown key context")
-	}
-}
-
-// String returns the receiver's string value.
-func (context KeyContext) String() string {
-	return string(context)
-}
-
-// KeyFocus represents key focus.
-type KeyFocus string
-
-// KeyFocusNone identifies a supported key focus none value.
-const (
-	KeyFocusNone     KeyFocus = ""
-	KeyFocusFileTree KeyFocus = "file-tree"
-	KeyFocusDiff     KeyFocus = "diff"
-	KeyFocusComments KeyFocus = "comments"
-)
-
-// NewKeyFocus constructs and validates key focus.
-func NewKeyFocus(value string) (KeyFocus, error) {
-	focus := KeyFocus(value)
-	switch focus {
-	case KeyFocusNone, KeyFocusFileTree, KeyFocusDiff, KeyFocusComments:
-		return focus, nil
-	default:
-		return "", errors.New("unknown key focus")
-	}
-}
-
-// String returns the receiver's string value.
-func (focus KeyFocus) String() string {
-	return string(focus)
-}
-
-// KeyAction represents key action.
-type KeyAction string
-
-// KeyActionNone identifies a supported key action none value.
-const (
-	KeyActionNone                KeyAction = ""
-	KeyActionQuit                KeyAction = "quit"
-	KeyActionInterrupt           KeyAction = "interrupt"
-	KeyActionFocusNextPane       KeyAction = "focus-next-pane"
-	KeyActionFocusPreviousPane   KeyAction = "focus-previous-pane"
-	KeyActionMoveUp              KeyAction = "move-up"
-	KeyActionMoveDown            KeyAction = "move-down"
-	KeyActionScrollLeft          KeyAction = "scroll-left"
-	KeyActionScrollRight         KeyAction = "scroll-right"
-	KeyActionFirst               KeyAction = "first"
-	KeyActionLast                KeyAction = "last"
-	KeyActionPageUp              KeyAction = "page-up"
-	KeyActionPageDown            KeyAction = "page-down"
-	KeyActionHalfPageUp          KeyAction = "half-page-up"
-	KeyActionHalfPageDown        KeyAction = "half-page-down"
-	KeyActionActivate            KeyAction = "activate"
-	KeyActionToggleFileReviewed  KeyAction = "toggle-file-reviewed"
-	KeyActionToggleHunkReviewed  KeyAction = "toggle-hunk-reviewed"
-	KeyActionCommentAtCursor     KeyAction = "comment-at-cursor"
-	KeyActionFileComment         KeyAction = "file-comment"
-	KeyActionSummaryComment      KeyAction = "summary-comment"
-	KeyActionEditComment         KeyAction = "edit-comment"
-	KeyActionDeleteComment       KeyAction = "delete-comment"
-	KeyActionExpandContext       KeyAction = "expand-context"
-	KeyActionVisualLine          KeyAction = "visual-line"
-	KeyActionVisualLines         KeyAction = "visual-lines"
-	KeyActionVisualHunk          KeyAction = "visual-hunk"
-	KeyActionExtendUp            KeyAction = "extend-up"
-	KeyActionExtendDown          KeyAction = "extend-down"
-	KeyActionCommentSelection    KeyAction = "comment-selection"
-	KeyActionSaveComment         KeyAction = "save-comment"
-	KeyActionToggleWrap          KeyAction = "toggle-wrap"
-	KeyActionToggleView          KeyAction = "toggle-view"
-	KeyActionAlignTop            KeyAction = "align-top"
-	KeyActionAlignCenter         KeyAction = "align-center"
-	KeyActionAlignBottom         KeyAction = "align-bottom"
-	KeyActionToggleDirectory     KeyAction = "toggle-directory"
-	KeyActionExpandDirectory     KeyAction = "expand-directory"
-	KeyActionCollapseDirectory   KeyAction = "collapse-directory"
-	KeyActionToggleHiddenFiles   KeyAction = "toggle-hidden-files"
-	KeyActionToggleComments      KeyAction = "toggle-comments"
-	KeyActionNextFile            KeyAction = "next-file"
-	KeyActionPreviousFile        KeyAction = "previous-file"
-	KeyActionNextHunk            KeyAction = "next-hunk"
-	KeyActionPreviousHunk        KeyAction = "previous-hunk"
-	KeyActionNextComment         KeyAction = "next-comment"
-	KeyActionPreviousComment     KeyAction = "previous-comment"
-	KeyActionNextSearchHit       KeyAction = "next-search-hit"
-	KeyActionPreviousSearchHit   KeyAction = "previous-search-hit"
-	KeyActionSearch              KeyAction = "search"
-	KeyActionSearchVisible       KeyAction = "search-visible"
-	KeyActionFindFile            KeyAction = "find-file"
-	KeyActionNextSearchScope     KeyAction = "next-search-scope"
-	KeyActionPreviousSearchScope KeyAction = "previous-search-scope"
-	KeyActionCommand             KeyAction = "command"
-	KeyActionFilter              KeyAction = "filter"
-	KeyActionCopyMarkdown        KeyAction = "copy-markdown"
-	KeyActionExportMarkdown      KeyAction = "export-markdown"
-	KeyActionExportJSON          KeyAction = "export-json"
-	KeyActionOpenSubmit          KeyAction = "open-submit"
-	KeyActionHelp                KeyAction = "help"
-	KeyActionStatusDetails       KeyAction = "status-details"
-	KeyActionReload              KeyAction = "reload"
-	KeyActionCancel              KeyAction = "cancel"
-	KeyActionAccept              KeyAction = "accept"
-	KeyActionDeleteBackward      KeyAction = "delete-backward"
-	KeyActionInsertNewline       KeyAction = "insert-newline"
-	KeyActionConfirmYes          KeyAction = "confirm-yes"
-	KeyActionConfirmNo           KeyAction = "confirm-no"
-	KeyActionNextHelpPage        KeyAction = "next-help-page"
-	KeyActionPreviousHelpPage    KeyAction = "previous-help-page"
-	KeyActionHelpLineUp          KeyAction = "help-line-up"
-	KeyActionHelpLineDown        KeyAction = "help-line-down"
-	KeyActionHelpPageUp          KeyAction = "help-page-up"
-	KeyActionHelpPageDown        KeyAction = "help-page-down"
-	KeyActionHelpHome            KeyAction = "help-home"
-	KeyActionHelpEnd             KeyAction = "help-end"
-	KeyActionToggleExportUnmap   KeyAction = "toggle-export-unmappable"
-	KeyActionExportSelected      KeyAction = "export-selected"
-	KeyActionSubmitRecheck       KeyAction = "submit-recheck"
-	KeyActionToggleStaleOverride KeyAction = "toggle-stale-head-override"
-	KeyActionToggleSubmitExclude KeyAction = "toggle-submit-exclusion"
-	KeyActionToggleSubmitSummary KeyAction = "toggle-submit-summary"
-	KeyActionPreviousSubmitEvent KeyAction = "previous-submit-event"
-	KeyActionNextSubmitEvent     KeyAction = "next-submit-event"
-	KeyActionSubmitReview        KeyAction = "submit-review"
-	KeyActionToggleFilePanel     KeyAction = "toggle-file-panel"
-)
-
-var validKeyActions = actionSet(
-	KeyActionQuit, KeyActionInterrupt,
-	KeyActionFocusNextPane, KeyActionFocusPreviousPane,
-	KeyActionMoveUp, KeyActionMoveDown, KeyActionScrollLeft, KeyActionScrollRight,
-	KeyActionFirst, KeyActionLast, KeyActionPageUp, KeyActionPageDown,
-	KeyActionHalfPageUp, KeyActionHalfPageDown, KeyActionActivate,
-	KeyActionToggleFileReviewed, KeyActionToggleHunkReviewed,
-	KeyActionCommentAtCursor, KeyActionFileComment, KeyActionSummaryComment,
-	KeyActionEditComment, KeyActionDeleteComment, KeyActionExpandContext,
-	KeyActionVisualLine, KeyActionVisualLines, KeyActionVisualHunk,
-	KeyActionExtendUp, KeyActionExtendDown, KeyActionCommentSelection,
-	KeyActionSaveComment,
-	KeyActionToggleWrap, KeyActionToggleView, KeyActionAlignTop,
-	KeyActionAlignCenter, KeyActionAlignBottom, KeyActionToggleDirectory,
-	KeyActionExpandDirectory, KeyActionCollapseDirectory, KeyActionToggleHiddenFiles,
-	KeyActionToggleComments, KeyActionNextFile, KeyActionPreviousFile,
-	KeyActionNextHunk, KeyActionPreviousHunk, KeyActionNextComment,
-	KeyActionPreviousComment, KeyActionNextSearchHit, KeyActionPreviousSearchHit,
-	KeyActionSearch, KeyActionSearchVisible, KeyActionFindFile,
-	KeyActionNextSearchScope, KeyActionPreviousSearchScope,
-	KeyActionCommand, KeyActionFilter, KeyActionCopyMarkdown,
-	KeyActionExportMarkdown, KeyActionExportJSON, KeyActionOpenSubmit,
-	KeyActionHelp, KeyActionStatusDetails, KeyActionReload, KeyActionCancel,
-	KeyActionAccept, KeyActionDeleteBackward, KeyActionInsertNewline,
-	KeyActionConfirmYes, KeyActionConfirmNo, KeyActionNextHelpPage,
-	KeyActionPreviousHelpPage, KeyActionHelpLineUp, KeyActionHelpLineDown,
-	KeyActionHelpPageUp, KeyActionHelpPageDown, KeyActionHelpHome,
-	KeyActionHelpEnd, KeyActionToggleExportUnmap, KeyActionExportSelected,
-	KeyActionSubmitRecheck,
-	KeyActionToggleStaleOverride, KeyActionToggleSubmitExclude,
-	KeyActionToggleSubmitSummary, KeyActionPreviousSubmitEvent,
-	KeyActionNextSubmitEvent, KeyActionSubmitReview, KeyActionToggleFilePanel,
-)
-
-var contextKeyActions = map[KeyContext]map[KeyAction]struct{}{
-	KeyContextNormal: actionSet(
-		KeyActionQuit, KeyActionInterrupt,
-		KeyActionFocusNextPane, KeyActionFocusPreviousPane,
-		KeyActionMoveUp, KeyActionMoveDown, KeyActionScrollLeft, KeyActionScrollRight,
-		KeyActionFirst, KeyActionLast, KeyActionPageUp, KeyActionPageDown,
-		KeyActionHalfPageUp, KeyActionHalfPageDown, KeyActionNextFile,
-		KeyActionPreviousFile, KeyActionNextHunk, KeyActionPreviousHunk,
-		KeyActionNextComment, KeyActionPreviousComment, KeyActionNextSearchHit,
-		KeyActionPreviousSearchHit, KeyActionCommentAtCursor, KeyActionFileComment,
-		KeyActionSummaryComment, KeyActionEditComment, KeyActionDeleteComment,
-		KeyActionExpandContext, KeyActionToggleFileReviewed,
-		KeyActionToggleHunkReviewed, KeyActionActivate, KeyActionAccept,
-		KeyActionToggleWrap, KeyActionToggleView, KeyActionAlignTop,
-		KeyActionAlignCenter, KeyActionAlignBottom, KeyActionToggleDirectory,
-		KeyActionExpandDirectory, KeyActionCollapseDirectory, KeyActionVisualLine,
-		KeyActionVisualLines, KeyActionVisualHunk, KeyActionCommand,
-		KeyActionFilter, KeyActionHelp, KeyActionStatusDetails, KeyActionSearch,
-		KeyActionSearchVisible, KeyActionFindFile,
-		KeyActionOpenSubmit, KeyActionReload, KeyActionCopyMarkdown,
-		KeyActionExportMarkdown, KeyActionExportJSON, KeyActionToggleFilePanel,
-		KeyActionToggleComments, KeyActionToggleHiddenFiles,
-	),
-	KeyContextVisual: actionSet(
-		KeyActionCancel, KeyActionInterrupt, KeyActionMoveUp, KeyActionMoveDown,
-		KeyActionPageUp, KeyActionPageDown, KeyActionExtendUp,
-		KeyActionExtendDown, KeyActionCommentSelection,
-	),
-	KeyContextCommentEdit: actionSet(
-		KeyActionCancel, KeyActionInterrupt, KeyActionDeleteBackward,
-		KeyActionSaveComment, KeyActionInsertNewline,
-	),
-	KeyContextSearch: actionSet(
-		KeyActionCancel, KeyActionInterrupt, KeyActionAccept,
-		KeyActionDeleteBackward, KeyActionMoveUp, KeyActionMoveDown,
-		KeyActionPageUp, KeyActionPageDown,
-		KeyActionNextSearchScope, KeyActionPreviousSearchScope,
-	),
-	KeyContextCommand: actionSet(
-		KeyActionCancel, KeyActionInterrupt, KeyActionAccept, KeyActionDeleteBackward,
-	),
-	KeyContextHelp: actionSet(
-		KeyActionCancel, KeyActionInterrupt, KeyActionNextHelpPage,
-		KeyActionPreviousHelpPage, KeyActionHelpLineUp, KeyActionHelpLineDown,
-		KeyActionHelpPageUp, KeyActionHelpPageDown, KeyActionHelpHome,
-		KeyActionHelpEnd,
-	),
-	KeyContextStatusDetails: actionSet(
-		KeyActionCancel, KeyActionInterrupt, KeyActionMoveUp, KeyActionMoveDown,
-		KeyActionPageUp, KeyActionPageDown,
-	),
-	KeyContextConfirm: actionSet(
-		KeyActionCancel, KeyActionInterrupt, KeyActionConfirmYes, KeyActionConfirmNo,
-	),
-	KeyContextExportPicker: actionSet(
-		KeyActionCancel, KeyActionInterrupt, KeyActionToggleExportUnmap, KeyActionExportSelected,
-	),
-	KeyContextSubmit: actionSet(
-		KeyActionCancel, KeyActionInterrupt, KeyActionStatusDetails,
-		KeyActionSubmitRecheck,
-		KeyActionToggleStaleOverride, KeyActionToggleSubmitExclude,
-		KeyActionToggleSubmitSummary, KeyActionPreviousSubmitEvent,
-		KeyActionNextSubmitEvent, KeyActionSubmitReview,
-		KeyActionMoveUp, KeyActionMoveDown, KeyActionPageUp, KeyActionPageDown,
-	),
-	KeyContextMinimumSize: actionSet(KeyActionQuit, KeyActionInterrupt),
-}
-
-func actionSet(values ...KeyAction) map[KeyAction]struct{} {
-	result := make(map[KeyAction]struct{}, len(values))
-	for _, value := range values {
-		result[value] = struct{}{}
-	}
-	return result
-}
-
-// NewKeyAction constructs and validates key action.
-func NewKeyAction(value string) (KeyAction, error) {
-	action := KeyAction(value)
-	if _, ok := validKeyActions[action]; !ok {
-		return "", errors.New("unknown key action")
-	}
-	return action, nil
-}
-
-// String returns the receiver's string value.
-func (action KeyAction) String() string {
-	return string(action)
-}
-
-// KeyChord represents key chord.
-type KeyChord string
-
-// NewKeyChord constructs and validates key chord.
-func NewKeyChord(value string) (KeyChord, error) {
-	if strings.TrimSpace(value) == "" {
-		return "", errors.New("key chord must not be empty")
-	}
-	return KeyChord(value), nil
-}
-
-// String returns the receiver's string value.
-func (chord KeyChord) String() string {
-	return string(chord)
-}
-
-// Keybinding represents keybinding.
-type Keybinding struct {
-	Context KeyContext
-	Focus   KeyFocus
-	Chord   KeyChord
-	Action  KeyAction
-}
-
-const (
-	maxKeybindings     = 4_096
-	maxKeyChordBytes   = 128
-	maxKeyChordStrokes = 4
-)
+const maxKeyChordStrokes = keymap.MaxChordStrokes
 
 type keyChordKey struct {
 	strokes [maxKeyChordStrokes]string
 	count   int
 }
 
-func compileKeyChord(chord KeyChord) (keyChordKey, error) {
-	fields := strings.Fields(chord.String())
-	if len(chord) > maxKeyChordBytes || len(fields) == 0 || len(fields) > maxKeyChordStrokes {
+func compileKeyChord(chord keymap.Chord) (keyChordKey, error) {
+	fields := chord.Strokes()
+	if len(chord) > keymap.MaxChordBytes || len(fields) == 0 || len(fields) > maxKeyChordStrokes {
 		return keyChordKey{}, errors.New("keybinding chord must have 1..4 strokes and at most 128 bytes")
 	}
 	var key keyChordKey
@@ -371,12 +62,12 @@ func (key keyChordKey) prefix(count int) keyChordKey {
 }
 
 type keyBindingScope struct {
-	context KeyContext
-	focus   KeyFocus
+	context keymap.Context
+	focus   keymap.Focus
 }
 
 type compiledChordBinding struct {
-	action KeyAction
+	action keymap.Action
 	prefix bool
 }
 
@@ -390,7 +81,7 @@ const (
 )
 
 type keyResolution struct {
-	action KeyAction
+	action keymap.Action
 	kind   keyResolutionKind
 }
 
@@ -402,26 +93,18 @@ func (resolution keyResolution) prefix() bool {
 	return resolution.kind == keyResolutionPrefix || resolution.kind == keyResolutionExactPrefix
 }
 
-var (
-	normalStatusSummaryActions = [...]KeyAction{
-		KeyActionFocusNextPane,
-		KeyActionActivate,
-		KeyActionHelp,
-		KeyActionQuit,
-	}
-	commentEditorSummaryActions = [...]KeyAction{
-		KeyActionSaveComment,
-		KeyActionInsertNewline,
-		KeyActionCancel,
-	}
-)
+var commentEditorSummaryActions = [...]keymap.Action{
+	keymap.ActionSaveComment,
+	keymap.ActionInsertNewline,
+	keymap.ActionCancel,
+}
 
 type compiledKeyScope struct {
-	chords               map[keyChordKey]compiledChordBinding
-	bindingSummary       string
-	normalStatusSummary  string
-	commentEditorSummary string
-	bindings             []Keybinding
+	chords                map[keyChordKey]compiledChordBinding
+	bindingSummary        string
+	normalStatusBindings  []keymap.Binding
+	commentEditorBindings []keymap.Binding
+	bindings              []keymap.Binding
 }
 
 type compiledKeybindings struct {
@@ -429,37 +112,21 @@ type compiledKeybindings struct {
 }
 
 type compiledBindingSource struct {
-	binding Keybinding
+	binding keymap.Binding
 	chord   keyChordKey
 }
 
-var runtimeKeyBindingScopes = [...]keyBindingScope{
-	{context: KeyContextNormal, focus: KeyFocusFileTree},
-	{context: KeyContextNormal, focus: KeyFocusDiff},
-	{context: KeyContextNormal, focus: KeyFocusComments},
-	{context: KeyContextVisual},
-	{context: KeyContextCommentEdit},
-	{context: KeyContextSearch},
-	{context: KeyContextCommand},
-	{context: KeyContextHelp},
-	{context: KeyContextStatusDetails},
-	{context: KeyContextConfirm},
-	{context: KeyContextExportPicker},
-	{context: KeyContextSubmit},
-	{context: KeyContextMinimumSize},
-}
-
-func compileKeybindings(bindings []Keybinding) (*compiledKeybindings, error) {
+func compileKeybindings(bindings []keymap.Binding) (*compiledKeybindings, error) {
 	if len(bindings) == 0 {
 		return nil, errors.New("at least one keybinding is required")
 	}
-	if len(bindings) > maxKeybindings {
-		return nil, fmt.Errorf("keybindings exceed supported limit %d", maxKeybindings)
+	if len(bindings) > keymap.MaxBindings {
+		return nil, fmt.Errorf("keybindings exceed supported limit %d", keymap.MaxBindings)
 	}
 	type bindingIdentity struct {
-		context KeyContext
-		focus   KeyFocus
-		chord   KeyChord
+		context keymap.Context
+		focus   keymap.Focus
+		chord   keymap.Chord
 	}
 	seen := make(map[bindingIdentity]struct{}, len(bindings))
 	sources := make([]compiledBindingSource, 0, len(bindings))
@@ -487,50 +154,20 @@ func compileKeybindings(bindings []Keybinding) (*compiledKeybindings, error) {
 		}
 		sources = append(sources, compiledBindingSource{binding: binding, chord: chord})
 	}
+	runtimeScopes := keymap.RuntimeScopes()
 	compiled := &compiledKeybindings{
-		scopes: make(map[keyBindingScope]*compiledKeyScope, len(runtimeKeyBindingScopes)),
+		scopes: make(map[keyBindingScope]*compiledKeyScope, len(runtimeScopes)),
 	}
-	for _, scope := range runtimeKeyBindingScopes {
+	for _, runtimeScope := range runtimeScopes {
+		scope := keyBindingScope{context: runtimeScope.Context, focus: runtimeScope.Focus}
 		compiled.scopes[scope] = compileKeyScope(sources, scope)
 	}
 	return compiled, nil
 }
 
-func validateKeybinding(binding Keybinding) error {
-	if binding.Context == "" || binding.Chord == "" || binding.Action == "" {
-		return errors.New("keybindings require context, chord, and action")
-	}
-	if strings.TrimSpace(binding.Context.String()) != binding.Context.String() ||
-		strings.TrimSpace(binding.Chord.String()) == "" ||
-		strings.TrimSpace(binding.Action.String()) != binding.Action.String() ||
-		strings.TrimSpace(binding.Focus.String()) != binding.Focus.String() {
-		return errors.New("keybinding values must be normalized")
-	}
-	context, err := NewKeyContext(binding.Context.String())
-	if err != nil || context != binding.Context {
-		return fmt.Errorf("keybinding context %q: %w", binding.Context, err)
-	}
-	focus, err := NewKeyFocus(binding.Focus.String())
-	if err != nil || focus != binding.Focus {
-		return fmt.Errorf("keybinding focus %q: %w", binding.Focus, err)
-	}
-	action, err := NewKeyAction(binding.Action.String())
-	if err != nil || action != binding.Action {
-		return fmt.Errorf("keybinding action %q: %w", binding.Action, err)
-	}
-	if _, ok := contextKeyActions[context][action]; !ok {
-		return fmt.Errorf(
-			"keybinding action %q is not available in context %q",
-			action,
-			context,
-		)
-	}
-	if focus != KeyFocusNone && context != KeyContextNormal {
-		return fmt.Errorf(
-			"keybinding context %q does not accept focus %q",
-			context,
-			focus,
-		)
+func validateKeybinding(binding keymap.Binding) error {
+	if err := keymap.ValidateBinding(binding); err != nil {
+		return fmt.Errorf("invalid keybinding: %w", err)
 	}
 	return nil
 }
@@ -545,7 +182,7 @@ func compileKeyScope(sources []compiledBindingSource, scope keyBindingScope) *co
 	if eligible == 0 {
 		return &compiledKeyScope{}
 	}
-	bindings := make([]Keybinding, 0, eligible)
+	bindings := make([]keymap.Binding, 0, eligible)
 	keys := make([]keyChordKey, 0, eligible)
 	positions := make(map[keyChordKey]int, eligible)
 	for _, source := range sources {
@@ -554,7 +191,7 @@ func compileKeyScope(sources []compiledBindingSource, scope keyBindingScope) *co
 			continue
 		}
 		if position, exists := positions[source.chord]; exists {
-			if binding.Focus != KeyFocusNone {
+			if binding.Focus != keymap.FocusNone {
 				bindings[position] = binding
 				keys[position] = source.chord
 			}
@@ -586,21 +223,47 @@ func compileKeyScope(sources []compiledBindingSource, scope keyBindingScope) *co
 		chords:         chords,
 		bindingSummary: formatBindingSummary(bindings, 4),
 	}
-	if scope.context == KeyContextNormal {
-		compiled.normalStatusSummary = formatActionSummary(bindings, normalStatusSummaryActions[:])
+	if scope.context == keymap.ContextNormal {
+		compiled.normalStatusBindings = bindingsForActions(bindings, normalStatusActions(scope.focus))
 	}
-	if scope.context == KeyContextCommentEdit {
-		compiled.commentEditorSummary = formatActionSummary(bindings, commentEditorSummaryActions[:])
+	if scope.context == keymap.ContextCommentEdit {
+		compiled.commentEditorBindings = bindingsForActions(bindings, commentEditorSummaryActions[:])
 	}
 	return compiled
 }
 
-func keyBindingAppliesToScope(binding Keybinding, scope keyBindingScope) bool {
-	return binding.Context == scope.context &&
-		(binding.Focus == KeyFocusNone || binding.Focus == scope.focus)
+func normalStatusActions(focus keymap.Focus) []keymap.Action {
+	switch focus {
+	case keymap.FocusFileTree:
+		return []keymap.Action{
+			keymap.ActionMoveDown,
+			keymap.ActionActivate,
+			keymap.ActionFocusNextPane,
+			keymap.ActionHelp,
+		}
+	case keymap.FocusComments:
+		return []keymap.Action{
+			keymap.ActionMoveDown,
+			keymap.ActionEditComment,
+			keymap.ActionFocusNextPane,
+			keymap.ActionHelp,
+		}
+	default:
+		return []keymap.Action{
+			keymap.ActionMoveDown,
+			keymap.ActionCommentAtCursor,
+			keymap.ActionFocusNextPane,
+			keymap.ActionHelp,
+		}
+	}
 }
 
-func formatBindingSummary(bindings []Keybinding, limit int) string {
+func keyBindingAppliesToScope(binding keymap.Binding, scope keyBindingScope) bool {
+	return binding.Context == scope.context &&
+		(binding.Focus == keymap.FocusNone || binding.Focus == scope.focus)
+}
+
+func formatBindingSummary(bindings []keymap.Binding, limit int) string {
 	var summary strings.Builder
 	for index, binding := range bindings[:min(len(bindings), limit)] {
 		writeBindingSummary(&summary, index, binding.Chord, binding.Action)
@@ -608,52 +271,50 @@ func formatBindingSummary(bindings []Keybinding, limit int) string {
 	return summary.String()
 }
 
-func formatActionSummary(bindings []Keybinding, actions []KeyAction) string {
-	var summary strings.Builder
-	count := 0
+func bindingsForActions(bindings []keymap.Binding, actions []keymap.Action) []keymap.Binding {
+	selected := make([]keymap.Binding, 0, len(actions))
 	for _, action := range actions {
 		for _, binding := range bindings {
 			if binding.Action != action {
 				continue
 			}
-			writeBindingSummary(&summary, count, binding.Chord, action)
-			count++
+			selected = append(selected, binding)
 			break
 		}
 	}
-	return summary.String()
+	return slices.Clip(selected)
 }
 
 func writeBindingSummary(
 	summary *strings.Builder,
 	index int,
-	chord KeyChord,
-	action KeyAction,
+	chord keymap.Chord,
+	action keymap.Action,
 ) {
 	if index != 0 {
 		summary.WriteString("  ")
 	}
-	summary.WriteString(chord.String())
+	summary.WriteString(chord.Display())
 	summary.WriteByte(' ')
-	summary.WriteString(action.String())
+	summary.WriteString(action.Description())
 }
 
 func (compiled *compiledKeybindings) scope(
-	context KeyContext,
-	focus KeyFocus,
+	context keymap.Context,
+	focus keymap.Focus,
 ) *compiledKeyScope {
 	if compiled == nil {
 		return nil
 	}
-	if context != KeyContextNormal {
-		focus = KeyFocusNone
+	if context != keymap.ContextNormal {
+		focus = keymap.FocusNone
 	}
 	return compiled.scopes[keyBindingScope{context: context, focus: focus}]
 }
 
 func (compiled *compiledKeybindings) resolve(
-	context KeyContext,
-	focus KeyFocus,
+	context keymap.Context,
+	focus keymap.Focus,
 	strokes []string,
 ) keyResolution {
 	key, ok := keyChordFromStrokes(strokes)
@@ -666,9 +327,9 @@ func (compiled *compiledKeybindings) resolve(
 	}
 	binding := scope.chords[key]
 	switch {
-	case binding.action != KeyActionNone && binding.prefix:
+	case binding.action != keymap.ActionNone && binding.prefix:
 		return keyResolution{action: binding.action, kind: keyResolutionExactPrefix}
-	case binding.action != KeyActionNone:
+	case binding.action != keymap.ActionNone:
 		return keyResolution{action: binding.action, kind: keyResolutionExact}
 	case binding.prefix:
 		return keyResolution{kind: keyResolutionPrefix}
@@ -678,8 +339,8 @@ func (compiled *compiledKeybindings) resolve(
 }
 
 func (compiled *compiledKeybindings) bindingSummary(
-	context KeyContext,
-	focus KeyFocus,
+	context keymap.Context,
+	focus keymap.Focus,
 ) string {
 	scope := compiled.scope(context, focus)
 	if scope == nil {
@@ -688,26 +349,26 @@ func (compiled *compiledKeybindings) bindingSummary(
 	return scope.bindingSummary
 }
 
-func (compiled *compiledKeybindings) normalStatusSummary(focus KeyFocus) string {
-	scope := compiled.scope(KeyContextNormal, focus)
+func (compiled *compiledKeybindings) normalStatusBindings(focus keymap.Focus) []keymap.Binding {
+	scope := compiled.scope(keymap.ContextNormal, focus)
 	if scope == nil {
-		return ""
+		return nil
 	}
-	return scope.normalStatusSummary
+	return scope.normalStatusBindings
 }
 
-func (compiled *compiledKeybindings) commentEditorSummary() string {
-	scope := compiled.scope(KeyContextCommentEdit, KeyFocusNone)
+func (compiled *compiledKeybindings) commentEditorBindings() []keymap.Binding {
+	scope := compiled.scope(keymap.ContextCommentEdit, keymap.FocusNone)
 	if scope == nil {
-		return ""
+		return nil
 	}
-	return scope.commentEditorSummary
+	return scope.commentEditorBindings
 }
 
 func (compiled *compiledKeybindings) effectiveBindings(
-	context KeyContext,
-	focus KeyFocus,
-) []Keybinding {
+	context keymap.Context,
+	focus keymap.Focus,
+) []keymap.Binding {
 	scope := compiled.scope(context, focus)
 	if scope == nil {
 		return nil
@@ -754,6 +415,10 @@ const (
 	PaletteSyntaxNumber
 	PaletteWarningForeground
 	PaletteWarningBackground
+	PaletteErrorForeground
+	PaletteErrorBackground
+	PaletteSuccessForeground
+	PaletteSuccessBackground
 )
 
 // Palette represents palette.
@@ -765,7 +430,7 @@ type Palette struct {
 func NewPalette(values map[PaletteRole]string) (Palette, error) {
 	colors := make(map[PaletteRole]string, len(values))
 	for role, value := range values {
-		if role < PalettePanelBackground || role > PaletteWarningBackground ||
+		if role < PalettePanelBackground || role > PaletteSuccessBackground ||
 			value == "" || len(value) > 64 {
 			return Palette{}, errors.New("invalid presentation palette")
 		}
@@ -852,7 +517,7 @@ func (features SettingFeatures) valid() bool {
 type SettingsRequest struct {
 	Palette         Palette
 	SyntaxSelector  review.SyntaxSelector
-	Keybindings     []Keybinding
+	Keybindings     []keymap.Binding
 	ExportTemplates review.ExportTemplates
 	Publication     review.PublicationOptions
 	ContextLines    review.ContextLines

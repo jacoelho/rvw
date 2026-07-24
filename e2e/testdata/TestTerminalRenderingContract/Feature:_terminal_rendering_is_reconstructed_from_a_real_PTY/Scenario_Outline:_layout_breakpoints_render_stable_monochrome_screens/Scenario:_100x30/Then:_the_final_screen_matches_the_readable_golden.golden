@@ -1,7 +1,7 @@
-rvw  [focus:diff]  staged.txt  [source:1 workspace:1]
-› •  staged.txt         │▸       diff --git a/staged.txt b/staged.txt
-     tracked.txt        │        new file mode 100644
-     untracked.txt      │        index 0000000..4480ae4
+FILES · 3/6           │▌ DIFF · staged.txt
+› •  A staged.txt       │▸       diff --git a/staged.txt b/staged.txt
+     M tracked.txt      │        new file mode 100644
+     A untracked.txt    │        index 0000000..4480ae4
                         │        --- /dev/null
                         │        +++ b/staged.txt
                         │        @@ -0,0 +1 @@
@@ -21,4 +21,10 @@ rvw  [focus:diff]  staged.txt  [source:1 workspace:1]
                         │
                         │
                         │
-work 0/64  Tab focus-next-pane  Enter activate  ? help  q quit
+                        │
+                        │
+                        │
+                        │
+                        │
+                        │
+Ready                                                Down next row  c comment  Tab next pane  ? help
