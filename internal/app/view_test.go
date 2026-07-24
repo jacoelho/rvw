@@ -44,6 +44,23 @@ func TestMinimumSizeOwnsInput(t *testing.T) {
 	}
 }
 
+func TestStatusLineNeverClipsPartOfABindingHint(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	model.notice = &Notice{Kind: NoticeInformation, Text: "reload complete"}
+	styles := newSemanticStyles(model.settings)
+	first := model.normalStatusBindings()[0]
+	prefix := string(model.notice.Text) + "  " + model.operationSummary()
+	firstHint := first.Chord.Display() + " " + first.Action.Description()
+	width := lipgloss.Width(prefix) + 2 + lipgloss.Width(firstHint) + 1
+	model.size = TerminalSize{Width: width, Height: 24, Known: true}
+
+	got := strings.TrimSpace(ansi.Strip(model.statusLine(width, styles)))
+	want := prefix + "  " + firstHint
+	if got != want {
+		t.Fatalf("status line = %q, want whole binding hints %q", got, want)
+	}
+}
+
 func TestCommentEditorDockKeepsCodeVisibleWithoutEscapedWidgetStyles(t *testing.T) {
 	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	waitContext, cancelWait := context.WithTimeout(t.Context(), 5*time.Second)

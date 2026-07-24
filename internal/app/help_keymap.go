@@ -1,9 +1,42 @@
 package app
 
 import (
+	"strings"
+
 	"charm.land/bubbles/v2/key"
+	"charm.land/lipgloss/v2"
 	"github.com/jacoelho/rvw/internal/keymap"
 )
+
+const bindingBarMaximumItems = 4
+
+type bindingBar struct {
+	bindings []keymap.Binding
+}
+
+func (bar bindingBar) Render(width int, styles semanticStyles) string {
+	if width <= 0 {
+		return ""
+	}
+	var rendered strings.Builder
+	used := 0
+	for _, binding := range bar.bindings[:min(len(bar.bindings), bindingBarMaximumItems)] {
+		separator := ""
+		if used != 0 {
+			separator = "  "
+		}
+		hint := styles.heading.Render(binding.Chord.Display()) + " " +
+			styles.muted.Render(binding.Action.Description())
+		hintWidth := lipgloss.Width(separator + hint)
+		if used+hintWidth > width {
+			break
+		}
+		rendered.WriteString(separator)
+		rendered.WriteString(hint)
+		used += hintWidth
+	}
+	return rendered.String()
+}
 
 type effectiveHelpKeyMap struct {
 	bindings []keymap.Binding

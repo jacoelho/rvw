@@ -327,12 +327,12 @@ func (model *Model) bindingSummary(contextName keymap.Context) string {
 	return model.settings.keymap.bindingSummary(contextName, model.configFocus())
 }
 
-func (model *Model) normalStatusBindingSummary() string {
-	return model.settings.keymap.normalStatusSummary(model.configFocus())
+func (model *Model) normalStatusBindings() []keymap.Binding {
+	return model.settings.keymap.normalStatusBindings(model.configFocus())
 }
 
-func (model *Model) commentEditorBindingSummary() string {
-	return model.settings.keymap.commentEditorSummary()
+func (model *Model) commentEditorBindings() []keymap.Binding {
+	return model.settings.keymap.commentEditorBindings()
 }
 
 func chordTimeoutCmd(ctx context.Context, generation uint64) tea.Cmd {

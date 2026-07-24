@@ -526,11 +526,11 @@ func (model *Model) commentEditorView(width, height int) string {
 		}, "\n")
 	}
 	title := "Comment · " + commentTargetText(draft.Target())
-	help := model.commentEditorBindingSummary()
+	help := bindingBar{bindings: model.commentEditorBindings()}.Render(width, styles)
 	return strings.Join([]string{
 		workspace,
 		fitCellWidth(styles.focused.Render(safeAndClip(title, width)), width),
-		fitCellWidth(styles.muted.Render(safeAndClip(help, width)), width),
+		fitCellWidth(help, width),
 		model.commentEditor.View(),
 	}, "\n")
 }
@@ -606,11 +606,6 @@ func paneHeader(title string, width int, focused bool, styles semanticStyles) st
 
 func (model *Model) statusLine(width int, styles semanticStyles) string {
 	status := model.operationSummary()
-	if model.mode == ModeCommentEdit {
-		status += "  comment editor owns input"
-	} else {
-		status += "  " + model.normalStatusBindingSummary()
-	}
 	_, height := model.renderSize()
 	if model.size.Width > maxRenderWidth || model.size.Height > maxRenderHeight {
 		status = fmt.Sprintf(
@@ -625,6 +620,17 @@ func (model *Model) statusLine(width int, styles semanticStyles) string {
 	}
 	if model.notice != nil {
 		status = string(model.notice.Text) + "  " + status
+	}
+	if model.mode == ModeCommentEdit {
+		status += "  comment editor owns input"
+	} else {
+		available := max(width-lipgloss.Width(status)-2, 0)
+		bindings := bindingBar{bindings: model.normalStatusBindings()}.Render(available, styles)
+		if bindings != "" {
+			status += "  " + bindings
+		}
+	}
+	if model.notice != nil {
 		switch model.notice.Kind {
 		case NoticeInformation:
 		case NoticeWarning:
@@ -633,7 +639,7 @@ func (model *Model) statusLine(width int, styles semanticStyles) string {
 			return fitCellWidth(styles.failure.Render(safeAndClip(status, width)), width)
 		}
 	}
-	return fitCellWidth(styles.muted.Render(safeAndClip(status, width)), width)
+	return fitCellWidth(status, width)
 }
 
 func (model *Model) renderSize() (int, int) {

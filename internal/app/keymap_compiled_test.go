@@ -2,9 +2,11 @@ package app
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
+	"charm.land/lipgloss/v2"
 	"github.com/jacoelho/rvw/internal/keymap"
 )
 
@@ -126,13 +128,16 @@ func TestCompiledKeybindingsBoundMaximumResolutionAndSummaries(t *testing.T) {
 	if summary := model.bindingSummary(keymap.ContextNormal); summary != wantSummary {
 		t.Fatalf("binding summary = %q, want %q", summary, wantSummary)
 	}
-	wantStatusSummary := strings.Join([]string{
-		"x-0005 " + keymap.ActionMoveDown.Description(),
-		"focus " + keymap.ActionFocusNextPane.Description(),
-		"help " + keymap.ActionHelp.Description(),
-	}, "  ")
-	if summary := model.normalStatusBindingSummary(); summary != wantStatusSummary {
-		t.Fatalf("action summary = %q, want %q", summary, wantStatusSummary)
+	wantStatusBindings := []keymap.Binding{
+		bindings[5],
+		bindings[0],
+		bindings[2],
+	}
+	if statusBindings := model.normalStatusBindings(); !slices.Equal(
+		statusBindings,
+		wantStatusBindings,
+	) {
+		t.Fatalf("status bindings = %#v, want %#v", statusBindings, wantStatusBindings)
 	}
 
 	allocations := testing.AllocsPerRun(1_000, func() {
@@ -140,11 +145,41 @@ func TestCompiledKeybindingsBoundMaximumResolutionAndSummaries(t *testing.T) {
 		compiledActionSink = compiledResolutionSink.action
 		compiledResolutionSink = model.resolveAction(prefix)
 		compiledStringSink = model.bindingSummary(keymap.ContextNormal)
-		compiledStringSink = model.normalStatusBindingSummary()
+		compiledBindingsSink = model.normalStatusBindings()
 		compiledBindingsSink = model.effectiveBindings(keymap.ContextNormal)
 	})
 	if allocations != 0 {
 		t.Fatalf("compiled resolution and summaries allocate %.2f times", allocations)
+	}
+}
+
+func TestBindingBarKeepsWholePriorityOrderedHints(t *testing.T) {
+	bindings := []keymap.Binding{
+		{Chord: "j", Action: keymap.ActionMoveDown},
+		{Chord: "c", Action: keymap.ActionCommentAtCursor},
+		{Chord: "tab", Action: keymap.ActionFocusNextPane},
+		{Chord: "?", Action: keymap.ActionHelp},
+	}
+	styles := semanticStyles{
+		heading: lipgloss.NewStyle(),
+		muted:   lipgloss.NewStyle(),
+	}
+	bar := bindingBar{bindings: bindings}
+	firstThree := strings.Join([]string{
+		"j " + keymap.ActionMoveDown.Description(),
+		"c " + keymap.ActionCommentAtCursor.Description(),
+		"Tab " + keymap.ActionFocusNextPane.Description(),
+	}, "  ")
+	full := firstThree + "  ? " + keymap.ActionHelp.Description()
+	boundary := lipgloss.Width(full)
+	if got := bar.Render(boundary-1, styles); got != firstThree {
+		t.Fatalf("below boundary = %q, want %q", got, firstThree)
+	}
+	if got := bar.Render(boundary, styles); got != full {
+		t.Fatalf("at boundary = %q, want %q", got, full)
+	}
+	if got := bar.Render(boundary+1, styles); got != full {
+		t.Fatalf("above boundary = %q, want %q", got, full)
 	}
 }
 

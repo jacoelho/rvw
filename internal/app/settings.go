@@ -100,11 +100,11 @@ var commentEditorSummaryActions = [...]keymap.Action{
 }
 
 type compiledKeyScope struct {
-	chords               map[keyChordKey]compiledChordBinding
-	bindingSummary       string
-	normalStatusSummary  string
-	commentEditorSummary string
-	bindings             []keymap.Binding
+	chords                map[keyChordKey]compiledChordBinding
+	bindingSummary        string
+	normalStatusBindings  []keymap.Binding
+	commentEditorBindings []keymap.Binding
+	bindings              []keymap.Binding
 }
 
 type compiledKeybindings struct {
@@ -224,10 +224,10 @@ func compileKeyScope(sources []compiledBindingSource, scope keyBindingScope) *co
 		bindingSummary: formatBindingSummary(bindings, 4),
 	}
 	if scope.context == keymap.ContextNormal {
-		compiled.normalStatusSummary = formatActionSummary(bindings, normalStatusActions(scope.focus))
+		compiled.normalStatusBindings = bindingsForActions(bindings, normalStatusActions(scope.focus))
 	}
 	if scope.context == keymap.ContextCommentEdit {
-		compiled.commentEditorSummary = formatActionSummary(bindings, commentEditorSummaryActions[:])
+		compiled.commentEditorBindings = bindingsForActions(bindings, commentEditorSummaryActions[:])
 	}
 	return compiled
 }
@@ -271,20 +271,18 @@ func formatBindingSummary(bindings []keymap.Binding, limit int) string {
 	return summary.String()
 }
 
-func formatActionSummary(bindings []keymap.Binding, actions []keymap.Action) string {
-	var summary strings.Builder
-	count := 0
+func bindingsForActions(bindings []keymap.Binding, actions []keymap.Action) []keymap.Binding {
+	selected := make([]keymap.Binding, 0, len(actions))
 	for _, action := range actions {
 		for _, binding := range bindings {
 			if binding.Action != action {
 				continue
 			}
-			writeBindingSummary(&summary, count, binding.Chord, action)
-			count++
+			selected = append(selected, binding)
 			break
 		}
 	}
-	return summary.String()
+	return slices.Clip(selected)
 }
 
 func writeBindingSummary(
@@ -351,20 +349,20 @@ func (compiled *compiledKeybindings) bindingSummary(
 	return scope.bindingSummary
 }
 
-func (compiled *compiledKeybindings) normalStatusSummary(focus keymap.Focus) string {
+func (compiled *compiledKeybindings) normalStatusBindings(focus keymap.Focus) []keymap.Binding {
 	scope := compiled.scope(keymap.ContextNormal, focus)
 	if scope == nil {
-		return ""
+		return nil
 	}
-	return scope.normalStatusSummary
+	return scope.normalStatusBindings
 }
 
-func (compiled *compiledKeybindings) commentEditorSummary() string {
+func (compiled *compiledKeybindings) commentEditorBindings() []keymap.Binding {
 	scope := compiled.scope(keymap.ContextCommentEdit, keymap.FocusNone)
 	if scope == nil {
-		return ""
+		return nil
 	}
-	return scope.commentEditorSummary
+	return scope.commentEditorBindings
 }
 
 func (compiled *compiledKeybindings) effectiveBindings(
