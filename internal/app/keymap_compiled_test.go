@@ -159,27 +159,42 @@ func TestBindingBarKeepsWholePriorityOrderedHints(t *testing.T) {
 		{Chord: "c", Action: keymap.ActionCommentAtCursor},
 		{Chord: "tab", Action: keymap.ActionFocusNextPane},
 		{Chord: "?", Action: keymap.ActionHelp},
+		{Chord: "q", Action: keymap.ActionQuit},
 	}
 	styles := semanticStyles{
 		heading: lipgloss.NewStyle(),
 		muted:   lipgloss.NewStyle(),
 	}
 	bar := bindingBar{bindings: bindings}
-	firstThree := strings.Join([]string{
+	hints := []string{
 		"j " + keymap.ActionMoveDown.Description(),
 		"c " + keymap.ActionCommentAtCursor.Description(),
 		"Tab " + keymap.ActionFocusNextPane.Description(),
-	}, "  ")
-	full := firstThree + "  ? " + keymap.ActionHelp.Description()
-	boundary := lipgloss.Width(full)
-	if got := bar.Render(boundary-1, styles); got != firstThree {
-		t.Fatalf("below boundary = %q, want %q", got, firstThree)
+		"? " + keymap.ActionHelp.Description(),
 	}
-	if got := bar.Render(boundary, styles); got != full {
-		t.Fatalf("at boundary = %q, want %q", got, full)
+	previous := ""
+	for count := 1; count <= bindingBarMaximumItems; count++ {
+		expected := strings.Join(hints[:count], "  ")
+		boundary := lipgloss.Width(expected)
+		if got := bar.Render(boundary-1, styles); got != previous {
+			t.Fatalf("hint %d below boundary = %q, want %q", count, got, previous)
+		}
+		if got := bar.Render(boundary, styles); got != expected {
+			t.Fatalf("hint %d at boundary = %q, want %q", count, got, expected)
+		}
+		if got := bar.Render(boundary+1, styles); got != expected {
+			t.Fatalf("hint %d above boundary = %q, want %q", count, got, expected)
+		}
+		previous = expected
 	}
-	if got := bar.Render(boundary+1, styles); got != full {
-		t.Fatalf("above boundary = %q, want %q", got, full)
+	if got := bar.Render(1_000, styles); strings.Contains(got, "q ") {
+		t.Fatalf("binding bar rendered more than %d hints: %q", bindingBarMaximumItems, got)
+	}
+	if got := (bindingBar{}).Render(80, styles); got != "" {
+		t.Fatalf("empty binding bar = %q", got)
+	}
+	if got := (bindingBar{bindings: bindings[:1]}).Render(80, styles); got != hints[0] {
+		t.Fatalf("one-item binding bar = %q, want %q", got, hints[0])
 	}
 }
 

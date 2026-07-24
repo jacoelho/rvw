@@ -603,6 +603,24 @@ func (tree fileTree) window(
 		}
 		start = previous
 	}
+	visible := 1
+	end := start
+	for visible < height {
+		next, exists := tree.nextVisible(end, collapsed)
+		if !exists {
+			break
+		}
+		end = next
+		visible++
+	}
+	for visible < height {
+		previous, exists := tree.previousVisible(start, collapsed)
+		if !exists {
+			break
+		}
+		start = previous
+		visible++
+	}
 	rows := make([]treeNode, 0, height)
 	for len(rows) < height {
 		rows = append(rows, tree.nodes[start])

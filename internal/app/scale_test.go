@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -196,6 +197,118 @@ func TestActivatingFileDropsPriorLargePatchAtScale(t *testing.T) {
 	}
 	if accepted := coordinator.Stats().Accepted; accepted != 1 {
 		t.Fatalf("accepted patch requests = %d, want only the activated file", accepted)
+	}
+}
+
+func TestScaleViewMaterializesOnlyViewportPresentationSlices(t *testing.T) {
+	model, _ := appScaleModel(t)
+	width, height := model.renderSize()
+	layout := model.workspaceLayout(width, height)
+	bodyHeight := height - 2
+	styles := newSemanticStyles(model.settings)
+	model.settings.wrap = false
+
+	active, ok := model.review.ActiveFile()
+	if !ok {
+		t.Fatal("scale review has no active file")
+	}
+	patch := model.review.Patch(active)
+	demand := model.patchLineDemand(layout.diffWidth, bodyHeight)
+	if demand.count != uint32(bodyHeight+viewportOverscan) {
+		t.Fatalf("patch demand = %d lines, want viewport plus overscan", demand.count)
+	}
+	if demand.bytes != max(int64(layout.diffWidth)*8, int64(4_096)) {
+		t.Fatalf("patch byte demand = %d, want clipped-line bound", demand.bytes)
+	}
+	if patch.Lines <= demand.count+1 {
+		t.Fatalf("scale patch = %d lines, need more than demand %d", patch.Lines, demand.count)
+	}
+	model.diffTop = patch.Lines - demand.count - 1
+	model.diffCursor = model.diffTop
+	model.commentCursor = model.commentRowCount() - 1
+	tree := model.currentFileTree()
+	lastTreeIndex, ok := tree.lastIndex()
+	if !ok {
+		t.Fatal("scale tree has no final projected node")
+	}
+	model.treeCursor = tree.nodes[lastTreeIndex].identity
+
+	treeLines, treeRows := model.fileTreeLines(layout.treeWidth, bodyHeight, styles)
+	diffLines, diffRows := model.diffLines(layout.diffWidth, bodyHeight, styles)
+	commentLines, commentRows := model.commentLines(layout.commentsWidth, bodyHeight, styles)
+	for name, count := range map[string]int{
+		"tree lines":    len(treeLines),
+		"tree rows":     len(treeRows),
+		"diff lines":    len(diffLines),
+		"diff rows":     len(diffRows),
+		"comment lines": len(commentLines),
+		"comment rows":  len(commentRows),
+	} {
+		if count > bodyHeight {
+			t.Fatalf("%s materialized %d entries for a %d-row viewport", name, count, bodyHeight)
+		}
+	}
+	if len(treeRows) != bodyHeight || !slices.Contains(treeRows, model.treeCursor) {
+		t.Fatalf("deep tree window = %d rows, cursor present %t", len(treeRows), slices.Contains(treeRows, model.treeCursor))
+	}
+	if len(diffRows) == 0 || diffRows[0] != model.diffTop {
+		t.Fatalf("deep diff window starts at %v, want %d", diffRows, model.diffTop)
+	}
+	if len(commentRows) != bodyHeight || !slices.Contains(commentRows, model.commentCursor) {
+		t.Fatalf(
+			"deep comment window = %d rows, cursor present %t",
+			len(commentRows),
+			slices.Contains(commentRows, model.commentCursor),
+		)
+	}
+	for _, test := range []struct {
+		name  string
+		view  DiffView
+		width int
+		wrap  bool
+	}{
+		{name: "unified/no-wrap", view: DiffViewUnified, width: layout.diffWidth},
+		{name: "unified/wrap", view: DiffViewUnified, width: layout.diffWidth, wrap: true},
+		{name: "side-by-side/no-wrap", view: DiffViewSideBySide, width: sideBySideContentWidth + diffCommentAnchorColumns},
+		{name: "side-by-side/wrap", view: DiffViewSideBySide, width: sideBySideContentWidth + diffCommentAnchorColumns, wrap: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			model.settings.diffView = test.view
+			model.settings.wrap = test.wrap
+			demand := model.patchLineDemand(test.width, bodyHeight)
+			if demand.count != uint32(bodyHeight+viewportOverscan) {
+				t.Fatalf("patch demand = %d lines, want viewport plus overscan", demand.count)
+			}
+			wantBytes := max(int64(test.width)*8, int64(4_096))
+			if test.wrap {
+				wantBytes = max(
+					int64(test.width)*int64(bodyHeight+viewportOverscan)*4,
+					wantBytes,
+				)
+			}
+			if demand.bytes != wantBytes {
+				t.Fatalf("patch byte demand = %d, want %d", demand.bytes, wantBytes)
+			}
+			lines, rows := model.diffLines(test.width, bodyHeight, styles)
+			if len(lines) > bodyHeight || len(rows) > bodyHeight {
+				t.Fatalf(
+					"rendered %d lines and %d mappings for %d-row viewport",
+					len(lines),
+					len(rows),
+					bodyHeight,
+				)
+			}
+			if len(rows) == 0 || rows[0] != model.diffTop {
+				t.Fatalf("deep diff window starts at %v, want %d", rows, model.diffTop)
+			}
+		})
+	}
+	view := model.View()
+	if rows := strings.Count(view.Content, "\n") + 1; rows != height {
+		t.Fatalf("scale view rendered %d rows, want %d", rows, height)
+	}
+	if bytes := len(view.Content); bytes > width*height*64 {
+		t.Fatalf("scale view retained %d presentation bytes for %dx%d", bytes, width, height)
 	}
 }
 

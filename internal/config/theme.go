@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"unicode/utf8"
@@ -136,25 +137,61 @@ func bundledTheme(name ThemeName, appearance Appearance) Theme {
 		}
 	}
 	palette := bundledPalette(paletteName, appearance)
+	colors := map[ThemeColor]Color{
+		"panel_bg":           Color(palette.background),
+		"fg_primary":         Color(palette.primary),
+		"fg_secondary":       Color(palette.secondary),
+		"fg_dim":             Color(palette.muted),
+		"diff_add":           Color(palette.addition),
+		"diff_del":           Color(palette.deletion),
+		"diff_context":       Color(palette.context),
+		"pending":            Color(palette.secondary),
+		"border_focused":     Color(palette.accent),
+		"status_bar_bg":      Color(palette.header),
+		"cursor_line_bg":     Color(palette.selected),
+		"diff_hunk_header":   Color(palette.accent),
+		"message_warning_fg": Color(palette.warning),
+	}
+	if background, ok := subtleDiffBackground(palette.background, palette.addition); ok {
+		colors["diff_add_bg"] = background
+	}
+	if background, ok := subtleDiffBackground(palette.background, palette.deletion); ok {
+		colors["diff_del_bg"] = background
+	}
 	return Theme{
 		Name:        name,
 		SyntaxTheme: SyntaxThemePath(selector.String()),
-		Colors: map[ThemeColor]Color{
-			"panel_bg":           Color(palette.background),
-			"fg_primary":         Color(palette.primary),
-			"fg_secondary":       Color(palette.secondary),
-			"fg_dim":             Color(palette.muted),
-			"diff_add":           Color(palette.addition),
-			"diff_del":           Color(palette.deletion),
-			"diff_context":       Color(palette.context),
-			"pending":            Color(palette.secondary),
-			"border_focused":     Color(palette.accent),
-			"status_bar_bg":      Color(palette.header),
-			"cursor_line_bg":     Color(palette.selected),
-			"diff_hunk_header":   Color(palette.accent),
-			"message_warning_fg": Color(palette.warning),
-		},
+		Colors:      colors,
 	}
+}
+
+func subtleDiffBackground(background, foreground string) (Color, bool) {
+	backgroundRGB, backgroundOK := parseHexColor(background)
+	foregroundRGB, foregroundOK := parseHexColor(foreground)
+	if !backgroundOK || !foregroundOK {
+		return "", false
+	}
+	var blended [3]uint16
+	for index := range blended {
+		blended[index] = (uint16(backgroundRGB[index])*7 +
+			uint16(foregroundRGB[index]) + 4) / 8
+	}
+	return Color(fmt.Sprintf("#%02x%02x%02x", blended[0], blended[1], blended[2])), true
+}
+
+func parseHexColor(value string) ([3]uint8, bool) {
+	if len(value) != 7 || value[0] != '#' {
+		return [3]uint8{}, false
+	}
+	var color [3]uint8
+	for index := range color {
+		component, err := strconv.ParseUint(value[1+index*2:3+index*2], 16, 8)
+		if err != nil {
+			return [3]uint8{}, false
+		}
+		color[index] = uint8(component)
+	}
+	return color, true
 }
 
 func bundledPalette(name ThemeName, appearance Appearance) bundledThemePalette {

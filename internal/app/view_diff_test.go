@@ -7,6 +7,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/vt"
 
 	"github.com/jacoelho/rvw/internal/review"
 )
@@ -132,6 +133,223 @@ func TestSideBySideNoNewlineMarkersRenderOnlyOnTheirOwnedSides(t *testing.T) {
 	}
 }
 
+func TestSideBySideSemanticBackgroundsStayOnApplicableCells(t *testing.T) {
+	model, active := modelWithPreparedPatch(t,
+		"@@ -1 +1 @@\n"+
+			"-old\n"+
+			"+new\n",
+	)
+	palette, err := NewPalette(map[PaletteRole]string{
+		PalettePanelBackground:      "#111111",
+		PaletteDiffAdd:              "#00ff00",
+		PaletteDiffDelete:           "#ff0000",
+		PaletteDiffAddBackground:    "#002200",
+		PaletteDiffDeleteBackground: "#220000",
+		PaletteStatusBackground:     "#333333",
+		PaletteCursorBackground:     "#444444",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.settings.colorEnabled = true
+	model.settings.palette = palette
+	model.diffCursor = 99
+	lines := model.review.PatchLines(active, 0, 10, 4_096)
+	rendered, rows := model.sideBySideDiffLines(
+		active,
+		lines,
+		100,
+		10,
+		newDiffLineNumberWidths(model.review.Patch(active)),
+		newSemanticStyles(model.settings),
+	)
+	terminal := vt.NewEmulator(100, len(rendered))
+	t.Cleanup(func() { _ = terminal.Close() })
+	if _, err := terminal.WriteString(strings.Join(rendered, "\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	deletionRow := rowIndex(t, rows, 1)
+	additionRow := rowIndex(t, rows, 2)
+	hunkRow := rowIndex(t, rows, 0)
+	for _, column := range []int{0, 10, 49, 50, 60, 99} {
+		if got := terminalColor(terminal.CellAt(column, hunkRow).Style.Bg); got != "#333333" {
+			t.Fatalf("hunk band cell (%d,%d) background = %q", column, hunkRow, got)
+		}
+	}
+	if got := terminalColor(terminal.CellAt(10, deletionRow).Style.Bg); got != "#220000" {
+		t.Fatalf("deletion old-side background = %q", got)
+	}
+	if got := terminalColor(terminal.CellAt(60, deletionRow).Style.Bg); got != "#111111" {
+		t.Fatalf("deletion neutral new-side background = %q", got)
+	}
+	if got := terminalColor(terminal.CellAt(10, additionRow).Style.Bg); got != "#111111" {
+		t.Fatalf("addition neutral old-side background = %q", got)
+	}
+	if got := terminalColor(terminal.CellAt(60, additionRow).Style.Bg); got != "#002200" {
+		t.Fatalf("addition new-side background = %q", got)
+	}
+	for _, row := range []int{deletionRow, additionRow} {
+		for _, column := range []int{0, 1, 49} {
+			if got := terminalColor(terminal.CellAt(column, row).Style.Bg); got != "#111111" {
+				t.Fatalf("side-by-side chrome cell (%d,%d) background = %q, want panel", column, row, got)
+			}
+		}
+	}
+	if got := terminalColor(terminal.CellAt(51, deletionRow).Style.Bg); got != "#111111" {
+		t.Fatalf("deletion absent new-side anchor background = %q, want panel", got)
+	}
+	if got := terminalColor(terminal.CellAt(3, additionRow).Style.Bg); got != "#111111" {
+		t.Fatalf("addition absent old-side anchor background = %q, want panel", got)
+	}
+
+	model.diffCursor = 1
+	selectedRendered, selectedRows := model.sideBySideDiffLines(
+		active,
+		lines,
+		100,
+		10,
+		newDiffLineNumberWidths(model.review.Patch(active)),
+		newSemanticStyles(model.settings),
+	)
+	selectedTerminal := vt.NewEmulator(100, len(selectedRendered))
+	t.Cleanup(func() { _ = selectedTerminal.Close() })
+	if _, err := selectedTerminal.WriteString(strings.Join(selectedRendered, "\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	selectedDeletion := rowIndex(t, selectedRows, 1)
+	for _, column := range []int{0, 10, 49, 60, 99} {
+		if got := terminalColor(selectedTerminal.CellAt(column, selectedDeletion).Style.Bg); got != "#444444" {
+			t.Fatalf("selected split cell (%d,%d) background = %q", column, selectedDeletion, got)
+		}
+	}
+
+	model.diffCursor = 99
+	model.settings.diffView = DiffViewUnified
+	unified, unifiedRows := model.diffLines(100, 10, newSemanticStyles(model.settings))
+	unifiedTerminal := vt.NewEmulator(100, len(unified))
+	t.Cleanup(func() { _ = unifiedTerminal.Close() })
+	if _, err := unifiedTerminal.WriteString(strings.Join(unified, "\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	unifiedDeletion := rowIndex(t, unifiedRows, 1)
+	unifiedAddition := rowIndex(t, unifiedRows, 2)
+	if got := terminalColor(unifiedTerminal.CellAt(6, unifiedDeletion).Style.Bg); got != "#220000" {
+		t.Fatalf("unified deletion absent new anchor background = %q", got)
+	}
+	if got := terminalColor(unifiedTerminal.CellAt(3, unifiedAddition).Style.Bg); got != "#002200" {
+		t.Fatalf("unified addition absent old anchor background = %q", got)
+	}
+}
+
+func TestUnifiedMetadataAndSyntaxRetainTheirCellBases(t *testing.T) {
+	model, active := modelWithPreparedPatch(t,
+		"diff --git a/alpha.txt b/alpha.txt\n"+
+			"index 1111111..2222222 100644\n"+
+			"--- a/alpha.txt\n"+
+			"+++ b/alpha.txt\n"+
+			"@@ -0,0 +1 @@\n"+
+			"+func value\n",
+	)
+	palette, err := NewPalette(map[PaletteRole]string{
+		PalettePanelBackground:   "#111111",
+		PalettePrimary:           "#ffffff",
+		PaletteDim:               "#888888",
+		PaletteDiffAdd:           "#00ff00",
+		PaletteDiffAddBackground: "#002200",
+		PaletteSyntaxKeyword:     "#0000ff",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selector, err := review.NewSyntaxSelector("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	object, err := review.NewObjectID(strings.Repeat("a", 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := review.NewSyntaxIdentity(object, selector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineOne, err := review.NewLineNumber(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.syntaxNew, err = review.PrepareSyntax(
+		identity,
+		[]review.LineNumber{lineOne},
+		[]byte("func value\n"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.settings.colorEnabled = true
+	model.settings.palette = palette
+	model.settings.wrap = false
+	model.settings.diffView = DiffViewUnified
+	model.diffCursor = 99
+	const width = 50
+	lines := model.review.PatchLines(active, 0, 20, 4_096)
+	rendered, rows := model.diffLines(width, 20, newSemanticStyles(model.settings))
+	terminal := vt.NewEmulator(width, len(rendered))
+	t.Cleanup(func() { _ = terminal.Close() })
+	if _, err := terminal.WriteString(strings.Join(rendered, "\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	metadataRow := rowIndex(t, rows, patchRowContaining(t, lines, "+++ b/alpha.txt"))
+	assertVTCellStyleAtRow(t, terminal, 8, metadataRow, "#ffffff", "#111111", 1)
+	assertVTCellStyleAtRow(t, terminal, width-1, metadataRow, "", "#111111", 0)
+
+	additionRow := rowIndex(t, rows, patchRowContaining(t, lines, "+func value"))
+	assertVTCellStyleAtRow(t, terminal, 9, additionRow, "#0000ff", "#002200", 1)
+	assertVTCellStyleAtRow(t, terminal, 14, additionRow, "#00ff00", "#002200", 0)
+	assertVTCellStyleAtRow(t, terminal, width-1, additionRow, "", "#002200", 0)
+}
+
+func TestUnifiedWrappedContinuationKeepsSemanticGutterBackground(t *testing.T) {
+	model, active := modelWithPreparedPatch(t,
+		"@@ -0,0 +1 @@\n"+
+			"+this addition is deliberately long enough to wrap across several terminal rows\n",
+	)
+	palette, err := NewPalette(map[PaletteRole]string{
+		PalettePanelBackground:   "#111111",
+		PaletteDiffAdd:           "#00ff00",
+		PaletteDiffAddBackground: "#002200",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.settings.colorEnabled = true
+	model.settings.palette = palette
+	model.settings.wrap = true
+	model.settings.diffView = DiffViewUnified
+	model.diffCursor = 99
+	rendered, rows := model.diffLines(24, 10, newSemanticStyles(model.settings))
+	addition := model.review.PatchLines(active, 0, 10, 4_096)[1].Number
+	indices := make([]int, 0, 2)
+	for index, row := range rows {
+		if row == addition {
+			indices = append(indices, index)
+		}
+	}
+	if len(indices) < 2 {
+		t.Fatalf("wrapped addition produced row mapping %v", rows)
+	}
+	terminal := vt.NewEmulator(24, len(rendered))
+	t.Cleanup(func() { _ = terminal.Close() })
+	if _, err := terminal.WriteString(strings.Join(rendered, "\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	continuation := indices[1]
+	for _, column := range []int{0, 1} {
+		if got := terminalColor(terminal.CellAt(column, continuation).Style.Bg); got != "#002200" {
+			t.Fatalf("continuation gutter cell (%d,%d) background = %q", column, continuation, got)
+		}
+	}
+}
+
 func TestSideBySideNoNewlineMarkerWrapsWithinWidthAndHeight(t *testing.T) {
 	model, active := modelWithPreparedPatch(t,
 		"@@ -1 +1 @@\n"+
@@ -233,6 +451,40 @@ func rowIndex(t *testing.T, rows []uint32, row uint32) int {
 		t.Fatalf("rendered row mapping omitted patch row %d: %v", row, rows)
 	}
 	return index
+}
+
+func patchRowContaining(t *testing.T, lines []review.PatchLine, fragment string) uint32 {
+	t.Helper()
+	for _, line := range lines {
+		if strings.Contains(line.Text.String(), fragment) {
+			return line.Number
+		}
+	}
+	t.Fatalf("patch lines omitted %q", fragment)
+	return 0
+}
+
+func assertVTCellStyleAtRow(
+	t *testing.T,
+	terminal *vt.Emulator,
+	x, y int,
+	foreground, background string,
+	attributes uint8,
+) {
+	t.Helper()
+	cell := terminal.CellAt(x, y)
+	if cell == nil {
+		t.Fatalf("cell (%d,%d) is absent", x, y)
+	}
+	if got := terminalColor(cell.Style.Fg); got != foreground {
+		t.Fatalf("cell (%d,%d) foreground = %q, want %q", x, y, got, foreground)
+	}
+	if got := terminalColor(cell.Style.Bg); got != background {
+		t.Fatalf("cell (%d,%d) background = %q, want %q", x, y, got, background)
+	}
+	if cell.Style.Attrs != attributes {
+		t.Fatalf("cell (%d,%d) attributes = %08b, want %08b", x, y, cell.Style.Attrs, attributes)
+	}
 }
 
 func sideBySideCells(t *testing.T, row string) (string, string) {

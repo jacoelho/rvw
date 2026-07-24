@@ -11,6 +11,7 @@ import (
 const bindingBarMaximumItems = 4
 
 type bindingBar struct {
+	base     lipgloss.Style
 	bindings []keymap.Binding
 }
 
@@ -23,10 +24,11 @@ func (bar bindingBar) Render(width int, styles semanticStyles) string {
 	for _, binding := range bar.bindings[:min(len(bar.bindings), bindingBarMaximumItems)] {
 		separator := ""
 		if used != 0 {
-			separator = "  "
+			separator = bar.base.Render("  ")
 		}
-		hint := styles.heading.Render(binding.Chord.Display()) + " " +
-			styles.muted.Render(binding.Action.Description())
+		hint := styles.heading.Inherit(bar.base).Render(binding.Chord.Display()) +
+			bar.base.Render(" ") +
+			styles.muted.Inherit(bar.base).Render(binding.Action.Description())
 		hintWidth := lipgloss.Width(separator + hint)
 		if used+hintWidth > width {
 			break

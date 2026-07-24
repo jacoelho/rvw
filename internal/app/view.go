@@ -29,28 +29,6 @@ const (
 	commentEditorWorkspaceHeight = 3
 )
 
-type semanticStyles struct {
-	heading       lipgloss.Style
-	muted         lipgloss.Style
-	focused       lipgloss.Style
-	selected      lipgloss.Style
-	added         lipgloss.Style
-	deleted       lipgloss.Style
-	context       lipgloss.Style
-	hunk          lipgloss.Style
-	pending       lipgloss.Style
-	reviewed      lipgloss.Style
-	commentAnchor lipgloss.Style
-	keyword       lipgloss.Style
-	literal       lipgloss.Style
-	comment       lipgloss.Style
-	number        lipgloss.Style
-	warning       lipgloss.Style
-	failure       lipgloss.Style
-	status        lipgloss.Style
-	panel         lipgloss.Style
-}
-
 type workspaceLayout struct {
 	treeWidth          int
 	diffWidth          int
@@ -94,6 +72,13 @@ type diffLineNumberWidths struct {
 	old int
 	new int
 }
+
+type paneHeaderState uint8
+
+const (
+	paneHeaderQuiet paneHeaderState = iota + 1
+	paneHeaderFocused
+)
 
 // View returns the receiver's view value.
 func (model *Model) View() tea.View {
@@ -155,7 +140,7 @@ func (model *Model) workspaceView(
 		bodyHeight,
 		styles,
 	)
-	separator := styles.muted.Render("│")
+	separator := styles.muted.Inherit(styles.panel).Render("│")
 
 	body := make([]string, bodyHeight)
 	for row := range bodyHeight {
@@ -169,27 +154,29 @@ func (model *Model) workspaceView(
 			if row < len(treeLines) {
 				treeLine = treeLines[row]
 			}
-			sections = append(sections, fitCellWidth(treeLine, layout.treeWidth))
+			sections = append(
+				sections,
+				fitStyledCellWidth(treeLine, layout.treeWidth, styles.panel),
+			)
 		}
-		sections = append(sections, fitCellWidth(diffLine, layout.diffWidth))
+		sections = append(
+			sections,
+			fitStyledCellWidth(diffLine, layout.diffWidth, styles.panel),
+		)
 		if layout.commentsWidth != 0 {
 			commentLine := ""
 			if row < len(commentLines) {
 				commentLine = commentLines[row]
 			}
-			sections = append(sections, fitCellWidth(commentLine, layout.commentsWidth))
+			sections = append(
+				sections,
+				fitStyledCellWidth(commentLine, layout.commentsWidth, styles.panel),
+			)
 		}
 		body[row] = strings.Join(sections, separator)
-		if model.settings.colorEnabled {
-			body[row] = styles.panel.Render(body[row])
-		}
 	}
 	title := model.workspaceHeaderLine(layout, styles)
 	footer := model.statusLine(width, styles)
-	if model.settings.colorEnabled {
-		title = styles.panel.Render(title)
-		footer = styles.status.Render(footer)
-	}
 	if model.mode == ModeCommand {
 		footer = model.commandBarLine(width, styles)
 	}
@@ -312,18 +299,26 @@ func (model *Model) fileTreeLines(
 	lines := make([]string, 0, len(window))
 	rows := make([]treeNodeIdentity, 0, len(window))
 	active, activeOK := model.review.ActiveFile()
+	snapshot := model.review.Snapshot()
 	for _, node := range window {
 		label := node.label
-		if label == "" && !node.identity.directory {
-			if file, ok := model.review.Snapshot().File(node.identity.file); ok {
-				label = file.DisplayPath()
+		badge := " "
+		badgeStyle := lipgloss.NewStyle()
+		if !node.identity.directory {
+			if file, ok := snapshot.File(node.identity.file); ok {
+				if label == "" {
+					label = file.DisplayPath()
+				}
+				badge = fileChangeBadge(file.Change().Kind())
+				badgeStyle = fileChangeBadgeStyle(file.Change().Kind(), styles)
 			}
 		}
 		cursor := "  "
-		if node.identity == model.treeCursor {
+		selected := node.identity == model.treeCursor
+		if selected {
 			cursor = "› "
 			if model.focus == FocusFileTree {
-				cursor = styles.focused.Render("▸") + " "
+				cursor = "▸ "
 			}
 		}
 		activeMarker := " "
@@ -343,15 +338,56 @@ func (model *Model) fileTreeLines(
 			}
 		}
 		indent := strings.Repeat("  ", min(node.depth, max(width/2, 0)))
-		line := cursor + activeMarker + reviewed + disclosure + indent +
-			safeAndClip(label, max(width-7-len(indent), 1))
-		if node.identity == model.treeCursor {
-			line = styles.selected.Render(line)
+		prefix := cursor + activeMarker + reviewed + disclosure
+		suffix := " " + indent + safeAndClip(label, max(width-9-len(indent), 1))
+		suffix = fitCellWidth(suffix, max(width-lipgloss.Width(prefix)-1, 0))
+		base := lipgloss.NewStyle()
+		if model.settings.colorEnabled {
+			base = styles.panel
+		}
+		renderedBadge := badgeStyle.Inherit(base).Render(badge)
+		line := base.Render(prefix) + renderedBadge + base.Render(suffix)
+		if selected {
+			line = styles.selected.Render(prefix + badge + suffix)
 		}
 		lines = append(lines, line)
 		rows = append(rows, node.identity)
 	}
 	return lines, rows
+}
+
+func fileChangeBadge(kind review.ChangeKind) string {
+	switch kind {
+	case review.ChangeAdded:
+		return "A"
+	case review.ChangeDeleted:
+		return "D"
+	case review.ChangeModified:
+		return "M"
+	case review.ChangeRenamed, review.ChangeRenameOnly:
+		return "R"
+	case review.ChangeCopied:
+		return "C"
+	case review.ChangeBinary:
+		return "B"
+	case review.ChangeModeOnly, review.ChangeObjectTypeChanged:
+		return "T"
+	case review.ChangeSubmodule:
+		return "S"
+	default:
+		return "?"
+	}
+}
+
+func fileChangeBadgeStyle(kind review.ChangeKind, styles semanticStyles) lipgloss.Style {
+	switch kind {
+	case review.ChangeAdded:
+		return styles.added
+	case review.ChangeDeleted:
+		return styles.deleted
+	default:
+		return styles.heading
+	}
 }
 
 func (model *Model) wrappedLine(value string, width int) []string {
@@ -400,7 +436,7 @@ func (model *Model) commentLines(
 		if index == cursor {
 			prefix = "› "
 			if model.focus == FocusComments {
-				prefix = styles.focused.Render("▸") + " "
+				prefix = "▸ "
 			}
 		}
 		var line string
@@ -453,6 +489,7 @@ func (model *Model) commentLines(
 				}
 			}
 		}
+		line = fitCellWidth(line, width)
 		if index == cursor {
 			line = styles.selected.Render(line)
 		}
@@ -556,7 +593,6 @@ func (model *Model) workspaceHeaderLine(layout workspaceLayout, styles semanticS
 		}
 	}
 	diffTitle := "DIFF · " + activeText
-	workspaceOwnsInput := model.mode == ModeNormal || model.mode == ModeVisual
 	switch model.mode {
 	case ModeCommentEdit:
 		diffTitle += " · COMMENT"
@@ -569,39 +605,53 @@ func (model *Model) workspaceHeaderLine(layout workspaceLayout, styles semanticS
 		sections = append(sections, paneHeader(
 			fmt.Sprintf("FILES · %d", model.review.Snapshot().FileCount()),
 			layout.treeWidth,
-			workspaceOwnsInput && model.focus == FocusFileTree,
+			model.workspacePaneHeaderState(FocusFileTree),
 			styles,
 		))
 	}
 	sections = append(sections, paneHeader(
 		diffTitle,
 		layout.diffWidth,
-		workspaceOwnsInput && model.focus == FocusDiff,
+		model.workspacePaneHeaderState(FocusDiff),
 		styles,
 	))
 	if layout.commentsWidth != 0 {
 		sections = append(sections, paneHeader(
 			fmt.Sprintf("COMMENTS · %d", model.commentRowCount()),
 			layout.commentsWidth,
-			workspaceOwnsInput && model.focus == FocusComments,
+			model.workspacePaneHeaderState(FocusComments),
 			styles,
 		))
 	}
-	return strings.Join(sections, styles.muted.Render("│"))
+	return strings.Join(sections, styles.muted.Inherit(styles.panel).Render("│"))
 }
 
-func paneHeader(title string, width int, focused bool, styles semanticStyles) string {
+func (model *Model) workspacePaneHeaderState(focus FocusOwner) paneHeaderState {
+	if (model.mode == ModeNormal || model.mode == ModeVisual) && model.focus == focus {
+		return paneHeaderFocused
+	}
+	return paneHeaderQuiet
+}
+
+func paneHeader(
+	title string,
+	width int,
+	state paneHeaderState,
+	styles semanticStyles,
+) string {
 	if width <= 0 {
 		return ""
 	}
 	marker := "  "
-	style := styles.muted
-	if focused {
-		marker = styles.focused.Render("▌") + " "
-		style = styles.heading
+	style := styles.paneHeader
+	if state == paneHeaderFocused {
+		marker = "▌ "
+		style = styles.focusedPaneHeader
 	}
 	titleWidth := max(width-lipgloss.Width(marker), 0)
-	return fitCellWidth(marker+style.Render(safeAndClip(title, titleWidth)), width)
+	return style.Inherit(styles.panel).Render(
+		fitCellWidth(marker+safeAndClip(title, titleWidth), width),
+	)
 }
 
 func (model *Model) statusLine(width int, styles semanticStyles) string {
@@ -621,11 +671,15 @@ func (model *Model) statusLine(width int, styles semanticStyles) string {
 	if model.notice != nil {
 		status = string(model.notice.Text) + "  " + status
 	}
+	status = safeAndClip(status, width)
 	if model.mode == ModeCommentEdit {
 		status += "  comment editor owns input"
 	} else {
 		available := max(width-lipgloss.Width(status)-2, 0)
-		bindings := bindingBar{bindings: model.normalStatusBindings()}.Render(available, styles)
+		bindings := bindingBar{
+			bindings: model.normalStatusBindings(),
+			base:     styles.status,
+		}.Render(available, styles)
 		if bindings != "" {
 			status += "  " + bindings
 		}
@@ -634,12 +688,12 @@ func (model *Model) statusLine(width int, styles semanticStyles) string {
 		switch model.notice.Kind {
 		case NoticeInformation:
 		case NoticeWarning:
-			return fitCellWidth(styles.warning.Render(safeAndClip(status, width)), width)
+			return fitStyledCellWidth(status, width, styles.warning.Inherit(styles.status))
 		case NoticeError:
-			return fitCellWidth(styles.failure.Render(safeAndClip(status, width)), width)
+			return fitStyledCellWidth(status, width, styles.failure.Inherit(styles.status))
 		}
 	}
-	return fitCellWidth(status, width)
+	return fitStyledCellWidth(status, width, styles.status)
 }
 
 func (model *Model) renderSize() (int, int) {

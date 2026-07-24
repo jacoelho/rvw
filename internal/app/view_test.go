@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/vt"
 
 	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
@@ -44,6 +45,58 @@ func TestMinimumSizeOwnsInput(t *testing.T) {
 	}
 }
 
+func TestFileChangeBadgesCoverEveryReviewChangeKind(t *testing.T) {
+	tests := []struct {
+		kind review.ChangeKind
+		want string
+	}{
+		{kind: review.ChangeAdded, want: "A"},
+		{kind: review.ChangeDeleted, want: "D"},
+		{kind: review.ChangeModified, want: "M"},
+		{kind: review.ChangeRenamed, want: "R"},
+		{kind: review.ChangeRenameOnly, want: "R"},
+		{kind: review.ChangeCopied, want: "C"},
+		{kind: review.ChangeBinary, want: "B"},
+		{kind: review.ChangeModeOnly, want: "T"},
+		{kind: review.ChangeObjectTypeChanged, want: "T"},
+		{kind: review.ChangeSubmodule, want: "S"},
+		{kind: review.ChangeKind("future"), want: "?"},
+	}
+	for _, test := range tests {
+		if got := fileChangeBadge(test.kind); got != test.want {
+			t.Fatalf("badge for %q = %q, want %q", test.kind, got, test.want)
+		}
+	}
+}
+
+func TestSelectedFileTreeRowEmphasizesItsFullWidth(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	model.settings.colorEnabled = false
+	active, ok := model.review.ActiveFile()
+	if !ok {
+		t.Fatal("missing active file")
+	}
+	tree := model.currentFileTree()
+	model.treeCursor = tree.nodes[tree.files[active]].identity
+	const width = 30
+	lines, _ := model.fileTreeLines(width, 1, newSemanticStyles(model.settings))
+	if len(lines) != 1 || lipgloss.Width(lines[0]) != width {
+		t.Fatalf("tree selection width = %d across %d rows", lipgloss.Width(lines[0]), len(lines))
+	}
+	if plain := ansi.Strip(lines[0]); !strings.Contains(plain, "M alpha.txt") {
+		t.Fatalf("tree row omitted the modified badge: %q", plain)
+	}
+	terminal := vt.NewEmulator(width, 1)
+	t.Cleanup(func() { _ = terminal.Close() })
+	if _, err := terminal.WriteString(lines[0]); err != nil {
+		t.Fatal(err)
+	}
+	last := terminal.CellAt(width-1, 0)
+	if last == nil || last.Style.Attrs&(1<<5) == 0 {
+		t.Fatalf("last selection cell lacks reverse emphasis: cell=%#v row=%q", last, lines[0])
+	}
+}
+
 func TestStatusLineNeverClipsPartOfABindingHint(t *testing.T) {
 	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	model.notice = &Notice{Kind: NoticeInformation, Text: "reload complete"}
@@ -58,6 +111,44 @@ func TestStatusLineNeverClipsPartOfABindingHint(t *testing.T) {
 	want := prefix + "  " + firstHint
 	if got != want {
 		t.Fatalf("status line = %q, want whole binding hints %q", got, want)
+	}
+}
+
+func TestStatusLineSanitizesPlainStateBeforeStyledBindings(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		notice NoticeText
+		want   string
+	}{
+		{
+			name:   "controls",
+			notice: "clipboard failure\nfenced\x1b[31m",
+			want:   `clipboard failure\x0Afenced\x1B[31m`,
+		},
+		{
+			name:   "bounded oversized detail",
+			notice: NoticeText("\n" + strings.Repeat("x", 10_000)),
+			want:   `\x0A`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+			model.notice = &Notice{Kind: NoticeInformation, Text: test.notice}
+			const width = 200
+			status := model.statusLine(width, semanticStyles{})
+			if strings.ContainsAny(status, "\n\r\x1b") {
+				t.Fatalf("status retained terminal controls: %q", status)
+			}
+			if !strings.Contains(status, test.want) {
+				t.Fatalf("status omitted escaped notice detail: %q", status)
+			}
+			if got := lipgloss.Width(status); got != width {
+				t.Fatalf("status width = %d, want %d", got, width)
+			}
+			if test.name == "bounded oversized detail" && !strings.Contains(status, "…") {
+				t.Fatalf("oversized status omitted truncation marker: %q", status)
+			}
+		})
 	}
 }
 
@@ -187,6 +278,50 @@ func TestWorkspaceHeadersIdentifyTheFocusedPaneWithoutChangingGeometry(t *testin
 	}
 }
 
+func TestColoredWorkspaceRowsPreserveBackgroundAcrossStyledSegments(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	palette, err := NewPalette(map[PaletteRole]string{
+		PalettePanelBackground:  "#111111",
+		PaletteStatusBackground: "#222222",
+		PalettePrimary:          "#ffffff",
+		PaletteSecondary:        "#cccccc",
+		PaletteDiffContext:      "#aaaaaa",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.settings.colorEnabled = true
+	model.settings.palette = palette
+	model.treeCursor = treeNodeIdentity{path: "not-present"}
+	styles := newSemanticStyles(model.settings)
+	const width = 30
+	treeLines, _ := model.fileTreeLines(width, 1, styles)
+	if len(treeLines) != 1 {
+		t.Fatalf("tree lines = %d, want 1", len(treeLines))
+	}
+	rows := []string{
+		paneHeader("FILES", width, paneHeaderFocused, styles),
+		treeLines[0],
+		model.statusLine(width, styles),
+	}
+	terminal := vt.NewEmulator(width, len(rows))
+	t.Cleanup(func() { _ = terminal.Close() })
+	if _, err := terminal.WriteString(strings.Join(rows, "\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	for _, column := range []int{0, 7, width - 1} {
+		if got := terminalColor(terminal.CellAt(column, 0).Style.Bg); got != "#111111" {
+			t.Fatalf("header cell %d background = %q, want panel", column, got)
+		}
+		if got := terminalColor(terminal.CellAt(column, 1).Style.Bg); got != "#111111" {
+			t.Fatalf("tree cell %d background = %q, want panel", column, got)
+		}
+		if got := terminalColor(terminal.CellAt(column, 2).Style.Bg); got != "#222222" {
+			t.Fatalf("status cell %d background = %q, want status", column, got)
+		}
+	}
+}
+
 func TestCommandPromptFooterTracksSupportedTerminalHeight(t *testing.T) {
 	for _, size := range []TerminalSize{
 		{Width: minimumWidth, Height: minimumHeight, Known: true},
@@ -289,6 +424,15 @@ func TestFocusedCommentPanePreservesStyleSequences(t *testing.T) {
 			if !strings.HasPrefix(plain, test.marker) || !strings.Contains(plain, "comment body") {
 				t.Fatalf("comment row = %q", plain)
 			}
+			terminal := vt.NewEmulator(40, 1)
+			t.Cleanup(func() { _ = terminal.Close() })
+			if _, err := terminal.WriteString(lines[0]); err != nil {
+				t.Fatal(err)
+			}
+			last := terminal.CellAt(39, 0)
+			if last == nil || last.Style.Attrs&(1<<5) == 0 {
+				t.Fatalf("comment selection did not reach the final cell: %#v", last)
+			}
 		})
 	}
 }
@@ -331,7 +475,7 @@ func TestRemoteCommentRowPreservesRenderedText(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("remote comment lines = %d, want 1", len(lines))
 	}
-	if got, want := ansi.Strip(lines[0]),
+	if got, want := strings.TrimRight(ansi.Strip(lines[0]), " "),
 		"› [remote open] alpha.txt:2 — deleted user: remote body"; got != want {
 		t.Fatalf("remote comment row = %q, want %q", got, want)
 	}
@@ -598,7 +742,43 @@ func TestCommentAnchorsRemainSideSpecificStableAndVisibleWithoutColor(t *testing
 			t.Fatalf("wrapped continuation reused marker cells: %q", plain)
 		}
 	}
-	if marker := model.commentAnchorCell(active, review.LineNew, lineTwo, styles); !strings.Contains(marker, "\x1b[1m") || ansi.Strip(marker) != "●" {
+	contextIndex := -1
+	for index, row := range unified {
+		if strings.Contains(ansi.Strip(row), "original") {
+			contextIndex = index
+			break
+		}
+	}
+	if contextIndex < 0 {
+		t.Fatal("context row is absent")
+	}
+	model.diffCursor = rows[contextIndex]
+	selected, _ := model.diffLines(62, 20, styles)
+	selectedContext := ""
+	for _, row := range selected {
+		if strings.Contains(ansi.Strip(row), "original") {
+			selectedContext = row
+			break
+		}
+	}
+	if selectedContext == "" {
+		t.Fatal("selected context row is absent")
+	}
+	terminal := vt.NewEmulator(62, 1)
+	t.Cleanup(func() { _ = terminal.Close() })
+	if _, err := terminal.WriteString(selectedContext); err != nil {
+		t.Fatal(err)
+	}
+	if last := terminal.CellAt(61, 0); last == nil || last.Style.Attrs&(1<<5) == 0 {
+		t.Fatalf("selection did not continue after styled anchors: cell=%#v row=%q", last, selectedContext)
+	}
+	if marker := model.commentAnchorCell(
+		active,
+		review.LineNew,
+		lineTwo,
+		diffCellPresentation{},
+		styles,
+	); !strings.Contains(marker, "\x1b[1m") || ansi.Strip(marker) != "●" {
 		t.Fatalf("monochrome marker lacks bold non-color emphasis: %q", marker)
 	}
 
@@ -749,7 +929,7 @@ func TestRenderSyntaxSpansStopsAtViewportBoundary(t *testing.T) {
 	styles := semanticStyles{number: lipgloss.NewStyle().Bold(true)}
 	want, wantLimited := renderSyntaxSpans(raw, func(yield func(review.SyntaxSpan) bool) {
 		yield(visible)
-	}, styles)
+	}, styles, lipgloss.NewStyle())
 
 	pulls := 0
 	stopped := false
@@ -771,7 +951,7 @@ func TestRenderSyntaxSpansStopsAtViewportBoundary(t *testing.T) {
 			}
 		}
 	}
-	got, gotLimited := renderSyntaxSpans(raw, spans, styles)
+	got, gotLimited := renderSyntaxSpans(raw, spans, styles, lipgloss.NewStyle())
 	if got != want || gotLimited != wantLimited {
 		t.Fatalf(
 			"syntax render = (%q, %t), want visible-only result (%q, %t)",
@@ -836,7 +1016,7 @@ func TestRenderSyntaxSpansPreservesBoundarySemantics(t *testing.T) {
 						return
 					}
 				}
-			}, styles)
+			}, styles, lipgloss.NewStyle())
 			if got != test.want || limited != test.limited {
 				t.Fatalf(
 					"syntax render = (%q, %t), want (%q, %t)",

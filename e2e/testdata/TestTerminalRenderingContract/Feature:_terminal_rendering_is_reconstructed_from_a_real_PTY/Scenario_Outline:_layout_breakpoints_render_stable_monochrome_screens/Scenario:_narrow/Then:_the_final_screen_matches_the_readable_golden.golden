@@ -1,4 +1,4 @@
-rvw  [focus:diff]  staged.txt  [source:1 worksp…
+▌ DIFF · staged.txt
 ▸       diff --git a/staged.txt b/staged.txt
         new file mode 100644
         index 0000000..4480ae4
@@ -11,4 +11,4 @@ rvw  [focus:diff]  staged.txt  [source:1 worksp…
 
 
 
-work 0/64  Tab focus-next-pane  Enter activate …
+Ready  Down next row  c comment  Tab next pane

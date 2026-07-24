@@ -362,6 +362,37 @@ func TestCuratedThemeAliasesResolveTheirOwnPaletteAndSyntaxTheme(t *testing.T) {
 	}
 }
 
+func TestBundledTrueColorThemesAddSubtleDiffBackgrounds(t *testing.T) {
+	dark := bundledTheme(ThemeGruvboxDark, AppearanceDark)
+	if got := dark.Colors[ThemeColor("diff_add_bg")]; got != Color("#3a3a28") {
+		t.Fatalf("diff_add_bg = %q, want #3a3a28", got)
+	}
+	if got := dark.Colors[ThemeColor("diff_del_bg")]; got != Color("#422c2a") {
+		t.Fatalf("diff_del_bg = %q, want #422c2a", got)
+	}
+	light := bundledTheme(ThemeGruvboxLight, AppearanceLight)
+	if got := light.Colors[ThemeColor("diff_add_bg")]; got != Color("#ebe1b0") {
+		t.Fatalf("light diff_add_bg = %q, want #ebe1b0", got)
+	}
+	if got := light.Colors[ThemeColor("diff_del_bg")]; got != Color("#efd3af") {
+		t.Fatalf("light diff_del_bg = %q, want #efd3af", got)
+	}
+	for _, theme := range []Theme{dark, light} {
+		if theme.Colors[ThemeColor("diff_add_bg")] == theme.Colors[ThemeColor("panel_bg")] ||
+			theme.Colors[ThemeColor("diff_del_bg")] == theme.Colors[ThemeColor("panel_bg")] {
+			t.Fatalf("theme %q generated an invisible semantic background", theme.Name)
+		}
+	}
+
+	ansiTheme := bundledTheme(ThemeANSI16Dark, AppearanceDark)
+	if _, exists := ansiTheme.Colors[ThemeColor("diff_add_bg")]; exists {
+		t.Fatal("ansi16-dark unexpectedly generated an RGB addition background")
+	}
+	if _, exists := ansiTheme.Colors[ThemeColor("diff_del_bg")]; exists {
+		t.Fatal("ansi16-dark unexpectedly generated an RGB deletion background")
+	}
+}
+
 func TestEmbeddedSyntaxThemesUseLightAppearanceFallbackPalette(t *testing.T) {
 	names := []ThemeName{
 		ThemeBase16OceanDark,
