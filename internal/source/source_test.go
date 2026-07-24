@@ -923,6 +923,98 @@ func TestLoadPatchStreamsLargeContentThroughDiskDiff(t *testing.T) {
 	}
 }
 
+func TestLoadPatchPreservesCrossoverPatchSemantics(t *testing.T) {
+	oldContents, newContents := nativeDiffCrossoverFixture()
+	combinedSize := uint64(len(oldContents) + len(newContents))
+	if combinedSize <= 1<<20 || !nativeDiffFitsMemory(uint64(len(oldContents)), uint64(len(newContents))) {
+		t.Fatalf("crossover fixture size = %d, want above 1 MiB and within memory admission", combinedSize)
+	}
+	root := initializedRepository(t)
+	path := filepath.Join(root, "crossover.txt")
+	writeFile(t, path, string(oldContents))
+	runGitTest(t, root, "add", "crossover.txt")
+	runGitTest(t, root, "commit", "-m", "base")
+	writeFile(t, path, string(newContents))
+
+	service := newTestService(t, root)
+	defer closeTestService(t, service)
+	document, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer document.Close()
+	file, ok := document.Snapshot().File(0)
+	if !ok || file.Change().Additions() != 2 || file.Change().Deletions() != 2 {
+		t.Fatalf("crossover diff file = %+v, present %v", file, ok)
+	}
+	current, err := review.NewReview(testReviewRequest(document.Snapshot()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contextLines, _ := review.NewContextLines(2)
+	patchContext, _ := review.ContextAround(contextLines)
+	current, request, err := current.RequestPatch(file.ID(), patchContext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.LoadPatch(t.Context(), document, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != review.PatchReady || result.Prepared.Hunks() != 2 {
+		t.Fatalf("crossover patch result = %+v", result)
+	}
+	current, err = current.ApplyPatch(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := patchLinesText(current.PatchLines(file.ID(), 0, 64, 32<<10))
+	for _, expected := range []string{
+		"@@ -249,5 +249,5 @@",
+		" repeated-middle-line",
+		"-old-middle-line",
+		"+new-middle-line",
+		"@@ -498,3 +498,3 @@",
+		"-old-unterminated-tail",
+		"+new-unterminated-tail",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("crossover patch omitted %q:\n%s", expected, text)
+		}
+	}
+	if markers := strings.Count(text, "\\ No newline at end of file"); markers != 2 {
+		t.Fatalf("crossover patch newline markers = %d, want 2:\n%s", markers, text)
+	}
+}
+
+func BenchmarkOpenWorktreeCrossoverDiff(b *testing.B) {
+	oldContents, newContents := nativeDiffCrossoverFixture()
+	root := initializedRepository(b)
+	path := filepath.Join(root, "crossover.txt")
+	writeFile(b, path, string(oldContents))
+	runGitTest(b, root, "add", "crossover.txt")
+	runGitTest(b, root, "commit", "-m", "base")
+	writeFile(b, path, string(newContents))
+	service := newTestService(b, root)
+	b.Cleanup(func() { closeTestService(b, service) })
+	b.ReportAllocs()
+	b.SetBytes(int64(len(oldContents) + len(newContents)))
+	for b.Loop() {
+		document, err := service.Open(b.Context(), WorktreeTarget(), OpenOptions{})
+		if err != nil {
+			b.Fatal(err)
+		}
+		file, ok := document.Snapshot().File(0)
+		if !ok || file.Change().Additions() != 2 || file.Change().Deletions() != 2 {
+			_ = document.Close()
+			b.Fatalf("crossover diff file = %+v, present %v", file, ok)
+		}
+		if err := document.Close(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func TestLoadPatchTreatsRawPathAsLiteral(t *testing.T) {
 	root := initializedRepository(t)
 	hostileName := ":(glob)**"
@@ -1154,7 +1246,7 @@ func TestValidatePullRequestPayload(t *testing.T) {
 	}
 }
 
-func initializedRepository(t *testing.T) string {
+func initializedRepository(t testing.TB) string {
 	t.Helper()
 	root := t.TempDir()
 	runGitTest(t, root, "init")
@@ -1163,7 +1255,7 @@ func initializedRepository(t *testing.T) string {
 	return root
 }
 
-func newTestService(t *testing.T, root string) *Service {
+func newTestService(t testing.TB, root string) *Service {
 	t.Helper()
 	workingDirectory, err := NewWorkingDirectory(root)
 	if err != nil {
@@ -1176,14 +1268,14 @@ func newTestService(t *testing.T, root string) *Service {
 	return service
 }
 
-func closeTestService(t *testing.T, service *Service) {
+func closeTestService(t testing.TB, service *Service) {
 	t.Helper()
 	if err := service.Close(context.Background()); err != nil {
 		t.Error(err)
 	}
 }
 
-func runGitTest(t *testing.T, directory string, arguments ...string) string {
+func runGitTest(t testing.TB, directory string, arguments ...string) string {
 	t.Helper()
 	command := exec.CommandContext(t.Context(), "git", arguments...)
 	command.Dir = directory
@@ -1195,7 +1287,7 @@ func runGitTest(t *testing.T, directory string, arguments ...string) string {
 	return string(output)
 }
 
-func writeFile(t *testing.T, path, contents string) {
+func writeFile(t testing.TB, path, contents string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)

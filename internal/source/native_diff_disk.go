@@ -25,7 +25,6 @@ const (
 	diskSortMergeFanIn       = 32
 	diskSortMergeBufferBytes = 4 << 10
 	maxDiskDiffLineTokens    = 64_000_000
-	maxDiskHistogramProbes   = 512_000_000
 )
 
 type diskLineRecord struct {
@@ -129,14 +128,13 @@ func newDiskDiffKernel(
 		ctx: ctx, workspace: workspace,
 		oldBuffer: make([]byte, 16<<10),
 		newBuffer: make([]byte, 16<<10),
+		old:       &diskDiffSide{content: oldContent, size: oldSize},
+		new:       &diskDiffSide{content: newContent, size: newSize},
 	}
-	var err error
-	kernel.old, err = kernel.indexSide(oldContent, oldSize, "old-lines-")
-	if err != nil {
+	if err := kernel.indexSide(kernel.old, "old-lines-"); err != nil {
 		return nil, errors.Join(err, kernel.Close())
 	}
-	kernel.new, err = kernel.indexSide(newContent, newSize, "new-lines-")
-	if err != nil {
+	if err := kernel.indexSide(kernel.new, "new-lines-"); err != nil {
 		return nil, errors.Join(err, kernel.Close())
 	}
 	return kernel, nil
@@ -153,27 +151,26 @@ func (kernel *diskDiffKernel) newTemp(pattern string) (*os.File, string, error) 
 }
 
 func (kernel *diskDiffKernel) indexSide(
-	content *os.File,
-	size uint64,
+	side *diskDiffSide,
 	pattern string,
-) (*diskDiffSide, error) {
+) error {
 	lines, path, err := kernel.newTemp(pattern)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	side := &diskDiffSide{content: content, lines: lines, path: path, size: size}
-	if content == nil || size == 0 {
-		return side, nil
+	side.lines, side.path = lines, path
+	if side.content == nil || side.size == 0 {
+		return nil
 	}
-	if _, err := content.Seek(0, io.SeekStart); err != nil {
-		return nil, err
+	if _, err := side.content.Seek(0, io.SeekStart); err != nil {
+		return err
 	}
 	writer := bufio.NewWriterSize(lines, 64<<10)
 	buffer := make([]byte, 64<<10)
 	hasher := sha256.New()
 	var lineOffset, position uint64
 	for {
-		count, readErr := content.Read(buffer)
+		count, readErr := side.content.Read(buffer)
 		chunk := buffer[:count]
 		for len(chunk) != 0 {
 			newline := bytes.IndexByte(chunk, '\n')
@@ -193,16 +190,16 @@ func (kernel *diskDiffKernel) indexSide(
 				length: position - lineOffset - 1, terminated: true,
 			}
 			if err := writeDiskLineRecord(writer, record); err != nil {
-				return nil, err
+				return err
 			}
 			side.count++
 			kernel.tokens++
 			if kernel.tokens > maxDiskDiffLineTokens {
-				return nil, &LimitError{Resource: LimitDiffLineTokens, Limit: maxDiskDiffLineTokens}
+				return &LimitError{Resource: LimitDiffLineTokens, Limit: maxDiskDiffLineTokens}
 			}
-			if side.count%4_096 == 0 {
+			if side.count%diffCancellationStride == 0 {
 				if err := context.Cause(kernel.ctx); err != nil {
-					return nil, err
+					return err
 				}
 			}
 			hasher.Reset()
@@ -211,12 +208,12 @@ func (kernel *diskDiffKernel) indexSide(
 		}
 		if readErr != nil {
 			if !errors.Is(readErr, io.EOF) {
-				return nil, readErr
+				return readErr
 			}
 			break
 		}
 		if count == 0 {
-			return nil, io.ErrNoProgress
+			return io.ErrNoProgress
 		}
 	}
 	if position != lineOffset {
@@ -225,21 +222,21 @@ func (kernel *diskDiffKernel) indexSide(
 		if err := writeDiskLineRecord(writer, diskLineRecord{
 			hash: digest, offset: lineOffset, length: position - lineOffset,
 		}); err != nil {
-			return nil, err
+			return err
 		}
 		side.count++
 		kernel.tokens++
 		if kernel.tokens > maxDiskDiffLineTokens {
-			return nil, &LimitError{Resource: LimitDiffLineTokens, Limit: maxDiskDiffLineTokens}
+			return &LimitError{Resource: LimitDiffLineTokens, Limit: maxDiskDiffLineTokens}
 		}
 	}
-	if position != size {
-		return nil, fmt.Errorf("content size changed while indexing lines: read %d, want %d", position, size)
+	if position != side.size {
+		return fmt.Errorf("content size changed while indexing lines: read %d, want %d", position, side.size)
 	}
 	if err := writer.Flush(); err != nil {
-		return nil, err
+		return err
 	}
-	return side, nil
+	return nil
 }
 
 func writeDiskLineRecord(writer io.Writer, record diskLineRecord) error {
@@ -310,10 +307,10 @@ func (kernel *diskDiffKernel) linesEqual(
 
 func (kernel *diskDiffKernel) chargeProbe() error {
 	kernel.probes++
-	if kernel.probes > maxDiskHistogramProbes {
-		return &LimitError{Resource: LimitDiffHistogramProbes, Limit: maxDiskHistogramProbes}
+	if kernel.probes > maxDiffHistogramProbes {
+		return &LimitError{Resource: LimitDiffHistogramProbes, Limit: maxDiffHistogramProbes}
 	}
-	if kernel.probes%4_096 == 0 {
+	if kernel.probes%diffCancellationStride == 0 {
 		return context.Cause(kernel.ctx)
 	}
 	return nil
@@ -471,7 +468,7 @@ func (kernel *diskDiffKernel) occurrenceRuns(
 		return nil
 	}
 	for index := oldStart; index < oldEnd; index++ {
-		if index%4_096 == 0 {
+		if index%diffCancellationStride == 0 {
 			if err := context.Cause(kernel.ctx); err != nil {
 				return nil, err
 			}
@@ -559,7 +556,7 @@ func (kernel *diskDiffKernel) mergeOccurrenceRunGroup(paths []string) (_ string,
 			return "", errors.Join(writeErr, output.Close())
 		}
 		merged++
-		if merged%4_096 == 0 {
+		if merged%diffCancellationStride == 0 {
 			if cancelErr := context.Cause(kernel.ctx); cancelErr != nil {
 				return "", errors.Join(cancelErr, output.Close())
 			}
@@ -624,7 +621,7 @@ func (kernel *diskDiffKernel) histogramAnchor(
 	}()
 	count := oldEnd - oldStart
 	for newIndex := newStart; newIndex < newEnd; newIndex++ {
-		if newIndex%4_096 == 0 {
+		if newIndex%diffCancellationStride == 0 {
 			if err := context.Cause(kernel.ctx); err != nil {
 				return 0, 0, 0, 0, err
 			}
