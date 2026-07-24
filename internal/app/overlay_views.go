@@ -10,6 +10,11 @@ import (
 	"github.com/jacoelho/rvw/internal/review"
 )
 
+const (
+	helpDialogWidth  = 72
+	helpDialogHeight = 22
+)
+
 func (model *Model) minimumView(width, height int) string {
 	styles := newSemanticStyles(model.settings)
 	lines := make([]string, 0, 4)
@@ -41,13 +46,10 @@ func (model *Model) minimumView(width, height int) string {
 
 func (model *Model) helpView(width, height int) string {
 	styles := newSemanticStyles(model.settings)
-	controls := model.modalBindingRows(
-		keymap.ContextHelp,
-		[]keymap.Action{keymap.ActionCancel, keymap.ActionNextHelpPage, keymap.ActionPreviousHelpPage},
-		width,
-		styles,
-	)
+	layout := newHelpDialogLayout(width, height)
+	controls := model.helpControlRows(layout.width, styles)
 	helpModel := model.help
+	helpModel.SetWidth(layout.width)
 	helpModel.Styles = help.Styles{
 		Ellipsis:       styles.muted,
 		ShortKey:       styles.heading,
@@ -57,16 +59,53 @@ func (model *Model) helpView(width, height int) string {
 		FullDesc:       styles.muted,
 		FullSeparator:  styles.muted,
 	}
+	bindings := model.effectiveBindings(keymap.ContextNormal)
+	pageSize := helpPageCapacity(layout, len(controls))
+	offset := min(max(model.helpTop, 0), max(len(bindings)-pageSize, 0))
 	rendered := helpModel.View(effectiveHelpKeyMap{
-		bindings: model.effectiveBindings(keymap.ContextNormal),
-		maxItems: max(height-len(controls)-2, 1),
-		offset:   model.helpTop,
+		bindings: bindings,
+		maxItems: pageSize,
+		offset:   offset,
 	})
 	lines := append(
 		[]string{modalTitle(styles, "Keybindings · "+model.configFocus().String()), ""},
 		strings.Split(rendered, "\n")...,
 	)
-	return blockingSurface(lines, controls, width, height, styles)
+	workspace, _ := model.workspaceView(width, height, model.workspaceLayout(width, height))
+	return boundedBlockingOverlay(
+		workspace,
+		lines,
+		controls,
+		width,
+		height,
+		blockingDialogSize{width: helpDialogWidth, height: helpDialogHeight},
+		styles,
+	)
+}
+
+func (model *Model) helpPageSize(width, height int) int {
+	styles := newSemanticStyles(model.settings)
+	layout := newHelpDialogLayout(width, height)
+	return helpPageCapacity(layout, len(model.helpControlRows(layout.width, styles)))
+}
+
+func newHelpDialogLayout(width, height int) blockingDialogLayout {
+	return newBlockingDialogLayout(width, height, blockingDialogSize{
+		width: helpDialogWidth, height: helpDialogHeight,
+	})
+}
+
+func (model *Model) helpControlRows(width int, styles semanticStyles) []string {
+	return model.modalBindingRows(
+		keymap.ContextHelp,
+		[]keymap.Action{keymap.ActionCancel, keymap.ActionNextHelpPage, keymap.ActionPreviousHelpPage},
+		width,
+		styles,
+	)
+}
+
+func helpPageCapacity(layout blockingDialogLayout, controlRows int) int {
+	return max(layout.height-controlRows-2, 1)
 }
 
 func (model *Model) statusView(width, height int) string {

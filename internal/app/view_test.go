@@ -422,6 +422,59 @@ func TestHelpViewPreservesWidgetStyles(t *testing.T) {
 	}
 }
 
+func TestHelpViewPreservesWorkspaceContextOutsideBoundedDialog(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	const width, height = 120, 40
+	_, _ = model.Update(tea.WindowSizeMsg{Width: width, Height: height})
+	model.overlay = OverlayHelp
+
+	workspace, _ := model.workspaceView(width, height, model.workspaceLayout(width, height))
+	workspaceRows := strings.Split(ansi.Strip(workspace), "\n")
+	helpRows := strings.Split(ansi.Strip(model.helpView(width, height)), "\n")
+	layout := newHelpDialogLayout(width, height)
+	if layout.width == width || layout.height == height {
+		t.Fatalf("help dialog unexpectedly occupies the %dx%d viewport: %+v", width, height, layout)
+	}
+	if len(helpRows) != height {
+		t.Fatalf("help rows = %d, want %d", len(helpRows), height)
+	}
+	for row := range height {
+		if row < layout.y || row >= layout.y+layout.height {
+			if helpRows[row] != workspaceRows[row] {
+				t.Fatalf("workspace row %d changed outside help dialog:\n%s\n%s", row, workspaceRows[row], helpRows[row])
+			}
+			continue
+		}
+		if got, want := ansi.Cut(helpRows[row], 0, layout.x), ansi.Cut(workspaceRows[row], 0, layout.x); got != want {
+			t.Fatalf("workspace prefix changed on help row %d: %q != %q", row, got, want)
+		}
+		right := layout.x + layout.width
+		if got, want := ansi.Cut(helpRows[row], right, width), ansi.Cut(workspaceRows[row], right, width); got != want {
+			t.Fatalf("workspace suffix changed on help row %d: %q != %q", row, got, want)
+		}
+	}
+	prefix, _, found := strings.Cut(helpRows[layout.y], "▌ Keybindings")
+	if !found || lipgloss.Width(prefix) != layout.x {
+		t.Fatalf("help title is not at dialog origin (%d,%d): %q", layout.x, layout.y, helpRows[layout.y])
+	}
+}
+
+func TestHelpPagingUsesBoundedDialogHeight(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	_, _ = model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	model.overlay = OverlayHelp
+
+	page := model.helpPageSize(120, 40)
+	if page >= model.diffHeight()-4 {
+		t.Fatalf("help page = %d, want less than full-workspace page %d", page, model.diffHeight()-4)
+	}
+	limit := len(model.effectiveBindings(keymap.ContextNormal))
+	model.applyHelpAction(keymap.ActionNextHelpPage, 1)
+	if want := min(page, max(limit-page, 0)); model.helpTop != want {
+		t.Fatalf("help offset = %d, want %d", model.helpTop, want)
+	}
+}
+
 func TestFindPalettePreservesWidgetStyles(t *testing.T) {
 	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	_, _ = model.Update(tea.WindowSizeMsg{Width: normalWidth, Height: 24})

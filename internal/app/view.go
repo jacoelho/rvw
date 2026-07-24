@@ -1064,6 +1064,41 @@ func boundedBlockingSurface(
 	return strings.Join(canvasRows, "\n")
 }
 
+func boundedBlockingOverlay(
+	background string,
+	body, controls []string,
+	width, height int,
+	preferred blockingDialogSize,
+	styles semanticStyles,
+) string {
+	layout := newBlockingDialogLayout(width, height, preferred)
+	if layout.width == 0 || layout.height == 0 {
+		return ""
+	}
+	modalRows := strings.Split(
+		blockingSurface(body, controls, layout.width, layout.height, styles),
+		"\n",
+	)
+	backgroundRows := strings.Split(background, "\n")
+	rows := make([]string, height)
+	for row := range height {
+		backgroundRow := ""
+		if row < len(backgroundRows) {
+			backgroundRow = backgroundRows[row]
+		}
+		backgroundRow = fitStyledCellWidth(backgroundRow, width, styles.panel)
+		if row < layout.y || row >= layout.y+len(modalRows) {
+			rows[row] = backgroundRow
+			continue
+		}
+		rightStart := layout.x + layout.width
+		rows[row] = clipStyled(backgroundRow, 0, layout.x) +
+			modalRows[row-layout.y] +
+			clipStyled(backgroundRow, rightStart, width-rightStart)
+	}
+	return strings.Join(rows, "\n")
+}
+
 func blockingSurface(
 	body, controls []string,
 	width, height int,

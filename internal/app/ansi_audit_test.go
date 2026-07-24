@@ -44,6 +44,7 @@ const (
 	ansiAuditOccupancyNone ansiAuditOccupancyClass = iota
 	ansiAuditOccupancyGeneral
 	ansiAuditOccupancyDialog
+	ansiAuditOccupancyReferenceDialog
 	ansiAuditOccupancyBlockingSurface
 )
 
@@ -507,7 +508,7 @@ func ansiAuditScenarios(t *testing.T) []ansiAuditScenario {
 			name: "help-modal", overlay: true, visibleCue: "Keybindings",
 			controlContext: keymap.ContextHelp,
 			primaryAction:  keymap.ActionNextHelpPage, requiresCancel: true,
-			occupancyClass: ansiAuditOccupancyBlockingSurface,
+			occupancyClass: ansiAuditOccupancyReferenceDialog,
 			setup:          func(model *Model) { model.overlay = OverlayHelp },
 		},
 		{
@@ -1180,6 +1181,8 @@ func ansiAuditBoundedDialogMaximum(scenario string) (blockingDialogSize, bool) {
 		return blockingDialogSize{width: 40, height: 7}, true
 	case scenario == "export-modal":
 		return blockingDialogSize{width: 52, height: 9}, true
+	case scenario == "help-modal":
+		return blockingDialogSize{width: helpDialogWidth, height: helpDialogHeight}, true
 	default:
 		return blockingDialogSize{}, false
 	}
@@ -1195,6 +1198,16 @@ func ansiAuditObservedBoundedDialogLayout(
 		return blockingDialogLayout{}, false
 	}
 	lines := strings.Split(plain, "\n")
+	if scenario == "help-modal" {
+		layout := newHelpDialogLayout(size.width, size.height)
+		line := ansiAuditLine(lines, layout.y)
+		prefix, _, found := strings.Cut(line, "▌ Keybindings")
+		if !found {
+			return blockingDialogLayout{}, false
+		}
+		layout.x = lipgloss.Width(prefix)
+		return layout, true
+	}
 	for row, line := range lines {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -1281,6 +1294,8 @@ func ansiAuditOccupancyRange(class ansiAuditOccupancyClass) (float64, float64, s
 		return 0.35, 0.65, "general application"
 	case ansiAuditOccupancyDialog:
 		return 0.25, 0.60, "modal dialog"
+	case ansiAuditOccupancyReferenceDialog:
+		return 0.15, 0.60, "reference dialog"
 	case ansiAuditOccupancyBlockingSurface:
 		return 0.02, 0.65, "full-screen operational surface"
 	default:

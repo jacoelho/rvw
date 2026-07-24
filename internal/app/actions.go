@@ -496,7 +496,8 @@ func (model *Model) expandPatchContext() {
 }
 
 func (model *Model) applyHelpAction(action keymap.Action, repeat int) {
-	page := max(model.diffHeight()-4, 1)
+	width, height := model.renderSize()
+	page := model.helpPageSize(width, height)
 	limit := len(model.effectiveBindings(keymap.ContextNormal))
 	switch action {
 	case keymap.ActionCancel, keymap.ActionInterrupt, keymap.ActionQuit:
