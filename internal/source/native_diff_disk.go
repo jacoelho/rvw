@@ -233,10 +233,7 @@ func (kernel *diskDiffKernel) indexSide(
 	if position != side.size {
 		return fmt.Errorf("content size changed while indexing lines: read %d, want %d", position, side.size)
 	}
-	if err := writer.Flush(); err != nil {
-		return err
-	}
-	return nil
+	return writer.Flush()
 }
 
 func writeDiskLineRecord(writer io.Writer, record diskLineRecord) error {

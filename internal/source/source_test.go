@@ -1246,51 +1246,51 @@ func TestValidatePullRequestPayload(t *testing.T) {
 	}
 }
 
-func initializedRepository(t testing.TB) string {
-	t.Helper()
-	root := t.TempDir()
-	runGitTest(t, root, "init")
-	runGitTest(t, root, "config", "user.email", "rvw@example.test")
-	runGitTest(t, root, "config", "user.name", "rvw test")
+func initializedRepository(tb testing.TB) string {
+	tb.Helper()
+	root := tb.TempDir()
+	runGitTest(tb, root, "init")
+	runGitTest(tb, root, "config", "user.email", "rvw@example.test")
+	runGitTest(tb, root, "config", "user.name", "rvw test")
 	return root
 }
 
-func newTestService(t testing.TB, root string) *Service {
-	t.Helper()
+func newTestService(tb testing.TB, root string) *Service {
+	tb.Helper()
 	workingDirectory, err := NewWorkingDirectory(root)
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 	service, err := NewService(workingDirectory, ServiceOptions{})
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 	return service
 }
 
-func closeTestService(t testing.TB, service *Service) {
-	t.Helper()
+func closeTestService(tb testing.TB, service *Service) {
+	tb.Helper()
 	if err := service.Close(context.Background()); err != nil {
-		t.Error(err)
+		tb.Error(err)
 	}
 }
 
-func runGitTest(t testing.TB, directory string, arguments ...string) string {
-	t.Helper()
-	command := exec.CommandContext(t.Context(), "git", arguments...)
+func runGitTest(tb testing.TB, directory string, arguments ...string) string {
+	tb.Helper()
+	command := exec.CommandContext(tb.Context(), "git", arguments...)
 	command.Dir = directory
 	command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "LC_ALL=C")
 	output, err := command.CombinedOutput()
 	if err != nil {
-		t.Fatalf("git %s: %v\n%s", strings.Join(arguments, " "), err, output)
+		tb.Fatalf("git %s: %v\n%s", strings.Join(arguments, " "), err, output)
 	}
 	return string(output)
 }
 
-func writeFile(t testing.TB, path, contents string) {
-	t.Helper()
+func writeFile(tb testing.TB, path, contents string) {
+	tb.Helper()
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 }
 

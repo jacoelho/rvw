@@ -91,8 +91,8 @@ func TestNativeMemoryAndDiskEditsAgree(t *testing.T) {
 		{name: "middle", old: []byte("one\ntwo\nthree\n"), new: []byte("one\nchanged\nthree\n")},
 		{
 			name: "ambiguous repeated lines",
-			old:  []byte("same\nsame\nold\nsame\nold\nsame\n"),
-			new:  []byte("same\nnew\nsame\nsame\nnew\nsame\n"),
+			old:  []byte(strings.Repeat("same\n", 2) + "old\nsame\nold\nsame\n"),
+			new:  []byte("same\nnew\n" + strings.Repeat("same\n", 2) + "new\nsame\n"),
 		},
 		{name: "unterminated", old: []byte("one\ntwo"), new: []byte("one\nchanged")},
 		{name: "crossover range", old: crossoverOld, new: crossoverNew},

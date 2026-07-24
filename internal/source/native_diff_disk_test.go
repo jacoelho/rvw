@@ -32,8 +32,8 @@ func TestAnalyzeDiskDiffHonorsCancellationDuringIndexing(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	contents := diskDiffAppendFixture(4_097)
-	oldContent, _ := openDiskDiffFixture(t, contents)
-	newContent, _ := openDiskDiffFixture(t, contents)
+	oldContent := openDiskDiffFixture(t, contents)
+	newContent := openDiskDiffFixture(t, contents)
 	workspace := t.TempDir()
 	analysis, err := analyzeDiskDiff(
 		ctx,
@@ -175,8 +175,8 @@ func analyzeDiskDiffFixture(
 	oldContents, newContents []byte,
 ) *diskDiffAnalysis {
 	t.Helper()
-	oldContent, _ := openDiskDiffFixture(t, oldContents)
-	newContent, _ := openDiskDiffFixture(t, newContents)
+	oldContent := openDiskDiffFixture(t, oldContents)
+	newContent := openDiskDiffFixture(t, newContents)
 	analysis, err := analyzeDiskDiff(
 		ctx,
 		t.TempDir(),
@@ -191,21 +191,21 @@ func analyzeDiskDiffFixture(
 	return analysis
 }
 
-func openDiskDiffFixture(t *testing.T, contents []byte) (*os.File, string) {
+func openDiskDiffFixture(t *testing.T, contents []byte) *os.File {
 	t.Helper()
 	path := writeDiskDiffFixture(t, contents)
 	file, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return file, path
+	return file
 }
 
-func writeDiskDiffFixture(t testing.TB, contents []byte) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "content")
+func writeDiskDiffFixture(tb testing.TB, contents []byte) string {
+	tb.Helper()
+	path := filepath.Join(tb.TempDir(), "content")
 	if err := os.WriteFile(path, contents, 0o600); err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 	return path
 }

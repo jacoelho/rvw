@@ -445,6 +445,7 @@ func histogramEdits(
 	return edits, nil
 }
 
+//nolint:gocognit // Anchor selection and bounded cancellation form one kernel.
 func nativeHistogramAnchor(
 	ctx context.Context,
 	probes *uint64,
