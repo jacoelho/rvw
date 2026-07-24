@@ -130,6 +130,7 @@ linters:
             - github.com/jacoelho/rvw/internal/app$
             - github.com/jacoelho/rvw/internal/config$
             - github.com/jacoelho/rvw/internal/delivery$
+            - github.com/jacoelho/rvw/internal/keymap$
             - github.com/jacoelho/rvw/internal/output$
             - github.com/jacoelho/rvw/internal/review$
             - github.com/jacoelho/rvw/internal/source$
@@ -147,6 +148,7 @@ linters:
             - charm.land/lipgloss/v2
             - github.com/charmbracelet/x/ansi$
             - github.com/jacoelho/rvw/internal/delivery$
+            - github.com/jacoelho/rvw/internal/keymap$
             - github.com/jacoelho/rvw/internal/review$
             - github.com/jacoelho/rvw/internal/source$
             - github.com/rivo/uniseg$
@@ -159,6 +161,7 @@ linters:
           allow:
             - $gostd
             - github.com/BurntSushi/toml$
+            - github.com/jacoelho/rvw/internal/keymap$
 
         delivery-production:
           list-mode: strict
