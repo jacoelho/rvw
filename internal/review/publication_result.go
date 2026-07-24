@@ -829,7 +829,7 @@ func pendingRebaseSourceMatchesResult(
 	if !pendingRebaseSourceMatchesRequest(source, workspace, sourceID) {
 		return false
 	}
-	if source.createdDraft {
+	if source.installDraft {
 		return source.state.pending == nil
 	}
 	return source.state.pending != nil && pending.nodeID == source.state.pending.nodeID &&

@@ -563,6 +563,68 @@ func TestCreatedDraftRefreshReplacesPublishedLocalComments(t *testing.T) {
 	}
 }
 
+func TestReusedDraftRefreshInstallsExistingPendingReview(t *testing.T) {
+	publishing, direct, request := genericPublicationAtPublishing(t, PublicationEventDraft)
+	nodeID, _ := NewReviewNodeID("existing-review")
+	databaseID, _ := NewReviewDatabaseID(42)
+	remote, err := NewPendingReview(PendingReviewDescriptor{
+		NodeID: nodeID, DatabaseID: databaseID, Commit: direct.Target().Head(),
+		Body: "existing summary", ViewerUpdate: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	converted, err := direct.Prepared().ReusePendingPublication(remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked, err := TakeCheckedPublication(CheckedPublicationDescriptor{
+		Target: direct.Target(), Marker: direct.Marker(),
+	}, converted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishing.publication.checked = checked
+	request.Checked = checked
+	plan, _ := converted.PendingPublication()
+	mutations := plan.Mutations(0, plan.MutationCount())
+	if len(mutations) != 1 || mutations[0].Kind() != PendingMutationReviewBody {
+		t.Fatalf("reused mutations = %+v", mutations)
+	}
+	fresh, err := NewPendingReview(PendingReviewDescriptor{
+		NodeID: nodeID, DatabaseID: databaseID, Commit: direct.Target().Head(),
+		Body: mutations[0].RemoteBody(nodeID, direct.Marker()), ViewerUpdate: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := publishing.PublicationRebaseSource()
+	if !source.Ready() {
+		t.Fatal("reused pending review has no installable refresh source")
+	}
+	prepared, err := PreparePublicationResult(request, source, PublicationResult{
+		Pending: new(fresh), Operation: request.Operation,
+		Workspace: request.Workspace, Source: request.Source,
+		RemoteReview: databaseID.Uint64(), Disposition: PublicationDispositionCommitted,
+		PendingRefresh: PendingRefreshAcquired,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := publishing.ApplyPreparedPublication(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.CommentCount() != 1 {
+		t.Fatalf("comments = %d, want one imported review body", next.CommentCount())
+	}
+	comment, ok := next.CommentAt(0)
+	if !ok || comment.Body().String() != remote.Body()+"\n\n"+summaryValue ||
+		next.PendingBindingState(comment.ID()) != PendingBindingClean {
+		t.Fatalf("installed comment = (%+v, %t)", comment, ok)
+	}
+}
+
 func TestPreparedReconciliationPreservesNotCommittedWhenLocalRefreshFails(t *testing.T) {
 	publishing, checked, publicationRequest := pendingPublicationAtPublishing(
 		t,

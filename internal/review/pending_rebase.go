@@ -25,7 +25,7 @@ type PendingRebaseSource struct {
 	commentRevision      uint64
 	remoteThreadStatus   RemoteThreadStatus
 	pendingReviewStatus  PendingReviewStatus
-	createdDraft         bool
+	installDraft         bool
 }
 
 // PendingRebaseSource captures an O(1), revision-fenced pending-rebase input.
@@ -54,15 +54,15 @@ func (review Review) PendingRebaseSource() PendingRebaseSource {
 }
 
 // PublicationRebaseSource captures the pending projection required by the
-// currently checked publication. A first draft publication has no prior
-// pending state, so its included local comments are removed before the fresh
-// GitHub draft is imported.
+// currently checked publication. A draft publication with no locally captured
+// pending state either created or reused one remotely, so its included local
+// comments are removed before the fresh GitHub draft is imported.
 func (review Review) PublicationRebaseSource() PendingRebaseSource {
 	source := review.PendingRebaseSource()
 	checked := review.publication.checked
-	if checked != nil && !checked.Pending() &&
+	if checked != nil && source.state.pending == nil &&
 		checked.prepared.options.event == PublicationEventDraft {
-		source.createdDraft = true
+		source.installDraft = true
 		source.publicationDecisions = checked.prepared.decisions
 	}
 	return source
@@ -71,8 +71,8 @@ func (review Review) PublicationRebaseSource() PendingRebaseSource {
 // Ready reports whether the source can prepare a pending rebase.
 func (source PendingRebaseSource) Ready() bool {
 	return source.workspace != 0 && source.source != 0 && source.commentRevision != 0 &&
-		(source.state.pending != nil || source.createdDraft) &&
-		(source.state.pending == nil || !source.createdDraft) &&
+		(source.state.pending != nil || source.installDraft) &&
+		(source.state.pending == nil || !source.installDraft) &&
 		source.state.activeMutation == 0 &&
 		source.state.mutationKind == 0 &&
 		source.retainedBytes >= pendingRebaseSourceMetadataBytes &&
@@ -233,8 +233,8 @@ func PreparePendingRebaseCancellable(
 		return PreparedPendingRebase{}, err
 	}
 	var state commentState
-	if source.createdDraft {
-		state, err = prepareCreatedDraftCommentStateCancellable(
+	if source.installDraft {
+		state, err = prepareInstalledDraftCommentStateCancellable(
 			cancelled,
 			source.state,
 			source.publicationDecisions,
@@ -275,7 +275,7 @@ func PreparePendingRebaseCancellable(
 	return prepared, nil
 }
 
-func prepareCreatedDraftCommentStateCancellable(
+func prepareInstalledDraftCommentStateCancellable(
 	cancelled func() error,
 	state commentState,
 	decisions []PublicationCommentDecision,

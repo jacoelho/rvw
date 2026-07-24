@@ -84,6 +84,95 @@ func TestPreparePendingPublicationPlansUpdatesAndAddsWithoutRetargeting(t *testi
 	}
 }
 
+func TestReusePendingPublicationConvertsNewDraftToExistingReviewMutations(t *testing.T) {
+	current := testReview(t, testSnapshot(t, 1, "one.go"))
+	current = saveTestComment(t, current, ReviewCommentTarget(), "local summary")
+	line, err := NewLineNumber(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineTarget, err := LineCommentTarget(0, LineNew, line, line)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current = saveTestComment(t, current, lineTarget, "local inline")
+	policies, _ := NewPublicationPolicies()
+	options, _ := NewPublicationOptions(PublicationEventDraft, policies)
+	prepared, err := current.PreparePublication(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	nodeID, _ := NewReviewNodeID("existing-review")
+	databaseID, _ := NewReviewDatabaseID(42)
+	commit, _ := NewObjectID(strings.Repeat("2", 40))
+	remote, err := NewPendingReview(PendingReviewDescriptor{
+		NodeID: nodeID, DatabaseID: databaseID, Commit: commit,
+		Body: "existing summary", ViewerUpdate: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	construction := prepared.PendingReuseConstructionBytes(remote)
+	reused, err := prepared.ReusePendingPublication(remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if construction == 0 || reused.RetainedBytes() > construction {
+		t.Fatalf("reuse bytes = %d, construction = %d", reused.RetainedBytes(), construction)
+	}
+	plan, ok := reused.PendingPublication()
+	if !ok || plan.Submit() || plan.Baseline().NodeID() != nodeID ||
+		plan.Baseline().DatabaseID() != databaseID {
+		t.Fatalf("reused plan = (%t, %+v)", ok, plan)
+	}
+	if plan.DesiredBody() != "existing summary\n\nlocal summary" {
+		t.Fatalf("desired body = %q", plan.DesiredBody())
+	}
+	mutations := plan.Mutations(0, plan.MutationCount())
+	if len(mutations) != 2 || mutations[0].Kind() != PendingMutationReviewBody ||
+		mutations[1].Kind() != PendingMutationAddComment ||
+		mutations[1].Target().Subject() != PendingSubjectLine ||
+		string(mutations[1].Target().Path().Raw()) != "one.go" {
+		t.Fatalf("reused mutations = %+v", mutations)
+	}
+	if reused.SummaryBody() != "" || reused.CommentCount() != 0 {
+		t.Fatal("reused draft retained the direct-review payload")
+	}
+}
+
+func TestReusePendingPublicationAddsInlineWithoutUpdatingReadOnlyBody(t *testing.T) {
+	current := testReview(t, testSnapshot(t, 1, "one.go"))
+	line, _ := NewLineNumber(1)
+	target, _ := LineCommentTarget(0, LineNew, line, line)
+	current = saveTestComment(t, current, target, "local inline")
+	policies, _ := NewPublicationPolicies()
+	options, _ := NewPublicationOptions(PublicationEventDraft, policies)
+	prepared, err := current.PreparePublication(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeID, _ := NewReviewNodeID("existing-review")
+	databaseID, _ := NewReviewDatabaseID(42)
+	commit, _ := NewObjectID(strings.Repeat("2", 40))
+	remote, err := NewPendingReview(PendingReviewDescriptor{
+		NodeID: nodeID, DatabaseID: databaseID, Commit: commit,
+		Body: "read-only summary", ViewerUpdate: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reused, err := prepared.ReusePendingPublication(remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, _ := reused.PendingPublication()
+	mutations := plan.Mutations(0, plan.MutationCount())
+	if len(mutations) != 1 || mutations[0].Kind() != PendingMutationAddComment {
+		t.Fatalf("read-only mutations = %+v", mutations)
+	}
+}
+
 func TestPendingPublicationViewBorrowsImmutableBackingWithoutAllocation(t *testing.T) {
 	current, err := NewReview(testReviewRequest(pendingTestSnapshot(t)))
 	if err != nil {

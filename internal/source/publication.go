@@ -32,7 +32,7 @@ const (
 	PublicationCheckPendingContinuation
 )
 
-// FreshPending returns the immutable pending capture requiring CPU reconciliation.
+// FreshPending returns the immutable pending capture requiring CPU preparation.
 func (acquisition PublicationCheckAcquisition) FreshPending() (review.PendingReview, bool) {
 	return acquisition.fresh, acquisition.valid && acquisition.hasFresh
 }
@@ -105,10 +105,15 @@ func (service *Service) AcquirePublicationCheck(
 		return PublicationCheckAcquisition{}, sourceFailure(OperationCheckPublication, err)
 	}
 	acquisition.target = checkedTarget
-	if mode == PublicationCheckPendingContinuation {
+	checkPending := mode == PublicationCheckPendingContinuation ||
+		mode == PublicationCheckNew && options.Event() == review.PublicationEventDraft
+	if checkPending {
 		fresh, status, detail := service.loadPendingReview(ctx, currentDetails, runCPU)
 		if cancellationErr := context.Cause(ctx); cancellationErr != nil {
 			return PublicationCheckAcquisition{}, sourceFailure(OperationCheckPublication, cancellationErr)
+		}
+		if mode == PublicationCheckNew && status == review.PendingReviewAbsent {
+			return acquisition, nil
 		}
 		if status != review.PendingReviewReady {
 			message := "GitHub pending review is " + status.String()
@@ -177,7 +182,11 @@ func (service *Service) CheckPublication(
 		return nil, err
 	}
 	if fresh, ok := acquisition.FreshPending(); ok {
-		prepared, err = prepared.ReconcilePendingPublication(fresh)
+		if prepared.ContinuesPendingPublication() {
+			prepared, err = prepared.ReconcilePendingPublication(fresh)
+		} else {
+			prepared, err = prepared.ReusePendingPublication(fresh)
+		}
 		if err != nil {
 			return nil, sourceFailure(OperationCheckPublication, err)
 		}

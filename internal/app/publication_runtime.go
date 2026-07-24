@@ -342,7 +342,11 @@ func (coordinator *Coordinator) preparePendingPublicationCheck(
 	prepared review.PreparedPublication,
 	fresh review.PendingReview,
 ) (review.PreparedPublication, error) {
+	reuse := !prepared.ContinuesPendingPublication()
 	construction := prepared.PendingReconciliationConstructionBytes(fresh)
+	if reuse {
+		construction = prepared.PendingReuseConstructionBytes(fresh)
+	}
 	if construction == 0 {
 		return review.PreparedPublication{}, review.ErrInvalidPublication
 	}
@@ -352,10 +356,19 @@ func (coordinator *Coordinator) preparePendingPublicationCheck(
 	if !coordinator.acquireCPU(job.ctx) {
 		return review.PreparedPublication{}, context.Cause(job.ctx)
 	}
-	reconciled, err := prepared.ReconcilePendingPublicationCancellable(
-		func() error { return context.Cause(job.ctx) },
-		fresh,
-	)
+	var reconciled review.PreparedPublication
+	var err error
+	if reuse {
+		reconciled, err = prepared.ReusePendingPublicationCancellable(
+			func() error { return context.Cause(job.ctx) },
+			fresh,
+		)
+	} else {
+		reconciled, err = prepared.ReconcilePendingPublicationCancellable(
+			func() error { return context.Cause(job.ctx) },
+			fresh,
+		)
+	}
 	coordinator.releaseCPU()
 	return reconciled, err
 }

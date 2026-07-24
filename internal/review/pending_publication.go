@@ -207,6 +207,153 @@ func (prepared PreparedPublication) ContinuesPendingPublication() bool {
 	return prepared.pending != nil
 }
 
+// PendingReuseConstructionBytes returns a conservative simultaneous input,
+// result, and scratch charge for converting a new draft into mutations of an
+// existing pending review.
+func (prepared PreparedPublication) PendingReuseConstructionBytes(
+	remote PendingReview,
+) int64 {
+	retained := prepared.RetainedBytes()
+	if retained == 0 || prepared.pending != nil ||
+		prepared.options.event != PublicationEventDraft ||
+		remote.nodeID == "" || remote.databaseID == 0 || remote.commit == "" {
+		return 0
+	}
+	return 3*retained + 2*remote.RetainedBytes() + 4_096
+}
+
+// ReusePendingPublication converts a newly prepared draft into mutations of a
+// pending review that appeared after the local snapshot was captured.
+func (prepared PreparedPublication) ReusePendingPublication(
+	remote PendingReview,
+) (PreparedPublication, error) {
+	return prepared.ReusePendingPublicationCancellable(nil, remote)
+}
+
+// ReusePendingPublicationCancellable converts a newly prepared draft into
+// mutations of a pending review that appeared after the local snapshot was
+// captured.
+func (prepared PreparedPublication) ReusePendingPublicationCancellable(
+	cancelled func() error,
+	remote PendingReview,
+) (PreparedPublication, error) {
+	construction := prepared.PendingReuseConstructionBytes(remote)
+	if construction == 0 {
+		return PreparedPublication{}, ErrInvalidPublication
+	}
+	if err := cancellationError(cancelled); err != nil {
+		return PreparedPublication{}, err
+	}
+	remoteBody, _ := splitPendingMarker(remote.body, publicationMarkerPrefix)
+	var summaryParts []string
+	if prepared.summary != "" {
+		summaryParts = []string{prepared.summary}
+	}
+	desiredBody, err := buildPendingPublicationBody(cancelled, remoteBody, summaryParts)
+	if err != nil {
+		return PreparedPublication{}, err
+	}
+	mutations := make([]PendingMutation, 0, len(prepared.comments)+1)
+	futureBodyBytes := int64(len(remote.body))
+	if desiredBody != remoteBody {
+		if !remote.viewerUpdate {
+			return PreparedPublication{}, fmt.Errorf(
+				"%w: pending review body is not editable",
+				ErrInvalidPublication,
+			)
+		}
+		mutations = append(mutations, PendingMutation{
+			kind: PendingMutationReviewBody, body: desiredBody, baseline: remoteBody,
+		})
+		futureBodyBytes = pendingMarkedBodyBytes(
+			desiredBody,
+			len(publicationMarkerPrefix)+32+len(markerSuffix),
+		)
+	}
+	for index, comment := range remote.comments {
+		if index%256 == 0 {
+			if cancelErr := cancellationError(cancelled); cancelErr != nil {
+				return PreparedPublication{}, cancelErr
+			}
+		}
+		futureBodyBytes += int64(len(comment.body))
+	}
+	inline := 0
+	for index, decision := range prepared.decisions {
+		if index%256 == 0 {
+			if cancelErr := cancellationError(cancelled); cancelErr != nil {
+				return PreparedPublication{}, cancelErr
+			}
+		}
+		switch decision.decision {
+		case PublicationIncludedInline:
+			if inline >= len(prepared.comments) {
+				return PreparedPublication{}, ErrInvalidPublication
+			}
+			comment := prepared.comments[inline]
+			inline++
+			path, pathErr := NewPathString(comment.path)
+			if pathErr != nil {
+				return PreparedPublication{}, ErrInvalidPublication
+			}
+			target, targetErr := NewPendingCommentTarget(PendingCommentTargetDescriptor{
+				Path: path, Commit: remote.commit, OriginalCommit: remote.commit,
+				Line: new(comment.endLine), StartLine: pendingStartLine(comment.startLine, comment.endLine),
+				Subject: PendingSubjectLine, Side: comment.side, StartSide: comment.side,
+			})
+			if targetErr != nil {
+				return PreparedPublication{}, ErrInvalidPublication
+			}
+			mutations = append(mutations, PendingMutation{
+				kind: PendingMutationAddComment, target: target,
+				body: comment.body, localID: decision.id,
+			})
+			futureBodyBytes += pendingMarkedBodyBytes(
+				comment.body,
+				len(draftCommentMarkerPrefix)+32+len(markerSuffix),
+			)
+		case PublicationIncludedSummary, PublicationExcludedManual,
+			PublicationExcludedStale, PublicationExcludedUnmappable,
+			PublicationExcludedInvalid:
+		default:
+			return PreparedPublication{}, ErrInvalidPublication
+		}
+	}
+	if inline != len(prepared.comments) || remote.CommentCount()+inline > MaxComments ||
+		futureBodyBytes > MaxCommentBodyTotal {
+		return PreparedPublication{}, ErrInvalidPublication
+	}
+	comments, err := clonePendingCommentsCancellable(cancelled, remote.comments)
+	if err != nil {
+		return PreparedPublication{}, err
+	}
+	baseline := remote
+	baseline.comments = comments
+	next := prepared
+	next.summary = ""
+	next.comments = nil
+	next.pending = new(PreparedPendingPublication{
+		desiredBody: desiredBody,
+		mutations:   mutations,
+		baseline:    baseline,
+	})
+	if err := validatePreparedPendingPublicationBytes(cancelled, *next.pending); err != nil {
+		return PreparedPublication{}, err
+	}
+	if next.RetainedBytes() > construction {
+		return PreparedPublication{}, ErrInvalidPublication
+	}
+	return next, nil
+}
+
+func pendingMarkedBodyBytes(body string, markerBytes int) int64 {
+	bytes := int64(len(body) + markerBytes)
+	if body != "" && markerBytes != 0 {
+		bytes += 2
+	}
+	return bytes
+}
+
 // ReconcilePendingPublication accepts remote effects already equal to the
 // desired local state and rejects external divergence from the captured base.
 func (prepared PreparedPublication) ReconcilePendingPublication(
