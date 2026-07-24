@@ -3,6 +3,8 @@ package source
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
@@ -103,4 +105,59 @@ func TestStreamIndexRejectsChecksumAndHonorsCancellation(t *testing.T) {
 	if _, err := streamIndex(ctx, path, func(streamedIndexEntry) error { return nil }); err == nil {
 		t.Fatal("cancelled decode succeeded")
 	}
+}
+
+func TestStreamIndexReadsOptionalExtensionAcrossBufferBoundary(t *testing.T) {
+	encoded := encodeIndexWithExtension(t, "TEST", make([]byte, 16<<10))
+	path := filepath.Join(t.TempDir(), "index")
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	count, err := streamIndex(t.Context(), path, func(streamedIndexEntry) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("count=%d, want 1", count)
+	}
+}
+
+func TestStreamIndexRejectsMalformedBufferedExtension(t *testing.T) {
+	encoded := encodeIndexWithExtension(t, "EOIE", []byte{0})
+	path := filepath.Join(t.TempDir(), "index")
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := streamIndex(t.Context(), path, func(streamedIndexEntry) error { return nil })
+	const want = "git index EOIE extension has an invalid size"
+	if err == nil || err.Error() != want {
+		t.Fatalf("error=%v, want %q", err, want)
+	}
+}
+
+func encodeIndexWithExtension(t *testing.T, signature string, payload []byte) []byte {
+	t.Helper()
+	if len(signature) != 4 {
+		t.Fatalf("extension signature length=%d, want 4", len(signature))
+	}
+
+	encoded := new(bytes.Buffer)
+	if err := gitindex.NewEncoder(encoded).Encode(&gitindex.Index{
+		Version: 2,
+		Entries: []*gitindex.Entry{{
+			Name: "a",
+			Hash: plumbing.NewHash("1111111111111111111111111111111111111111"),
+			Mode: filemode.Regular,
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body := bytes.Clone(encoded.Bytes()[:encoded.Len()-indexChecksumBytes])
+	body = append(body, signature...)
+	body = binary.BigEndian.AppendUint32(body, uint32(len(payload)))
+	body = append(body, payload...)
+	checksum := sha1.Sum(body)
+	return append(body, checksum[:]...)
 }
