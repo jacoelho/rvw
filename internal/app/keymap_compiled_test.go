@@ -172,20 +172,21 @@ func TestBindingBarKeepsWholePriorityOrderedHints(t *testing.T) {
 		"Tab " + keymap.ActionFocusNextPane.Description(),
 		"? " + keymap.ActionHelp.Description(),
 	}
-	previous := ""
 	for count := 1; count <= bindingBarMaximumItems; count++ {
 		expected := strings.Join(hints[:count], "  ")
 		boundary := lipgloss.Width(expected)
-		if got := bar.Render(boundary-1, styles); got != previous {
-			t.Fatalf("hint %d below boundary = %q, want %q", count, got, previous)
-		}
 		if got := bar.Render(boundary, styles); got != expected {
 			t.Fatalf("hint %d at boundary = %q, want %q", count, got, expected)
 		}
-		if got := bar.Render(boundary+1, styles); got != expected {
-			t.Fatalf("hint %d above boundary = %q, want %q", count, got, expected)
-		}
-		previous = expected
+	}
+	oversized := keymap.Binding{
+		Chord:  keymap.Chord(strings.Repeat("x", 64)),
+		Action: keymap.ActionMoveDown,
+	}
+	short := keymap.Binding{Chord: "?", Action: keymap.ActionHelp}
+	wantShort := "? " + keymap.ActionHelp.Description()
+	if got := (bindingBar{bindings: []keymap.Binding{oversized, short}}).Render(32, styles); got != wantShort {
+		t.Fatalf("oversized leading hint hid later usable hint: %q", got)
 	}
 	if got := bar.Render(1_000, styles); strings.Contains(got, "q ") {
 		t.Fatalf("binding bar rendered more than %d hints: %q", bindingBarMaximumItems, got)

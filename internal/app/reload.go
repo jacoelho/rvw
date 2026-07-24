@@ -351,6 +351,7 @@ func (model *Model) installReloadState(
 	committed review.Review,
 	viewport *diffViewport,
 ) *source.Document {
+	selections := model.captureReviewSelections()
 	oldDocument := model.document
 	model.document = outcome.Document
 	model.review = committed
@@ -362,7 +363,10 @@ func (model *Model) installReloadState(
 	model.pathFiles = outcome.PathFiles
 	model.ambiguousPaths = outcome.AmbiguousPaths
 	model.collapsedTree = outcome.Collapsed
-	model.filterQuery = ""
+	model.fileProjection = fileProjectionState{
+		workspace: projectionReady,
+		filter:    projectionReady,
+	}
 	model.filterGeneration++
 	model.filterBuild = nil
 	if model.filterTreeOperation != 0 {
@@ -384,7 +388,7 @@ func (model *Model) installReloadState(
 		model.diffCursor = 0
 		model.visualAnchor = 0
 	}
-	model.commentCursor = min(model.commentCursor, max(model.commentRowCount()-1, 0))
+	model.reconcileReviewSelections(selections)
 	return oldDocument
 }
 
@@ -402,7 +406,7 @@ func (model *Model) finishReloadDocument(
 		return
 	}
 	model.notice = &Notice{
-		Kind: NoticeInformation,
+		Kind: NoticeSuccess,
 		Text: NoticeText(
 			"reload complete: " +
 				strconv.FormatUint(uint64(report.FilesPreserved), 10) +

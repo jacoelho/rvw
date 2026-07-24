@@ -108,6 +108,7 @@ linters:
             - charm.land/bubbletea/v2
             - charm.land/lipgloss/v2
             - github.com/BurntSushi/toml
+            - github.com/charmbracelet/colorprofile
             - github.com/charmbracelet/x/ansi
             - github.com/charmbracelet/x/exp/golden
             - github.com/charmbracelet/x/vt

@@ -31,6 +31,7 @@ type semanticStyles struct {
 	number             lipgloss.Style
 	warning            lipgloss.Style
 	failure            lipgloss.Style
+	success            lipgloss.Style
 	status             lipgloss.Style
 	panel              lipgloss.Style
 }
@@ -158,6 +159,7 @@ func newSemanticStyles(settings Settings) semanticStyles {
 		metadata:          lipgloss.NewStyle(),
 		warning:           lipgloss.NewStyle().Bold(true),
 		failure:           lipgloss.NewStyle().Bold(true),
+		success:           lipgloss.NewStyle().Bold(true),
 	}
 	if !settings.colorEnabled {
 		styles.added = lipgloss.NewStyle().Bold(true)
@@ -231,29 +233,48 @@ func newSemanticStyles(settings Settings) semanticStyles {
 	styles.commentAnchor = lipgloss.NewStyle().Bold(true).Foreground(
 		lipgloss.Color(palette.color(PalettePrimary, "15")),
 	)
-	styles.warning = styles.warning.Foreground(
-		lipgloss.Color(palette.color(PaletteWarningForeground, "3")),
+	styles.warning = semanticMessageStyle(
+		styles.warning, palette, PaletteWarningForeground, PaletteWarningBackground,
+		palette.color(PalettePending, "3"),
 	)
-	if background := palette.color(PaletteWarningBackground, ""); background != "" {
-		styles.warning = styles.warning.Background(lipgloss.Color(background))
-	}
-	styles.failure = styles.failure.Foreground(
-		lipgloss.Color(palette.color(PaletteDiffDelete, "1")),
+	styles.failure = semanticMessageStyle(
+		styles.failure, palette, PaletteErrorForeground, PaletteErrorBackground,
+		palette.color(PaletteDiffDelete, "1"),
 	)
+	styles.success = semanticMessageStyle(
+		styles.success, palette, PaletteSuccessForeground, PaletteSuccessBackground,
+		palette.color(PaletteDiffAdd, "2"),
+	)
+	syntaxFallback := palette.color(PalettePrimary, "15")
 	styles.keyword = lipgloss.NewStyle().Bold(true).Foreground(
-		lipgloss.Color(palette.color(PaletteSyntaxKeyword, "5")),
+		lipgloss.Color(palette.color(PaletteSyntaxKeyword, syntaxFallback)),
 	)
 	styles.literal = lipgloss.NewStyle().Foreground(
-		lipgloss.Color(palette.color(PaletteSyntaxString, "2")),
+		lipgloss.Color(palette.color(PaletteSyntaxString, syntaxFallback)),
 	)
 	styles.comment = lipgloss.NewStyle().Foreground(
-		lipgloss.Color(palette.color(PaletteSyntaxComment, "8")),
+		lipgloss.Color(palette.color(PaletteSyntaxComment, syntaxFallback)),
 	)
 	styles.number = lipgloss.NewStyle().Foreground(
-		lipgloss.Color(palette.color(PaletteSyntaxNumber, "6")),
+		lipgloss.Color(palette.color(PaletteSyntaxNumber, syntaxFallback)),
 	)
 	styles.status = lipgloss.NewStyle().
 		Foreground(lipgloss.Color(palette.color(PaletteSecondary, "7"))).
 		Background(lipgloss.Color(palette.color(PaletteStatusBackground, "")))
 	return styles
+}
+
+func semanticMessageStyle(
+	base lipgloss.Style,
+	palette Palette,
+	foregroundRole, backgroundRole PaletteRole,
+	foregroundFallback string,
+) lipgloss.Style {
+	style := base.Foreground(lipgloss.Color(
+		palette.color(foregroundRole, foregroundFallback),
+	))
+	if background := palette.color(backgroundRole, ""); background != "" {
+		style = style.Background(lipgloss.Color(background))
+	}
+	return style
 }

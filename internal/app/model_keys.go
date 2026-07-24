@@ -291,11 +291,11 @@ func (model *Model) resolveActionWithStroke(
 }
 
 func (model *Model) keyContext() keymap.Context {
-	if model.belowMinimum() {
-		return keymap.ContextMinimumSize
-	}
 	if model.overlay == OverlayConfirm {
 		return keymap.ContextConfirm
+	}
+	if model.belowMinimum() {
+		return keymap.ContextMinimumSize
 	}
 	switch {
 	case model.mode == ModeVisual:

@@ -334,6 +334,12 @@ func (review Review) CommentAt(index int) (Comment, bool) {
 	return review.comments[index], true
 }
 
+// CommentIndex returns the position of the comment with id.
+func (review Review) CommentIndex(id CommentID) (int, bool) {
+	index := commentIndex(review.comments, id)
+	return index, index >= 0
+}
+
 // CommentRange performs the comment range operation.
 func (review Review) CommentRange(start, count int) []Comment {
 	if start < 0 || start >= len(review.comments) || count <= 0 {

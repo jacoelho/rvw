@@ -89,7 +89,7 @@ func TestInteractiveKeybindingBoundaryConvertsAcceptedVocabulary(t *testing.T) {
 	}
 }
 
-func TestInteractivePaletteBridgesBundledSyntaxColors(t *testing.T) {
+func TestInteractivePaletteBridgesEverySemanticThemeRole(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
 	if err := os.MkdirAll(home, 0o700); err != nil {
@@ -107,6 +107,33 @@ func TestInteractivePaletteBridgesBundledSyntaxColors(t *testing.T) {
 		t.Fatal("active bundled theme is absent")
 	}
 	values := interactivePaletteValues(theme)
+	for themeRole, paletteRole := range map[config.ThemeColor]app.PaletteRole{
+		"panel_bg":           app.PalettePanelBackground,
+		"fg_primary":         app.PalettePrimary,
+		"fg_secondary":       app.PaletteSecondary,
+		"fg_dim":             app.PaletteDim,
+		"diff_add":           app.PaletteDiffAdd,
+		"diff_del":           app.PaletteDiffDelete,
+		"diff_context":       app.PaletteDiffContext,
+		"pending":            app.PalettePending,
+		"border_focused":     app.PaletteFocused,
+		"status_bar_bg":      app.PaletteStatusBackground,
+		"cursor_line_bg":     app.PaletteCursorBackground,
+		"diff_add_bg":        app.PaletteDiffAddBackground,
+		"diff_del_bg":        app.PaletteDiffDeleteBackground,
+		"diff_hunk_header":   app.PaletteDiffHunk,
+		"message_warning_fg": app.PaletteWarningForeground,
+		"message_warning_bg": app.PaletteWarningBackground,
+		"message_error_fg":   app.PaletteErrorForeground,
+		"message_error_bg":   app.PaletteErrorBackground,
+		"message_success_fg": app.PaletteSuccessForeground,
+		"message_success_bg": app.PaletteSuccessBackground,
+	} {
+		want := theme.Colors[themeRole].String()
+		if got := values[paletteRole]; got != want {
+			t.Fatalf("theme %q palette value = %q, want %q", themeRole, got, want)
+		}
+	}
 	for syntaxRole, paletteRole := range map[config.SyntaxColor]app.PaletteRole{
 		config.SyntaxKeyword: app.PaletteSyntaxKeyword,
 		config.SyntaxString:  app.PaletteSyntaxString,

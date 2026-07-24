@@ -415,6 +415,10 @@ const (
 	PaletteSyntaxNumber
 	PaletteWarningForeground
 	PaletteWarningBackground
+	PaletteErrorForeground
+	PaletteErrorBackground
+	PaletteSuccessForeground
+	PaletteSuccessBackground
 )
 
 // Palette represents palette.
@@ -426,7 +430,7 @@ type Palette struct {
 func NewPalette(values map[PaletteRole]string) (Palette, error) {
 	colors := make(map[PaletteRole]string, len(values))
 	for role, value := range values {
-		if role < PalettePanelBackground || role > PaletteWarningBackground ||
+		if role < PalettePanelBackground || role > PaletteSuccessBackground ||
 			value == "" || len(value) > 64 {
 			return Palette{}, errors.New("invalid presentation palette")
 		}

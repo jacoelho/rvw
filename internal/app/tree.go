@@ -634,7 +634,7 @@ func (tree fileTree) window(
 }
 
 func (model *Model) currentFileTree() fileTree {
-	if model.filterQuery != "" && model.filteredFileTree != nil {
+	if model.fileProjection.appliedQuery != "" && model.filteredFileTree != nil {
 		return *model.filteredFileTree
 	}
 	if model.review.ShowHidden() {

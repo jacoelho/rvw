@@ -122,7 +122,7 @@ func (model *Model) beginEditComment() {
 		}
 		return
 	}
-	model.commentCursor = min(max(model.commentCursor, 0), count-1)
+	model.selectCommentIndex(model.commentCursor)
 	comment, _ := model.review.CommentAt(model.commentCursor)
 	model.startCommentMutation(
 		func(operation review.OperationID) (review.Review, review.CommentMutation, error) {
@@ -132,7 +132,8 @@ func (model *Model) beginEditComment() {
 }
 
 func (model *Model) editableLocalCommentSelected() bool {
-	return model.commentCursor >= 0 && model.commentCursor < model.review.CommentCount()
+	return model.commentCursor >= 0 && model.commentCursor < model.review.CommentCount() &&
+		model.commentRowSelected(model.commentCursor)
 }
 
 func (model *Model) cancelCommentEdit() {
@@ -164,10 +165,18 @@ func (model *Model) deleteComment(id review.CommentID) {
 func (model *Model) moveComment(delta int) {
 	count := model.commentRowCount()
 	if count == 0 {
-		model.commentCursor = 0
+		model.selectCommentIndex(0)
 		return
 	}
-	model.commentCursor = min(max(model.commentCursor+delta, 0), count-1)
+	if model.commentSelectionKnown && model.commentSelection.kind == 0 {
+		if delta < 0 {
+			model.selectCommentIndex(count - 1)
+		} else {
+			model.selectCommentIndex(0)
+		}
+		return
+	}
+	model.selectCommentIndex(model.commentCursor + delta)
 }
 
 func (model *Model) moveAndActivateComment(delta int) {
@@ -178,6 +187,9 @@ func (model *Model) moveAndActivateComment(delta int) {
 func (model *Model) activateCommentSelection() {
 	localCount := model.review.CommentCount()
 	if model.commentCursor < 0 || model.commentCursor >= model.commentRowCount() {
+		return
+	}
+	if !model.commentRowSelected(model.commentCursor) {
 		return
 	}
 	if model.commentCursor < localCount {

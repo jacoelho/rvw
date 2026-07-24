@@ -49,10 +49,15 @@ func (model *Model) applyAction(action keymap.Action, repeat int) tea.Cmd {
 
 func (model *Model) applyRestrictedAction(action keymap.Action, repeat int) (tea.Cmd, bool) {
 	if model.belowMinimum() {
-		if action == keymap.ActionQuit || action == keymap.ActionInterrupt {
-			if model.overlay == OverlayConfirm {
+		if model.overlay == OverlayConfirm {
+			switch action {
+			case keymap.ActionCancel, keymap.ActionConfirmNo, keymap.ActionInterrupt:
+				return model.applyConfirmationAction(action), true
+			default:
 				return nil, true
 			}
+		}
+		if action == keymap.ActionQuit || action == keymap.ActionInterrupt {
 			return model.requestQuit(), true
 		}
 		return nil, true
@@ -260,8 +265,12 @@ func (model *Model) applyViewAction(action keymap.Action) (tea.Cmd, bool) {
 		} else {
 			model.review = model.review.ShowHiddenFiles()
 		}
-		if model.filterQuery != "" {
-			return model.startFileFilter(model.filterQuery), true
+		query := model.fileProjection.requestedQuery
+		if query == "" {
+			query = model.fileProjection.appliedQuery
+		}
+		if query != "" {
+			return model.startFileFilter(query), true
 		}
 		model.selectFileOrder()
 	case keymap.ActionToggleComments:

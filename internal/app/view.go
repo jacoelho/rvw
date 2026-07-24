@@ -83,7 +83,7 @@ const (
 )
 
 var workspaceBindingLabels = map[keymap.Action]string{
-	keymap.ActionMoveDown:        "next row",
+	keymap.ActionMoveDown:        nextRowLabel,
 	keymap.ActionCommentAtCursor: commentLabel,
 	keymap.ActionFileComment:     "file comment",
 	keymap.ActionEditComment:     "edit",
@@ -335,11 +335,15 @@ func (model *Model) fileTreeLines(
 		return nil, nil
 	}
 	if tree.empty() {
-		message := "No changed files."
-		if model.filterQuery != "" {
-			message = "No files match the filter."
+		message := model.emptyFileProjectionText()
+		style := styles.muted
+		if strings.HasPrefix(message, "Error:") {
+			style = styles.failure
+		} else if strings.HasPrefix(message, "Loading") ||
+			strings.HasPrefix(message, "Filtering") {
+			style = styles.pending
 		}
-		return []string{styles.muted.Render(message)}, nil
+		return []string{style.Render(safeAndClip(message, width))}, nil
 	}
 	window := tree.window(model.treeCursor, height, model.collapsedTree)
 	lines := make([]string, 0, len(window))
@@ -479,7 +483,7 @@ func (model *Model) commentLines(
 		review.PendingReviewReady
 	for index := start; index < min(start+height, count); index++ {
 		prefix := "  "
-		if index == cursor {
+		if index == cursor && model.commentRowSelected(index) {
 			prefix = "› "
 			if model.workspaceOwnsInput() && model.focus == FocusComments {
 				prefix = "▸ "
@@ -670,8 +674,9 @@ func (model *Model) workspaceHeaderLine(layout workspaceLayout, styles semanticS
 		if visibleFiles != totalFiles {
 			fileCount = fmt.Sprintf("%d/%d", visibleFiles, totalFiles)
 		}
+		title := "FILES · " + fileCount + model.fileProjectionHeaderSuffix()
 		sections = append(sections, paneHeader(
-			"FILES · "+fileCount,
+			title,
 			layout.treeWidth,
 			model.workspacePaneHeaderState(FocusFileTree),
 			styles,
@@ -687,13 +692,71 @@ func (model *Model) workspaceHeaderLine(layout workspaceLayout, styles semanticS
 	}
 	if layout.commentsWidth != 0 {
 		sections = append(sections, paneHeader(
-			fmt.Sprintf("COMMENTS · %d", model.commentRowCount()),
+			fmt.Sprintf("COMMENTS · %d%s", model.commentRowCount(), model.commentSourceHeaderSuffix()),
 			layout.commentsWidth,
 			model.workspacePaneHeaderState(FocusComments),
 			styles,
 		))
 	}
 	return strings.Join(sections, styles.muted.Inherit(styles.panel).Render("│"))
+}
+
+func (model *Model) emptyFileProjectionText() string {
+	switch model.fileProjection.workspace {
+	case projectionInitial, projectionLoading:
+		return "Loading changed files…"
+	case projectionFailed:
+		return "Error: changed files unavailable — " + string(model.fileProjection.workspaceDetail)
+	case projectionReady:
+	}
+	if model.fileProjection.requestedQuery != model.fileProjection.appliedQuery {
+		switch model.fileProjection.filter {
+		case projectionLoading:
+			return "Filtering files…"
+		case projectionFailed:
+			return "Error: file filter failed — " + string(model.fileProjection.filterDetail)
+		case projectionInitial, projectionReady:
+		}
+	}
+	if model.fileProjection.appliedQuery != "" {
+		return "No files match the filter."
+	}
+	return "No changed files."
+}
+
+func (model *Model) fileProjectionHeaderSuffix() string {
+	switch model.fileProjection.workspace {
+	case projectionInitial, projectionLoading:
+		return " · LOADING"
+	case projectionFailed:
+		return " · ! ERROR"
+	case projectionReady:
+	}
+	if model.fileProjection.requestedQuery != model.fileProjection.appliedQuery {
+		switch model.fileProjection.filter {
+		case projectionLoading:
+			return " · FILTERING"
+		case projectionFailed:
+			return " · ! FILTER ERROR"
+		case projectionInitial, projectionReady:
+		}
+	}
+	return ""
+}
+
+func (model *Model) commentSourceHeaderSuffix() string {
+	remote := model.review.Snapshot().RemoteThreadSummary()
+	if model.foreground.reloadActive() && remote.Status != review.RemoteThreadsNotRequested {
+		return " · REMOTE LOADING"
+	}
+	switch remote.Status {
+	case review.RemoteThreadsUnavailable, review.RemoteThreadsLimited:
+		return " · ! REMOTE " + strings.ToUpper(remote.Status.String())
+	case review.RemoteThreadsNotRequested, review.RemoteThreadsReady:
+		return ""
+	default:
+		return " · ! REMOTE ERROR"
+	}
 }
 
 func (model *Model) workspacePaneHeaderState(focus FocusOwner) paneHeaderState {
@@ -730,6 +793,9 @@ func paneHeader(
 
 func (model *Model) statusLine(width int, styles semanticStyles) string {
 	status := model.operationSummary()
+	if conditions := model.workspaceConditionSummary(); conditions != "" {
+		status = conditions + "  " + status
+	}
 	_, height := model.renderSize()
 	layout := model.workspaceLayout(width, height)
 	if model.size.Width > maxRenderWidth || model.size.Height > maxRenderHeight {
@@ -747,6 +813,8 @@ func (model *Model) statusLine(width int, styles semanticStyles) string {
 		prefix := ""
 		switch model.notice.Kind {
 		case NoticeInformation:
+		case NoticeSuccess:
+			prefix = "Success: "
 		case NoticeWarning:
 			prefix = "Warning: "
 		case NoticeError:
@@ -758,6 +826,9 @@ func (model *Model) statusLine(width int, styles semanticStyles) string {
 		status = safeAndClip(status+"  comment editor owns input", width)
 	} else {
 		bindingBudget := min(max(width/2, 0), 48)
+		if width >= compactWidth {
+			bindingBudget = min(width-20, 72)
+		}
 		bindings := bindingBar{
 			bindings: model.workspaceStatusBindings(layout),
 			labels:   workspaceBindingLabels,
@@ -772,6 +843,8 @@ func (model *Model) statusLine(width int, styles semanticStyles) string {
 	if model.notice != nil {
 		switch model.notice.Kind {
 		case NoticeInformation:
+		case NoticeSuccess:
+			return fitStyledCellWidth(status, width, styles.success.Inherit(styles.status))
 		case NoticeWarning:
 			return fitStyledCellWidth(status, width, styles.warning.Inherit(styles.status))
 		case NoticeError:
@@ -779,6 +852,43 @@ func (model *Model) statusLine(width int, styles semanticStyles) string {
 		}
 	}
 	return fitStyledCellWidth(status, width, styles.status)
+}
+
+func (model *Model) workspaceConditionSummary() string {
+	conditions := make([]string, 0, 3)
+	switch model.fileProjection.workspace {
+	case projectionInitial, projectionLoading:
+		conditions = append(conditions, "Loading files…")
+	case projectionFailed:
+		conditions = append(conditions, "Error: file index unavailable")
+	case projectionReady:
+	}
+	if model.fileProjection.requestedQuery != model.fileProjection.appliedQuery {
+		switch model.fileProjection.filter {
+		case projectionLoading:
+			conditions = append(conditions, "Filtering files…")
+		case projectionFailed:
+			conditions = append(conditions, "Error: file filter failed")
+		case projectionInitial, projectionReady:
+		}
+	}
+	remote := model.review.Snapshot().RemoteThreadSummary()
+	if model.foreground.reloadActive() && remote.Status != review.RemoteThreadsNotRequested {
+		conditions = append(conditions, "Loading remote comments; prior results retained")
+		return strings.Join(conditions, " · ")
+	}
+	switch remote.Status {
+	case review.RemoteThreadsUnavailable, review.RemoteThreadsLimited:
+		condition := "Remote comments " + remote.Status.String()
+		if remote.Count != 0 {
+			condition += "; prior results retained"
+		}
+		conditions = append(conditions, condition)
+	case review.RemoteThreadsNotRequested, review.RemoteThreadsReady:
+	default:
+		conditions = append(conditions, "Error: remote comments failed")
+	}
+	return strings.Join(conditions, " · ")
 }
 
 func (model *Model) workspaceStatusBindings(layout workspaceLayout) []keymap.Binding {
@@ -896,6 +1006,62 @@ func constrainedStyledLines(lines []string, width, height int) string {
 		lines[index] = fitCellWidth(lines[index], width)
 	}
 	return strings.Join(lines, "\n")
+}
+
+type blockingDialogSize struct {
+	width, height int
+}
+
+type blockingDialogLayout struct {
+	x, y          int
+	width, height int
+}
+
+func contentSizedBlockingDialog(
+	maximum blockingDialogSize,
+	body, controls []string,
+) blockingDialogSize {
+	maximum.height = min(maximum.height, max(len(body)+len(controls), 1))
+	return maximum
+}
+
+func newBlockingDialogLayout(
+	width, height int,
+	preferred blockingDialogSize,
+) blockingDialogLayout {
+	layout := blockingDialogLayout{
+		width:  min(max(width, 0), preferred.width),
+		height: min(max(height, 0), preferred.height),
+	}
+	layout.x = max((width-layout.width)/2, 0)
+	layout.y = max((height-layout.height)/2, 0)
+	return layout
+}
+
+func boundedBlockingSurface(
+	body, controls []string,
+	width, height int,
+	preferred blockingDialogSize,
+	styles semanticStyles,
+) string {
+	layout := newBlockingDialogLayout(width, height, preferred)
+	if layout.width == 0 || layout.height == 0 {
+		return ""
+	}
+	modal := blockingSurface(body, controls, layout.width, layout.height, styles)
+	modalRows := strings.Split(modal, "\n")
+	canvasRows := make([]string, height)
+	blank := strings.Repeat(" ", max(width, 0))
+	left := strings.Repeat(" ", layout.x)
+	right := strings.Repeat(" ", max(width-layout.x-layout.width, 0))
+	for row := range height {
+		if row < layout.y || row >= layout.y+len(modalRows) {
+			canvasRows[row] = blank
+			continue
+		}
+		canvasRows[row] = left + modalRows[row-layout.y] + right
+	}
+	return strings.Join(canvasRows, "\n")
 }
 
 func blockingSurface(

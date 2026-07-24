@@ -24,11 +24,14 @@ const (
 	commentLabel               = "comment"
 	exportLabel                = "export"
 	helpLabel                  = "help"
+	nextRowLabel               = "next row"
 	operationIdentityExhausted = "operation identity exhausted"
 	keyEnter                   = "enter"
 	keyEscape                  = "esc"
 	keyReturn                  = "return"
 	remoteCommentsReadOnly     = NoticeText("remote comments are read-only")
+	readyStatusText            = "Ready"
+	reloadLabel                = "reload"
 	searchLabel                = "search"
 	unknownValue               = "unknown"
 )
@@ -107,6 +110,7 @@ type NoticeKind uint8
 // NoticeInformation identifies a supported notice information value.
 const (
 	NoticeInformation NoticeKind = iota + 1
+	NoticeSuccess
 	NoticeWarning
 	NoticeError
 )
@@ -183,6 +187,7 @@ type Model struct {
 	commandContext            context.Context
 	deliveryOperations        map[review.OperationID]delivery.Destination
 	filteredFileTree          *fileTree
+	commentSelection          commentRowIdentity
 	receiver                  *ReadyReceiver
 	operationProgress         map[review.OperationID]Progress
 	filterBuild               *fileFilterBuild
@@ -201,7 +206,7 @@ type Model struct {
 	findRestore               *findReturnState
 	searchAfterSyntax         *pendingSearch
 	help                      help.Model
-	filterQuery               string
+	fileProjection            fileProjectionState
 	visibleFileTree           fileTree
 	allFileTree               fileTree
 	filterTreeFiles           []review.FileID
@@ -231,6 +236,7 @@ type Model struct {
 	commentCursor             int
 	publicationDetailTop      int
 	publicationCursor         int
+	publicationSelection      publicationRowIdentity
 	helpTop                   int
 	statusTop                 int
 	nextOperation             uint64
@@ -246,6 +252,7 @@ type Model struct {
 	repeat                    uint16
 	exportPicker              exportSelection
 	publicationAllowStale     bool
+	commentSelectionKnown     bool
 	commentPaneVisibility     paneVisibility
 	publicationIntent         publicationOperationIntent
 	quitting                  bool
@@ -317,22 +324,26 @@ func NewModel(
 	commandInput.Prompt = ": "
 	commandInput.CharLimit = maxPromptBytes
 	model := &Model{
-		commandContext:     ctx,
-		document:           document,
-		coordinator:        coordinator,
-		receiver:           receiver,
-		settings:           settings,
-		publicationEvent:   settings.publication.Event(),
-		help:               helpModel,
-		commentEditor:      editor,
-		searchInput:        searchInput,
-		commandInput:       commandInput,
-		review:             current,
-		focus:              FocusDiff,
-		mode:               ModeNormal,
-		fileTreeVisible:    true,
-		nextOperation:      1,
-		foreground:         newForegroundState(),
+		commandContext:   ctx,
+		document:         document,
+		coordinator:      coordinator,
+		receiver:         receiver,
+		settings:         settings,
+		publicationEvent: settings.publication.Event(),
+		help:             helpModel,
+		commentEditor:    editor,
+		searchInput:      searchInput,
+		commandInput:     commandInput,
+		review:           current,
+		focus:            FocusDiff,
+		mode:             ModeNormal,
+		fileTreeVisible:  true,
+		nextOperation:    1,
+		foreground:       newForegroundState(),
+		fileProjection: fileProjectionState{
+			workspace: projectionInitial,
+			filter:    projectionReady,
+		},
 		operationProgress:  make(map[review.OperationID]Progress),
 		exportOperations:   make(map[review.OperationID]exportRequest),
 		deliveryOperations: make(map[review.OperationID]delivery.Destination),
@@ -490,7 +501,7 @@ func (model *Model) applyMouseAction(message mouseActionMsg) tea.Cmd {
 		model.diffCursor = message.diffLine
 		model.moveDiff(0)
 	case mouseTargetComment:
-		model.commentCursor = message.commentIndex
+		model.selectCommentIndex(message.commentIndex)
 	}
 	return command
 }
@@ -887,7 +898,7 @@ func (model *Model) applyForegroundEffect(effect foregroundEffect) {
 func (model *Model) operationSummary() string {
 	stats := model.coordinatorStats
 	if stats.Accepted == 0 {
-		return "Ready"
+		return readyStatusText
 	}
 	return "Working " + strconv.Itoa(stats.Accepted)
 }

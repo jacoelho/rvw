@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 
+	"github.com/jacoelho/rvw/internal/delivery"
 	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 )
@@ -154,6 +155,10 @@ func TestBlockingSurfacesPreserveAtomicControlsAtMinimumSize(t *testing.T) {
 	)
 	model.confirmation = confirmation{kind: confirmationQuit}
 	model.publicationDraftReady = true
+	publicationID, publicationCheck := beginTestPublicationCheck(t, model)
+	model.applyPublicationCheckOutcome(PublicationCheckOutcome{
+		ID: publicationID, Check: publicationCheck,
+	})
 
 	tests := []struct {
 		name string
@@ -179,6 +184,157 @@ func TestBlockingSurfacesPreserveAtomicControlsAtMinimumSize(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestConfirmationPromptsAreCompleteAtMinimumSize(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	pendingID := installPendingTestComment(t, model)
+	ids := appendTestReviewComments(t, model, "delete me")
+	setModelKeybindings(t, model,
+		keymap.Binding{Context: keymap.ContextConfirm, Chord: "esc", Action: keymap.ActionCancel},
+		keymap.Binding{Context: keymap.ContextConfirm, Chord: "y", Action: keymap.ActionConfirmYes},
+		keymap.Binding{Context: keymap.ContextConfirm, Chord: "n", Action: keymap.ActionConfirmNo},
+	)
+	tests := []struct {
+		name         string
+		confirmation confirmation
+		prompt       string
+	}{
+		{name: "none", prompt: "Confirm action?"},
+		{name: "quit", confirmation: confirmation{kind: confirmationQuit}, prompt: "Discard local review changes and quit?"},
+		{name: "delete", confirmation: confirmation{kind: confirmationDeleteComment, comment: ids[0]}, prompt: "Delete the selected comment?"},
+		{name: "delete GitHub draft", confirmation: confirmation{kind: confirmationDeleteComment, comment: pendingID}, prompt: "Delete this GitHub draft on the next save?"},
+		{name: reloadLabel, confirmation: confirmation{kind: confirmationReload}, prompt: "Reload and discard review state that cannot be reconciled?"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			model.confirmation = test.confirmation
+			plain := ansi.Strip(model.confirmationView(minimumWidth, minimumHeight))
+			normalized := strings.Join(strings.Fields(plain), " ")
+			if !strings.Contains(normalized, test.prompt) {
+				t.Fatalf("minimum confirmation omitted complete prompt %q:\n%s", test.prompt, plain)
+			}
+		})
+	}
+}
+
+func installPendingTestComment(t *testing.T, model *Model) review.CommentID {
+	t.Helper()
+	path, err := review.NewPathString("alpha.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit, err := review.NewObjectID(strings.Repeat("1", 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	line, err := review.NewLineNumber(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := review.NewPendingCommentTarget(review.PendingCommentTargetDescriptor{
+		Path: path, Commit: commit, OriginalCommit: commit,
+		Line: new(line), Subject: review.PendingSubjectLine, Side: review.LineNew,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commentNode, err := review.NewCommentNodeID("PRRC_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	commentDatabase, err := review.NewCommentDatabaseID(101)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capabilities, err := review.NewPendingCapabilities(
+		review.PendingCapabilityUpdate,
+		review.PendingCapabilityDelete,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingComment, err := review.NewPendingComment(review.PendingCommentDescriptor{
+		NodeID: commentNode, DatabaseID: commentDatabase,
+		Body:   "GitHub draft\n\n<!-- rvw-draft-comment:v1:0123456789abcdef0123456789abcdef -->",
+		Target: target, Capabilities: capabilities,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewNode, err := review.NewReviewNodeID("PRR_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewDatabase, err := review.NewReviewDatabaseID(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := review.NewPendingReview(review.PendingReviewDescriptor{
+		NodeID: reviewNode, DatabaseID: reviewDatabase, Commit: commit,
+		Body: "test summary", Comments: []review.PendingComment{pendingComment}, ViewerUpdate: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := model.review.Snapshot().WithPendingReview(pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.review, err = review.NewReview(testReviewRequest(snapshot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	comment, ok := model.review.CommentAt(0)
+	if !ok || model.review.PendingBindingState(comment.ID()) != review.PendingBindingClean {
+		t.Fatal("pending test comment was not imported as an editable GitHub draft")
+	}
+	return comment.ID()
+}
+
+func TestExportOptionStateIsVisibleAcrossCompactBoundary(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	setModelKeybindings(t, model,
+		keymap.Binding{Context: keymap.ContextExportPicker, Chord: "esc", Action: keymap.ActionCancel},
+		keymap.Binding{Context: keymap.ContextExportPicker, Chord: "enter", Action: keymap.ActionExportSelected},
+		keymap.Binding{Context: keymap.ContextExportPicker, Chord: "x", Action: keymap.ActionToggleExportUnmap},
+	)
+	for _, width := range []int{minimumWidth, 52} {
+		for _, height := range []int{minimumHeight, minimumHeight + 1, minimumHeight + 2} {
+			model.openExportPicker(exportSelection{
+				format: review.ExportMarkdown, destination: delivery.DestinationClipboard,
+				options: review.DefaultExportOptions(),
+			})
+			plain := ansi.Strip(model.exportPickerView(width, height))
+			for _, want := range []string{"[ ] x", "Esc cancel", "Enter export"} {
+				if !strings.Contains(plain, want) {
+					t.Fatalf("%dx%d export view omitted %q:\n%s", width, height, want, plain)
+				}
+			}
+			model.applyExportPickerAction(keymap.ActionToggleExportUnmap)
+			plain = ansi.Strip(model.exportPickerView(width, height))
+			if !strings.Contains(plain, "[x] x") {
+				t.Fatalf("%dx%d export view hid toggled state:\n%s", width, height, plain)
+			}
+		}
+	}
+	setModelKeybindings(t, model,
+		keymap.Binding{Context: keymap.ContextExportPicker, Chord: "esc", Action: keymap.ActionCancel},
+		keymap.Binding{Context: keymap.ContextExportPicker, Chord: "enter", Action: keymap.ActionExportSelected},
+		keymap.Binding{
+			Context: keymap.ContextExportPicker,
+			Chord:   "ctrl-a ctrl-b ctrl-c ctrl-d",
+			Action:  keymap.ActionToggleExportUnmap,
+		},
+	)
+	model.openExportPicker(exportSelection{
+		format: review.ExportMarkdown, destination: delivery.DestinationClipboard,
+		options: review.DefaultExportOptions(),
+	})
+	plain := ansi.Strip(model.exportPickerView(minimumWidth, minimumHeight))
+	if strings.Contains(plain, "Ctrl+") || !strings.Contains(plain, "[ ] unmappable") {
+		t.Fatalf("over-width export chord was partially rendered:\n%s", plain)
 	}
 }
 
@@ -799,34 +955,40 @@ func TestMinimumSizeRetainsPendingConfirmation(t *testing.T) {
 	} {
 		t.Run(fmt.Sprint(pending.kind), func(t *testing.T) {
 			model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+			setModelKeybindings(t, model,
+				keymap.Binding{Context: keymap.ContextConfirm, Chord: "esc", Action: keymap.ActionCancel},
+				keymap.Binding{Context: keymap.ContextConfirm, Chord: "n", Action: keymap.ActionConfirmNo},
+				keymap.Binding{Context: keymap.ContextConfirm, Chord: "y", Action: keymap.ActionConfirmYes},
+				keymap.Binding{Context: keymap.ContextConfirm, Chord: "ctrl-c", Action: keymap.ActionInterrupt},
+			)
 			model.confirmation = pending
 			model.overlay = OverlayConfirm
 
 			_, _ = model.Update(tea.WindowSizeMsg{Width: minimumWidth - 1, Height: minimumHeight})
-			if model.keyContext() != keymap.ContextMinimumSize {
-				t.Fatalf("key context = %q, want %q", model.keyContext(), keymap.ContextMinimumSize)
+			if model.keyContext() != keymap.ContextConfirm {
+				t.Fatalf("key context = %q, want %q", model.keyContext(), keymap.ContextConfirm)
 			}
-			if content := model.View().Content; !strings.Contains(content, "decision pending") ||
-				!strings.Contains(content, "resize to decide") || strings.Contains(content, "Confirmation") {
+			if content := ansi.Strip(model.View().Content); !strings.Contains(content, "Decision pending") ||
+				!strings.Contains(strings.ToLower(content), "esc cancel") || strings.Contains(content, "Confirmation") {
 				t.Fatalf("minimum view did not own pending decision:\n%s", content)
 			}
 
-			for _, key := range []string{"y", "n", "esc", "q"} {
-				_, command := model.Update(keyMessage(key))
-				if command != nil {
-					t.Fatalf("key %q returned a command while decision was blocked", key)
-				}
-				if model.overlay != OverlayConfirm || model.confirmation != pending {
-					t.Fatalf("key %q changed pending confirmation to overlay=%v confirmation=%+v", key, model.overlay, model.confirmation)
-				}
+			_, command := model.Update(keyMessage("y"))
+			if command != nil || model.overlay != OverlayConfirm || model.confirmation != pending {
+				t.Fatalf("destructive confirmation changed below minimum: command=%v overlay=%v confirmation=%+v", command, model.overlay, model.confirmation)
 			}
 
 			_, _ = model.Update(tea.WindowSizeMsg{Width: normalWidth, Height: 24})
 			if model.keyContext() != keymap.ContextConfirm || model.overlay != OverlayConfirm || model.confirmation != pending {
 				t.Fatalf("resize did not restore confirmation: context=%q overlay=%v confirmation=%+v", model.keyContext(), model.overlay, model.confirmation)
 			}
-			if content := model.View().Content; !strings.Contains(content, "Confirmation") {
+			if content := ansi.Strip(model.View().Content); !strings.Contains(content, "Confirmation") {
 				t.Fatalf("restored view omitted confirmation:\n%s", content)
+			}
+			_, _ = model.Update(tea.WindowSizeMsg{Width: minimumWidth - 1, Height: minimumHeight})
+			_, command = model.Update(keyMessage("esc"))
+			if command != nil || model.overlay != OverlayNone || model.confirmation != (confirmation{}) {
+				t.Fatalf("cancel below minimum = command=%v overlay=%v confirmation=%+v", command, model.overlay, model.confirmation)
 			}
 		})
 	}
@@ -856,18 +1018,20 @@ func TestConfirmedQuitPreservesLastViewUntilTerminalRestoration(t *testing.T) {
 	}
 }
 
-func TestMinimumHeightPrioritizesPendingConfirmationWarning(t *testing.T) {
+func TestMinimumHeightPrioritizesPendingConfirmationCancellation(t *testing.T) {
 	for height := 1; height < minimumHeight; height++ {
 		t.Run(fmt.Sprintf("height-%d", height), func(t *testing.T) {
 			model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+			setModelKeybindings(t, model,
+				keymap.Binding{Context: keymap.ContextConfirm, Chord: "esc", Action: keymap.ActionCancel},
+			)
 			model.confirmation = confirmation{kind: confirmationQuit}
 			model.overlay = OverlayConfirm
 			_, _ = model.Update(tea.WindowSizeMsg{Width: normalWidth, Height: height})
 
-			content := model.View().Content
-			if !strings.Contains(content, "decision pending") ||
-				!strings.Contains(content, "resize to decide") {
-				t.Fatalf("height %d hid pending-decision warning: %q", height, content)
+			content := ansi.Strip(model.View().Content)
+			if !strings.Contains(strings.ToLower(content), "esc cancel") {
+				t.Fatalf("height %d hid pending-decision cancellation: %q", height, content)
 			}
 		})
 	}

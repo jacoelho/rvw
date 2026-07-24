@@ -2,12 +2,14 @@ package app
 
 import tea "charm.land/bubbletea/v2"
 
+const applicationName = "rvw"
+
 func (model *Model) completeView(content string, mouseHits mouseHitMap) tea.View {
 	view := tea.NewView(content)
 	view.AltScreen = true
 	view.ReportFocus = true
 	view.DisableBracketedPasteMode = false
-	view.WindowTitle = "rvw"
+	view.WindowTitle = applicationName
 	view.KeyboardEnhancements.ReportEventTypes = true
 	if model.settings.mouse {
 		view.MouseMode = tea.MouseModeCellMotion

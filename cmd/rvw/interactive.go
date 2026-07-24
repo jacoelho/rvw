@@ -365,6 +365,10 @@ func interactivePaletteValues(theme config.Theme) map[app.PaletteRole]string {
 		"diff_hunk_header":   app.PaletteDiffHunk,
 		"message_warning_fg": app.PaletteWarningForeground,
 		"message_warning_bg": app.PaletteWarningBackground,
+		"message_error_fg":   app.PaletteErrorForeground,
+		"message_error_bg":   app.PaletteErrorBackground,
+		"message_success_fg": app.PaletteSuccessForeground,
+		"message_success_bg": app.PaletteSuccessBackground,
 	}
 	for name, role := range roles {
 		if color := theme.Colors[name].String(); color != "" {

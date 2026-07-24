@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/jacoelho/rvw/internal/delivery"
 	"github.com/jacoelho/rvw/internal/keymap"
@@ -111,20 +112,67 @@ func (model *Model) exportPickerView(width, height int) string {
 		return "[ ]"
 	}
 	styles := newSemanticStyles(model.settings)
+	dialogSize := blockingDialogSize{width: 52, height: 9}
+	dialogLayout := newBlockingDialogLayout(width, height, dialogSize)
 	controls := model.modalBindingRows(
 		keymap.ContextExportPicker,
 		[]keymap.Action{keymap.ActionCancel, keymap.ActionExportSelected, keymap.ActionToggleExportUnmap},
-		width,
+		dialogLayout.width,
 		styles,
 	)
-	return blockingSurface([]string{
-		styles.heading.Render("Export selection"),
+	toggleChord := model.exportToggleChord()
+	fullOptionLine, fullChordVisible := exportOptionLine(
+		checked(review.ExportUnmappable),
+		toggleChord,
+		"include unmappable comments",
+		dialogLayout.width,
+	)
+	body := []string{
+		modalTitle(styles, "Export selection"),
 		"",
 		"format       " + format,
 		"destination  " + destination,
 		"",
-		checked(review.ExportUnmappable) + " include unmappable comments",
-	}, controls, width, height, styles)
+		fullOptionLine,
+	}
+	if len(body)+len(controls) > dialogLayout.height || toggleChord != "" && !fullChordVisible {
+		compactOptionLine, _ := exportOptionLine(
+			checked(review.ExportUnmappable),
+			toggleChord,
+			"unmappable",
+			dialogLayout.width,
+		)
+		body = []string{
+			modalTitle(styles, "Export selection"),
+			format + " → " + destination,
+			compactOptionLine,
+		}
+	}
+	dialogSize = contentSizedBlockingDialog(dialogSize, body, controls)
+	return boundedBlockingSurface(body, controls, width, height, dialogSize, styles)
+}
+
+func exportOptionLine(check, chord, label string, width int) (string, bool) {
+	withoutChord := check + " " + label
+	if chord == "" {
+		return withoutChord, false
+	}
+	withChord := check + " " + chord + " " + label
+	if lipgloss.Width(withChord) <= width {
+		return withChord, true
+	}
+	return withoutChord, false
+}
+
+func (model *Model) exportToggleChord() string {
+	bindings := bindingsForActions(
+		model.effectiveBindings(keymap.ContextExportPicker),
+		[]keymap.Action{keymap.ActionToggleExportUnmap},
+	)
+	if len(bindings) == 0 {
+		return ""
+	}
+	return bindings[0].Chord.Display()
 }
 
 func (model *Model) applyExportOutcome(outcome ExportOutcome) tea.Cmd {
@@ -248,7 +296,7 @@ func (model *Model) applyDeliveryOutcome(outcome DeliveryOutcome) {
 		model.notice = operationTransitionNotice(err)
 		return
 	}
-	model.notice = &Notice{Kind: NoticeInformation, Text: "export delivered"}
+	model.notice = &Notice{Kind: NoticeSuccess, Text: "export delivered"}
 }
 
 func (model *Model) settleOperation(

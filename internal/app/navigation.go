@@ -28,6 +28,24 @@ type fileFilterBuild struct {
 	position   int
 }
 
+type projectionPhase uint8
+
+const (
+	projectionInitial projectionPhase = iota + 1
+	projectionLoading
+	projectionReady
+	projectionFailed
+)
+
+type fileProjectionState struct {
+	workspaceDetail NoticeText
+	filterDetail    NoticeText
+	requestedQuery  string
+	appliedQuery    string
+	workspace       projectionPhase
+	filter          projectionPhase
+}
+
 // FileTreeWork represents file tree work.
 type FileTreeWork struct {
 	// Files transfers exclusive ownership to the coordinator after successful submission.
@@ -253,7 +271,7 @@ func (model *Model) moveFirst() {
 		return
 	}
 	if model.focus == FocusComments {
-		model.commentCursor = 0
+		model.selectCommentIndex(0)
 		return
 	}
 	model.diffCursor = 0
@@ -273,7 +291,7 @@ func (model *Model) moveLast() {
 		return
 	}
 	if model.focus == FocusComments {
-		model.commentCursor = max(model.commentRowCount()-1, 0)
+		model.selectCommentIndex(model.commentRowCount() - 1)
 		return
 	}
 	active, ok := model.review.ActiveFile()
@@ -458,8 +476,12 @@ func (model *Model) configFocus() keymap.Focus {
 }
 
 func (model *Model) requestWorkspaceIndex() tea.Cmd {
+	model.fileProjection.workspace = projectionLoading
+	model.fileProjection.workspaceDetail = ""
 	operationID, err := review.NewOperationID(model.nextOperation)
 	if err != nil {
+		model.fileProjection.workspace = projectionFailed
+		model.fileProjection.workspaceDetail = operationIdentityExhausted
 		model.notice = &Notice{Kind: NoticeError, Text: operationIdentityExhausted}
 		return nil
 	}
@@ -476,6 +498,8 @@ func (model *Model) applyWorkspaceIndex(outcome WorkspaceIndexOutcome) tea.Cmd {
 	}
 	model.workspaceIndex = 0
 	if outcome.Err != nil {
+		model.fileProjection.workspace = projectionFailed
+		model.fileProjection.workspaceDetail = NoticeText(outcome.Err.Error())
 		model.notice = &Notice{
 			Kind: NoticeError,
 			Text: NoticeText("prepare review workspace: " + outcome.Err.Error()),
@@ -492,6 +516,8 @@ func (model *Model) applyWorkspaceIndex(outcome WorkspaceIndexOutcome) tea.Cmd {
 	model.pathFiles = outcome.PathFiles
 	model.ambiguousPaths = outcome.AmbiguousPaths
 	model.collapsedTree = outcome.Collapsed
+	model.fileProjection.workspace = projectionReady
+	model.fileProjection.workspaceDetail = ""
 	model.selectFileOrder()
 	model.notice = nil
 	model.requestActivePatch()
@@ -640,7 +666,8 @@ func (model *Model) selectSourceLine(side review.LineSide, value uint32) {
 func (model *Model) startFileFilter(query string) tea.Cmd {
 	query = strings.TrimSpace(query)
 	model.filterGeneration++
-	model.filterQuery = query
+	model.fileProjection.requestedQuery = query
+	model.fileProjection.filterDetail = ""
 	model.filterBuild = nil
 	source := model.visibleFileOrder
 	if model.review.ShowHidden() {
@@ -652,12 +679,15 @@ func (model *Model) startFileFilter(query string) tea.Cmd {
 		}
 		model.fileOrder = source
 		model.filteredFileTree = nil
+		model.fileProjection.appliedQuery = ""
+		model.fileProjection.filter = projectionReady
 		model.filterTreeGeneration = 0
 		model.filterTreeFiles = nil
 		model.selectFileOrder()
 		model.notice = &Notice{Kind: NoticeInformation, Text: "file filter cleared"}
 		return nil
 	}
+	model.fileProjection.filter = projectionLoading
 	model.filterBuild = &fileFilterBuild{
 		generation: model.filterGeneration,
 		query:      strings.ToLower(query),
@@ -702,6 +732,8 @@ func (model *Model) startFileFilterTree() tea.Cmd {
 	if err != nil {
 		model.filterTreeGeneration = 0
 		model.filterTreeFiles = nil
+		model.fileProjection.filter = projectionFailed
+		model.fileProjection.filterDetail = NoticeText(err.Error())
 		model.notice = &Notice{Kind: NoticeError, Text: operationIdentityExhausted}
 		return nil
 	}
@@ -716,6 +748,8 @@ func (model *Model) startFileFilterTree() tea.Cmd {
 	if err != nil {
 		model.filterTreeGeneration = 0
 		model.filterTreeFiles = nil
+		model.fileProjection.filter = projectionFailed
+		model.fileProjection.filterDetail = NoticeText(err.Error())
 		model.notice = &Notice{
 			Kind: NoticeWarning,
 			Text: NoticeText("build filtered file tree: " + err.Error()),
@@ -735,6 +769,10 @@ func (model *Model) applyFileFilterTree(outcome FileTreeOutcome) tea.Cmd {
 	model.filterTreeBuilding = false
 	model.filterTreeOperation = 0
 	if outcome.Err != nil && outcome.Generation == model.filterGeneration {
+		model.filterTreeGeneration = 0
+		model.filterTreeFiles = nil
+		model.fileProjection.filter = projectionFailed
+		model.fileProjection.filterDetail = NoticeText(outcome.Err.Error())
 		model.notice = &Notice{
 			Kind: NoticeWarning,
 			Text: NoticeText("build filtered file tree: " + outcome.Err.Error()),
@@ -745,10 +783,13 @@ func (model *Model) applyFileFilterTree(outcome FileTreeOutcome) tea.Cmd {
 		model.fileOrder = outcome.Files
 		filtered := model.allFileTree.withProjection(outcome.Projection)
 		model.filteredFileTree = &filtered
+		model.fileProjection.appliedQuery = model.fileProjection.requestedQuery
+		model.fileProjection.filter = projectionReady
+		model.fileProjection.filterDetail = ""
 		model.filterTreeGeneration = 0
 		model.filterTreeFiles = nil
 		model.selectFileOrder()
-		model.notice = &Notice{Kind: NoticeInformation, Text: "file filter applied"}
+		model.notice = &Notice{Kind: NoticeSuccess, Text: "file filter applied"}
 		return nil
 	}
 	if model.filterTreeGeneration != 0 &&

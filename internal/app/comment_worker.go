@@ -9,6 +9,11 @@ import (
 	"github.com/jacoelho/rvw/internal/review"
 )
 
+const (
+	commentChangePreparing = "preparing comment change"
+	commentSaved           = "comment saved"
+)
+
 type commentMutationWork struct {
 	Mutation review.CommentMutation
 }
@@ -87,7 +92,7 @@ func (model *Model) startCommentMutation(
 		return false
 	}
 	model.review = next
-	model.notice = &Notice{Kind: NoticeInformation, Text: "preparing comment change"}
+	model.notice = &Notice{Kind: NoticeInformation, Text: commentChangePreparing}
 	return true
 }
 
@@ -104,9 +109,11 @@ func (model *Model) applyCommentMutationOutcome(outcome commentMutationOutcome) 
 	if err != nil {
 		return model.failCommentMutation(outcome.ID, kind, err)
 	}
+	selections := model.captureReviewSelections()
 	model.review = next
 	switch kind {
 	case review.CommentMutationBeginEdit:
+		model.reconcileReviewSelections(selections)
 		draft, ok := model.review.Draft()
 		if !ok {
 			model.notice = &Notice{Kind: NoticeError, Text: "prepared comment edit has no draft"}
@@ -119,14 +126,15 @@ func (model *Model) applyCommentMutationOutcome(outcome commentMutationOutcome) 
 		return nil
 	case review.CommentMutationSave:
 		model.mode = ModeNormal
-		model.commentCursor = max(model.review.CommentCount()-1, 0)
-		model.notice = &Notice{Kind: NoticeInformation, Text: "comment saved"}
+		model.selectCommentIndex(model.review.CommentCount() - 1)
+		model.reconcilePublicationSelection(selections.publication)
+		model.notice = &Notice{Kind: NoticeSuccess, Text: commentSaved}
 	case review.CommentMutationDelete:
-		model.commentCursor = min(model.commentCursor, max(model.review.CommentCount()-1, 0))
-		model.notice = &Notice{Kind: NoticeInformation, Text: "comment deleted"}
+		model.reconcileReviewSelections(selections)
+		model.notice = &Notice{Kind: NoticeSuccess, Text: "comment deleted"}
 	case review.CommentMutationResolveConflict:
-		model.commentCursor = min(model.commentCursor, max(model.review.CommentCount()-1, 0))
-		model.notice = &Notice{Kind: NoticeInformation, Text: "draft conflict resolved"}
+		model.reconcileReviewSelections(selections)
+		model.notice = &Notice{Kind: NoticeSuccess, Text: "draft conflict resolved"}
 	}
 	return nil
 }

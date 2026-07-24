@@ -46,18 +46,18 @@ const (
 )
 
 type findReturnState struct {
-	treeCursor    treeNodeIdentity
-	diffLeft      int
-	commentCursor int
-	active        review.FileID
-	selected      review.FileID
-	diffTop       uint32
-	diffCursor    uint32
-	visualAnchor  uint32
-	focus         FocusOwner
-	focusReturn   FocusOwner
-	activeOK      bool
-	selectedOK    bool
+	treeCursor       treeNodeIdentity
+	commentSelection commentRowIdentity
+	diffLeft         int
+	active           review.FileID
+	selected         review.FileID
+	diffTop          uint32
+	diffCursor       uint32
+	visualAnchor     uint32
+	focus            FocusOwner
+	focusReturn      FocusOwner
+	activeOK         bool
+	selectedOK       bool
 }
 
 type fileFindResult struct {
@@ -153,18 +153,18 @@ func (model *Model) captureFindReturnState() findReturnState {
 	active, activeOK := model.review.ActiveFile()
 	selected, selectedOK := model.review.SelectedFile()
 	return findReturnState{
-		treeCursor:    model.treeCursor,
-		active:        active,
-		selected:      selected,
-		focus:         model.focus,
-		focusReturn:   model.focusReturn,
-		diffLeft:      model.diffLeft,
-		commentCursor: model.commentCursor,
-		diffTop:       model.diffTop,
-		diffCursor:    model.diffCursor,
-		visualAnchor:  model.visualAnchor,
-		activeOK:      activeOK,
-		selectedOK:    selectedOK,
+		treeCursor:       model.treeCursor,
+		active:           active,
+		selected:         selected,
+		focus:            model.focus,
+		focusReturn:      model.focusReturn,
+		diffLeft:         model.diffLeft,
+		commentSelection: model.currentCommentSelection(),
+		diffTop:          model.diffTop,
+		diffCursor:       model.diffCursor,
+		visualAnchor:     model.visualAnchor,
+		activeOK:         activeOK,
+		selectedOK:       selectedOK,
 	}
 }
 
@@ -230,7 +230,7 @@ func (model *Model) restoreFindReturnState(state findReturnState) {
 		}
 	}
 	model.treeCursor = state.treeCursor
-	model.commentCursor = state.commentCursor
+	model.reconcileCommentSelection(state.commentSelection)
 	model.focus = state.focus
 	model.focusReturn = state.focusReturn
 	if !state.activeOK {
@@ -741,7 +741,7 @@ func (model *Model) findStatusText() string {
 		}
 		return "Searching changed patches…"
 	case findFailed:
-		return model.find.failure
+		return "Error: " + model.find.failure
 	case findReady:
 		count := model.findResultCount()
 		if model.find.scope != findFiles {
@@ -754,7 +754,7 @@ func (model *Model) findStatusText() string {
 			case review.SearchCancelled:
 				return "Search cancelled"
 			case review.SearchFailed:
-				return summary.Detail.String()
+				return "Error: " + summary.Detail.String()
 			case review.SearchIdle, review.SearchActive, review.SearchComplete,
 				review.SearchSuperseded:
 			}
@@ -825,7 +825,6 @@ type findModalLayout struct {
 	inputY      int
 	resultY     int
 	resultRows  int
-	bordered    bool
 }
 
 func newFindModalLayout(width, height int) findModalLayout {
@@ -835,17 +834,12 @@ func newFindModalLayout(width, height int) findModalLayout {
 		layout.height = min(height-4, 20)
 		layout.x = (width - layout.width) / 2
 		layout.y = (height - layout.height) / 2
-		layout.bordered = true
 	}
-	border := 0
-	if layout.bordered {
-		border = 1
-	}
-	layout.innerWidth = max(layout.width-border*2, 1)
-	layout.innerHeight = max(layout.height-border*2, 1)
-	layout.inputX = layout.x + border
-	layout.inputY = layout.y + border + 1
-	layout.resultY = layout.y + border + 3
+	layout.innerWidth = max(layout.width, 1)
+	layout.innerHeight = max(layout.height, 1)
+	layout.inputX = layout.x
+	layout.inputY = layout.y + 1
+	layout.resultY = layout.y + 3
 	layout.resultRows = max(layout.innerHeight-5, 1)
 	return layout
 }
@@ -862,9 +856,18 @@ func (model *Model) findModalView(
 	layout := newFindModalLayout(width, height)
 	innerWidth := layout.innerWidth
 	lines := make([]string, 0, layout.innerHeight)
-	title := styles.heading.Render("Find") + "  " + findTabs(model.find.scope, styles)
+	title := modalTitle(styles, "Find") + "  " + findTabs(model.find.scope, styles)
 	lines = append(lines, fitCellWidth(title, innerWidth))
-	lines = append(lines, fitCellWidth(model.searchInput.View(), innerWidth))
+	searchInput := model.searchInput
+	inputStyles := searchInput.Styles()
+	inputStyles.Focused.Prompt = styles.heading.Inherit(styles.panel)
+	inputStyles.Focused.Text = styles.panel
+	inputStyles.Focused.Placeholder = styles.muted.Inherit(styles.panel)
+	inputStyles.Focused.Suggestion = styles.muted.Inherit(styles.panel)
+	inputStyles.Blurred = inputStyles.Focused
+	inputStyles.Cursor.Color = styles.panel.GetForeground()
+	searchInput.SetStyles(inputStyles)
+	lines = append(lines, fitCellWidth(searchInput.View(), innerWidth))
 	status := safeAndClip(model.findStatusText(), innerWidth)
 	if model.find.phase == findFailed {
 		status = styles.failure.Render(status)
@@ -908,9 +911,6 @@ func (model *Model) findModalView(
 	}
 	content := strings.Join(lines[:layout.innerHeight], "\n")
 	modalStyle := styles.panel.Width(layout.innerWidth).Height(layout.innerHeight)
-	if layout.bordered {
-		modalStyle = modalStyle.Border(lipgloss.RoundedBorder())
-	}
 	return modalStyle.Render(content), layout, rows
 }
 

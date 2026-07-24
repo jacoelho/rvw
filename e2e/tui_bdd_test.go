@@ -32,10 +32,12 @@ func TestTerminalRenderingContract(t *testing.T) {
 		minimum bool
 	}
 	sizes := []bdd.Example[sizeExample]{
-		bdd.Case("wide", sizeExample{180, 36, "staged contents", false}),
-		bdd.Case("normal", sizeExample{120, 24, "staged contents", false}),
-		bdd.Case("compact", sizeExample{80, 18, "staged contents", false}),
-		bdd.Case("narrow", sizeExample{48, 14, "staged contents", false}),
+		bdd.Case("40x12", sizeExample{40, 12, "staged contents", false}),
+		bdd.Case("60x20", sizeExample{60, 20, "staged contents", false}),
+		bdd.Case("80x24", sizeExample{80, 24, "staged contents", false}),
+		bdd.Case("100x30", sizeExample{100, 30, "staged contents", false}),
+		bdd.Case("120x40", sizeExample{120, 40, "staged contents", false}),
+		bdd.Case("160x50", sizeExample{160, 50, "staged contents", false}),
 		bdd.Case("below minimum", sizeExample{19, 5, "Resize to 20×6", true}),
 	}
 
@@ -196,9 +198,8 @@ func TestInteractiveSourceContract(t *testing.T) {
 				w.pty.send(t, "s")
 				w.pty.awaitScreen(t, "draft preflight", func(screen string) bool {
 					return strings.Contains(screen, "Synchronize comments to a pending GitHub draft") &&
-						strings.Contains(screen, "Review action · draft synchronization required") &&
-						strings.Contains(screen, "▸ Synchronize draft comments") &&
-						strings.Contains(screen, "Source/head: checked at current head") &&
+						strings.Contains(screen, "Enter sync draft") &&
+						strings.Contains(screen, "Head: checked at current head") &&
 						strings.Contains(screen, "Pending review: continue 9001 · 1 changed · 0 conflicts") &&
 						strings.Contains(screen, "[modified · inline] existing inline edited")
 				})

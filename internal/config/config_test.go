@@ -220,20 +220,20 @@ func TestLoadResolvesBoundedCustomTheme(t *testing.T) {
 	writeTestFile(t, filepath.Join(themesDirectory, "syntax.tmTheme"), `<?xml version="1.0"?>
 <plist version="1.0"><dict><key>settings</key><array>
 <dict><key>scope</key><string>keyword.control</string><key>settings</key>
-<dict><key>foreground</key><string>#123456</string></dict></dict>
+<dict><key>foreground</key><string>#ffffff</string></dict></dict>
 </array></dict></plist>`)
 	writeTestFile(t, filepath.Join(themesDirectory, "mine.v2.toml"), `
-panel_bg = "#010203"
+panel_bg = "#000000"
 fg_primary = "White"
-fg_secondary = "light-blue"
-fg_dim = "dark_gray"
-diff_add = "green"
-diff_del = "red"
-diff_context = "gray"
-pending = "yellow"
-border_focused = "cyan"
+fg_secondary = "white"
+fg_dim = "white"
+diff_add = "white"
+diff_del = "white"
+diff_context = "white"
+pending = "light-yellow"
+border_focused = "light-cyan"
 status_bar_bg = "black"
-cursor_line_bg = "#AABBCC"
+cursor_line_bg = "blue"
 syntax_theme = "syntax.tmTheme"
 `)
 
@@ -244,13 +244,97 @@ syntax_theme = "syntax.tmTheme"
 		t.Fatal(err)
 	}
 	theme, ok := resolved.Theme(ThemeName("mine.v2"))
-	if !ok || !theme.UserDefined || theme.Colors[themeSecondaryForeground] != Color("lightblue") ||
+	if !ok || !theme.UserDefined || theme.Colors[themeSecondaryForeground] != Color("white") ||
 		theme.SyntaxTheme.String() != filepath.Join(themesDirectory, "syntax.tmTheme") ||
-		theme.SyntaxColors[SyntaxKeyword] != Color("#123456") {
+		theme.SyntaxColors[SyntaxKeyword] != Color("#ffffff") ||
+		theme.SyntaxColors[SyntaxString] != Color("white") ||
+		theme.Colors[themeErrorForeground] != Color("white") ||
+		theme.Colors[themeSuccessForeground] != Color("white") ||
+		theme.Colors[themeWarningForeground] != Color("lightyellow") {
 		t.Fatalf("unexpected resolved theme: %+v", theme)
 	}
 	if !resolved.UI().ColorEnabled {
 		t.Fatal("explicit theme did not override NO_COLOR")
+	}
+}
+
+func TestLoadRejectsInvisibleResolvedThemeFallback(t *testing.T) {
+	root := projectDirectory(t)
+	home := filepath.Join(root, "home")
+	configDirectory := filepath.Join(home, ".config", "rvw")
+	themesDirectory := filepath.Join(configDirectory, "themes")
+	if err := os.MkdirAll(themesDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(configDirectory, "config.toml"), "theme = \"unsafe\"\n")
+	writeTestFile(t, filepath.Join(themesDirectory, "unsafe.toml"), `
+panel_bg = "black"
+fg_primary = "white"
+fg_secondary = "white"
+fg_dim = "white"
+diff_add = "white"
+diff_del = "white"
+diff_context = "white"
+pending = "lightyellow"
+border_focused = "lightcyan"
+status_bar_bg = "black"
+cursor_line_bg = "blue"
+message_error_bg = "white"
+`)
+
+	_, err := Load(LoadRequest{CWD: root, Environment: []string{"HOME=" + home}})
+	if err == nil || !strings.Contains(err.Error(), "message_error_fg against message_error_bg") {
+		t.Fatalf("resolved fallback contrast error = %v", err)
+	}
+}
+
+func TestResolvedSuccessFallbackIsValidatedAgainstStatusBackground(t *testing.T) {
+	colors := map[ThemeColor]Color{
+		themeDiffAddition:     "white",
+		themeStatusBackground: "white",
+		themePanelBackground:  "black",
+	}
+	syntax := make(map[SyntaxColor]Color)
+	resolveThemeFallbacks(colors, syntax)
+	if colors[themeSuccessForeground] != colors[themeDiffAddition] {
+		t.Fatal("success fallback was not materialized")
+	}
+	err := validateThemeContrast("fallback.toml", colors, syntax)
+	if err == nil || !strings.Contains(err.Error(), "message_success_fg against status_bar_bg") {
+		t.Fatalf("resolved success fallback contrast error = %v", err)
+	}
+}
+
+func TestLoadRejectsCustomThemeContrastBeforePaletteConstruction(t *testing.T) {
+	root := projectDirectory(t)
+	home := filepath.Join(root, "home")
+	configDirectory := filepath.Join(home, ".config", "rvw")
+	themesDirectory := filepath.Join(configDirectory, "themes")
+	if err := os.MkdirAll(themesDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(configDirectory, "config.toml"), "theme = \"unsafe\"\n")
+	writeTestFile(t, filepath.Join(themesDirectory, "unsafe.toml"), `
+panel_bg = "#000000"
+fg_primary = "#111111"
+fg_secondary = "white"
+fg_dim = "white"
+diff_add = "white"
+diff_del = "white"
+diff_context = "white"
+pending = "white"
+border_focused = "white"
+status_bar_bg = "black"
+cursor_line_bg = "blue"
+`)
+
+	_, err := Load(LoadRequest{
+		CWD: root, Environment: []string{"HOME=" + home},
+	})
+	if err == nil || !strings.Contains(err.Error(), "fg_primary against panel_bg") ||
+		!strings.Contains(err.Error(), "TrueColor") ||
+		!strings.Contains(err.Error(), "minimum is 4.5:1") {
+		t.Fatalf("unsafe custom theme error = %v", err)
 	}
 }
 
@@ -412,26 +496,15 @@ func TestEveryBundledThemeMeetsCanonicalProfileTextContrast(t *testing.T) {
 			}{name: name, appearance: AppearanceLight},
 		)
 	}
-	pairs := map[ThemeColor][]ThemeColor{
-		themePrimaryForeground:   {themePanelBackground, themeStatusBackground, themeCursorBackground, themeDiffAdditionBackground, themeDiffDeletionBackground},
-		themeSecondaryForeground: {themePanelBackground, themeStatusBackground},
-		themeDimForeground:       {themePanelBackground, themeStatusBackground, themeCursorBackground, themeDiffAdditionBackground, themeDiffDeletionBackground},
-		themeDiffAddition:        {themePanelBackground, themeCursorBackground, themeDiffAdditionBackground},
-		themeDiffDeletion:        {themePanelBackground, themeStatusBackground, themeCursorBackground, themeDiffDeletionBackground},
-		themeDiffContext:         {themePanelBackground, themeCursorBackground},
-		themePending:             {themePanelBackground},
-		themeFocusedBorder:       {themePanelBackground, themeStatusBackground, themeCursorBackground},
-		themeDiffHunkHeader:      {themePanelBackground, themeStatusBackground, themeCursorBackground},
-		themeWarningForeground:   {themePanelBackground, themeStatusBackground},
-	}
 	for _, test := range themes {
 		theme := bundledTheme(test.name, test.appearance)
-		for foregroundRole, backgroundRoles := range pairs {
+		for _, rule := range themeContrastRules {
+			foregroundRole := rule.role
 			foreground, ok := bundledTestColor(theme.Colors[foregroundRole])
 			if !ok {
 				t.Fatalf("theme %q role %q has unknown color %q", test.name, foregroundRole, theme.Colors[foregroundRole])
 			}
-			for _, backgroundRole := range backgroundRoles {
+			for _, backgroundRole := range rule.backgrounds {
 				backgroundValue, exists := theme.Colors[backgroundRole]
 				if !exists {
 					continue
@@ -490,13 +563,13 @@ func bundledTestColor(value Color) ([3]uint8, bool) {
 		return parsed, true
 	}
 	named := map[Color]ansi.BasicColor{
-		"black": ansi.Black, "red": ansi.Red, "green": ansi.Green,
-		"yellow": ansi.Yellow, "blue": ansi.Blue, "magenta": ansi.Magenta,
+		ansiBlack: ansi.Black, "red": ansi.Red, "green": ansi.Green,
+		"yellow": ansi.Yellow, ansiBlue: ansi.Blue, "magenta": ansi.Magenta,
 		"cyan": ansi.Cyan, "gray": ansi.White, "grey": ansi.White,
-		"darkgray": ansi.BrightBlack, "darkgrey": ansi.BrightBlack,
-		"lightred": ansi.BrightRed, "lightgreen": ansi.BrightGreen,
-		"lightyellow": ansi.BrightYellow, "lightblue": ansi.BrightBlue,
-		"lightmagenta": ansi.BrightMagenta, "lightcyan": ansi.BrightCyan,
+		ansiDarkGray: ansi.BrightBlack, "darkgrey": ansi.BrightBlack,
+		ansiLightRed: ansi.BrightRed, ansiLightGreen: ansi.BrightGreen,
+		ansiLightYellow: ansi.BrightYellow, "lightblue": ansi.BrightBlue,
+		"lightmagenta": ansi.BrightMagenta, ansiLightCyan: ansi.BrightCyan,
 		"white": ansi.BrightWhite,
 	}
 	resolved, ok := named[value]

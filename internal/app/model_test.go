@@ -34,7 +34,7 @@ func TestModelRetainsOwnerAndBuildsCompleteBoundedViews(t *testing.T) {
 		t.Fatal("View mutated observable model state")
 	}
 	if !first.AltScreen || !first.ReportFocus ||
-		first.WindowTitle != "rvw" ||
+		first.WindowTitle != applicationName ||
 		first.MouseMode != tea.MouseModeCellMotion ||
 		!first.KeyboardEnhancements.ReportEventTypes {
 		t.Fatalf("incomplete terminal view fields: %+v", first)

@@ -352,6 +352,8 @@ func (model *Model) failActiveCollapseCapture(err error) {
 func (model *Model) failCollapseCaptureIntent(intent collapseCaptureIntent, err error) {
 	switch intent := intent.(type) {
 	case workspaceCollapseCaptureIntent:
+		model.fileProjection.workspace = projectionFailed
+		model.fileProjection.workspaceDetail = NoticeText(err.Error())
 		model.notice = &Notice{
 			Kind: NoticeError,
 			Text: NoticeText("prepare review workspace: " + err.Error()),

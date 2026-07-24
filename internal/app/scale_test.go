@@ -24,6 +24,7 @@ var (
 	benchmarkScaleReview review.Review
 	benchmarkScaleIndex  WorkspaceIndexOutcome
 	benchmarkScaleView   tea.View
+	benchmarkScaleText   string
 	benchmarkWrappedLine []string
 )
 
@@ -62,6 +63,33 @@ func BenchmarkRenderReviewAtMaxGeometry(b *testing.B) {
 
 	for b.Loop() {
 		benchmarkScaleView = model.View()
+	}
+}
+
+func BenchmarkRenderBoundedDialogs(b *testing.B) {
+	sizes := []TerminalSize{
+		{Width: 100, Height: 30, Known: true},
+		{Width: maxRenderWidth, Height: maxRenderHeight, Known: true},
+	}
+	for _, size := range sizes {
+		name := fmt.Sprintf("%dx%d", size.Width, size.Height)
+		b.Run("confirmation/"+name, func(b *testing.B) {
+			model, _ := appScaleModel(b)
+			model.confirmation = confirmation{kind: confirmationReload}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				benchmarkScaleText = model.confirmationView(size.Width, size.Height)
+			}
+		})
+		b.Run("export/"+name, func(b *testing.B) {
+			model, _ := appScaleModel(b)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				benchmarkScaleText = model.exportPickerView(size.Width, size.Height)
+			}
+		})
 	}
 }
 

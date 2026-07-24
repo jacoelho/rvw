@@ -795,10 +795,18 @@ func (snapshot Snapshot) takePendingReviewCancellable(
 	if err != nil {
 		return Snapshot{}, err
 	}
-	if snapshot.remoteThreadStatus == RemoteThreadsReady {
+	if len(snapshot.remoteThreads) != 0 {
+		remoteStatus := snapshot.remoteThreadStatus
+		remoteDetail := snapshot.remoteThreadDetail
 		next, err = next.withoutPendingRemoteCommentsCancellable(cancelled, pending)
 		if err != nil {
 			return Snapshot{}, err
+		}
+		if remoteStatus == RemoteThreadsUnavailable || remoteStatus == RemoteThreadsLimited {
+			next, err = next.WithRemoteThreadFailure(remoteStatus, remoteDetail)
+			if err != nil {
+				return Snapshot{}, err
+			}
 		}
 		return next, nil
 	}

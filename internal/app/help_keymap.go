@@ -41,7 +41,7 @@ func (bar bindingBar) render(width int, styles semanticStyles, base lipgloss.Sty
 		hint := bar.renderBinding(binding, styles, base)
 		hintWidth := lipgloss.Width(separator + hint)
 		if used+hintWidth > width {
-			break
+			continue
 		}
 		rendered.WriteString(separator)
 		rendered.WriteString(hint)

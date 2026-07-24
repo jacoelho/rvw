@@ -143,7 +143,16 @@ func (model *Model) resizePrompts() {
 }
 
 func (model *Model) commandBarLine(width int, styles semanticStyles) string {
-	return styles.status.Render(fitCellWidth(model.commandInput.View(), width))
+	commandInput := model.commandInput
+	inputStyles := commandInput.Styles()
+	inputStyles.Focused.Prompt = styles.heading.Inherit(styles.status)
+	inputStyles.Focused.Text = styles.status
+	inputStyles.Focused.Placeholder = styles.muted.Inherit(styles.status)
+	inputStyles.Focused.Suggestion = styles.muted.Inherit(styles.status)
+	inputStyles.Blurred = inputStyles.Focused
+	inputStyles.Cursor.Color = styles.status.GetForeground()
+	commandInput.SetStyles(inputStyles)
+	return styles.status.Render(fitCellWidth(commandInput.View(), width))
 }
 
 func parseCommand(value string) (commandIntent, error) { //nolint:funlen // One closed switch owns the complete command grammar.
@@ -166,7 +175,7 @@ func parseCommand(value string) (commandIntent, error) { //nolint:funlen // One 
 		intent, err := noArguments(commandQuit)
 		intent.force = true
 		return intent, err
-	case "reload":
+	case reloadLabel:
 		return noArguments(commandReload)
 	case "diff":
 		return noArguments(commandToggleDiff)

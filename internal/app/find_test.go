@@ -124,6 +124,9 @@ func TestFindRejectsInvalidUTF8Transactionally(t *testing.T) {
 	if model.find.phase != findFailed || model.find.failure != "find query is not valid UTF-8" {
 		t.Fatalf("invalid paste state phase=%v failure=%q", model.find.phase, model.find.failure)
 	}
+	if status := model.findStatusText(); status != "Error: find query is not valid UTF-8" {
+		t.Fatalf("invalid paste status = %q", status)
+	}
 }
 
 func TestReviewFindSearchesOnlyCapturedVisibleProjection(t *testing.T) {

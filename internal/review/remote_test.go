@@ -63,7 +63,7 @@ func TestRemoteThreadMappingRejectsAmbiguityAndExcludesOutdatedLines(t *testing.
 	}
 }
 
-func TestRemoteThreadFailureClearsDerivedMappingsAndMarkers(t *testing.T) {
+func TestRemoteThreadFailureRetainsLastAppliedProjection(t *testing.T) {
 	line, _ := NewLineNumber(3)
 	thread := testRemoteThread(t, "thread", "one.go", LineNew, &line, remoteThreadOptions{})
 	snapshot, err := testSnapshot(t, 1, "one.go").WithRemoteThreads([]RemoteThread{thread})
@@ -75,9 +75,9 @@ func TestRemoteThreadFailureClearsDerivedMappingsAndMarkers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.RemoteThreadCount() != 0 ||
-		testReview(t, snapshot).HasCommentAnchor(0, LineNew, line) {
-		t.Fatal("remote thread failure retained derived state")
+	if snapshot.RemoteThreadCount() != 1 ||
+		!testReview(t, snapshot).HasCommentAnchor(0, LineNew, line) {
+		t.Fatal("remote thread failure discarded the last applied projection")
 	}
 }
 
@@ -144,6 +144,216 @@ func TestRemoteThreadPointAccessAllocatesNothing(t *testing.T) {
 	}
 	if thread.ID() != "thread" || comment.ID() != "comment" {
 		t.Fatalf("point access = thread %q comment %q", thread.ID(), comment.ID())
+	}
+}
+
+func TestRemoteThreadIndexTracksStableIdentityWithoutAllocation(t *testing.T) {
+	line, _ := NewLineNumber(1)
+	threads := []RemoteThread{
+		testRemoteThread(t, "thread-z", "one.go", LineNew, &line, remoteThreadOptions{}),
+		testRemoteThread(t, "thread-a", "one.go", LineNew, &line, remoteThreadOptions{}),
+		testRemoteThread(t, "thread-m", "one.go", LineNew, &line, remoteThreadOptions{}),
+	}
+	snapshot, err := testSnapshot(t, 1, "one.go").WithRemoteThreads(threads)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]int{
+		"thread-z": 0,
+		"thread-a": 1,
+		"thread-m": 2,
+	} {
+		if got, ok := snapshot.RemoteThreadIndex(id); !ok || got != want {
+			t.Fatalf("RemoteThreadIndex(%q) = (%d, %t), want (%d, true)", id, got, ok, want)
+		}
+	}
+	if got, ok := snapshot.RemoteThreadIndex("missing"); ok || got != 0 {
+		t.Fatalf("missing RemoteThreadIndex = (%d, %t), want (0, false)", got, ok)
+	}
+	if allocations := testing.AllocsPerRun(1_000, func() {
+		if index, ok := snapshot.RemoteThreadIndex("thread-m"); !ok || index != 2 {
+			panic("stable remote thread index is unavailable")
+		}
+	}); allocations != 0 {
+		t.Fatalf("RemoteThreadIndex allocations = %g, want 0", allocations)
+	}
+}
+
+func TestRemoteThreadFailureRetainsStableIdentityIndex(t *testing.T) {
+	snapshot := testSnapshotWithRemoteComment(t)
+	detail, _ := NewOperationDetail("remote threads failed")
+	failed, err := snapshot.WithRemoteThreadFailure(RemoteThreadsUnavailable, detail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if index, ok := failed.RemoteThreadIndex("thread"); !ok || index != 0 {
+		t.Fatalf("failed RemoteThreadIndex = (%d, %t), want retained index 0", index, ok)
+	}
+}
+
+func TestReplacementRetainsRemoteProjectionWhenRefreshFails(t *testing.T) {
+	line, _ := NewLineNumber(3)
+	thread := testRemoteThread(t, "thread", "one.go", LineNew, &line, remoteThreadOptions{})
+	previous, err := testSnapshot(t, 1, "one.go").WithRemoteThreads([]RemoteThread{thread})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := testSnapshot(t, 2, "one.go")
+	detail, _ := NewOperationDetail("GitHub refresh failed")
+	replacement, err = replacement.WithRemoteThreadFailure(RemoteThreadsUnavailable, detail)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	current := testReview(t, previous)
+	prepared, err := PrepareReplacement(current, replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRetained := prepared.next.retainedBytesWithoutSnapshot() +
+		prepared.next.snapshot.RetainedBytes() - replacement.RetainedBytes()
+	if prepared.RetainedBytes() != wantRetained {
+		t.Fatalf("prepared retained bytes = %d, want %d", prepared.RetainedBytes(), wantRetained)
+	}
+	if construction := ReplacementConstructionBytes(current, replacement); construction < prepared.RetainedBytes() {
+		t.Fatalf("construction bound = %d, retained result = %d", construction, prepared.RetainedBytes())
+	}
+	next, _, err := current.CommitReplacement(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := next.Snapshot().RemoteThreadSummary()
+	if summary.Status != RemoteThreadsUnavailable || summary.Count != 1 ||
+		summary.Detail != detail {
+		t.Fatalf("remote summary = %#v, want unavailable stale projection", summary)
+	}
+	if index, ok := next.Snapshot().RemoteThreadIndex("thread"); !ok || index != 0 {
+		t.Fatalf("retained RemoteThreadIndex = (%d, %t), want (0, true)", index, ok)
+	}
+}
+
+func TestStaleRemoteProjectionExcludesNewlyAcquiredPendingComments(t *testing.T) {
+	path, _ := NewPath([]byte("one.go"))
+	comment, err := NewRemoteComment(RemoteCommentDescriptor{
+		ID: "PRRC_node", Body: "pending copy",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	thread, err := NewRemoteThread(RemoteThreadDescriptor{
+		ID: "thread", Path: path, Side: LineNew, Comments: []RemoteComment{comment},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous, err := testSnapshot(t, 1, "one.go").WithRemoteThreads([]RemoteThread{thread})
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, _ := NewOperationDetail("GitHub refresh failed")
+	replacement, err := testSnapshot(t, 2, "one.go").WithRemoteThreadFailure(
+		RemoteThreadsUnavailable,
+		detail,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement, err = replacement.WithPendingReview(newRetainedTestPendingReview(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	current := testReview(t, previous)
+	prepared, err := PrepareReplacement(current, replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, _, err := current.CommitReplacement(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := next.Snapshot().RemoteThreadSummary()
+	if summary.Status != RemoteThreadsUnavailable || summary.Count != 0 {
+		t.Fatalf("filtered stale remote summary = %#v", summary)
+	}
+}
+
+func TestLaterPendingCaptureFiltersFailedStaleRemoteProjection(t *testing.T) {
+	path, _ := NewPath([]byte("one.go"))
+	comment, err := NewRemoteComment(RemoteCommentDescriptor{
+		ID: "PRRC_node", Body: "pending copy",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	thread, err := NewRemoteThread(RemoteThreadDescriptor{
+		ID: "thread", Path: path, Side: LineNew, Comments: []RemoteComment{comment},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := testSnapshot(t, 1, "one.go").WithRemoteThreads([]RemoteThread{thread})
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, _ := NewOperationDetail("GitHub refresh failed")
+	snapshot, err = snapshot.WithRemoteThreadFailure(RemoteThreadsUnavailable, detail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = snapshot.WithPendingReview(newRetainedTestPendingReview(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := snapshot.RemoteThreadSummary()
+	if summary.Status != RemoteThreadsUnavailable || summary.Count != 0 ||
+		summary.Detail != detail {
+		t.Fatalf("filtered failed remote summary = %#v", summary)
+	}
+}
+
+func TestOptionalStaleProjectionDoesNotBlockValidFailureSnapshot(t *testing.T) {
+	previous := testSnapshotWithRemoteComment(t)
+	detail, _ := NewOperationDetail(strings.Repeat("failure detail ", 16))
+	replacement, err := testSnapshot(t, 2, "one.go").WithRemoteThreadFailure(
+		RemoteThreadsUnavailable,
+		detail,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	threadDelta := previous.remoteRetainedBytes - detail.Bytes()
+	replacement.retainedBytes = MaxSnapshotRetainedBytes - threadDelta - detail.Bytes()/2
+
+	retained, err := retainRemoteThreadsAfterFailure(nil, previous, replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := retained.RemoteThreadSummary()
+	if summary.Status != RemoteThreadsUnavailable || summary.Count != 0 ||
+		summary.Detail != detail {
+		t.Fatalf("fallback summary = %#v, want original failure-only candidate", summary)
+	}
+}
+
+func TestRemoteThreadPositionSortHonorsCancellation(t *testing.T) {
+	positions := make([]remoteThreadPosition, 4_096)
+	for index := range positions {
+		positions[index] = remoteThreadPosition{
+			id: "thread-" + strings.Repeat("z", index%31), index: index,
+		}
+	}
+	want := errors.New("cancel remote thread position sort")
+	polls := 0
+	err := sortRemoteThreadPositionsCancellable(func() error {
+		polls++
+		if polls == 2 {
+			return want
+		}
+		return nil
+	}, positions)
+	if !errors.Is(err, want) {
+		t.Fatalf("position sort error = %v, want %v", err, want)
 	}
 }
 
