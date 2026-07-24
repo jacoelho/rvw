@@ -13,6 +13,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/jacoelho/rvw/internal/delivery"
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 	"github.com/jacoelho/rvw/internal/source"
 )
@@ -258,8 +259,8 @@ type Model struct {
 }
 
 type pendingKeyChord struct {
-	context    KeyContext
-	focus      KeyFocus
+	context    keymap.Context
+	focus      keymap.Focus
 	strokes    []string
 	generation uint64
 }
@@ -871,7 +872,10 @@ func (model *Model) applyForegroundEffect(effect foregroundEffect) {
 
 func (model *Model) operationSummary() string {
 	stats := model.coordinatorStats
-	return "work " + strconv.Itoa(stats.Accepted) + "/" + strconv.Itoa(MaxAcceptedOperations)
+	if stats.Accepted == 0 {
+		return "Ready"
+	}
+	return "Working " + strconv.Itoa(stats.Accepted)
 }
 
 func (model *Model) refreshCoordinatorStats() {

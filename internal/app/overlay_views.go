@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 )
 
@@ -19,19 +20,22 @@ func (model *Model) minimumView(width, height int) string {
 		}
 	}
 	lines = append(lines, line)
-	controls := model.bindingSummary(KeyContextMinimumSize)
+	controls := model.bindingSummary(keymap.ContextMinimumSize)
 	lines = append(lines, controls)
 	return constrainedLines(lines, width, height)
 }
 
 func (model *Model) helpView(width, height int) string {
 	rendered := model.help.View(effectiveHelpKeyMap{
-		bindings: model.effectiveBindings(KeyContextNormal),
+		bindings: model.effectiveBindings(keymap.ContextNormal),
 		maxItems: max(height-4, 1),
 		offset:   model.helpTop,
 	})
-	lines := append([]string{"Effective help", ""}, strings.Split(rendered, "\n")...)
-	lines = append(lines, "", model.bindingSummary(KeyContextHelp))
+	lines := append(
+		[]string{"Keybindings · " + model.configFocus().String(), ""},
+		strings.Split(rendered, "\n")...,
+	)
+	lines = append(lines, "", model.bindingSummary(keymap.ContextHelp))
 	return constrainedStyledLines(lines, width, height)
 }
 
@@ -71,7 +75,7 @@ func (model *Model) statusView(width, height int) string {
 			lines = append(lines, fmt.Sprintf("%d older records retained", remaining))
 		}
 	}
-	lines = append(lines, "", model.bindingSummary(KeyContextStatusDetails))
+	lines = append(lines, "", model.bindingSummary(keymap.ContextStatusDetails))
 	return constrainedLines(lines, width, height)
 }
 
@@ -80,6 +84,8 @@ func (model *Model) statusFactLines() []string {
 	lines := []string{
 		"Status details",
 		"",
+		fmt.Sprintf("source revision      %d", model.review.Snapshot().SourceID().Uint64()),
+		fmt.Sprintf("workspace revision   %d", model.review.WorkspaceRevision().Uint64()),
 		fmt.Sprintf("accepted operations  %d/%d", stats.Accepted, MaxAcceptedOperations),
 		fmt.Sprintf("request bytes        %d/%d", stats.RequestBytes, MaxQueuedRequestBytes),
 		fmt.Sprintf("reserved results     %d/%d", stats.ReservedResult, MaxRetainedResultBytes),

@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 )
 
@@ -15,9 +16,9 @@ func TestDefaultFindShortcutsOpenTheirScopes(t *testing.T) {
 	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	settleModelWork(t, model, coordinator)
 	setModelKeybindings(t, model,
-		Keybinding{Context: KeyContextNormal, Chord: "/", Action: KeyActionSearch},
-		Keybinding{Context: KeyContextNormal, Chord: "g /", Action: KeyActionSearchVisible},
-		Keybinding{Context: KeyContextNormal, Chord: "Ctrl-p", Action: KeyActionFindFile},
+		keymap.Binding{Context: keymap.ContextNormal, Chord: "/", Action: keymap.ActionSearch},
+		keymap.Binding{Context: keymap.ContextNormal, Chord: "g /", Action: keymap.ActionSearchVisible},
+		keymap.Binding{Context: keymap.ContextNormal, Chord: "ctrl-p", Action: keymap.ActionFindFile},
 	)
 
 	_, _ = model.Update(keyMessage("/"))

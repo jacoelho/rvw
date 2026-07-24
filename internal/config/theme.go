@@ -57,6 +57,14 @@ var namedColors = stringSet[string](
 	"lightmagenta", "lightcyan", "white",
 )
 
+func stringSet[T ~string](values ...T) map[T]bool {
+	result := make(map[T]bool, len(values))
+	for _, value := range values {
+		result[value] = true
+	}
+	return result
+}
+
 func resolveThemes(config *Config, environment map[string]string) error {
 	config.themes = make(map[ThemeName]Theme)
 	active := config.ui.Theme

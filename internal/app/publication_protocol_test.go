@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 	"github.com/jacoelho/rvw/internal/source"
 )
@@ -41,10 +42,10 @@ func TestPublicationCheckReadyAndCancellation(t *testing.T) {
 func TestEnterDuringPublicationCheckSubmitsWhenPreflightIsReady(t *testing.T) {
 	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	settleModelWork(t, model, coordinator)
-	setModelKeybindings(t, model, Keybinding{
-		Context: KeyContextSubmit,
+	setModelKeybindings(t, model, keymap.Binding{
+		Context: keymap.ContextSubmit,
 		Chord:   "enter",
-		Action:  KeyActionSubmitReview,
+		Action:  keymap.ActionSubmitReview,
 	})
 	id, result := beginTestPublicationCheck(t, model)
 	model.overlay = OverlaySubmit
@@ -80,16 +81,16 @@ func TestPublicationEventSelectorCyclesFinalGitHubActions(t *testing.T) {
 	if err != nil || options.Event() != review.PublicationEventDraft {
 		t.Fatalf("initial publication options = (%s, %v), want draft", options.Event(), err)
 	}
-	model.applyPublicationAction(KeyActionNextSubmitEvent)
+	model.applyPublicationAction(keymap.ActionNextSubmitEvent)
 	if model.publicationEvent != review.PublicationEventApprove ||
 		model.publicationEventSelector() != "Submit as (h/l): Comment  [Approve]  Request changes" {
 		t.Fatalf("next selector = %q (%s)", model.publicationEventSelector(), model.publicationEvent)
 	}
-	model.applyPublicationAction(KeyActionPreviousSubmitEvent)
+	model.applyPublicationAction(keymap.ActionPreviousSubmitEvent)
 	if model.publicationEvent != review.PublicationEventComment {
 		t.Fatalf("previous event = %s", model.publicationEvent)
 	}
-	model.applyPublicationAction(KeyActionPreviousSubmitEvent)
+	model.applyPublicationAction(keymap.ActionPreviousSubmitEvent)
 	if model.publicationEvent != review.PublicationEventRequestChanges {
 		t.Fatalf("wrapped event = %s", model.publicationEvent)
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/jacoelho/rvw/internal/app"
 	"github.com/jacoelho/rvw/internal/config"
 	"github.com/jacoelho/rvw/internal/delivery"
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/output"
 	"github.com/jacoelho/rvw/internal/review"
 	"github.com/jacoelho/rvw/internal/source"
@@ -380,34 +381,13 @@ func interactivePalette(resolved config.Config, activeTheme config.ThemeName) (a
 	return app.NewPalette(paletteValues)
 }
 
-func interactiveKeybindings(bindings []config.Keybinding) ([]app.Keybinding, error) {
-	keybindings := make([]app.Keybinding, 0, len(bindings))
+func interactiveKeybindings(bindings []config.Keybinding) ([]keymap.Binding, error) {
+	keybindings := make([]keymap.Binding, 0, len(bindings))
 	for index, binding := range bindings {
-		if binding.Unbind {
-			continue
+		if err := keymap.ValidateBinding(binding); err != nil {
+			return nil, fmt.Errorf("keybinding %d: %w", index+1, err)
 		}
-		contextName, err := app.NewKeyContext(binding.Context.String())
-		if err != nil {
-			return nil, fmt.Errorf("keybinding %d context: %w", index+1, err)
-		}
-		focus, err := app.NewKeyFocus(binding.Focus.String())
-		if err != nil {
-			return nil, fmt.Errorf("keybinding %d focus: %w", index+1, err)
-		}
-		chord, err := app.NewKeyChord(binding.Chord.String())
-		if err != nil {
-			return nil, fmt.Errorf("keybinding %d chord: %w", index+1, err)
-		}
-		action, err := app.NewKeyAction(binding.Action.String())
-		if err != nil {
-			return nil, fmt.Errorf("keybinding %d action: %w", index+1, err)
-		}
-		keybindings = append(keybindings, app.Keybinding{
-			Context: contextName,
-			Focus:   focus,
-			Chord:   chord,
-			Action:  action,
-		})
+		keybindings = append(keybindings, binding)
 	}
 	return keybindings, nil
 }

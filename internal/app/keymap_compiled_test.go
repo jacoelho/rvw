@@ -4,107 +4,109 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/jacoelho/rvw/internal/keymap"
 )
 
 var (
-	compiledActionSink     KeyAction
-	compiledBindingsSink   []Keybinding
+	compiledActionSink     keymap.Action
+	compiledBindingsSink   []keymap.Binding
 	compiledResolutionSink keyResolution
 	compiledStringSink     string
 )
 
-func setModelKeybindings(tb testing.TB, model *Model, bindings ...Keybinding) {
+func setModelKeybindings(tb testing.TB, model *Model, bindings ...keymap.Binding) {
 	tb.Helper()
-	keymap, err := compileKeybindings(bindings)
+	compiled, err := compileKeybindings(bindings)
 	if err != nil {
 		tb.Fatalf("compile keybindings: %v", err)
 	}
-	model.settings.keymap = keymap
+	model.settings.keymap = compiled
 }
 
 func TestCompiledKeybindingsPreserveOrderAndFocusOverrides(t *testing.T) {
-	raw := []Keybinding{
+	raw := []keymap.Binding{
 		{
-			Context: KeyContextNormal,
-			Chord:   keyReturn,
-			Action:  KeyActionMoveUp,
-		},
-		{
-			Context: KeyContextNormal,
-			Chord:   "b",
-			Action:  KeyActionMoveDown,
-		},
-		{
-			Context: KeyContextNormal,
-			Focus:   KeyFocusFileTree,
+			Context: keymap.ContextNormal,
 			Chord:   "enter",
-			Action:  KeyActionLast,
+			Action:  keymap.ActionMoveUp,
 		},
 		{
-			Context: KeyContextNormal,
-			Focus:   KeyFocusFileTree,
+			Context: keymap.ContextNormal,
+			Chord:   "b",
+			Action:  keymap.ActionMoveDown,
+		},
+		{
+			Context: keymap.ContextNormal,
+			Focus:   keymap.FocusFileTree,
+			Chord:   "enter",
+			Action:  keymap.ActionLast,
+		},
+		{
+			Context: keymap.ContextNormal,
+			Focus:   keymap.FocusFileTree,
 			Chord:   "c",
-			Action:  KeyActionActivate,
+			Action:  keymap.ActionActivate,
 		},
 	}
-	keymap, err := compileKeybindings(raw)
+	compiled, err := compileKeybindings(raw)
 	if err != nil {
 		t.Fatalf("compile keybindings: %v", err)
 	}
-	raw[0] = Keybinding{Context: KeyContextNormal, Chord: "x", Action: KeyActionQuit}
+	raw[0] = keymap.Binding{Context: keymap.ContextNormal, Chord: "x", Action: keymap.ActionQuit}
 
-	tree := keymap.effectiveBindings(KeyContextNormal, KeyFocusFileTree)
+	tree := compiled.effectiveBindings(keymap.ContextNormal, keymap.FocusFileTree)
 	if len(tree) != 3 ||
-		tree[0].Chord != "enter" || tree[0].Action != KeyActionLast ||
-		tree[1].Chord != "b" || tree[1].Action != KeyActionMoveDown ||
-		tree[2].Chord != "c" || tree[2].Action != KeyActionActivate {
+		tree[0].Chord != "enter" || tree[0].Action != keymap.ActionLast ||
+		tree[1].Chord != "b" || tree[1].Action != keymap.ActionMoveDown ||
+		tree[2].Chord != "c" || tree[2].Action != keymap.ActionActivate {
 		t.Fatalf("file-tree bindings = %#v", tree)
 	}
-	diff := keymap.effectiveBindings(KeyContextNormal, KeyFocusDiff)
+	diff := compiled.effectiveBindings(keymap.ContextNormal, keymap.FocusDiff)
 	if len(diff) != 2 ||
-		diff[0].Chord != KeyChord(keyReturn) || diff[0].Action != KeyActionMoveUp ||
-		diff[1].Chord != "b" || diff[1].Action != KeyActionMoveDown {
+		diff[0].Chord != "enter" || diff[0].Action != keymap.ActionMoveUp ||
+		diff[1].Chord != "b" || diff[1].Action != keymap.ActionMoveDown {
 		t.Fatalf("diff bindings = %#v", diff)
 	}
-	resolution := keymap.resolve(
-		KeyContextNormal,
-		KeyFocusFileTree,
+	resolution := compiled.resolve(
+		keymap.ContextNormal,
+		keymap.FocusFileTree,
 		[]string{"enter"},
 	)
-	if resolution.action != KeyActionLast || !resolution.exact() || resolution.prefix() {
+	if resolution.action != keymap.ActionLast || !resolution.exact() || resolution.prefix() {
 		t.Fatalf("focused enter = %q kind=%v", resolution.action, resolution.kind)
 	}
-	if summary := keymap.bindingSummary(KeyContextNormal, KeyFocusFileTree); !strings.HasPrefix(
+	if summary := compiled.bindingSummary(keymap.ContextNormal, keymap.FocusFileTree); !strings.HasPrefix(
 		summary,
-		"enter last  b move-down  c activate",
+		"Enter last row  b next row  c open",
 	) {
 		t.Fatalf("file-tree summary = %q", summary)
 	}
 }
 
 func TestCompiledKeybindingsBoundMaximumResolutionAndSummaries(t *testing.T) {
-	bindings := make([]Keybinding, maxKeybindings)
+	bindings := make([]keymap.Binding, keymap.MaxBindings)
 	for index := range bindings {
-		bindings[index] = Keybinding{
-			Context: KeyContextNormal,
-			Chord:   KeyChord(fmt.Sprintf("x-%04d", index)),
-			Action:  KeyActionMoveDown,
+		bindings[index] = keymap.Binding{
+			Context: keymap.ContextNormal,
+			Chord:   keymap.Chord(fmt.Sprintf("x-%04d", index)),
+			Action:  keymap.ActionMoveDown,
 		}
 	}
-	bindings[0].Chord, bindings[0].Action = "focus", KeyActionFocusNextPane
-	bindings[1].Chord, bindings[1].Action = "activate", KeyActionActivate
-	bindings[2].Chord, bindings[2].Action = "help", KeyActionHelp
-	bindings[3].Chord, bindings[3].Action = "quit", KeyActionQuit
-	bindings[4].Chord, bindings[4].Action = "g target", KeyActionMoveUp
+	bindings[0].Chord, bindings[0].Action = "focus", keymap.ActionFocusNextPane
+	bindings[1].Chord, bindings[1].Action = "activate", keymap.ActionActivate
+	bindings[2].Chord, bindings[2].Action = "help", keymap.ActionHelp
+	bindings[3].Chord, bindings[3].Action = "quit", keymap.ActionQuit
+	bindings[4].Chord, bindings[4].Action = "g target", keymap.ActionMoveUp
 
-	model := modelForKeyContext(KeyContextNormal)
+	model := modelForKeyContext(keymap.ContextNormal)
 	setModelKeybindings(t, model, bindings...)
 	target := []string{"x-4095"}
 	prefix := []string{"g"}
 	multi := []string{"g", "target"}
 
 	resolution := model.resolveAction(target)
-	if resolution.action != KeyActionMoveDown || !resolution.exact() || resolution.prefix() {
+	if resolution.action != keymap.ActionMoveDown || !resolution.exact() || resolution.prefix() {
 		t.Fatalf("maximum exact = %q kind=%v", resolution.action, resolution.kind)
 	}
 	resolution = model.resolveAction(prefix)
@@ -112,29 +114,34 @@ func TestCompiledKeybindingsBoundMaximumResolutionAndSummaries(t *testing.T) {
 		t.Fatalf("maximum prefix kind=%v", resolution.kind)
 	}
 	resolution = model.resolveAction(multi)
-	if resolution.action != KeyActionMoveUp || !resolution.exact() || resolution.prefix() {
+	if resolution.action != keymap.ActionMoveUp || !resolution.exact() || resolution.prefix() {
 		t.Fatalf("maximum multi = %q kind=%v", resolution.action, resolution.kind)
 	}
 	wantSummary := strings.Join([]string{
-		"focus " + string(KeyActionFocusNextPane),
-		"activate " + string(KeyActionActivate),
-		"help " + string(KeyActionHelp),
-		"quit " + string(KeyActionQuit),
+		"focus " + keymap.ActionFocusNextPane.Description(),
+		"activate " + keymap.ActionActivate.Description(),
+		"help " + keymap.ActionHelp.Description(),
+		"quit " + keymap.ActionQuit.Description(),
 	}, "  ")
-	if summary := model.bindingSummary(KeyContextNormal); summary != wantSummary {
+	if summary := model.bindingSummary(keymap.ContextNormal); summary != wantSummary {
 		t.Fatalf("binding summary = %q, want %q", summary, wantSummary)
 	}
-	if summary := model.normalStatusBindingSummary(); summary != wantSummary {
-		t.Fatalf("action summary = %q, want %q", summary, wantSummary)
+	wantStatusSummary := strings.Join([]string{
+		"x-0005 " + keymap.ActionMoveDown.Description(),
+		"focus " + keymap.ActionFocusNextPane.Description(),
+		"help " + keymap.ActionHelp.Description(),
+	}, "  ")
+	if summary := model.normalStatusBindingSummary(); summary != wantStatusSummary {
+		t.Fatalf("action summary = %q, want %q", summary, wantStatusSummary)
 	}
 
 	allocations := testing.AllocsPerRun(1_000, func() {
 		compiledResolutionSink = model.resolveAction(target)
 		compiledActionSink = compiledResolutionSink.action
 		compiledResolutionSink = model.resolveAction(prefix)
-		compiledStringSink = model.bindingSummary(KeyContextNormal)
+		compiledStringSink = model.bindingSummary(keymap.ContextNormal)
 		compiledStringSink = model.normalStatusBindingSummary()
-		compiledBindingsSink = model.effectiveBindings(KeyContextNormal)
+		compiledBindingsSink = model.effectiveBindings(keymap.ContextNormal)
 	})
 	if allocations != 0 {
 		t.Fatalf("compiled resolution and summaries allocate %.2f times", allocations)
@@ -142,14 +149,14 @@ func TestCompiledKeybindingsBoundMaximumResolutionAndSummaries(t *testing.T) {
 }
 
 func TestCompiledKeybindingsEnforceFixedRuntimeBounds(t *testing.T) {
-	tooMany := make([]Keybinding, maxKeybindings+1)
+	tooMany := make([]keymap.Binding, keymap.MaxBindings+1)
 	if _, err := compileKeybindings(tooMany); err == nil {
 		t.Fatal("keybinding count above the runtime maximum was accepted")
 	}
-	if _, err := compileKeybindings([]Keybinding{{
-		Context: KeyContextNormal,
+	if _, err := compileKeybindings([]keymap.Binding{{
+		Context: keymap.ContextNormal,
 		Chord:   "a b c d e",
-		Action:  KeyActionQuit,
+		Action:  keymap.ActionQuit,
 	}}); err == nil {
 		t.Fatal("five-stroke chord was accepted")
 	}

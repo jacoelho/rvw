@@ -6,6 +6,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/jacoelho/rvw/internal/delivery"
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 )
 
@@ -29,13 +30,13 @@ func (model *Model) openExportPicker(selection exportSelection) {
 	model.overlay = OverlayExport
 }
 
-func (model *Model) applyExportPickerAction(action KeyAction) {
+func (model *Model) applyExportPickerAction(action keymap.Action) {
 	switch action {
-	case KeyActionCancel, KeyActionInterrupt, KeyActionQuit:
+	case keymap.ActionCancel, keymap.ActionInterrupt, keymap.ActionQuit:
 		model.overlay = OverlayNone
-	case KeyActionToggleExportUnmap:
+	case keymap.ActionToggleExportUnmap:
 		model.toggleExportOption(review.ExportUnmappable)
-	case KeyActionExportSelected:
+	case keymap.ActionExportSelected:
 		selection := model.exportPicker
 		model.overlay = OverlayNone
 		model.startExport(selection)
@@ -117,7 +118,7 @@ func (model *Model) exportPickerView(width, height int) string {
 		"",
 		checked(review.ExportUnmappable) + " include unmappable comments",
 		"",
-		model.bindingSummary(KeyContextExportPicker),
+		model.bindingSummary(keymap.ContextExportPicker),
 	}, width, height)
 }
 

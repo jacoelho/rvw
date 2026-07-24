@@ -3,11 +3,11 @@ package app
 import (
 	"context"
 	"strconv"
-	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 )
 
@@ -18,12 +18,12 @@ func (model *Model) handleKey(message tea.KeyPressMsg) tea.Cmd {
 	}
 	if model.foreground.reloadIsPreparing() {
 		if action, consumed, command := model.resolveKeyStroke(stroke); consumed {
-			if action == KeyActionNone {
+			if action == keymap.ActionNone {
 				return command
 			}
 			repeat := model.takeRepeat(action)
-			if action == KeyActionQuit || action == KeyActionInterrupt ||
-				action == KeyActionCancel {
+			if action == keymap.ActionQuit || action == keymap.ActionInterrupt ||
+				action == keymap.ActionCancel {
 				return model.applyAction(action, repeat)
 			}
 		}
@@ -38,7 +38,7 @@ func (model *Model) handleKey(message tea.KeyPressMsg) tea.Cmd {
 		return nil
 	}
 	if action, consumed, command := model.resolveKeyStroke(stroke); consumed {
-		if action == KeyActionNone {
+		if action == keymap.ActionNone {
 			return command
 		}
 		return model.applyAction(action, model.takeRepeat(action))
@@ -50,9 +50,9 @@ func (model *Model) handleKey(message tea.KeyPressMsg) tea.Cmd {
 // resolveKeyStroke owns chord accumulation for every key context. A pending
 // prefix is consumed; when it fails to extend, the current stroke is retried as
 // the start of a new chord so modal text inputs receive only unbound strokes.
-func (model *Model) resolveKeyStroke(stroke keyStroke) (KeyAction, bool, tea.Cmd) {
+func (model *Model) resolveKeyStroke(stroke keyStroke) (keymap.Action, bool, tea.Cmd) {
 	if stroke.value == "" {
-		return KeyActionNone, false, nil
+		return keymap.ActionNone, false, nil
 	}
 	model.invalidateChordForOwnerChange()
 	resolution := model.resolveActionWithStroke(model.chord.strokes, stroke.value)
@@ -67,7 +67,7 @@ func (model *Model) resolveKeyStroke(stroke keyStroke) (KeyAction, bool, tea.Cmd
 			model.chord.focus = model.configFocus()
 		}
 		model.chord.generation++
-		return KeyActionNone, true,
+		return keymap.ActionNone, true,
 			chordTimeoutCmd(model.commandContext, model.chord.generation)
 	}
 	model.abandonChord()
@@ -80,10 +80,10 @@ func (model *Model) resolveKeyStroke(stroke keyStroke) (KeyAction, bool, tea.Cmd
 		model.chord.context = model.keyContext()
 		model.chord.focus = model.configFocus()
 		model.chord.generation++
-		return KeyActionNone, true,
+		return keymap.ActionNone, true,
 			chordTimeoutCmd(model.commandContext, model.chord.generation)
 	}
-	return KeyActionNone, false, nil
+	return keymap.ActionNone, false, nil
 }
 
 func keyStrokeFrom(message tea.KeyPressMsg) keyStroke {
@@ -93,9 +93,9 @@ func keyStrokeFrom(message tea.KeyPressMsg) keyStroke {
 	}
 }
 
-func keyRepeatAction(stroke keyStroke, action KeyAction) KeyAction {
+func keyRepeatAction(stroke keyStroke, action keymap.Action) keymap.Action {
 	if stroke.repeated && !actionAcceptsKeyRepeat(action) {
-		return KeyActionNone
+		return keymap.ActionNone
 	}
 	return action
 }
@@ -145,7 +145,7 @@ func (model *Model) acceptRepeatDigit(stroke string) bool {
 	return true
 }
 
-func (model *Model) takeRepeat(action KeyAction) int {
+func (model *Model) takeRepeat(action keymap.Action) int {
 	repeat := model.repeat
 	model.repeat = 0
 	if repeat == 0 || !repeatableAction(action) {
@@ -154,38 +154,38 @@ func (model *Model) takeRepeat(action KeyAction) int {
 	return int(repeat)
 }
 
-func repeatableAction(action KeyAction) bool {
+func repeatableAction(action keymap.Action) bool {
 	switch action {
-	case KeyActionFocusNextPane, KeyActionFocusPreviousPane,
-		KeyActionMoveUp, KeyActionMoveDown,
-		KeyActionPageUp, KeyActionPageDown,
-		KeyActionHalfPageUp, KeyActionHalfPageDown,
-		KeyActionNextFile, KeyActionPreviousFile,
-		KeyActionNextHunk, KeyActionPreviousHunk,
-		KeyActionNextComment, KeyActionPreviousComment,
-		KeyActionExtendUp, KeyActionExtendDown:
+	case keymap.ActionFocusNextPane, keymap.ActionFocusPreviousPane,
+		keymap.ActionMoveUp, keymap.ActionMoveDown,
+		keymap.ActionPageUp, keymap.ActionPageDown,
+		keymap.ActionHalfPageUp, keymap.ActionHalfPageDown,
+		keymap.ActionNextFile, keymap.ActionPreviousFile,
+		keymap.ActionNextHunk, keymap.ActionPreviousHunk,
+		keymap.ActionNextComment, keymap.ActionPreviousComment,
+		keymap.ActionExtendUp, keymap.ActionExtendDown:
 		return true
 	default:
 		return false
 	}
 }
 
-func actionAcceptsKeyRepeat(action KeyAction) bool {
+func actionAcceptsKeyRepeat(action keymap.Action) bool {
 	switch action {
-	case KeyActionFocusNextPane, KeyActionFocusPreviousPane,
-		KeyActionMoveUp, KeyActionMoveDown,
-		KeyActionScrollLeft, KeyActionScrollRight,
-		KeyActionPageUp, KeyActionPageDown,
-		KeyActionHalfPageUp, KeyActionHalfPageDown,
-		KeyActionNextFile, KeyActionPreviousFile,
-		KeyActionNextHunk, KeyActionPreviousHunk,
-		KeyActionNextComment, KeyActionPreviousComment,
-		KeyActionNextSearchHit, KeyActionPreviousSearchHit,
-		KeyActionExtendUp, KeyActionExtendDown,
-		KeyActionDeleteBackward, KeyActionInsertNewline,
-		KeyActionNextHelpPage, KeyActionPreviousHelpPage,
-		KeyActionHelpLineUp, KeyActionHelpLineDown,
-		KeyActionHelpPageUp, KeyActionHelpPageDown:
+	case keymap.ActionFocusNextPane, keymap.ActionFocusPreviousPane,
+		keymap.ActionMoveUp, keymap.ActionMoveDown,
+		keymap.ActionScrollLeft, keymap.ActionScrollRight,
+		keymap.ActionPageUp, keymap.ActionPageDown,
+		keymap.ActionHalfPageUp, keymap.ActionHalfPageDown,
+		keymap.ActionNextFile, keymap.ActionPreviousFile,
+		keymap.ActionNextHunk, keymap.ActionPreviousHunk,
+		keymap.ActionNextComment, keymap.ActionPreviousComment,
+		keymap.ActionNextSearchHit, keymap.ActionPreviousSearchHit,
+		keymap.ActionExtendUp, keymap.ActionExtendDown,
+		keymap.ActionDeleteBackward, keymap.ActionInsertNewline,
+		keymap.ActionNextHelpPage, keymap.ActionPreviousHelpPage,
+		keymap.ActionHelpLineUp, keymap.ActionHelpLineDown,
+		keymap.ActionHelpPageUp, keymap.ActionHelpPageDown:
 		return true
 	default:
 		return false
@@ -195,13 +195,13 @@ func actionAcceptsKeyRepeat(action KeyAction) bool {
 func (model *Model) handleCommentEditorKey(message tea.KeyPressMsg) tea.Cmd {
 	stroke := keyStrokeFrom(message)
 	if action, consumed, command := model.resolveKeyStroke(stroke); consumed {
-		if action == KeyActionNone {
+		if action == keymap.ActionNone {
 			return command
 		}
 		switch action {
-		case KeyActionDeleteBackward:
+		case keymap.ActionDeleteBackward:
 			return model.updateCommentEditor(tea.KeyPressMsg(tea.Key{Code: tea.KeyBackspace}))
-		case KeyActionInsertNewline:
+		case keymap.ActionInsertNewline:
 			return model.updateCommentEditor(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
 		default:
 			return model.applyAction(action, 1)
@@ -290,40 +290,40 @@ func (model *Model) resolveActionWithStroke(
 	return model.resolveAction(candidate[:len(strokes)+1])
 }
 
-func (model *Model) keyContext() KeyContext {
+func (model *Model) keyContext() keymap.Context {
 	if model.belowMinimum() {
-		return KeyContextMinimumSize
+		return keymap.ContextMinimumSize
 	}
 	if model.overlay == OverlayConfirm {
-		return KeyContextConfirm
+		return keymap.ContextConfirm
 	}
 	switch {
 	case model.mode == ModeVisual:
-		return KeyContextVisual
+		return keymap.ContextVisual
 	case model.mode == ModeCommentEdit:
-		return KeyContextCommentEdit
+		return keymap.ContextCommentEdit
 	case model.overlay == OverlayFind:
-		return KeyContextSearch
+		return keymap.ContextSearch
 	case model.mode == ModeCommand:
-		return KeyContextCommand
+		return keymap.ContextCommand
 	case model.overlay == OverlayHelp:
-		return KeyContextHelp
+		return keymap.ContextHelp
 	case model.overlay == OverlayStatus:
-		return KeyContextStatusDetails
+		return keymap.ContextStatusDetails
 	case model.overlay == OverlayExport:
-		return KeyContextExportPicker
+		return keymap.ContextExportPicker
 	case model.overlay == OverlaySubmit:
-		return KeyContextSubmit
+		return keymap.ContextSubmit
 	default:
-		return KeyContextNormal
+		return keymap.ContextNormal
 	}
 }
 
-func (model *Model) effectiveBindings(contextName KeyContext) []Keybinding {
+func (model *Model) effectiveBindings(contextName keymap.Context) []keymap.Binding {
 	return model.settings.keymap.effectiveBindings(contextName, model.configFocus())
 }
 
-func (model *Model) bindingSummary(contextName KeyContext) string {
+func (model *Model) bindingSummary(contextName keymap.Context) string {
 	return model.settings.keymap.bindingSummary(contextName, model.configFocus())
 }
 
@@ -349,20 +349,5 @@ func chordTimeoutCmd(ctx context.Context, generation uint64) tea.Cmd {
 }
 
 func normalizeStroke(value string) string {
-	if value == " " {
-		return "space"
-	}
-	value = strings.TrimSpace(value)
-	value = strings.ReplaceAll(value, "+", "-")
-	if len([]rune(value)) == 1 {
-		return value
-	}
-	switch strings.ToLower(value) {
-	case keyReturn:
-		return keyEnter
-	case "escape":
-		return keyEscape
-	default:
-		return strings.ToLower(value)
-	}
+	return keymap.NormalizeStroke(value)
 }

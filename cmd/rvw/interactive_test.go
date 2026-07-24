@@ -9,50 +9,8 @@ import (
 	"testing"
 
 	"github.com/jacoelho/rvw/internal/config"
+	"github.com/jacoelho/rvw/internal/keymap"
 )
-
-type acceptedKeybindingContext struct {
-	context string
-	actions []string
-}
-
-var acceptedKeybindingVocabulary = []acceptedKeybindingContext{
-	{context: "normal", actions: strings.Fields(`
-		quit interrupt focus-next-pane focus-previous-pane move-up move-down scroll-left scroll-right
-		first last page-up page-down half-page-up half-page-down next-file previous-file next-hunk
-		previous-hunk next-comment previous-comment next-search-hit previous-search-hit
-		comment-at-cursor file-comment summary-comment edit-comment delete-comment expand-context
-		toggle-file-reviewed toggle-hunk-reviewed activate accept toggle-wrap toggle-view align-top
-		align-center align-bottom toggle-directory expand-directory collapse-directory visual-line
-		visual-lines visual-hunk command filter help status-details search open-submit reload
-		copy-markdown export-markdown export-json toggle-file-panel toggle-comments toggle-hidden-files
-	`)},
-	{context: "visual", actions: strings.Fields(`
-		cancel interrupt move-up move-down page-up page-down extend-up extend-down comment-selection
-	`)},
-	{context: "comment-edit", actions: strings.Fields(`
-		cancel interrupt delete-backward save-comment insert-newline
-	`)},
-	{context: "search", actions: strings.Fields(`cancel interrupt accept delete-backward`)},
-	{context: "command", actions: strings.Fields(`cancel interrupt accept delete-backward`)},
-	{context: "help", actions: strings.Fields(`
-		cancel interrupt next-help-page previous-help-page help-line-up help-line-down help-page-up
-		help-page-down help-home help-end
-	`)},
-	{context: "status-details", actions: strings.Fields(`
-		cancel interrupt move-up move-down page-up page-down
-	`)},
-	{context: "confirm", actions: strings.Fields(`cancel interrupt confirm-yes confirm-no`)},
-	{context: "export-picker", actions: strings.Fields(`
-		cancel interrupt toggle-export-unmappable export-selected
-	`)},
-	{context: "submit-preflight", actions: strings.Fields(`
-		cancel interrupt submit-recheck toggle-stale-head-override toggle-submit-exclusion
-		toggle-submit-summary previous-submit-event next-submit-event submit-review
-		move-up move-down page-up page-down
-	`)},
-	{context: "minimum-size", actions: strings.Fields(`quit interrupt`)},
-}
 
 func TestInteractiveKeybindingBoundaryConvertsAcceptedVocabulary(t *testing.T) {
 	type expectedBinding struct {
@@ -65,25 +23,25 @@ func TestInteractiveKeybindingBoundaryConvertsAcceptedVocabulary(t *testing.T) {
 		contents strings.Builder
 		expected []expectedBinding
 	)
-	for _, vocabulary := range acceptedKeybindingVocabulary {
+	for _, context := range keymap.Contexts() {
 		focuses := []string{""}
-		if vocabulary.context == "normal" {
+		if context == keymap.ContextNormal {
 			focuses = append(focuses, "file-tree", "diff", "comments")
 		}
 		for _, focus := range focuses {
-			for _, action := range vocabulary.actions {
+			for _, action := range keymap.AllowedActions(context) {
 				chord := fmt.Sprintf("rvw-contract-%03d", len(expected))
 				contents.WriteString("[[ui.keybindings]]\n")
-				fmt.Fprintf(&contents, "context = %q\n", vocabulary.context)
+				fmt.Fprintf(&contents, "context = %q\n", context)
 				if focus != "" {
 					fmt.Fprintf(&contents, "focus = %q\n", focus)
 				}
 				fmt.Fprintf(&contents, "chord = %q\naction = %q\n\n", chord, action)
 				expected = append(expected, expectedBinding{
-					context: vocabulary.context,
+					context: context.String(),
 					focus:   focus,
 					chord:   chord,
-					action:  action,
+					action:  action.String(),
 				})
 			}
 		}
@@ -134,10 +92,21 @@ func TestInteractiveKeybindingsReportsInvalidBoundaryField(t *testing.T) {
 	_, err := interactiveKeybindings([]config.Keybinding{{
 		Context: "unknown",
 		Chord:   "x",
-		Action:  config.KeyActionQuit,
+		Action:  keymap.ActionQuit,
 	}})
-	if err == nil || !strings.Contains(err.Error(), "keybinding 1 context") {
+	if err == nil || !strings.Contains(err.Error(), "keybinding 1: keybinding context") {
 		t.Fatalf("interactiveKeybindings error = %v", err)
+	}
+}
+
+func TestInteractiveKeybindingsRejectsUnresolvedUnbind(t *testing.T) {
+	_, err := interactiveKeybindings([]config.Keybinding{{
+		Context: keymap.ContextNormal,
+		Chord:   "q",
+		Unbind:  true,
+	}})
+	if err == nil || !strings.Contains(err.Error(), "require context, chord, and action") {
+		t.Fatalf("interactiveKeybindings unresolved unbind error = %v", err)
 	}
 }
 

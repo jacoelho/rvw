@@ -12,6 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/jacoelho/rvw/internal/delivery"
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 	"github.com/jacoelho/rvw/internal/source"
 )
@@ -75,20 +76,20 @@ func newTestModel(tb testing.TB, changed map[string]string) (*Model, *Coordinato
 		SyntaxSelector:  syntaxSelector,
 		ExportTemplates: exportTemplates,
 		Publication:     publicationOptions,
-		Keybindings: []Keybinding{
-			{Context: KeyContextNormal, Chord: "q", Action: KeyActionQuit},
-			{Context: KeyContextNormal, Chord: "j", Action: KeyActionMoveDown},
-			{Context: KeyContextNormal, Chord: "enter", Action: KeyActionActivate},
-			{Context: KeyContextNormal, Chord: "c", Action: KeyActionCommentAtCursor},
-			{Context: KeyContextNormal, Chord: "M", Action: KeyActionExportMarkdown},
-			{Context: KeyContextNormal, Chord: "J", Action: KeyActionExportJSON},
-			{Context: KeyContextNormal, Chord: "?", Action: KeyActionHelp},
-			{Context: KeyContextCommentEdit, Chord: "ctrl-s", Action: KeyActionSaveComment},
-			{Context: KeyContextCommentEdit, Chord: "esc", Action: KeyActionCancel},
-			{Context: KeyContextHelp, Chord: "q", Action: KeyActionCancel},
-			{Context: KeyContextExportPicker, Chord: "enter", Action: KeyActionExportSelected},
-			{Context: KeyContextExportPicker, Chord: "esc", Action: KeyActionCancel},
-			{Context: KeyContextMinimumSize, Chord: "q", Action: KeyActionQuit},
+		Keybindings: []keymap.Binding{
+			{Context: keymap.ContextNormal, Chord: "q", Action: keymap.ActionQuit},
+			{Context: keymap.ContextNormal, Chord: "j", Action: keymap.ActionMoveDown},
+			{Context: keymap.ContextNormal, Chord: "enter", Action: keymap.ActionActivate},
+			{Context: keymap.ContextNormal, Chord: "c", Action: keymap.ActionCommentAtCursor},
+			{Context: keymap.ContextNormal, Chord: "M", Action: keymap.ActionExportMarkdown},
+			{Context: keymap.ContextNormal, Chord: "J", Action: keymap.ActionExportJSON},
+			{Context: keymap.ContextNormal, Chord: "?", Action: keymap.ActionHelp},
+			{Context: keymap.ContextCommentEdit, Chord: "ctrl-s", Action: keymap.ActionSaveComment},
+			{Context: keymap.ContextCommentEdit, Chord: "esc", Action: keymap.ActionCancel},
+			{Context: keymap.ContextHelp, Chord: "q", Action: keymap.ActionCancel},
+			{Context: keymap.ContextExportPicker, Chord: "enter", Action: keymap.ActionExportSelected},
+			{Context: keymap.ContextExportPicker, Chord: "esc", Action: keymap.ActionCancel},
+			{Context: keymap.ContextMinimumSize, Chord: "q", Action: keymap.ActionQuit},
 		},
 	})
 	if err != nil {

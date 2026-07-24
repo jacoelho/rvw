@@ -184,7 +184,7 @@ func (model *Model) workspaceView(
 			body[row] = styles.panel.Render(body[row])
 		}
 	}
-	title := model.titleLine(width, styles)
+	title := model.workspaceHeaderLine(layout, styles)
 	footer := model.statusLine(width, styles)
 	if model.settings.colorEnabled {
 		title = styles.panel.Render(title)
@@ -548,32 +548,60 @@ func newCommentEditorLayout(height int) commentEditorLayout {
 	}
 }
 
-func (model *Model) titleLine(width int, styles semanticStyles) string {
+func (model *Model) workspaceHeaderLine(layout workspaceLayout, styles semanticStyles) string {
 	activeText := "no active file"
 	if active, ok := model.review.ActiveFile(); ok {
 		if file, exists := model.review.Snapshot().File(active); exists {
 			activeText = file.DisplayPath()
 		}
 	}
-	focus := "diff"
-	switch {
-	case model.mode == ModeCommentEdit:
-		focus = "comment"
-	case model.mode == ModeCommand:
-		focus = KeyContextCommand.String()
-	case model.focus == FocusFileTree:
-		focus = "files"
-	case model.focus == FocusComments:
-		focus = "comments"
+	diffTitle := "DIFF · " + activeText
+	workspaceOwnsInput := model.mode == ModeNormal || model.mode == ModeVisual
+	switch model.mode {
+	case ModeCommentEdit:
+		diffTitle += " · COMMENT"
+	case ModeCommand:
+		diffTitle += " · COMMAND"
+	case ModeNormal, ModeVisual:
 	}
-	title := fmt.Sprintf(
-		"rvw  [focus:%s]  %s  [source:%d workspace:%d]",
-		focus,
-		activeText,
-		model.review.Snapshot().SourceID().Uint64(),
-		model.review.WorkspaceRevision().Uint64(),
-	)
-	return fitCellWidth(styles.heading.Render(safeAndClip(title, width)), width)
+	sections := make([]string, 0, 3)
+	if layout.treeWidth != 0 {
+		sections = append(sections, paneHeader(
+			fmt.Sprintf("FILES · %d", model.review.Snapshot().FileCount()),
+			layout.treeWidth,
+			workspaceOwnsInput && model.focus == FocusFileTree,
+			styles,
+		))
+	}
+	sections = append(sections, paneHeader(
+		diffTitle,
+		layout.diffWidth,
+		workspaceOwnsInput && model.focus == FocusDiff,
+		styles,
+	))
+	if layout.commentsWidth != 0 {
+		sections = append(sections, paneHeader(
+			fmt.Sprintf("COMMENTS · %d", model.commentRowCount()),
+			layout.commentsWidth,
+			workspaceOwnsInput && model.focus == FocusComments,
+			styles,
+		))
+	}
+	return strings.Join(sections, styles.muted.Render("│"))
+}
+
+func paneHeader(title string, width int, focused bool, styles semanticStyles) string {
+	if width <= 0 {
+		return ""
+	}
+	marker := "  "
+	style := styles.muted
+	if focused {
+		marker = styles.focused.Render("▌") + " "
+		style = styles.heading
+	}
+	titleWidth := max(width-lipgloss.Width(marker), 0)
+	return fitCellWidth(marker+style.Render(safeAndClip(title, titleWidth)), width)
 }
 
 func (model *Model) statusLine(width int, styles semanticStyles) string {

@@ -14,6 +14,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 )
 
@@ -269,32 +270,32 @@ func (model *Model) applyPendingFindRestore(file review.FileID) bool {
 func (model *Model) handleFindKey(message tea.KeyPressMsg) tea.Cmd {
 	stroke := keyStrokeFrom(message)
 	if action, consumed, command := model.resolveKeyStroke(stroke); consumed {
-		if action == KeyActionNone {
+		if action == keymap.ActionNone {
 			return command
 		}
 		switch action {
-		case KeyActionCancel, KeyActionInterrupt:
+		case keymap.ActionCancel, keymap.ActionInterrupt:
 			model.closeFind(findCloseCancel)
-		case KeyActionAccept:
+		case keymap.ActionAccept:
 			return model.acceptFind()
-		case KeyActionNextSearchScope:
+		case keymap.ActionNextSearchScope:
 			return model.switchFindScope(1)
-		case KeyActionPreviousSearchScope:
+		case keymap.ActionPreviousSearchScope:
 			return model.switchFindScope(-1)
-		case KeyActionMoveUp:
+		case keymap.ActionMoveUp:
 			model.moveFind(-1)
-		case KeyActionMoveDown:
+		case keymap.ActionMoveDown:
 			model.moveFind(1)
-		case KeyActionPageUp:
+		case keymap.ActionPageUp:
 			model.moveFind(-max(model.findResultRows(), 1))
-		case KeyActionPageDown:
+		case keymap.ActionPageDown:
 			model.moveFind(max(model.findResultRows(), 1))
-		case KeyActionDeleteBackward:
+		case keymap.ActionDeleteBackward:
 			message = tea.KeyPressMsg(tea.Key{Code: tea.KeyBackspace})
 		default:
 			return nil
 		}
-		if action != KeyActionDeleteBackward {
+		if action != keymap.ActionDeleteBackward {
 			return nil
 		}
 	}

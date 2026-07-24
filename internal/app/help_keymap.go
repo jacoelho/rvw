@@ -1,9 +1,12 @@
 package app
 
-import "charm.land/bubbles/v2/key"
+import (
+	"charm.land/bubbles/v2/key"
+	"github.com/jacoelho/rvw/internal/keymap"
+)
 
 type effectiveHelpKeyMap struct {
-	bindings []Keybinding
+	bindings []keymap.Binding
 	maxItems int
 	offset   int
 }
@@ -24,7 +27,7 @@ func (keyMap effectiveHelpKeyMap) bindingsFor(limit int) []key.Binding {
 	for _, binding := range keyMap.bindings[start:] {
 		bindings = append(bindings, key.NewBinding(
 			key.WithKeys(binding.Chord.String()),
-			key.WithHelp(binding.Chord.String(), binding.Action.String()),
+			key.WithHelp(binding.Chord.Display(), binding.Action.Description()),
 		))
 		if len(bindings) == limit {
 			break

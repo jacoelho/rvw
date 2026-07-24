@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 )
 
@@ -420,14 +421,14 @@ func (model *Model) focusVisible(owner FocusOwner) bool {
 	}
 }
 
-func (model *Model) configFocus() KeyFocus {
+func (model *Model) configFocus() keymap.Focus {
 	switch model.focus {
 	case FocusFileTree:
-		return KeyFocusFileTree
+		return keymap.FocusFileTree
 	case FocusComments:
-		return KeyFocusComments
+		return keymap.FocusComments
 	default:
-		return KeyFocusDiff
+		return keymap.FocusDiff
 	}
 }
 

@@ -49,7 +49,7 @@ func TestTerminalRenderingContract(t *testing.T) {
 					if example.minimum {
 						return strings.Contains(screen, example.ready)
 					}
-					return strings.Contains(screen, example.ready) && strings.Contains(screen, "work 0/64")
+					return strings.Contains(screen, example.ready) && strings.Contains(screen, "Ready")
 				})
 				golden.RequireEqual(t, screen)
 			})
@@ -69,7 +69,7 @@ func TestTerminalRenderingContract(t *testing.T) {
 			})
 			scenario.Then("the virtual terminal contains colored semantic cells", func(t testing.TB, w *world) {
 				w.pty.awaitScreen(t, "colored stable screen", func(screen string) bool {
-					return strings.Contains(screen, "staged contents") && strings.Contains(screen, "work 0/64")
+					return strings.Contains(screen, "staged contents") && strings.Contains(screen, "Ready")
 				})
 				if !w.pty.hasStyledCells() {
 					t.Fatalf("screen has no colored or emphasized cells\n%s", w.pty.diagnostics(t))
@@ -85,7 +85,7 @@ func TestTerminalRenderingContract(t *testing.T) {
 			})
 			scenario.Then("no mouse enable sequence is emitted", func(t testing.TB, w *world) {
 				w.pty.awaitScreen(t, "stable no-mouse screen", func(screen string) bool {
-					return strings.Contains(screen, "staged contents") && strings.Contains(screen, "work 0/64")
+					return strings.Contains(screen, "staged contents") && strings.Contains(screen, "Ready")
 				})
 				w.pty.send(t, "q")
 				w.pty.awaitExit(t)
@@ -119,7 +119,7 @@ func TestInteractiveSourceContract(t *testing.T) {
 			})
 			scenario.Then("the source is visible and terminal state is restored", func(t testing.TB, w *world) {
 				w.pty.awaitScreen(t, "source file", func(screen string) bool {
-					return strings.Contains(screen, example.want) && strings.Contains(screen, "work 0/64")
+					return strings.Contains(screen, example.want) && strings.Contains(screen, "Ready")
 				})
 				w.pty.send(t, "q")
 				w.pty.awaitExit(t)
@@ -311,7 +311,7 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 			scenario.Given("a stable worktree screen", launchStableWorktree())
 			scenario.When("help is opened and closed", func(t testing.TB, w *world) {
 				w.pty.send(t, "?")
-				screen := w.pty.awaitScreen(t, "help", containsScreen("Effective help"))
+				screen := w.pty.awaitScreen(t, "help", containsScreen("Keybindings"))
 				assertNoEscapedWidgetStyles(t, w, screen, "help")
 				w.pty.send(t, "q")
 				w.pty.awaitScreen(t, "workspace after help", containsScreen("staged contents"))
@@ -334,7 +334,7 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 			scenario.When("the command prompt opens help", func(t testing.TB, w *world) {
 				w.pty.send(t, ":")
 				screen := w.pty.awaitScreen(t, "command footer", func(screen string) bool {
-					return strings.Contains(screen, "[focus:command]") &&
+					return strings.Contains(screen, "DIFF · staged.txt · COMMAND") &&
 						strings.Contains(screen, "staged contents")
 				})
 				assertNoEscapedWidgetStyles(t, w, screen, "command prompt")
@@ -343,7 +343,7 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 					t.Fatalf("command input is not docked to the footer:\n%s", screen)
 				}
 				w.pty.send(t, "help\r")
-				w.pty.awaitScreen(t, "command-selected help", containsScreen("Effective help"))
+				w.pty.awaitScreen(t, "command-selected help", containsScreen("Keybindings"))
 				w.pty.send(t, "q")
 			})
 			scenario.Then("a clean quit restores the terminal", func(t testing.TB, w *world) {
@@ -370,7 +370,7 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 			scenario.Then("escape restores the file active before the preview", func(t testing.TB, w *world) {
 				w.pty.send(t, kittyEscape)
 				w.pty.awaitScreen(t, "restored staged file", func(screen string) bool {
-					return strings.Contains(screen, "[focus:diff]  staged.txt") &&
+					return strings.Contains(screen, "▌ DIFF · staged.txt") &&
 						strings.Contains(screen, "staged contents")
 				})
 			})
@@ -387,7 +387,7 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 			})
 			scenario.Then("accepted file navigation remains active", func(t testing.TB, w *world) {
 				w.pty.awaitScreen(t, "accepted untracked file", func(screen string) bool {
-					return strings.Contains(screen, "[focus:diff]  untracked.txt") &&
+					return strings.Contains(screen, "▌ DIFF · untracked.txt") &&
 						strings.Contains(screen, "untracked contents")
 				})
 			})
@@ -400,7 +400,7 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 			})
 			scenario.Then("the accepted file is restored and the terminal exits cleanly", func(t testing.TB, w *world) {
 				w.pty.awaitScreen(t, "restored accepted file", func(screen string) bool {
-					return strings.Contains(screen, "[focus:diff]  untracked.txt") &&
+					return strings.Contains(screen, "▌ DIFF · untracked.txt") &&
 						strings.Contains(screen, "untracked contents")
 				})
 				w.pty.send(t, "q")
@@ -423,7 +423,7 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 				w.pty.send(t, "gg")
 				w.pty.awaitScreen(t, "comment anchor before pane activation", unfocusedCommentAnchor)
 				w.pty.send(t, "\t")
-				w.pty.awaitScreen(t, "comments pane focus", containsScreen("[focus:comments]"))
+				w.pty.awaitScreen(t, "comments pane focus", containsScreen("▌ COMMENTS ·"))
 				w.pty.send(t, "\r")
 				w.pty.awaitScreen(t, "comments-pane activation line", focusedCommentAnchor)
 			})
@@ -532,10 +532,15 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 			})
 			scenario.Then("the replacement source is reconciled", func(t testing.TB, w *world) {
 				w.pty.awaitScreen(t, "reload completion", func(screen string) bool {
-					return strings.Contains(screen, "[source:2 workspace:2]") &&
-						strings.Contains(screen, "reloaded.txt") &&
-						strings.Contains(screen, "work 0/64")
+					return strings.Contains(screen, "reloaded.txt") &&
+						strings.Contains(screen, "Ready")
 				})
+				w.pty.send(t, xtermF2)
+				w.pty.awaitScreen(t, "reloaded status details", func(screen string) bool {
+					return strings.Contains(screen, "source revision      2") &&
+						strings.Contains(screen, "workspace revision   2")
+				})
+				w.pty.send(t, kittyEscape)
 				w.pty.send(t, "q")
 				w.pty.awaitExit(t)
 			})
@@ -568,7 +573,7 @@ func launchStableWorktreeAt(width, height int) bdd.Step[*world] {
 	return func(t testing.TB, w *world) {
 		w.launchPTY(t, width, height, "diff")
 		w.pty.awaitScreen(t, "stable worktree", func(screen string) bool {
-			return strings.Contains(screen, "staged contents") && strings.Contains(screen, "work 0/64")
+			return strings.Contains(screen, "staged contents") && strings.Contains(screen, "Ready")
 		})
 	}
 }
@@ -777,7 +782,7 @@ func launchCommentedPullRequest() bdd.Step[*world] {
 	return func(t testing.TB, w *world) {
 		w.launchPTY(t, 120, 24, "pr", "7", "--repo", "fixture/repository")
 		w.pty.awaitScreen(t, "pull request patch", func(screen string) bool {
-			return strings.Contains(screen, "reviewed.go") && strings.Contains(screen, "work 0/64")
+			return strings.Contains(screen, "reviewed.go") && strings.Contains(screen, "Ready")
 		})
 		saveLineComment("This should be published.")(t, w)
 	}

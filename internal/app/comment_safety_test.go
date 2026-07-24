@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 )
 
@@ -145,10 +146,10 @@ func TestModelRemainsUsableWithUnavailableUnsafePendingCapture(t *testing.T) {
 	} else if !strings.Contains(view, detail.String()) {
 		t.Fatalf("submit view omitted pending-review failure detail: %q", view)
 	}
-	setModelKeybindings(t, model, Keybinding{
-		Context: KeyContextSubmit,
-		Chord:   "F2",
-		Action:  KeyActionStatusDetails,
+	setModelKeybindings(t, model, keymap.Binding{
+		Context: keymap.ContextSubmit,
+		Chord:   "f2",
+		Action:  keymap.ActionStatusDetails,
 	})
 	_, _ = model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyF2}))
 	if model.overlay != OverlayStatus {

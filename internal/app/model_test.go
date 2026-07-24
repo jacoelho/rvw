@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/jacoelho/rvw/internal/delivery"
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 )
 
@@ -244,7 +245,7 @@ func TestExportPickerDefaultsAndTogglesUnmappableComments(t *testing.T) {
 		model.exportPicker.options.Has(review.ExportUnmappable) {
 		t.Fatalf("default picker = %#v", model.exportPicker)
 	}
-	model.applyExportPickerAction(KeyActionToggleExportUnmap)
+	model.applyExportPickerAction(keymap.ActionToggleExportUnmap)
 	if !model.exportPicker.options.Has(review.ExportUnmappable) {
 		t.Fatalf("toggled picker = %#v", model.exportPicker)
 	}
@@ -789,11 +790,11 @@ func TestEffectiveBindingsDriveRoutingAndVisibleHelp(t *testing.T) {
 		"a.txt": "changed\n",
 		"b.txt": "changed\n",
 	})
-	setModelKeybindings(t, model, Keybinding{
-		Context: KeyContextNormal,
-		Focus:   KeyFocusFileTree,
+	setModelKeybindings(t, model, keymap.Binding{
+		Context: keymap.ContextNormal,
+		Focus:   keymap.FocusFileTree,
 		Chord:   "j",
-		Action:  KeyActionLast,
+		Action:  keymap.ActionLast,
 	})
 	_, _ = model.Update(tea.WindowSizeMsg{Width: compactWidth, Height: 18})
 	model.focus = FocusFileTree
@@ -806,8 +807,8 @@ func TestEffectiveBindingsDriveRoutingAndVisibleHelp(t *testing.T) {
 
 	model.overlay = OverlayHelp
 	help := model.View().Content
-	if !strings.Contains(help, "j") || !strings.Contains(help, KeyActionLast.String()) ||
-		strings.Contains(help, KeyActionMoveDown.String()) {
+	if !strings.Contains(help, "j") || !strings.Contains(help, keymap.ActionLast.String()) ||
+		strings.Contains(help, keymap.ActionMoveDown.String()) {
 		t.Fatalf("help did not reflect focused override:\n%s", help)
 	}
 
@@ -896,11 +897,11 @@ func TestMouseActionForHiddenPaneDoesNotMutateInputOwnership(t *testing.T) {
 				t.Fatalf("click message type = %T", command())
 			}
 
-			setModelKeybindings(t, model, Keybinding{
-				Context: KeyContextNormal,
-				Focus:   KeyFocusDiff,
+			setModelKeybindings(t, model, keymap.Binding{
+				Context: keymap.ContextNormal,
+				Focus:   keymap.FocusDiff,
 				Chord:   "x t",
-				Action:  KeyActionToggleWrap,
+				Action:  keymap.ActionToggleWrap,
 			})
 			_, _ = model.Update(keyMessage("5"))
 			_, _ = model.Update(keyMessage("x"))

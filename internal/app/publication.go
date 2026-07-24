@@ -8,6 +8,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 )
 
@@ -414,10 +415,10 @@ func resolvePublicationOperation(
 	return next
 }
 
-func (model *Model) applyPublicationAction(action KeyAction) {
+func (model *Model) applyPublicationAction(action keymap.Action) {
 	summary := model.review.PublicationSummary()
 	switch action {
-	case KeyActionCancel, KeyActionInterrupt, KeyActionQuit:
+	case keymap.ActionCancel, keymap.ActionInterrupt, keymap.ActionQuit:
 		switch summary.Status {
 		case review.PublicationChecking, review.PublicationPublishing:
 			model.publicationIntent = publicationOperationIntentCancel
@@ -434,9 +435,9 @@ func (model *Model) applyPublicationAction(action KeyAction) {
 		default:
 			model.overlay = OverlayNone
 		}
-	case KeyActionStatusDetails:
+	case keymap.ActionStatusDetails:
 		model.overlay = OverlayStatus
-	case KeyActionSubmitReview:
+	case keymap.ActionSubmitReview:
 		switch summary.Status {
 		case review.PublicationChecking:
 			model.publicationIntent = publicationOperationIntentSubmit
@@ -448,46 +449,46 @@ func (model *Model) applyPublicationAction(action KeyAction) {
 			model.startPublication()
 		default:
 		}
-	case KeyActionSubmitRecheck:
+	case keymap.ActionSubmitRecheck:
 		if summary.Status == review.PublicationUnknown {
 			model.startReconciliation()
 		} else if model.publicationOperation == 0 {
 			model.restartPublicationCheck()
 		}
-	case KeyActionToggleStaleOverride:
+	case keymap.ActionToggleStaleOverride:
 		if model.publicationOperation == 0 {
 			model.publicationAllowStale = !model.publicationAllowStale
 			model.restartPublicationCheck()
 		}
-	case KeyActionToggleSubmitSummary:
+	case keymap.ActionToggleSubmitSummary:
 		if model.publicationOperation == 0 {
 			model.publicationMoveSummary = !model.publicationMoveSummary
 			model.restartPublicationCheck()
 		}
-	case KeyActionToggleSubmitExclude:
+	case keymap.ActionToggleSubmitExclude:
 		if model.publicationOperation == 0 {
 			model.togglePublicationExclusion()
 			model.restartPublicationCheck()
 		}
-	case KeyActionPreviousSubmitEvent:
+	case keymap.ActionPreviousSubmitEvent:
 		model.movePublicationEvent(-1)
-	case KeyActionNextSubmitEvent:
+	case keymap.ActionNextSubmitEvent:
 		model.movePublicationEvent(1)
-	case KeyActionMoveUp:
+	case keymap.ActionMoveUp:
 		model.publicationCursor = max(model.publicationCursor-1, 0)
 		model.publicationDetailTop = 0
-	case KeyActionMoveDown:
+	case keymap.ActionMoveDown:
 		model.publicationCursor = min(
 			model.publicationCursor+1,
 			model.review.CommentCount(),
 		)
 		model.publicationDetailTop = 0
-	case KeyActionPageUp:
+	case keymap.ActionPageUp:
 		model.publicationDetailTop = max(
 			model.publicationDetailTop-model.publicationDetailStep(),
 			0,
 		)
-	case KeyActionPageDown:
+	case keymap.ActionPageDown:
 		model.publicationDetailTop = min(
 			model.publicationDetailTop+model.publicationDetailStep(),
 			review.MaxPublicationBytes,
@@ -652,7 +653,7 @@ func (model *Model) publicationView(width, height int) string {
 	default:
 		lines = append(lines, "No publication preflight is active.")
 	}
-	lines = append(lines, model.bindingSummary(KeyContextSubmit))
+	lines = append(lines, model.bindingSummary(keymap.ContextSubmit))
 	return constrainedLines(lines, width, height)
 }
 

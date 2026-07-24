@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 )
 
@@ -59,7 +60,7 @@ func TestCommentEditorDockKeepsCodeVisibleWithoutEscapedWidgetStyles(t *testing.
 	if !strings.Contains(plain, "changed") {
 		t.Fatalf("comment editor hid the selected code:\n%s", plain)
 	}
-	if !strings.Contains(plain, "Comment ·") || !strings.Contains(plain, "[focus:comment]") {
+	if !strings.Contains(plain, "Comment ·") || !strings.Contains(plain, "DIFF · alpha.txt · COMMENT") {
 		t.Fatalf("comment editor omitted its visible focus state:\n%s", plain)
 	}
 	if strings.Contains(plain, "enter activate") || !strings.Contains(plain, "comment editor owns input") {
@@ -117,7 +118,7 @@ func TestCommandPromptUsesFocusedWorkspaceFooter(t *testing.T) {
 	if len(lines) != 24 {
 		t.Fatalf("command prompt rendered %d lines, want 24", len(lines))
 	}
-	if !strings.Contains(lines[0], "[focus:command]") ||
+	if !strings.Contains(lines[0], "DIFF · alpha.txt · COMMAND") ||
 		!strings.Contains(lines[0], "alpha.txt") {
 		t.Fatalf("command prompt hid or misidentified the workspace:\n%s", plain)
 	}
@@ -132,6 +133,40 @@ func TestCommandPromptUsesFocusedWorkspaceFooter(t *testing.T) {
 	}
 	if !strings.Contains(view.Content, "\x1b[") {
 		t.Fatalf("command footer discarded widget styling:\n%q", view.Content)
+	}
+}
+
+func TestWorkspaceHeadersIdentifyTheFocusedPaneWithoutChangingGeometry(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	_, _ = model.Update(tea.WindowSizeMsg{Width: normalWidth, Height: 24})
+
+	model.focus = FocusDiff
+	diffHeader := strings.Split(ansi.Strip(model.View().Content), "\n")[0]
+	if !strings.Contains(diffHeader, "  FILES · 1") ||
+		!strings.Contains(diffHeader, "▌ DIFF · alpha.txt") {
+		t.Fatalf("diff-focused header = %q", diffHeader)
+	}
+
+	model.focus = FocusFileTree
+	treeHeader := strings.Split(ansi.Strip(model.View().Content), "\n")[0]
+	if !strings.Contains(treeHeader, "▌ FILES · 1") ||
+		!strings.Contains(treeHeader, "  DIFF · alpha.txt") {
+		t.Fatalf("file-focused header = %q", treeHeader)
+	}
+	if lipgloss.Width(diffHeader) != normalWidth || lipgloss.Width(treeHeader) != normalWidth {
+		t.Fatalf(
+			"header widths = diff %d tree %d, want %d",
+			lipgloss.Width(diffHeader),
+			lipgloss.Width(treeHeader),
+			normalWidth,
+		)
+	}
+
+	model.mode = ModeVisual
+	model.focus = FocusDiff
+	visualHeader := strings.Split(ansi.Strip(model.View().Content), "\n")[0]
+	if !strings.Contains(visualHeader, "▌ DIFF · alpha.txt") {
+		t.Fatalf("visual-mode header = %q", visualHeader)
 	}
 }
 
@@ -336,8 +371,8 @@ func TestMinimumSizeRetainsPendingConfirmation(t *testing.T) {
 			model.overlay = OverlayConfirm
 
 			_, _ = model.Update(tea.WindowSizeMsg{Width: minimumWidth - 1, Height: minimumHeight})
-			if model.keyContext() != KeyContextMinimumSize {
-				t.Fatalf("key context = %q, want %q", model.keyContext(), KeyContextMinimumSize)
+			if model.keyContext() != keymap.ContextMinimumSize {
+				t.Fatalf("key context = %q, want %q", model.keyContext(), keymap.ContextMinimumSize)
 			}
 			if content := model.View().Content; !strings.Contains(content, "decision pending") ||
 				!strings.Contains(content, "resize to decide") || strings.Contains(content, "Confirmation") {
@@ -355,7 +390,7 @@ func TestMinimumSizeRetainsPendingConfirmation(t *testing.T) {
 			}
 
 			_, _ = model.Update(tea.WindowSizeMsg{Width: normalWidth, Height: 24})
-			if model.keyContext() != KeyContextConfirm || model.overlay != OverlayConfirm || model.confirmation != pending {
+			if model.keyContext() != keymap.ContextConfirm || model.overlay != OverlayConfirm || model.confirmation != pending {
 				t.Fatalf("resize did not restore confirmation: context=%q overlay=%v confirmation=%+v", model.keyContext(), model.overlay, model.confirmation)
 			}
 			if content := model.View().Content; !strings.Contains(content, "Confirmation") {
@@ -372,7 +407,7 @@ func TestConfirmedQuitPreservesLastViewUntilTerminalRestoration(t *testing.T) {
 	model.overlay = OverlayConfirm
 	before := model.View()
 
-	command := model.applyConfirmationAction(KeyActionConfirmYes)
+	command := model.applyConfirmationAction(keymap.ActionConfirmYes)
 	if command == nil {
 		t.Fatal("confirmed quit returned no command")
 	}

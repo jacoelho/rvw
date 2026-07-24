@@ -3,6 +3,7 @@ package app
 import (
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 )
 
@@ -72,12 +73,12 @@ func (model *Model) requestReload() {
 	model.startReload()
 }
 
-func (model *Model) applyConfirmationAction(action KeyAction) tea.Cmd {
+func (model *Model) applyConfirmationAction(action keymap.Action) tea.Cmd {
 	switch action {
-	case KeyActionCancel, KeyActionConfirmNo, KeyActionInterrupt:
+	case keymap.ActionCancel, keymap.ActionConfirmNo, keymap.ActionInterrupt:
 		model.confirmation = confirmation{}
 		model.overlay = OverlayNone
-	case KeyActionConfirmYes:
+	case keymap.ActionConfirmYes:
 		pending := model.confirmation
 		if pending.kind == confirmationQuit {
 			return model.quit()
@@ -111,7 +112,7 @@ func (model *Model) confirmationView(width, height int) string {
 		prompt = "Reload and discard review state that cannot be reconciled?"
 	}
 	return constrainedLines(
-		[]string{"Confirmation", "", prompt, "", model.bindingSummary(KeyContextConfirm)},
+		[]string{"Confirmation", "", prompt, "", model.bindingSummary(keymap.ContextConfirm)},
 		width,
 		height,
 	)
