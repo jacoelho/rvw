@@ -192,6 +192,71 @@ func TestSemanticStylesPreserveOptionalDiffBackgroundContract(t *testing.T) {
 	}
 }
 
+func TestSemanticTextStylesDoNotCompoundPaletteContrastWithFaint(t *testing.T) {
+	palette, err := NewPalette(map[PaletteRole]string{
+		PalettePanelBackground:  "#111111",
+		PalettePrimary:          "#ffffff",
+		PaletteSecondary:        "#dddddd",
+		PaletteDim:              "#bbbbbb",
+		PaletteDiffDelete:       "#ff7777",
+		PaletteSyntaxComment:    "#aaaaaa",
+		PaletteStatusBackground: "#222222",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, settings := range []Settings{
+		{colorEnabled: false},
+		{colorEnabled: true, palette: palette},
+	} {
+		styles := newSemanticStyles(settings)
+		for name, style := range map[string]lipgloss.Style{
+			"muted":       styles.muted,
+			"pane header": styles.paneHeader,
+			"gutter":      styles.gutter,
+			"metadata":    styles.metadata,
+			"pending":     styles.pending,
+			commentLabel:  styles.comment,
+		} {
+			if style.GetFaint() {
+				t.Fatalf("%s style compounds semantic contrast with terminal faint", name)
+			}
+		}
+	}
+}
+
+func TestWarningStyleInheritsStatusBackgroundUnlessExplicitlyOverridden(t *testing.T) {
+	for _, test := range []struct {
+		name              string
+		warningBackground string
+		wantBackground    string
+	}{
+		{name: "inherits status", wantBackground: "#112233"},
+		{name: "explicit override", warningBackground: "#445566", wantBackground: "#445566"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			values := map[PaletteRole]string{
+				PaletteStatusBackground:  "#112233",
+				PaletteWarningForeground: "#ffee00",
+			}
+			if test.warningBackground != "" {
+				values[PaletteWarningBackground] = test.warningBackground
+			}
+			palette, err := NewPalette(values)
+			if err != nil {
+				t.Fatal(err)
+			}
+			styles := newSemanticStyles(Settings{colorEnabled: true, palette: palette})
+			terminal := vt.NewEmulator(1, 1)
+			t.Cleanup(func() { _ = terminal.Close() })
+			if _, err := terminal.WriteString(styles.warning.Inherit(styles.status).Render("!")); err != nil {
+				t.Fatal(err)
+			}
+			assertVTCellStyle(t, terminal, 0, "#ffee00", test.wantBackground, 1)
+		})
+	}
+}
+
 func TestDiffCellStylesReachGutterSyntaxContentAndPaddingCells(t *testing.T) {
 	t.Run("color", func(t *testing.T) {
 		styles := semanticStyles{

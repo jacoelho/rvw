@@ -97,7 +97,7 @@ func TestCompiledKeybindingsBoundMaximumResolutionAndSummaries(t *testing.T) {
 	}
 	bindings[0].Chord, bindings[0].Action = "focus", keymap.ActionFocusNextPane
 	bindings[1].Chord, bindings[1].Action = "activate", keymap.ActionActivate
-	bindings[2].Chord, bindings[2].Action = "help", keymap.ActionHelp
+	bindings[2].Chord, bindings[2].Action = helpLabel, keymap.ActionHelp
 	bindings[3].Chord, bindings[3].Action = "quit", keymap.ActionQuit
 	bindings[4].Chord, bindings[4].Action = "g target", keymap.ActionMoveUp
 

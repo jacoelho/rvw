@@ -73,6 +73,30 @@ func TestEnterDuringPublicationCheckSubmitsWhenPreflightIsReady(t *testing.T) {
 	}
 }
 
+func TestPublicationCancellationCannotBeReversedBeforeCheckSettles(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	settleModelWork(t, model, coordinator)
+	id, result := beginTestPublicationCheck(t, model)
+	model.overlay = OverlaySubmit
+
+	model.applyPublicationAction(keymap.ActionCancel)
+	model.applyPublicationAction(keymap.ActionSubmitReview)
+	if model.publicationIntent != publicationOperationIntentCancel {
+		t.Fatalf("publication intent = %v, want monotonic cancellation", model.publicationIntent)
+	}
+	if controls := ansi.Strip(model.publicationView(40, 12)); strings.Contains(controls, "publish review") || !strings.Contains(controls, "Cancelling") {
+		t.Fatalf("cancelling publication exposed submission or hid state:\n%s", controls)
+	}
+
+	model.applyPublicationCheckOutcome(PublicationCheckOutcome{ID: id, Check: result})
+	if summary := model.review.PublicationSummary(); summary.Status != review.PublicationIdle {
+		t.Fatalf("publication summary after cancellation = %+v", summary)
+	}
+	if model.publicationOperation != 0 || model.overlay != OverlayNone {
+		t.Fatalf("publication UI after cancellation = operation %d overlay %v", model.publicationOperation, model.overlay)
+	}
+}
+
 func TestPublicationEventChoicesExposeAndCycleFinalGitHubActions(t *testing.T) {
 	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	settleModelWork(t, model, coordinator)
@@ -177,7 +201,7 @@ func TestPublicationChoiceAndPrimaryActionSurviveMinimumViewport(t *testing.T) {
 		t.Fatalf("publication view rows = %d, want 6:\n%s", len(lines), view)
 	}
 	for _, want := range []string{
-		"Comment",
+		publicationEventCommentLabel,
 		publicationEventApproveLabel,
 		publicationEventRequestChangesLabel,
 		"Enter publish review",

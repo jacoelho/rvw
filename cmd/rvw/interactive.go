@@ -339,11 +339,15 @@ func interactiveSettings(resolved config.Config) (app.Settings, error) {
 }
 
 func interactivePalette(resolved config.Config, activeTheme config.ThemeName) (app.Palette, error) {
-	paletteValues := make(map[app.PaletteRole]string)
 	theme, ok := resolved.Theme(activeTheme)
 	if !ok {
-		return app.NewPalette(paletteValues)
+		return app.NewPalette(nil)
 	}
+	return app.NewPalette(interactivePaletteValues(theme))
+}
+
+func interactivePaletteValues(theme config.Theme) map[app.PaletteRole]string {
+	paletteValues := make(map[app.PaletteRole]string)
 	roles := map[config.ThemeColor]app.PaletteRole{
 		"panel_bg":           app.PalettePanelBackground,
 		"fg_primary":         app.PalettePrimary,
@@ -378,7 +382,7 @@ func interactivePalette(resolved config.Config, activeTheme config.ThemeName) (a
 			paletteValues[role] = color
 		}
 	}
-	return app.NewPalette(paletteValues)
+	return paletteValues
 }
 
 func interactiveKeybindings(bindings []config.Keybinding) ([]keymap.Binding, error) {

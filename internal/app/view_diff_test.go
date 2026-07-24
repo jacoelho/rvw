@@ -9,8 +9,103 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 )
+
+func TestPatchRecoveryLineKeepsStateAndActionAheadOfDetail(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	for _, test := range []struct {
+		state string
+		width int
+	}{
+		{state: "Failed", width: 20},
+		{state: "Limited", width: 20},
+		{state: "Failed", width: 48},
+	} {
+		got := model.patchRecoveryLine(test.state, strings.Repeat("detail ", 20), test.width)
+		if lipgloss.Width(got) > test.width || !strings.Contains(got, test.state+"; Enter retry") {
+			t.Fatalf("recovery line width %d = %q", test.width, got)
+		}
+	}
+	setModelKeybindings(t, model,
+		keymap.Binding{
+			Context: keymap.ContextNormal,
+			Focus:   keymap.FocusDiff,
+			Chord:   "g r",
+			Action:  keymap.ActionActivate,
+		},
+		keymap.Binding{
+			Context: keymap.ContextNormal,
+			Focus:   keymap.FocusFileTree,
+			Chord:   "g r",
+			Action:  keymap.ActionToggleDirectory,
+		},
+		keymap.Binding{
+			Context: keymap.ContextNormal,
+			Focus:   keymap.FocusComments,
+			Chord:   "g r",
+			Action:  keymap.ActionEditComment,
+		},
+	)
+	if got := model.patchRecoveryLine("Failed", "detail", 48); !strings.Contains(got, "g r retry") {
+		t.Fatalf("remapped recovery = %q", got)
+	}
+	for _, focus := range []FocusOwner{FocusFileTree, FocusComments} {
+		model.focus = focus
+		got := model.patchRecoveryLine("Failed", "detail", 64)
+		if !strings.Contains(got, "focus diff, then g r retry") {
+			t.Fatalf("focus %d recovery = %q", focus, got)
+		}
+	}
+	model.focus = FocusDiff
+	model.mode = ModeVisual
+	if got := model.patchRecoveryLine("Failed", "detail", 72); !strings.Contains(
+		got,
+		"leave visual mode, then g r retry",
+	) {
+		t.Fatalf("visual-mode recovery = %q", got)
+	}
+	model.mode = ModeNormal
+	setModelKeybindings(t, model, keymap.Binding{
+		Context: keymap.ContextNormal,
+		Chord:   "?",
+		Action:  keymap.ActionHelp,
+	})
+	model.focus = FocusFileTree
+	if got := model.patchRecoveryLine("Failed", "detail", 48); !strings.Contains(got, "no retry") ||
+		strings.Contains(got, "focus diff") {
+		t.Fatalf("unbound recovery = %q", got)
+	}
+}
+
+func TestCancelledPatchUsesCompletedOutcomeLabel(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	active, ok := model.review.ActiveFile()
+	if !ok {
+		t.Fatal("missing active file")
+	}
+	waitForPatch(t, model, coordinator, active)
+	current := model.review.DropPatch(active)
+	pending, request, err := current.RequestPatch(active, review.WholeFileContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err = pending.ApplyPatch(review.PatchResult{
+		Workspace: request.Workspace,
+		Handle:    request.Handle,
+		Status:    review.PatchCancelled,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.review = current
+	lines, _ := model.diffLines(48, 4, newSemanticStyles(model.settings))
+	got := ansi.Strip(strings.Join(lines, "\n"))
+	if !strings.Contains(got, "Cancelled;") || strings.Contains(got, "Cancel;") {
+		t.Fatalf("cancelled patch = %q", got)
+	}
+}
 
 func TestSideBySidePatchStripsOnlyTheOwnedKindPrefix(t *testing.T) {
 	model, active := modelWithPreparedPatch(t,
@@ -254,6 +349,7 @@ func TestUnifiedMetadataAndSyntaxRetainTheirCellBases(t *testing.T) {
 		PalettePanelBackground:   "#111111",
 		PalettePrimary:           "#ffffff",
 		PaletteDim:               "#888888",
+		PaletteCursorBackground:  "#333333",
 		PaletteDiffAdd:           "#00ff00",
 		PaletteDiffAddBackground: "#002200",
 		PaletteSyntaxKeyword:     "#0000ff",
@@ -300,12 +396,22 @@ func TestUnifiedMetadataAndSyntaxRetainTheirCellBases(t *testing.T) {
 	}
 	metadataRow := rowIndex(t, rows, patchRowContaining(t, lines, "+++ b/alpha.txt"))
 	assertVTCellStyleAtRow(t, terminal, 8, metadataRow, "#ffffff", "#111111", 1)
-	assertVTCellStyleAtRow(t, terminal, width-1, metadataRow, "", "#111111", 0)
+	assertVTCellStyleAtRow(t, terminal, width-1, metadataRow, "#ffffff", "#111111", 0)
 
 	additionRow := rowIndex(t, rows, patchRowContaining(t, lines, "+func value"))
 	assertVTCellStyleAtRow(t, terminal, 9, additionRow, "#0000ff", "#002200", 1)
 	assertVTCellStyleAtRow(t, terminal, 14, additionRow, "#00ff00", "#002200", 0)
-	assertVTCellStyleAtRow(t, terminal, width-1, additionRow, "", "#002200", 0)
+	assertVTCellStyleAtRow(t, terminal, width-1, additionRow, "#ffffff", "#002200", 0)
+
+	model.diffCursor = patchRowContaining(t, lines, "+func value")
+	selected, selectedRows := model.diffLines(width, 20, newSemanticStyles(model.settings))
+	selectedTerminal := vt.NewEmulator(width, len(selected))
+	t.Cleanup(func() { _ = selectedTerminal.Close() })
+	if _, err := selectedTerminal.WriteString(strings.Join(selected, "\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	selectedAddition := rowIndex(t, selectedRows, model.diffCursor)
+	assertVTCellStyleAtRow(t, selectedTerminal, 9, selectedAddition, "#00ff00", "#333333", 1)
 }
 
 func TestUnifiedWrappedContinuationKeepsSemanticGutterBackground(t *testing.T) {

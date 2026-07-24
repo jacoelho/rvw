@@ -1,4 +1,4 @@
-FILES · 6                             │▌ DIFF · staged.txt                                                                                   │  COMMENTS · 0
+FILES · 3/6                           │▌ DIFF · staged.txt                                                                                   │  COMMENTS · 0
 › •  A staged.txt                       │▸       diff --git a/staged.txt b/staged.txt                                                          │No comments.
      M tracked.txt                      │        new file mode 100644                                                                          │
      A untracked.txt                    │        index 0000000..4480ae4                                                                        │
@@ -33,4 +33,4 @@ FILES · 6                             │▌ DIFF · staged.txt                
                                         │                                                                                                      │
                                         │                                                                                                      │
                                         │                                                                                                      │
-Ready  Down next row  c comment  Tab next pane  ? show keybindings
+Ready                                                                                                                                Down next row  c comment  Tab next pane  ? help

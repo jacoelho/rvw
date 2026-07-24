@@ -2,11 +2,13 @@ package app
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 )
 
@@ -15,7 +17,7 @@ const (
 	minimumHeight    = 6
 	compactWidth     = 80
 	normalWidth      = 120
-	wideWidth        = 180
+	wideWidth        = 160
 	maxRenderWidth   = 1_000
 	maxRenderHeight  = 300
 	viewportOverscan = 8
@@ -80,6 +82,17 @@ const (
 	paneHeaderFocused
 )
 
+var workspaceBindingLabels = map[keymap.Action]string{
+	keymap.ActionMoveDown:        "next row",
+	keymap.ActionCommentAtCursor: commentLabel,
+	keymap.ActionFileComment:     "file comment",
+	keymap.ActionEditComment:     "edit",
+	keymap.ActionFocusNextPane:   "next pane",
+	keymap.ActionNextFile:        "next",
+	keymap.ActionPreviousFile:    "prev",
+	keymap.ActionHelp:            helpLabel,
+}
+
 // View returns the receiver's view value.
 func (model *Model) View() tea.View {
 	width, height := model.renderSize()
@@ -133,13 +146,27 @@ func (model *Model) workspaceView(
 ) (string, mouseHitMap) {
 	styles := newSemanticStyles(model.settings)
 	bodyHeight := max(height-2, 1)
-	treeLines, treeRows := model.fileTreeLines(layout.treeWidth, bodyHeight, styles)
-	diffLines, diffRows := model.diffLines(layout.diffWidth, bodyHeight, styles)
-	commentLines, commentRows := model.commentLines(
-		layout.commentsWidth,
-		bodyHeight,
-		styles,
+	var (
+		treeLines    []string
+		treeRows     []treeNodeIdentity
+		diffLines    []string
+		diffRows     []uint32
+		commentLines []string
+		commentRows  []int
 	)
+	if layout.treeWidth != 0 {
+		treeLines, treeRows = model.fileTreeLines(layout.treeWidth, bodyHeight, styles)
+	}
+	if layout.diffWidth != 0 {
+		diffLines, diffRows = model.diffLines(layout.diffWidth, bodyHeight, styles)
+	}
+	if layout.commentsWidth != 0 {
+		commentLines, commentRows = model.commentLines(
+			layout.commentsWidth,
+			bodyHeight,
+			styles,
+		)
+	}
 	separator := styles.muted.Inherit(styles.panel).Render("│")
 
 	body := make([]string, bodyHeight)
@@ -159,10 +186,12 @@ func (model *Model) workspaceView(
 				fitStyledCellWidth(treeLine, layout.treeWidth, styles.panel),
 			)
 		}
-		sections = append(
-			sections,
-			fitStyledCellWidth(diffLine, layout.diffWidth, styles.panel),
-		)
+		if layout.diffWidth != 0 {
+			sections = append(
+				sections,
+				fitStyledCellWidth(diffLine, layout.diffWidth, styles.panel),
+			)
+		}
 		if layout.commentsWidth != 0 {
 			commentLine := ""
 			if row < len(commentLines) {
@@ -202,7 +231,7 @@ func (hits mouseHitMap) command(message tea.MouseMsg) tea.Cmd {
 	if hits.bodyHeight == 0 || mouse.Y < 1 || mouse.Y > hits.bodyHeight {
 		return nil
 	}
-	focus := FocusDiff
+	var focus FocusOwner
 	diffStart := 0
 	if hits.layout.treeWidth != 0 {
 		if mouse.X < hits.layout.treeWidth {
@@ -211,9 +240,19 @@ func (hits mouseHitMap) command(message tea.MouseMsg) tea.Cmd {
 			diffStart = hits.layout.treeWidth + 1
 		}
 	}
-	commentsStart := diffStart + hits.layout.diffWidth + 1
-	if hits.layout.commentsWidth != 0 && mouse.X >= commentsStart {
+	if focus == 0 && hits.layout.diffWidth != 0 {
+		focus = FocusDiff
+	}
+	commentsStart := diffStart + hits.layout.diffWidth
+	if hits.layout.diffWidth != 0 {
+		commentsStart++
+	}
+	if hits.layout.commentsWidth != 0 &&
+		(hits.layout.diffWidth == 0 || mouse.X >= commentsStart) {
 		focus = FocusComments
+	}
+	if focus == 0 {
+		return nil
 	}
 	action := mouseActionMsg{reviewState: hits.reviewState, focus: focus}
 	switch message.(type) {
@@ -234,7 +273,7 @@ func (hits mouseHitMap) command(message tea.MouseMsg) tea.Cmd {
 				action.diffLine = hits.diffRows[row]
 			}
 		case FocusComments:
-			if row < len(hits.commentRows) {
+			if row < len(hits.commentRows) && hits.commentRows[row] >= 0 {
 				action.target = mouseTargetComment
 				action.commentIndex = hits.commentRows[row]
 			}
@@ -292,8 +331,15 @@ func (model *Model) fileTreeLines(
 	styles semanticStyles,
 ) ([]string, []treeNodeIdentity) {
 	tree := model.currentFileTree()
-	if width == 0 || tree.empty() {
+	if width == 0 {
 		return nil, nil
+	}
+	if tree.empty() {
+		message := "No changed files."
+		if model.filterQuery != "" {
+			message = "No files match the filter."
+		}
+		return []string{styles.muted.Render(message)}, nil
 	}
 	window := tree.window(model.treeCursor, height, model.collapsedTree)
 	lines := make([]string, 0, len(window))
@@ -317,7 +363,7 @@ func (model *Model) fileTreeLines(
 		selected := node.identity == model.treeCursor
 		if selected {
 			cursor = "› "
-			if model.focus == FocusFileTree {
+			if model.workspaceOwnsInput() && model.focus == FocusFileTree {
 				cursor = "▸ "
 			}
 		}
@@ -435,7 +481,7 @@ func (model *Model) commentLines(
 		prefix := "  "
 		if index == cursor {
 			prefix = "› "
-			if model.focus == FocusComments {
+			if model.workspaceOwnsInput() && model.focus == FocusComments {
 				prefix = "▸ "
 			}
 		}
@@ -495,6 +541,15 @@ func (model *Model) commentLines(
 		}
 		lines = append(lines, line)
 		rows = append(rows, index)
+	}
+	remote := snapshot.RemoteThreadSummary()
+	if len(lines) < height && (remote.Status == review.RemoteThreadsUnavailable ||
+		remote.Status == review.RemoteThreadsLimited) {
+		lines = append(lines, styles.warning.Render(safeAndClip(
+			"Remote comments "+remote.Status.String()+": "+remote.Detail.String(),
+			width,
+		)))
+		rows = append(rows, -1)
 	}
 	return lines, rows
 }
@@ -590,6 +645,11 @@ func (model *Model) workspaceHeaderLine(layout workspaceLayout, styles semanticS
 	if active, ok := model.review.ActiveFile(); ok {
 		if file, exists := model.review.Snapshot().File(active); exists {
 			activeText = file.DisplayPath()
+			if layout.treeWidth == 0 {
+				if position, found := slices.BinarySearch(model.fileOrder, active); found && len(model.fileOrder) > 1 {
+					activeText = fmt.Sprintf("%d/%d · %s", position+1, len(model.fileOrder), activeText)
+				}
+			}
 		}
 	}
 	diffTitle := "DIFF · " + activeText
@@ -598,23 +658,33 @@ func (model *Model) workspaceHeaderLine(layout workspaceLayout, styles semanticS
 		diffTitle += " · COMMENT"
 	case ModeCommand:
 		diffTitle += " · COMMAND"
-	case ModeNormal, ModeVisual:
+	case ModeVisual:
+		diffTitle += " · VISUAL"
+	case ModeNormal:
 	}
 	sections := make([]string, 0, 3)
 	if layout.treeWidth != 0 {
+		visibleFiles := len(model.fileOrder)
+		totalFiles := model.review.Snapshot().FileCount()
+		fileCount := fmt.Sprint(totalFiles)
+		if visibleFiles != totalFiles {
+			fileCount = fmt.Sprintf("%d/%d", visibleFiles, totalFiles)
+		}
 		sections = append(sections, paneHeader(
-			fmt.Sprintf("FILES · %d", model.review.Snapshot().FileCount()),
+			"FILES · "+fileCount,
 			layout.treeWidth,
 			model.workspacePaneHeaderState(FocusFileTree),
 			styles,
 		))
 	}
-	sections = append(sections, paneHeader(
-		diffTitle,
-		layout.diffWidth,
-		model.workspacePaneHeaderState(FocusDiff),
-		styles,
-	))
+	if layout.diffWidth != 0 {
+		sections = append(sections, paneHeader(
+			diffTitle,
+			layout.diffWidth,
+			model.workspacePaneHeaderState(FocusDiff),
+			styles,
+		))
+	}
 	if layout.commentsWidth != 0 {
 		sections = append(sections, paneHeader(
 			fmt.Sprintf("COMMENTS · %d", model.commentRowCount()),
@@ -627,10 +697,14 @@ func (model *Model) workspaceHeaderLine(layout workspaceLayout, styles semanticS
 }
 
 func (model *Model) workspacePaneHeaderState(focus FocusOwner) paneHeaderState {
-	if (model.mode == ModeNormal || model.mode == ModeVisual) && model.focus == focus {
+	if model.workspaceOwnsInput() && model.focus == focus {
 		return paneHeaderFocused
 	}
 	return paneHeaderQuiet
+}
+
+func (model *Model) workspaceOwnsInput() bool {
+	return model.overlay == OverlayNone && (model.mode == ModeNormal || model.mode == ModeVisual)
 }
 
 func paneHeader(
@@ -657,6 +731,7 @@ func paneHeader(
 func (model *Model) statusLine(width int, styles semanticStyles) string {
 	status := model.operationSummary()
 	_, height := model.renderSize()
+	layout := model.workspaceLayout(width, height)
 	if model.size.Width > maxRenderWidth || model.size.Height > maxRenderHeight {
 		status = fmt.Sprintf(
 			"presentation clipped to %d×%d  %s",
@@ -665,23 +740,33 @@ func (model *Model) statusLine(width int, styles semanticStyles) string {
 			status,
 		)
 	}
-	if model.workspaceLayout(width, height).sideBySideFallback {
+	if layout.sideBySideFallback {
 		status = "unified fallback: side-by-side needs 100 columns  " + status
 	}
 	if model.notice != nil {
-		status = string(model.notice.Text) + "  " + status
+		prefix := ""
+		switch model.notice.Kind {
+		case NoticeInformation:
+		case NoticeWarning:
+			prefix = "Warning: "
+		case NoticeError:
+			prefix = "Error: "
+		}
+		status = prefix + string(model.notice.Text) + "  " + status
 	}
-	status = safeAndClip(status, width)
 	if model.mode == ModeCommentEdit {
-		status += "  comment editor owns input"
+		status = safeAndClip(status+"  comment editor owns input", width)
 	} else {
-		available := max(width-lipgloss.Width(status)-2, 0)
+		bindingBudget := min(max(width/2, 0), 48)
 		bindings := bindingBar{
-			bindings: model.normalStatusBindings(),
-			base:     styles.status,
-		}.Render(available, styles)
+			bindings: model.workspaceStatusBindings(layout),
+			labels:   workspaceBindingLabels,
+		}.RenderWithBase(bindingBudget, styles, styles.status)
 		if bindings != "" {
-			status += "  " + bindings
+			statusWidth := max(width-lipgloss.Width(bindings)-2, 0)
+			status = fitCellWidth(safeAndClip(status, statusWidth), statusWidth) + "  " + bindings
+		} else {
+			status = safeAndClip(status, width)
 		}
 	}
 	if model.notice != nil {
@@ -694,6 +779,52 @@ func (model *Model) statusLine(width int, styles semanticStyles) string {
 		}
 	}
 	return fitStyledCellWidth(status, width, styles.status)
+}
+
+func (model *Model) workspaceStatusBindings(layout workspaceLayout) []keymap.Binding {
+	if model.mode == ModeVisual {
+		return bindingsForActions(model.effectiveBindings(keymap.ContextVisual), []keymap.Action{
+			keymap.ActionExtendDown,
+			keymap.ActionCommentSelection,
+			keymap.ActionCancel,
+		})
+	}
+	if _, active := model.review.ActiveFile(); !active {
+		return bindingsForActions(model.effectiveBindings(keymap.ContextNormal), []keymap.Action{
+			keymap.ActionReload,
+			keymap.ActionHelp,
+		})
+	}
+	if layout.treeWidth != 0 || layout.commentsWidth != 0 {
+		if model.focus == FocusComments && !model.editableLocalCommentSelected() {
+			return bindingsForActions(model.effectiveBindings(keymap.ContextNormal), []keymap.Action{
+				keymap.ActionHelp,
+				keymap.ActionFocusNextPane,
+				keymap.ActionFileComment,
+			})
+		}
+		return model.normalStatusBindings()
+	}
+	if len(model.fileOrder) < 2 {
+		return bindingsForActions(model.effectiveBindings(keymap.ContextNormal), []keymap.Action{
+			keymap.ActionMoveDown,
+			keymap.ActionHelp,
+			keymap.ActionCommentAtCursor,
+		})
+	}
+	actions := make([]keymap.Action, 0, 4)
+	if active, ok := model.review.ActiveFile(); ok {
+		if position, found := slices.BinarySearch(model.fileOrder, active); found {
+			if position < len(model.fileOrder)-1 {
+				actions = append(actions, keymap.ActionNextFile)
+			}
+			if position > 0 {
+				actions = append(actions, keymap.ActionPreviousFile)
+			}
+		}
+	}
+	actions = append(actions, keymap.ActionHelp, keymap.ActionCommentAtCursor)
+	return bindingsForActions(model.effectiveBindings(keymap.ContextNormal), actions)
 }
 
 func (model *Model) renderSize() (int, int) {
@@ -715,6 +846,18 @@ func (model *Model) showFileTree() bool {
 	}
 	width, height := model.renderSize()
 	return model.workspaceLayout(width, height).treeWidth != 0
+}
+
+func (model *Model) currentWorkspaceLayout() workspaceLayout {
+	width, height := model.renderSize()
+	return model.workspaceLayout(width, height)
+}
+
+func (model *Model) showDiffPane() bool {
+	if !model.size.Known {
+		return false
+	}
+	return model.currentWorkspaceLayout().diffWidth != 0
 }
 
 func (model *Model) showCommentsPane() bool {
@@ -747,18 +890,34 @@ func separatorWidth(treeWidth, commentsWidth int) int {
 	return width
 }
 
-func constrainedLines(lines []string, width, height int) string {
-	lines = lines[:min(len(lines), height)]
-	for index := range lines {
-		lines[index] = safeAndClip(lines[index], width)
-	}
-	return constrainedStyledLines(lines, width, height)
-}
-
 func constrainedStyledLines(lines []string, width, height int) string {
 	lines = lines[:min(len(lines), height)]
 	for index := range lines {
 		lines[index] = fitCellWidth(lines[index], width)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func blockingSurface(
+	body, controls []string,
+	width, height int,
+	styles semanticStyles,
+) string {
+	if width <= 0 || height <= 0 {
+		return ""
+	}
+	controls = controls[:min(len(controls), height)]
+	bodyRows := max(height-len(controls), 0)
+	body = body[:min(len(body), bodyRows)]
+	lines := make([]string, 0, height)
+	for _, line := range body {
+		lines = append(lines, fitStyledCellWidth(line, width, styles.panel))
+	}
+	for len(lines) < bodyRows {
+		lines = append(lines, fitStyledCellWidth("", width, styles.panel))
+	}
+	for _, line := range controls {
+		lines = append(lines, fitStyledCellWidth(line, width, styles.panel))
 	}
 	return strings.Join(lines, "\n")
 }

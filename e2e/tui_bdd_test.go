@@ -36,7 +36,7 @@ func TestTerminalRenderingContract(t *testing.T) {
 		bdd.Case("normal", sizeExample{120, 24, "staged contents", false}),
 		bdd.Case("compact", sizeExample{80, 18, "staged contents", false}),
 		bdd.Case("narrow", sizeExample{48, 14, "staged contents", false}),
-		bdd.Case("below minimum", sizeExample{19, 5, "rvw needs at least", true}),
+		bdd.Case("below minimum", sizeExample{19, 5, "Resize to 20×6", true}),
 	}
 
 	bdd.Feature(t, "terminal rendering is reconstructed from a real PTY", newWorld, func(feature *bdd.Suite[*world]) {
@@ -184,7 +184,7 @@ func TestInteractiveSourceContract(t *testing.T) {
 			scenario.Given("the existing inline draft is edited", func(t testing.TB, w *world) {
 				w.launchPTY(t, 120, 24, "pr", "7", "--repo", "fixture/repository")
 				w.pty.awaitScreen(t, "pending source", containsScreen("reviewed.go"))
-				w.pty.send(t, "zc\tj")
+				w.pty.send(t, "zcj")
 				w.pty.awaitScreen(t, "selected inline draft", containsScreen("▸ [draft] reviewed.go:3"))
 				w.pty.send(t, "e")
 				w.pty.awaitScreen(t, "comment editor", containsScreen("Comment ·"))

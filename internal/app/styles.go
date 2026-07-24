@@ -68,9 +68,10 @@ type diffCellState struct {
 }
 
 type diffCellPresentation struct {
-	base    lipgloss.Style
-	gutter  lipgloss.Style
-	content lipgloss.Style
+	base           lipgloss.Style
+	gutter         lipgloss.Style
+	content        lipgloss.Style
+	suppressSyntax bool
 }
 
 func diffCellStyles(state diffCellState, styles semanticStyles) diffCellPresentation {
@@ -107,9 +108,10 @@ func diffCellStyles(state diffCellState, styles semanticStyles) diffCellPresenta
 	}
 	base := diffCellBase(state.selection, state.colorMode, accent, styles)
 	return diffCellPresentation{
-		base:    base,
-		gutter:  styles.gutter.Inherit(base),
-		content: content.Inherit(base),
+		base:           base,
+		gutter:         styles.gutter.Inherit(base),
+		content:        content.Inherit(base),
+		suppressSyntax: state.selection != diffCellNotSelected,
 	}
 }
 
@@ -147,13 +149,13 @@ func validDiffCellState(state diffCellState) bool {
 func newSemanticStyles(settings Settings) semanticStyles {
 	styles := semanticStyles{
 		heading:           lipgloss.NewStyle().Bold(true),
-		muted:             lipgloss.NewStyle().Faint(true),
+		muted:             lipgloss.NewStyle(),
 		focused:           lipgloss.NewStyle().Bold(true).Underline(true),
 		selected:          lipgloss.NewStyle().Reverse(true),
-		paneHeader:        lipgloss.NewStyle().Faint(true),
+		paneHeader:        lipgloss.NewStyle(),
 		focusedPaneHeader: lipgloss.NewStyle().Bold(true),
-		gutter:            lipgloss.NewStyle().Faint(true),
-		metadata:          lipgloss.NewStyle().Faint(true),
+		gutter:            lipgloss.NewStyle(),
+		metadata:          lipgloss.NewStyle(),
 		warning:           lipgloss.NewStyle().Bold(true),
 		failure:           lipgloss.NewStyle().Bold(true),
 	}
@@ -162,19 +164,19 @@ func newSemanticStyles(settings Settings) semanticStyles {
 		styles.deleted = lipgloss.NewStyle().Underline(true)
 		styles.hunk = lipgloss.NewStyle().Bold(true)
 		styles.context = lipgloss.NewStyle()
-		styles.pending = lipgloss.NewStyle().Faint(true)
+		styles.pending = lipgloss.NewStyle()
 		styles.reviewed = lipgloss.NewStyle().Bold(true)
 		styles.commentAnchor = lipgloss.NewStyle().Bold(true)
 		styles.keyword = lipgloss.NewStyle().Bold(true)
 		styles.literal = lipgloss.NewStyle().Underline(true)
-		styles.comment = lipgloss.NewStyle().Faint(true)
+		styles.comment = lipgloss.NewStyle()
 		styles.number = lipgloss.NewStyle().Bold(true)
 		return styles
 	}
 	palette := settings.palette
-	styles.panel = lipgloss.NewStyle().Background(
-		lipgloss.Color(palette.color(PalettePanelBackground, "")),
-	)
+	styles.panel = lipgloss.NewStyle().
+		Foreground(lipgloss.Color(palette.color(PalettePrimary, "15"))).
+		Background(lipgloss.Color(palette.color(PalettePanelBackground, "")))
 	styles.heading = styles.heading.Foreground(
 		lipgloss.Color(palette.color(PalettePrimary, "15")),
 	)
@@ -185,6 +187,7 @@ func newSemanticStyles(settings Settings) semanticStyles {
 		lipgloss.Color(palette.color(PaletteFocused, "6")),
 	)
 	styles.selected = lipgloss.NewStyle().
+		Bold(true).
 		Foreground(lipgloss.Color(palette.color(PalettePrimary, "15"))).
 		Background(lipgloss.Color(palette.color(PaletteCursorBackground, "8")))
 	styles.paneHeader = lipgloss.NewStyle().Foreground(
@@ -228,17 +231,22 @@ func newSemanticStyles(settings Settings) semanticStyles {
 	styles.commentAnchor = lipgloss.NewStyle().Bold(true).Foreground(
 		lipgloss.Color(palette.color(PalettePrimary, "15")),
 	)
-	styles.warning = styles.warning.
-		Foreground(lipgloss.Color(palette.color(PaletteWarningForeground, "3"))).
-		Background(lipgloss.Color(palette.color(PaletteWarningBackground, "")))
-	styles.failure = styles.failure.Foreground(lipgloss.Red)
+	styles.warning = styles.warning.Foreground(
+		lipgloss.Color(palette.color(PaletteWarningForeground, "3")),
+	)
+	if background := palette.color(PaletteWarningBackground, ""); background != "" {
+		styles.warning = styles.warning.Background(lipgloss.Color(background))
+	}
+	styles.failure = styles.failure.Foreground(
+		lipgloss.Color(palette.color(PaletteDiffDelete, "1")),
+	)
 	styles.keyword = lipgloss.NewStyle().Bold(true).Foreground(
 		lipgloss.Color(palette.color(PaletteSyntaxKeyword, "5")),
 	)
 	styles.literal = lipgloss.NewStyle().Foreground(
 		lipgloss.Color(palette.color(PaletteSyntaxString, "2")),
 	)
-	styles.comment = lipgloss.NewStyle().Faint(true).Foreground(
+	styles.comment = lipgloss.NewStyle().Foreground(
 		lipgloss.Color(palette.color(PaletteSyntaxComment, "8")),
 	)
 	styles.number = lipgloss.NewStyle().Foreground(

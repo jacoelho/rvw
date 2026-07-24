@@ -110,16 +110,21 @@ func (model *Model) exportPickerView(width, height int) string {
 		}
 		return "[ ]"
 	}
-	return constrainedLines([]string{
-		"Export selection",
+	styles := newSemanticStyles(model.settings)
+	controls := model.modalBindingRows(
+		keymap.ContextExportPicker,
+		[]keymap.Action{keymap.ActionCancel, keymap.ActionExportSelected, keymap.ActionToggleExportUnmap},
+		width,
+		styles,
+	)
+	return blockingSurface([]string{
+		styles.heading.Render("Export selection"),
 		"",
 		"format       " + format,
 		"destination  " + destination,
 		"",
 		checked(review.ExportUnmappable) + " include unmappable comments",
-		"",
-		model.bindingSummary(keymap.ContextExportPicker),
-	}, width, height)
+	}, controls, width, height, styles)
 }
 
 func (model *Model) applyExportOutcome(outcome ExportOutcome) tea.Cmd {
@@ -220,10 +225,12 @@ func (model *Model) applyDeliveryOutcome(outcome DeliveryOutcome) {
 	delete(model.deliveryOperations, outcome.ID)
 	if outcome.Err != nil {
 		status := review.OperationFailed
+		notice := outcome.Err.Error()
 		if outcome.Outcome.State == delivery.CommitUnknown {
 			status = review.OperationUnknown
+			notice = "delivery outcome fenced; " + notice
 		}
-		model.notice = &Notice{Kind: NoticeError, Text: NoticeText(outcome.Err.Error())}
+		model.notice = &Notice{Kind: NoticeError, Text: NoticeText(notice)}
 		if err := model.settleOperation(
 			outcome.ID,
 			status,

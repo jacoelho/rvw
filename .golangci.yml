@@ -161,6 +161,7 @@ linters:
           allow:
             - $gostd
             - github.com/BurntSushi/toml$
+            - github.com/charmbracelet/x/ansi$
             - github.com/jacoelho/rvw/internal/keymap$
 
         delivery-production:

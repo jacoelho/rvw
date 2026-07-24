@@ -20,7 +20,7 @@ func TestCoordinatorDirectOutcomeFamiliesRetainUntilClaim(t *testing.T) {
 		name    string
 	}{
 		{name: "patch", outcome: func(id review.OperationID) Outcome { return PatchOutcome{ID: id} }},
-		{name: "search", outcome: func(id review.OperationID) Outcome { return SearchOutcome{ID: id} }},
+		{name: searchLabel, outcome: func(id review.OperationID) Outcome { return SearchOutcome{ID: id} }},
 		{name: "syntax", outcome: func(id review.OperationID) Outcome { return SyntaxOutcome{ID: id} }},
 		{
 			name: "publication check",
@@ -64,7 +64,7 @@ func TestCoordinatorDirectOutcomeFamiliesRetainUntilClaim(t *testing.T) {
 				return WorkspaceIndexOutcome{ID: id}
 			},
 		},
-		{name: "export", outcome: func(id review.OperationID) Outcome { return ExportOutcome{ID: id} }},
+		{name: exportLabel, outcome: func(id review.OperationID) Outcome { return ExportOutcome{ID: id} }},
 		{
 			name: "delivery",
 			outcome: func(id review.OperationID) Outcome {

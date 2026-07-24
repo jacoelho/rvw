@@ -4,13 +4,13 @@ import (
 	"fmt"
 	"strings"
 
+	"charm.land/bubbles/v2/help"
+
 	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 )
 
 func (model *Model) minimumView(width, height int) string {
-	line := "rvw needs at least 20×6; current " +
-		fmt.Sprintf("%d×%d", model.size.Width, model.size.Height)
 	lines := make([]string, 0, 4)
 	if model.overlay == OverlayConfirm {
 		if height == 1 {
@@ -19,32 +19,61 @@ func (model *Model) minimumView(width, height int) string {
 			lines = append(lines, "decision pending", "resize to decide")
 		}
 	}
-	lines = append(lines, line)
-	controls := model.bindingSummary(keymap.ContextMinimumSize)
-	lines = append(lines, controls)
-	return constrainedLines(lines, width, height)
-}
-
-func (model *Model) helpView(width, height int) string {
-	rendered := model.help.View(effectiveHelpKeyMap{
-		bindings: model.effectiveBindings(keymap.ContextNormal),
-		maxItems: max(height-4, 1),
-		offset:   model.helpTop,
-	})
-	lines := append(
-		[]string{"Keybindings · " + model.configFocus().String(), ""},
-		strings.Split(rendered, "\n")...,
+	lines = append(lines,
+		fmt.Sprintf("Resize to %d×%d", minimumWidth, minimumHeight),
+		fmt.Sprintf("Current %d×%d", model.size.Width, model.size.Height),
 	)
-	lines = append(lines, "", model.bindingSummary(keymap.ContextHelp))
+	bindings := bindingsForActions(
+		model.effectiveBindings(keymap.ContextMinimumSize),
+		[]keymap.Action{keymap.ActionQuit, keymap.ActionInterrupt},
+	)
+	lines = append(lines, bindingBar{bindings: bindings}.Render(width, newSemanticStyles(model.settings)))
 	return constrainedStyledLines(lines, width, height)
 }
 
+func (model *Model) helpView(width, height int) string {
+	styles := newSemanticStyles(model.settings)
+	controls := model.modalBindingRows(
+		keymap.ContextHelp,
+		[]keymap.Action{keymap.ActionCancel, keymap.ActionNextHelpPage, keymap.ActionPreviousHelpPage},
+		width,
+		styles,
+	)
+	helpModel := model.help
+	helpModel.Styles = help.Styles{
+		Ellipsis:       styles.muted,
+		ShortKey:       styles.heading,
+		ShortDesc:      styles.muted,
+		ShortSeparator: styles.muted,
+		FullKey:        styles.heading,
+		FullDesc:       styles.muted,
+		FullSeparator:  styles.muted,
+	}
+	rendered := helpModel.View(effectiveHelpKeyMap{
+		bindings: model.effectiveBindings(keymap.ContextNormal),
+		maxItems: max(height-len(controls)-2, 1),
+		offset:   model.helpTop,
+	})
+	lines := append(
+		[]string{styles.heading.Render("Keybindings · " + model.configFocus().String()), ""},
+		strings.Split(rendered, "\n")...,
+	)
+	return blockingSurface(lines, controls, width, height, styles)
+}
+
 func (model *Model) statusView(width, height int) string {
+	styles := newSemanticStyles(model.settings)
+	controls := model.modalBindingRows(
+		keymap.ContextStatusDetails,
+		[]keymap.Action{keymap.ActionCancel, keymap.ActionMoveDown, keymap.ActionPageDown},
+		width,
+		styles,
+	)
 	lines := model.statusFactLines()
 	operationCount := model.review.OperationCount()
 	if operationCount != 0 {
 		lines = append(lines, "", "Operations (newest first)")
-		available := model.statusOperationRows(height)
+		available := model.statusOperationRows(max(height-len(controls), 0))
 		offset := min(model.statusTop, max(operationCount-available, 0))
 		operations := model.review.NewestOperations(offset, available)
 		for _, operation := range operations {
@@ -75,8 +104,18 @@ func (model *Model) statusView(width, height int) string {
 			lines = append(lines, fmt.Sprintf("%d older records retained", remaining))
 		}
 	}
-	lines = append(lines, "", model.bindingSummary(keymap.ContextStatusDetails))
-	return constrainedLines(lines, width, height)
+	return blockingSurface(lines, controls, width, height, styles)
+}
+
+func (model *Model) modalBindingRows(
+	contextName keymap.Context,
+	actions []keymap.Action,
+	width int,
+	styles semanticStyles,
+) []string {
+	return bindingBar{
+		bindings: bindingsForActions(model.effectiveBindings(contextName), actions),
+	}.RenderRows(width, 2, styles, styles.panel)
 }
 
 func (model *Model) statusFactLines() []string {

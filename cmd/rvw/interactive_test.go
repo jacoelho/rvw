@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jacoelho/rvw/internal/app"
 	"github.com/jacoelho/rvw/internal/config"
 	"github.com/jacoelho/rvw/internal/keymap"
 )
@@ -85,6 +86,39 @@ func TestInteractiveKeybindingBoundaryConvertsAcceptedVocabulary(t *testing.T) {
 	}
 	if _, err := interactiveSettings(resolved); err != nil {
 		t.Fatalf("interactiveSettings rejected converted accepted vocabulary: %v", err)
+	}
+}
+
+func TestInteractivePaletteBridgesBundledSyntaxColors(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := config.LoadGlobal(config.LoadRequest{
+		CWD:         root,
+		Environment: []string{"HOME=" + home},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	theme, ok := resolved.Theme(resolved.ActiveTheme())
+	if !ok {
+		t.Fatal("active bundled theme is absent")
+	}
+	values := interactivePaletteValues(theme)
+	for syntaxRole, paletteRole := range map[config.SyntaxColor]app.PaletteRole{
+		config.SyntaxKeyword: app.PaletteSyntaxKeyword,
+		config.SyntaxString:  app.PaletteSyntaxString,
+		config.SyntaxComment: app.PaletteSyntaxComment,
+		config.SyntaxNumber:  app.PaletteSyntaxNumber,
+	} {
+		if got, want := values[paletteRole], theme.SyntaxColors[syntaxRole].String(); got == "" || got != want {
+			t.Fatalf("syntax %q palette value = %q, want %q", syntaxRole, got, want)
+		}
+	}
+	if _, err := interactivePalette(resolved, resolved.ActiveTheme()); err != nil {
+		t.Fatalf("final interactive palette: %v", err)
 	}
 }
 

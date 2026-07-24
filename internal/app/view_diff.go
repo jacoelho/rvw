@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rivo/uniseg"
 
+	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/review"
 )
 
@@ -129,15 +130,23 @@ func (model *Model) diffLines(
 	state := model.review.Patch(active)
 	switch state.Status {
 	case review.PatchUnavailable:
-		return []string{styles.muted.Render("Patch is not loaded. Press Enter to retry.")}, nil
+		return []string{styles.muted.Render(model.patchRecoveryLine(
+			"Not loaded", "", width,
+		))}, nil
 	case review.PatchPending:
 		return []string{styles.pending.Render("Loading patch…")}, nil
 	case review.PatchFailed:
-		return []string{styles.failure.Render("Patch failed: " + safeAndClip(state.Detail.String(), width-14))}, nil
+		return []string{styles.failure.Render(model.patchRecoveryLine(
+			"Failed", state.Detail.String(), width,
+		))}, nil
 	case review.PatchCancelled:
-		return []string{styles.warning.Render("Patch cancelled. Press Enter to retry.")}, nil
+		return []string{styles.warning.Render(model.patchRecoveryLine(
+			"Cancelled", "", width,
+		))}, nil
 	case review.PatchLimited:
-		return []string{styles.warning.Render("Patch limited: " + safeAndClip(state.Detail.String(), width-15))}, nil
+		return []string{styles.warning.Render(model.patchRecoveryLine(
+			"Limited", state.Detail.String(), width,
+		))}, nil
 	case review.PatchReady:
 	default:
 		return []string{styles.failure.Render("Invalid patch state.")}, nil
@@ -156,7 +165,7 @@ func (model *Model) diffLines(
 		cursor := cell.gutter.Render(" ")
 		if line.Number == model.diffCursor {
 			cursor = cell.gutter.Render("›")
-			if model.focus == FocusDiff {
+			if model.workspaceOwnsInput() && model.focus == FocusDiff {
 				cursor = styles.focused.Inherit(cell.base).Render("▸")
 			}
 		}
@@ -204,6 +213,37 @@ func (model *Model) diffLines(
 		return []string{styles.muted.Render("Empty patch.")}, nil
 	}
 	return rendered, rows
+}
+
+func (model *Model) patchRecoveryLine(state, detail string, width int) string {
+	retry := "no retry"
+	bindings := bindingsForActions(
+		model.settings.keymap.effectiveBindings(keymap.ContextNormal, keymap.FocusDiff),
+		[]keymap.Action{keymap.ActionActivate},
+	)
+	if len(bindings) != 0 {
+		steps := make([]string, 0, 3)
+		switch model.keyContext() {
+		case keymap.ContextNormal:
+		case keymap.ContextVisual:
+			steps = append(steps, "leave visual mode")
+		case keymap.ContextCommentEdit:
+			steps = append(steps, "leave comment editor")
+		default:
+			steps = append(steps, "return to workspace")
+		}
+		if model.focus != FocusDiff {
+			steps = append(steps, "focus diff")
+		}
+		steps = append(steps, bindings[0].Chord.Display()+" retry")
+		retry = strings.Join(steps, ", then ")
+	}
+	recovery := state + "; " + retry
+	recoveryWidth := lipgloss.Width(recovery)
+	if detail == "" || width <= recoveryWidth+2 {
+		return safeAndClip(recovery, width)
+	}
+	return recovery + ": " + safeAndClip(detail, width-recoveryWidth-2)
 }
 
 func (model *Model) renderUnifiedPatchLine(
@@ -264,13 +304,14 @@ func (model *Model) renderUnifiedPatchLine(
 		}
 	} else {
 		renderedContent = model.renderSyntaxContent(syntaxContent{
-			raw:       content,
-			spans:     model.syntaxSpans(line),
-			width:     contentWidth,
-			truncated: line.Truncated,
-			wrap:      model.settings.wrap,
-			styles:    styles,
-			cellStyle: cell.content,
+			raw:            content,
+			spans:          model.syntaxSpans(line),
+			width:          contentWidth,
+			truncated:      line.Truncated,
+			wrap:           model.settings.wrap,
+			styles:         styles,
+			cellStyle:      cell.content,
+			suppressSyntax: cell.suppressSyntax,
 		})
 	}
 	segments := model.wrappedLine(renderedContent, contentWidth)
@@ -329,7 +370,7 @@ func (model *Model) sideBySideDiffLines(
 		cursor := lineCell.gutter.Render(" ")
 		if line.Number == model.diffCursor {
 			cursor = lineCell.gutter.Render("›")
-			if model.focus == FocusDiff {
+			if model.workspaceOwnsInput() && model.focus == FocusDiff {
 				cursor = styles.focused.Inherit(lineCell.base).Render("▸")
 			}
 		}
@@ -453,13 +494,14 @@ func (model *Model) renderSidePatchLine(
 	content := ""
 	if hasSourceLine {
 		content = model.renderSyntaxContent(syntaxContent{
-			raw:       text,
-			spans:     spans,
-			width:     contentWidth,
-			truncated: line.Truncated,
-			wrap:      model.settings.wrap,
-			styles:    styles,
-			cellStyle: cell.content,
+			raw:            text,
+			spans:          spans,
+			width:          contentWidth,
+			truncated:      line.Truncated,
+			wrap:           model.settings.wrap,
+			styles:         styles,
+			cellStyle:      cell.content,
+			suppressSyntax: cell.suppressSyntax,
 		})
 	}
 	segments := model.wrappedLine(content, contentWidth)
@@ -518,13 +560,14 @@ func (model *Model) syntaxSpansForSide(
 }
 
 type syntaxContent struct {
-	styles    semanticStyles
-	cellStyle lipgloss.Style
-	spans     iter.Seq[review.SyntaxSpan]
-	raw       string
-	width     int
-	truncated bool
-	wrap      bool
+	styles         semanticStyles
+	cellStyle      lipgloss.Style
+	spans          iter.Seq[review.SyntaxSpan]
+	raw            string
+	width          int
+	truncated      bool
+	wrap           bool
+	suppressSyntax bool
 }
 
 func (model *Model) renderSyntaxContent(content syntaxContent) string {
@@ -547,7 +590,7 @@ func (model *Model) renderSyntaxContent(content syntaxContent) string {
 	}
 	sanitizer := terminalTextRenderer{}
 	var value string
-	if content.spans == nil {
+	if content.spans == nil || content.suppressSyntax {
 		value = content.cellStyle.Render(sanitizer.render(raw))
 	} else {
 		styled, spansLimited := renderSyntaxSpans(

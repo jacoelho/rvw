@@ -46,7 +46,7 @@ func (model *Model) requestCommentDelete() {
 	count := model.review.CommentCount()
 	if count == 0 || model.commentCursor >= count {
 		if model.commentCursor >= count && model.review.Snapshot().RemoteThreadCount() != 0 {
-			model.notice = &Notice{Kind: NoticeInformation, Text: "remote comments are read-only"}
+			model.notice = &Notice{Kind: NoticeInformation, Text: remoteCommentsReadOnly}
 		}
 		return
 	}
@@ -111,9 +111,18 @@ func (model *Model) confirmationView(width, height int) string {
 	case confirmationReload:
 		prompt = "Reload and discard review state that cannot be reconciled?"
 	}
-	return constrainedLines(
-		[]string{"Confirmation", "", prompt, "", model.bindingSummary(keymap.ContextConfirm)},
+	styles := newSemanticStyles(model.settings)
+	controls := model.modalBindingRows(
+		keymap.ContextConfirm,
+		[]keymap.Action{keymap.ActionCancel, keymap.ActionConfirmYes, keymap.ActionConfirmNo},
+		width,
+		styles,
+	)
+	return blockingSurface(
+		[]string{styles.heading.Render("Confirmation"), "", safeText(prompt)},
+		controls,
 		width,
 		height,
+		styles,
 	)
 }

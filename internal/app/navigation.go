@@ -290,16 +290,31 @@ func (model *Model) moveLast() {
 }
 
 func (model *Model) activateSelection() {
-	if model.focus == FocusComments {
+	switch model.focus {
+	case FocusComments:
 		model.activateCommentSelection()
 		return
-	}
-	if model.focus == FocusFileTree {
+	case FocusDiff:
+		active, ok := model.review.ActiveFile()
+		if !ok {
+			return
+		}
+		switch model.review.Patch(active).Status {
+		case review.PatchUnavailable, review.PatchFailed,
+			review.PatchCancelled, review.PatchLimited:
+			model.foreground.clearPendingDiffTarget()
+			model.requestActivePatch()
+		case review.PatchPending, review.PatchReady:
+		}
+		return
+	case FocusFileTree:
 		tree := model.currentFileTree()
 		if node, _, ok := tree.node(model.treeCursor); ok && node.identity.directory {
 			model.activateTreeNode()
 			return
 		}
+	default:
+		return
 	}
 	selected, ok := model.review.SelectedFile()
 	if !ok {
@@ -366,12 +381,18 @@ func (model *Model) applyDiffTarget(target pendingDiffTarget) {
 
 func (model *Model) cycleFocus(delta int) {
 	model.focusReturn = 0
-	owners := []FocusOwner{FocusDiff}
+	owners := make([]FocusOwner, 0, 3)
 	if model.showFileTree() {
-		owners = []FocusOwner{FocusFileTree, FocusDiff}
+		owners = append(owners, FocusFileTree)
+	}
+	if model.showDiffPane() {
+		owners = append(owners, FocusDiff)
 	}
 	if model.showCommentsPane() {
 		owners = append(owners, FocusComments)
+	}
+	if len(owners) == 0 {
+		return
 	}
 	index := 0
 	for position, owner := range owners {
@@ -386,15 +407,19 @@ func (model *Model) cycleFocus(delta int) {
 }
 
 func (model *Model) clampFocus() {
-	if model.focus == FocusFileTree && !model.showFileTree() ||
-		model.focus == FocusComments && !model.showCommentsPane() {
+	if !model.focusVisible(model.focus) {
 		model.focusReturn = model.focus
-		model.setFocus(FocusDiff)
+		switch {
+		case model.showDiffPane():
+			model.setFocus(FocusDiff)
+		case model.showFileTree():
+			model.setFocus(FocusFileTree)
+		case model.showCommentsPane():
+			model.setFocus(FocusComments)
+		}
 		return
 	}
-	if model.focus == FocusDiff &&
-		(model.focusReturn == FocusFileTree && model.showFileTree() ||
-			model.focusReturn == FocusComments && model.showCommentsPane()) {
+	if model.focusReturn != 0 && model.focusVisible(model.focusReturn) {
 		model.setFocus(model.focusReturn)
 		model.focusReturn = 0
 	}
@@ -413,7 +438,7 @@ func (model *Model) focusVisible(owner FocusOwner) bool {
 	case FocusFileTree:
 		return model.showFileTree()
 	case FocusDiff:
-		return true
+		return model.showDiffPane()
 	case FocusComments:
 		return model.showCommentsPane()
 	default:

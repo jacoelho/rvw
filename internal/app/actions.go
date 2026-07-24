@@ -164,6 +164,14 @@ func (model *Model) applyNavigationAction(action keymap.Action, repeat int) (tea
 }
 
 func (model *Model) applyReviewAction(action keymap.Action) (tea.Cmd, bool) {
+	if !model.reviewActionFocusAllowed(action) {
+		model.notice = &Notice{
+			Kind: NoticeInformation,
+			Text: NoticeText(action.Description() + " requires the " +
+				model.reviewActionFocusName(action) + " pane"),
+		}
+		return nil, true
+	}
 	switch action {
 	case keymap.ActionActivate, keymap.ActionAccept:
 		model.activateSelection()
@@ -180,8 +188,9 @@ func (model *Model) applyReviewAction(action keymap.Action) (tea.Cmd, bool) {
 	case keymap.ActionExpandContext:
 		model.expandPatchContext()
 	case keymap.ActionVisualLine, keymap.ActionVisualLines:
-		model.mode = ModeVisual
-		model.visualAnchor = model.diffCursor
+		if !model.beginVisualSelection() {
+			return nil, true
+		}
 	case keymap.ActionVisualHunk:
 		model.beginVisualHunk()
 	case keymap.ActionToggleFileReviewed:
@@ -196,6 +205,31 @@ func (model *Model) applyReviewAction(action keymap.Action) (tea.Cmd, bool) {
 		return nil, false
 	}
 	return nil, true
+}
+
+func (model *Model) reviewActionFocusAllowed(action keymap.Action) bool {
+	switch action {
+	case keymap.ActionCommentAtCursor,
+		keymap.ActionExpandContext,
+		keymap.ActionVisualLine,
+		keymap.ActionVisualLines,
+		keymap.ActionVisualHunk,
+		keymap.ActionToggleHunkReviewed:
+		return model.focus == FocusDiff
+	case keymap.ActionEditComment, keymap.ActionDeleteComment:
+		return model.focus == FocusComments
+	default:
+		return true
+	}
+}
+
+func (*Model) reviewActionFocusName(action keymap.Action) string {
+	switch action {
+	case keymap.ActionEditComment, keymap.ActionDeleteComment:
+		return "comments"
+	default:
+		return "diff"
+	}
 }
 
 func (model *Model) applyViewAction(action keymap.Action) (tea.Cmd, bool) {
@@ -231,14 +265,43 @@ func (model *Model) applyViewAction(action keymap.Action) (tea.Cmd, bool) {
 		}
 		model.selectFileOrder()
 	case keymap.ActionToggleComments:
-		model.commentsVisible = !model.commentsVisible
-		model.clampFocus()
+		layout := model.currentWorkspaceLayout()
+		if layout.commentsWidth != 0 {
+			if layout.paneCount() == 1 {
+				model.singlePaneOverride = 0
+			} else {
+				model.commentPaneVisibility = paneVisibilityHidden
+				model.singlePaneOverride = 0
+			}
+			model.clampFocus()
+		} else {
+			model.commentPaneVisibility = paneVisibilityShown
+			model.singlePaneOverride = 0
+			if model.currentWorkspaceLayout().commentsWidth == 0 {
+				model.singlePaneOverride = FocusComments
+			}
+			model.setFocus(FocusComments)
+		}
 	case keymap.ActionToggleFilePanel:
-		model.fileTreeVisible = !model.fileTreeVisible
-		model.clampFocus()
+		layout := model.currentWorkspaceLayout()
+		if layout.treeWidth != 0 {
+			if layout.paneCount() != 1 {
+				model.fileTreeVisible = false
+			}
+			model.singlePaneOverride = 0
+			model.clampFocus()
+		} else {
+			model.fileTreeVisible = true
+			model.singlePaneOverride = 0
+			if model.currentWorkspaceLayout().treeWidth == 0 {
+				model.singlePaneOverride = FocusFileTree
+			}
+			model.setFocus(FocusFileTree)
+		}
 	case keymap.ActionHelp:
 		model.overlay = OverlayHelp
 	case keymap.ActionStatusDetails:
+		model.statusReturn = OverlayNone
 		model.overlay = OverlayStatus
 	default:
 		return nil, false
@@ -451,7 +514,8 @@ func (model *Model) applyStatusAction(action keymap.Action, repeat int) {
 	page := max(model.statusOperationRows(height), 1)
 	switch action {
 	case keymap.ActionCancel, keymap.ActionInterrupt, keymap.ActionQuit:
-		model.overlay = OverlayNone
+		model.overlay = model.statusReturn
+		model.statusReturn = OverlayNone
 	case keymap.ActionMoveDown:
 		model.statusTop += repeat
 	case keymap.ActionMoveUp:

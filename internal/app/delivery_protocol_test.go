@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/jacoelho/rvw/internal/delivery"
@@ -61,6 +62,10 @@ func TestDeliveryOutcomeFencingAndSettlement(t *testing.T) {
 			}
 			if _, exists := model.deliveryOperations[id]; exists {
 				t.Fatal("settled delivery remained tracked")
+			}
+			if testCase.outcome.State == delivery.CommitUnknown &&
+				(model.notice == nil || !strings.Contains(string(model.notice.Text), "fenced")) {
+				t.Fatalf("unknown delivery notice = %+v", model.notice)
 			}
 			model.applyDeliveryOutcome(DeliveryOutcome{ID: id, Outcome: testCase.outcome})
 			if model.review.Operations()[id].Status != testCase.wantStatus {

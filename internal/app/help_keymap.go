@@ -11,11 +11,23 @@ import (
 const bindingBarMaximumItems = 4
 
 type bindingBar struct {
-	base     lipgloss.Style
+	labels   map[keymap.Action]string
 	bindings []keymap.Binding
 }
 
 func (bar bindingBar) Render(width int, styles semanticStyles) string {
+	return bar.render(width, styles, lipgloss.Style{})
+}
+
+func (bar bindingBar) RenderWithBase(
+	width int,
+	styles semanticStyles,
+	base lipgloss.Style,
+) string {
+	return bar.render(width, styles, base)
+}
+
+func (bar bindingBar) render(width int, styles semanticStyles, base lipgloss.Style) string {
 	if width <= 0 {
 		return ""
 	}
@@ -24,11 +36,9 @@ func (bar bindingBar) Render(width int, styles semanticStyles) string {
 	for _, binding := range bar.bindings[:min(len(bar.bindings), bindingBarMaximumItems)] {
 		separator := ""
 		if used != 0 {
-			separator = bar.base.Render("  ")
+			separator = base.Render("  ")
 		}
-		hint := styles.heading.Inherit(bar.base).Render(binding.Chord.Display()) +
-			bar.base.Render(" ") +
-			styles.muted.Inherit(bar.base).Render(binding.Action.Description())
+		hint := bar.renderBinding(binding, styles, base)
 		hintWidth := lipgloss.Width(separator + hint)
 		if used+hintWidth > width {
 			break
@@ -38,6 +48,61 @@ func (bar bindingBar) Render(width int, styles semanticStyles) string {
 		used += hintWidth
 	}
 	return rendered.String()
+}
+
+func (bar bindingBar) RenderRows(
+	width, maximumRows int,
+	styles semanticStyles,
+	base lipgloss.Style,
+) []string {
+	if width <= 0 || maximumRows <= 0 {
+		return nil
+	}
+	rows := make([]string, 0, maximumRows)
+	current := ""
+	currentWidth := 0
+	for _, binding := range bar.bindings[:min(len(bar.bindings), bindingBarMaximumItems)] {
+		hint := bar.renderBinding(binding, styles, base)
+		hintWidth := lipgloss.Width(hint)
+		if hintWidth > width {
+			continue
+		}
+		separator := ""
+		separatorWidth := 0
+		if currentWidth != 0 {
+			separator = base.Render("  ")
+			separatorWidth = 2
+		}
+		if currentWidth+separatorWidth+hintWidth > width {
+			rows = append(rows, current)
+			if len(rows) == maximumRows {
+				return rows
+			}
+			current = hint
+			currentWidth = hintWidth
+			continue
+		}
+		current += separator + hint
+		currentWidth += separatorWidth + hintWidth
+	}
+	if current != "" && len(rows) < maximumRows {
+		rows = append(rows, current)
+	}
+	return rows
+}
+
+func (bar bindingBar) renderBinding(
+	binding keymap.Binding,
+	styles semanticStyles,
+	base lipgloss.Style,
+) string {
+	label := binding.Action.Description()
+	if override := bar.labels[binding.Action]; override != "" {
+		label = override
+	}
+	return styles.heading.Inherit(base).Render(binding.Chord.Display()) +
+		base.Render(" ") +
+		styles.muted.Inherit(base).Render(label)
 }
 
 type effectiveHelpKeyMap struct {

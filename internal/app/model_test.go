@@ -930,9 +930,9 @@ func TestResponsiveLayoutUsesBothWidthAndHeightBoundaries(t *testing.T) {
 		width, height  int
 		tree, comments bool
 	}{
-		{width: 179, height: 30, tree: true, comments: false},
-		{width: 180, height: 29, tree: true, comments: false},
-		{width: 180, height: 30, tree: true, comments: true},
+		{width: wideWidth - 1, height: 30, tree: true, comments: false},
+		{width: wideWidth, height: 29, tree: true, comments: false},
+		{width: wideWidth, height: 30, tree: true, comments: true},
 		{width: 120, height: 24, tree: true, comments: false},
 		{width: 120, height: 23, tree: true, comments: false},
 		{width: 85, height: 18, tree: true, comments: false},
@@ -958,14 +958,74 @@ func TestResponsiveLayoutUsesBothWidthAndHeightBoundaries(t *testing.T) {
 		}
 	}
 
-	model.commentsVisible = true
+	model.commentPaneVisibility = paneVisibilityShown
 	layout := model.workspaceLayout(120, 24)
 	if layout.treeWidth < 24 || layout.commentsWidth < 32 || layout.diffWidth < 60 {
 		t.Fatalf("normal comments layout = %+v", layout)
 	}
 	model.settings.diffView = DiffViewSideBySide
 	if !model.workspaceLayout(120, 24).sideBySideFallback ||
-		model.workspaceLayout(180, 30).sideBySideFallback {
+		model.workspaceLayout(200, 30).sideBySideFallback {
 		t.Fatal("side-by-side fallback did not follow diff content width")
+	}
+}
+
+func TestCommentsToggleControlsWideLayoutAndRestoresFocus(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"a.txt": "changed\n"})
+	_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
+	model.focus = FocusComments
+	if !model.showCommentsPane() {
+		t.Fatal("wide layout did not initially show comments")
+	}
+
+	_, handled := model.applyViewAction(keymap.ActionToggleComments)
+	if !handled || model.showCommentsPane() || model.focus != FocusDiff {
+		t.Fatalf("hide comments = handled %v visible %v focus %v", handled, model.showCommentsPane(), model.focus)
+	}
+	_, handled = model.applyViewAction(keymap.ActionToggleComments)
+	if !handled || !model.showCommentsPane() {
+		t.Fatalf("show comments = handled %v visible %v", handled, model.showCommentsPane())
+	}
+
+	model.commentPaneVisibility = paneVisibilityAuto
+	_, _ = model.Update(tea.WindowSizeMsg{Width: compactWidth, Height: 18})
+	_, _ = model.applyViewAction(keymap.ActionToggleComments)
+	if model.commentPaneVisibility != paneVisibilityShown || !model.showCommentsPane() {
+		t.Fatalf("compact show intent = policy %v visible %v", model.commentPaneVisibility, model.showCommentsPane())
+	}
+	_, _ = model.applyViewAction(keymap.ActionToggleComments)
+	if model.commentPaneVisibility != paneVisibilityShown || model.showCommentsPane() {
+		t.Fatalf("compact hide = policy %v visible %v", model.commentPaneVisibility, model.showCommentsPane())
+	}
+}
+
+func TestNarrowPaneTogglesKeepSurfaceAndWidePreferenceConsistent(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"a.txt": "changed\n"})
+	_, _ = model.Update(tea.WindowSizeMsg{Width: 60, Height: 20})
+
+	_, _ = model.applyViewAction(keymap.ActionToggleComments)
+	if layout := model.currentWorkspaceLayout(); layout.commentsWidth == 0 ||
+		layout.diffWidth != 0 || model.commentPaneVisibility != paneVisibilityShown {
+		t.Fatalf("comments surface = %+v policy %v", layout, model.commentPaneVisibility)
+	}
+	_, _ = model.applyViewAction(keymap.ActionToggleFilePanel)
+	if layout := model.currentWorkspaceLayout(); layout.treeWidth == 0 ||
+		layout.diffWidth != 0 || model.commentPaneVisibility != paneVisibilityShown {
+		t.Fatalf("files surface = %+v comments policy %v", layout, model.commentPaneVisibility)
+	}
+	_, _ = model.applyViewAction(keymap.ActionToggleComments)
+	if layout := model.currentWorkspaceLayout(); layout.commentsWidth == 0 ||
+		layout.diffWidth != 0 || model.commentPaneVisibility == paneVisibilityHidden {
+		t.Fatalf("restored comments surface = %+v policy %v", layout, model.commentPaneVisibility)
+	}
+	_, _ = model.applyViewAction(keymap.ActionToggleComments)
+	if layout := model.currentWorkspaceLayout(); layout.diffWidth == 0 || layout.paneCount() != 1 {
+		t.Fatalf("restored diff surface = %+v", layout)
+	}
+
+	_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
+	if layout := model.currentWorkspaceLayout(); layout.treeWidth == 0 || layout.commentsWidth == 0 ||
+		layout.diffWidth == 0 {
+		t.Fatalf("wide preference restoration = %+v", layout)
 	}
 }

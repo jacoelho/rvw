@@ -34,6 +34,43 @@ func TestDefaultFindShortcutsOpenTheirScopes(t *testing.T) {
 	assertFindScope(t, model, findFiles)
 }
 
+func TestFindFooterUsesEffectiveBindings(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	settleModelWork(t, model, coordinator)
+	setModelKeybindings(t, model,
+		keymap.Binding{Context: keymap.ContextSearch, Chord: "ctrl-a", Action: keymap.ActionAccept},
+		keymap.Binding{Context: keymap.ContextSearch, Chord: "ctrl-x", Action: keymap.ActionCancel},
+		keymap.Binding{Context: keymap.ContextSearch, Chord: "ctrl-t", Action: keymap.ActionNextSearchScope},
+		keymap.Binding{Context: keymap.ContextSearch, Chord: "ctrl-n", Action: keymap.ActionMoveDown},
+	)
+	_ = model.openFind(findFiles)
+	_, _ = model.Update(tea.WindowSizeMsg{Width: compactWidth, Height: 18})
+
+	plain := ansi.Strip(model.View().Content)
+	for _, want := range []string{"Ctrl-X cancel", "Ctrl-A open file", "Ctrl-T next search scope"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("find footer omitted remapped binding %q:\n%s", want, plain)
+		}
+	}
+	if strings.Contains(plain, "Tab scope") || strings.Contains(plain, "Esc close") {
+		t.Fatalf("find footer retained hard-coded bindings:\n%s", plain)
+	}
+
+	_, _ = model.Update(tea.WindowSizeMsg{Width: minimumWidth, Height: minimumHeight})
+	plain = ansi.Strip(model.View().Content)
+	if !strings.Contains(plain, "Ctrl-X cancel") {
+		t.Fatalf("minimum find modal hid cancel:\n%s", plain)
+	}
+
+	model.closeFind(findCloseCancel)
+	_ = model.openFind(findCurrent)
+	_, _ = model.Update(tea.WindowSizeMsg{Width: compactWidth, Height: 18})
+	plain = ansi.Strip(model.View().Content)
+	if !strings.Contains(plain, "Ctrl-A search") {
+		t.Fatalf("prompt-stage find footer hid search action:\n%s", plain)
+	}
+}
+
 func TestOpenFindBorrowsImmutableSortedFileOrder(t *testing.T) {
 	model, coordinator := newTestModel(t, map[string]string{
 		"alpha.txt": "one\n",

@@ -172,7 +172,7 @@ func parseCommand(value string) (commandIntent, error) { //nolint:funlen // One 
 		return noArguments(commandToggleDiff)
 	case "copy":
 		return noArguments(commandCopy)
-	case "export":
+	case exportLabel:
 		return noArguments(commandExport)
 	case "json":
 		return noArguments(commandJSON)
@@ -182,7 +182,7 @@ func parseCommand(value string) (commandIntent, error) { //nolint:funlen // One 
 		return parseResolveDraftCommand(arguments)
 	case "ack-submit":
 		return noArguments(commandAcknowledgeSubmit)
-	case "help":
+	case helpLabel:
 		return noArguments(commandHelp)
 	case "filter":
 		return commandIntent{kind: commandFilter, text: arguments}, nil

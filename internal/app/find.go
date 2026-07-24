@@ -846,7 +846,7 @@ func newFindModalLayout(width, height int) findModalLayout {
 	layout.inputX = layout.x + border
 	layout.inputY = layout.y + border + 1
 	layout.resultY = layout.y + border + 3
-	layout.resultRows = max(layout.innerHeight-4, 1)
+	layout.resultRows = max(layout.innerHeight-5, 1)
 	return layout
 }
 
@@ -890,10 +890,21 @@ func (model *Model) findModalView(
 		}
 		lines = append(lines, fitCellWidth(line, innerWidth))
 	}
-	help := styles.muted.Render("Tab scope  ↑↓ preview  Enter select  Esc close")
-	lines = append(lines, fitCellWidth(help, innerWidth))
-	for len(lines) < layout.innerHeight {
+	actions := []keymap.Action{keymap.ActionCancel}
+	acceptLabel := model.findAcceptLabel()
+	if acceptLabel != "" {
+		actions = append(actions, keymap.ActionAccept)
+	}
+	actions = append(actions, keymap.ActionNextSearchScope, keymap.ActionMoveDown)
+	controls := bindingBar{
+		bindings: bindingsForActions(model.effectiveBindings(keymap.ContextSearch), actions),
+		labels:   map[keymap.Action]string{keymap.ActionAccept: acceptLabel},
+	}.RenderRows(innerWidth, 2, styles, styles.panel)
+	for len(lines)+len(controls) < layout.innerHeight {
 		lines = append(lines, strings.Repeat(" ", innerWidth))
+	}
+	for _, control := range controls {
+		lines = append(lines, fitStyledCellWidth(control, innerWidth, styles.panel))
 	}
 	content := strings.Join(lines[:layout.innerHeight], "\n")
 	modalStyle := styles.panel.Width(layout.innerWidth).Height(layout.innerHeight)
@@ -901,6 +912,23 @@ func (model *Model) findModalView(
 		modalStyle = modalStyle.Border(lipgloss.RoundedBorder())
 	}
 	return modalStyle.Render(content), layout, rows
+}
+
+func (model *Model) findAcceptLabel() string {
+	if model.find.phase == findSearching {
+		return ""
+	}
+	if model.find.scope == findFiles {
+		if model.find.phase == findReady && model.findResultCount() != 0 {
+			return "open file"
+		}
+		return ""
+	}
+	if model.find.phase == findReady && model.find.submittedQuery == model.searchInput.Value() &&
+		model.findResultCount() != 0 {
+		return "open result"
+	}
+	return searchLabel
 }
 
 func (model *Model) findResultLine(index, width int, styles semanticStyles) string {

@@ -15,7 +15,10 @@ import (
 	"github.com/jacoelho/rvw/internal/review"
 )
 
-const appScaleCommentCount = 512
+const (
+	appScaleCommentCount = 512
+	appScaleRenderWidth  = 180
+)
 
 var (
 	benchmarkScaleReview review.Review
@@ -78,6 +81,10 @@ func BenchmarkRenderReviewModesAtScale(b *testing.B) {
 			model, _ := appScaleModel(b)
 			model.settings.diffView = testCase.view
 			model.settings.wrap = testCase.wrap
+			if testCase.view == DiffViewSideBySide &&
+				model.currentWorkspaceLayout().sideBySideFallback {
+				b.Fatal("side-by-side scale benchmark fell back to unified rendering")
+			}
 			b.ReportAllocs()
 			b.ResetTimer()
 			for b.Loop() {
@@ -183,6 +190,7 @@ func TestActivatingFileDropsPriorLargePatchAtScale(t *testing.T) {
 		t.Fatal(err)
 	}
 	model.review = current
+	model.focus = FocusFileTree
 
 	model.activateSelection()
 
@@ -340,9 +348,9 @@ func appScaleModel(tb testing.TB) (*Model, *Coordinator) {
 	model.ambiguousPaths = index.AmbiguousPaths
 	model.collapsedTree = index.Collapsed
 	model.notice = nil
-	model.commentsVisible = true
+	model.commentPaneVisibility = paneVisibilityShown
 	model.focus = FocusDiff
-	model.size = TerminalSize{Width: wideWidth, Height: 30, Known: true}
+	model.size = TerminalSize{Width: appScaleRenderWidth, Height: 30, Known: true}
 	model.selectFileOrder()
 	return model, coordinator
 }

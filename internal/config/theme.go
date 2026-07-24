@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"image/color"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -13,13 +15,32 @@ import (
 	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
+	"github.com/charmbracelet/x/ansi"
 )
 
 const (
 	maxThemeBytes          int64 = 1 << 20
 	ansiBlack                    = "black"
+	ansiGray                     = "gray"
+	ansiWhite                    = "white"
 	gruvboxLightForeground       = "#ebdbb2"
 	gruvboxDarkBackground        = "#3c3836"
+
+	themePanelBackground        ThemeColor = "panel_bg"
+	themePrimaryForeground      ThemeColor = "fg_primary"
+	themeSecondaryForeground    ThemeColor = "fg_secondary"
+	themeDimForeground          ThemeColor = "fg_dim"
+	themeDiffAddition           ThemeColor = "diff_add"
+	themeDiffDeletion           ThemeColor = "diff_del"
+	themeDiffContext            ThemeColor = "diff_context"
+	themePending                ThemeColor = "pending"
+	themeFocusedBorder          ThemeColor = "border_focused"
+	themeStatusBackground       ThemeColor = "status_bar_bg"
+	themeCursorBackground       ThemeColor = "cursor_line_bg"
+	themeDiffAdditionBackground ThemeColor = "diff_add_bg"
+	themeDiffDeletionBackground ThemeColor = "diff_del_bg"
+	themeDiffHunkHeader         ThemeColor = "diff_hunk_header"
+	themeWarningForeground      ThemeColor = "message_warning_fg"
 )
 
 var curatedThemes = stringSet[ThemeName](
@@ -34,28 +55,28 @@ var embeddedSyntaxThemes = stringSet[ThemeName](
 )
 
 var requiredThemeColors = []ThemeColor{
-	"panel_bg",
-	"fg_primary",
-	"fg_secondary",
-	"fg_dim",
-	"diff_add",
-	"diff_del",
-	"diff_context",
-	"pending",
-	"border_focused",
-	"status_bar_bg",
-	"cursor_line_bg",
+	themePanelBackground,
+	themePrimaryForeground,
+	themeSecondaryForeground,
+	themeDimForeground,
+	themeDiffAddition,
+	themeDiffDeletion,
+	themeDiffContext,
+	themePending,
+	themeFocusedBorder,
+	themeStatusBackground,
+	themeCursorBackground,
 }
 
 var optionalThemeColors = stringSet[ThemeColor](
-	"diff_add_bg", "diff_del_bg", "diff_hunk_header", "file_modified", "file_renamed",
-	"branch_name", "message_warning_fg", "message_warning_bg",
+	themeDiffAdditionBackground, themeDiffDeletionBackground, themeDiffHunkHeader,
+	"file_modified", "file_renamed", "branch_name", themeWarningForeground, "message_warning_bg",
 )
 
 var namedColors = stringSet[string](
-	"reset", ansiBlack, "red", "green", "yellow", "blue", "magenta", "cyan", "gray", "grey",
+	"reset", ansiBlack, "red", "green", "yellow", "blue", "magenta", "cyan", ansiGray, "grey",
 	"darkgray", "darkgrey", "lightred", "lightgreen", "lightyellow", "lightblue",
-	"lightmagenta", "lightcyan", "white",
+	"lightmagenta", "lightcyan", ansiWhite,
 )
 
 func stringSet[T ~string](values ...T) map[T]bool {
@@ -138,31 +159,203 @@ func bundledTheme(name ThemeName, appearance Appearance) Theme {
 	}
 	palette := bundledPalette(paletteName, appearance)
 	colors := map[ThemeColor]Color{
-		"panel_bg":           Color(palette.background),
-		"fg_primary":         Color(palette.primary),
-		"fg_secondary":       Color(palette.secondary),
-		"fg_dim":             Color(palette.muted),
-		"diff_add":           Color(palette.addition),
-		"diff_del":           Color(palette.deletion),
-		"diff_context":       Color(palette.context),
-		"pending":            Color(palette.secondary),
-		"border_focused":     Color(palette.accent),
-		"status_bar_bg":      Color(palette.header),
-		"cursor_line_bg":     Color(palette.selected),
-		"diff_hunk_header":   Color(palette.accent),
-		"message_warning_fg": Color(palette.warning),
+		themePanelBackground:     Color(palette.background),
+		themePrimaryForeground:   Color(palette.primary),
+		themeSecondaryForeground: Color(palette.secondary),
+		themeDimForeground:       Color(palette.muted),
+		themeDiffAddition:        Color(palette.addition),
+		themeDiffDeletion:        Color(palette.deletion),
+		themeDiffContext:         Color(palette.context),
+		themePending:             Color(palette.secondary),
+		themeFocusedBorder:       Color(palette.accent),
+		themeStatusBackground:    Color(palette.header),
+		themeCursorBackground:    Color(palette.selected),
+		themeDiffHunkHeader:      Color(palette.accent),
+		themeWarningForeground:   Color(palette.warning),
+	}
+	syntaxColors := map[SyntaxColor]Color{
+		SyntaxKeyword: Color(palette.accent),
+		SyntaxString:  Color(palette.addition),
+		SyntaxComment: Color(palette.muted),
+		SyntaxNumber:  Color(palette.accent),
 	}
 	if background, ok := subtleDiffBackground(palette.background, palette.addition); ok {
-		colors["diff_add_bg"] = background
+		colors[themeDiffAdditionBackground] = background
 	}
 	if background, ok := subtleDiffBackground(palette.background, palette.deletion); ok {
-		colors["diff_del_bg"] = background
+		colors[themeDiffDeletionBackground] = background
 	}
+	enforceBundledContrast(colors, syntaxColors, appearance)
 	return Theme{
-		Name:        name,
-		SyntaxTheme: SyntaxThemePath(selector.String()),
-		Colors:      colors,
+		Name:         name,
+		SyntaxTheme:  SyntaxThemePath(selector.String()),
+		Colors:       colors,
+		SyntaxColors: syntaxColors,
 	}
+}
+
+const minimumTextContrast = 4.5
+
+func enforceBundledContrast(
+	colors map[ThemeColor]Color,
+	syntaxColors map[SyntaxColor]Color,
+	appearance Appearance,
+) {
+	panel := themePanelBackground
+	status := themeStatusBackground
+	selection := themeCursorBackground
+	addition := themeDiffAdditionBackground
+	deletion := themeDiffDeletionBackground
+	for _, role := range []ThemeColor{panel, status, selection, addition, deletion} {
+		if value, exists := colors[role]; exists {
+			colors[role] = contrastSafeBackground(value, appearance)
+		}
+	}
+	rules := []struct {
+		role        ThemeColor
+		backgrounds []ThemeColor
+	}{
+		{role: themePrimaryForeground, backgrounds: []ThemeColor{panel, status, selection, addition, deletion}},
+		{role: themeSecondaryForeground, backgrounds: []ThemeColor{panel, status}},
+		{role: themeDimForeground, backgrounds: []ThemeColor{panel, status, selection, addition, deletion}},
+		{role: themeDiffAddition, backgrounds: []ThemeColor{panel, selection, addition}},
+		{role: themeDiffDeletion, backgrounds: []ThemeColor{panel, status, selection, deletion}},
+		{role: themeDiffContext, backgrounds: []ThemeColor{panel, selection}},
+		{role: themePending, backgrounds: []ThemeColor{panel}},
+		{role: themeFocusedBorder, backgrounds: []ThemeColor{panel, status, selection}},
+		{role: themeDiffHunkHeader, backgrounds: []ThemeColor{panel, status, selection}},
+		{role: themeWarningForeground, backgrounds: []ThemeColor{panel, status}},
+	}
+	for _, rule := range rules {
+		role := rule.role
+		value, exists := colors[role]
+		if !exists {
+			continue
+		}
+		backgroundValues := make([]Color, 0, len(rule.backgrounds))
+		for _, background := range rule.backgrounds {
+			if backgroundValue, exists := colors[background]; exists {
+				backgroundValues = append(backgroundValues, backgroundValue)
+			}
+		}
+		colors[role] = contrastSafeColor(value, backgroundValues, appearance)
+	}
+	syntaxBackgrounds := make([]Color, 0, 4)
+	for _, role := range []ThemeColor{panel, selection, addition, deletion} {
+		if value, exists := colors[role]; exists {
+			syntaxBackgrounds = append(syntaxBackgrounds, value)
+		}
+	}
+	for _, role := range []SyntaxColor{SyntaxKeyword, SyntaxString, SyntaxComment, SyntaxNumber} {
+		if value, exists := syntaxColors[role]; exists {
+			syntaxColors[role] = contrastSafeColor(value, syntaxBackgrounds, appearance)
+		}
+	}
+}
+
+func contrastSafeBackground(background Color, appearance Appearance) Color {
+	original, ok := parseHexColor(string(background))
+	if !ok {
+		return background
+	}
+	targetBackground := [3]uint8{}
+	targetForeground := [3]uint8{255, 255, 255}
+	if appearance == AppearanceLight {
+		targetBackground, targetForeground = targetForeground, targetBackground
+	}
+	for step := range 256 {
+		candidate := mixRGB(original, targetBackground, uint8(step))
+		if contrastsWithProfiles(targetForeground, [][3]uint8{candidate}) {
+			return Color(fmt.Sprintf("#%02x%02x%02x", candidate[0], candidate[1], candidate[2]))
+		}
+	}
+	return Color(fmt.Sprintf(
+		"#%02x%02x%02x",
+		targetBackground[0],
+		targetBackground[1],
+		targetBackground[2],
+	))
+}
+
+func contrastSafeColor(
+	foreground Color,
+	backgrounds []Color,
+	appearance Appearance,
+) Color {
+	original, ok := parseHexColor(string(foreground))
+	if !ok {
+		return foreground
+	}
+	parsedBackgrounds := make([][3]uint8, 0, len(backgrounds))
+	for _, background := range backgrounds {
+		if parsed, ok := parseHexColor(string(background)); ok {
+			parsedBackgrounds = append(parsedBackgrounds, parsed)
+		}
+	}
+	if len(parsedBackgrounds) == 0 {
+		return foreground
+	}
+	target := [3]uint8{255, 255, 255}
+	if appearance == AppearanceLight {
+		target = [3]uint8{}
+	}
+	for step := range 256 {
+		candidate := mixRGB(original, target, uint8(step))
+		if contrastsWithProfiles(candidate, parsedBackgrounds) {
+			return Color(fmt.Sprintf("#%02x%02x%02x", candidate[0], candidate[1], candidate[2]))
+		}
+	}
+	return Color(fmt.Sprintf("#%02x%02x%02x", target[0], target[1], target[2]))
+}
+
+func mixRGB(first, second [3]uint8, amount uint8) [3]uint8 {
+	var mixed [3]uint8
+	for index := range mixed {
+		value := (uint16(first[index])*uint16(255-amount) +
+			uint16(second[index])*uint16(amount) + 127) / 255
+		if value > math.MaxUint8 {
+			panic("mixed RGB component cannot be represented as uint8")
+		}
+		mixed[index] = uint8(value)
+	}
+	return mixed
+}
+
+func contrastsWithProfiles(
+	foreground [3]uint8,
+	backgrounds [][3]uint8,
+) bool {
+	for _, background := range backgrounds {
+		foregroundColor := color.RGBA{R: foreground[0], G: foreground[1], B: foreground[2], A: 255}
+		backgroundColor := color.RGBA{R: background[0], G: background[1], B: background[2], A: 255}
+		if contrastRatio(foregroundColor, backgroundColor) < minimumTextContrast ||
+			contrastRatio(ansi.Convert256(foregroundColor), ansi.Convert256(backgroundColor)) < minimumTextContrast ||
+			contrastRatio(ansi.Convert16(foregroundColor), ansi.Convert16(backgroundColor)) < minimumTextContrast {
+			return false
+		}
+	}
+	return true
+}
+
+func contrastRatio(first, second color.Color) float64 {
+	firstLuminance := relativeLuminance(first)
+	secondLuminance := relativeLuminance(second)
+	if firstLuminance < secondLuminance {
+		firstLuminance, secondLuminance = secondLuminance, firstLuminance
+	}
+	return (firstLuminance + 0.05) / (secondLuminance + 0.05)
+}
+
+func relativeLuminance(value color.Color) float64 {
+	red, green, blue, _ := value.RGBA()
+	channel := func(component uint32) float64 {
+		normalized := float64(component) / 65535
+		if normalized <= 0.04045 {
+			return normalized / 12.92
+		}
+		return math.Pow((normalized+0.055)/1.055, 2.4)
+	}
+	return 0.2126*channel(red) + 0.7152*channel(green) + 0.0722*channel(blue)
 }
 
 func subtleDiffBackground(background, foreground string) (Color, bool) {
@@ -198,7 +391,7 @@ func bundledPalette(name ThemeName, appearance Appearance) bundledThemePalette {
 	switch name {
 	case ThemeDark:
 		return bundledThemePalette{
-			"#18181c", "white", "#d2d2d2", "#a0a0a0",
+			"#18181c", ansiWhite, "#d2d2d2", "#a0a0a0",
 			"#1e1e1e", "#28282d", "#50dc78", "#f05a5a",
 			"#5ac8ff", "#ffd25a", "#c8c8c8",
 		}
@@ -210,9 +403,9 @@ func bundledPalette(name ThemeName, appearance Appearance) bundledThemePalette {
 		}
 	case ThemeANSI16Dark:
 		return bundledThemePalette{
-			ansiBlack, "white", "gray", "darkgray",
-			"darkgray", "cyan", "green", "red",
-			"cyan", "yellow", "gray",
+			ansiBlack, ansiWhite, ansiGray, "darkgray",
+			ansiBlack, ansiBlack, "lightgreen", "lightred",
+			"lightcyan", "lightyellow", ansiGray,
 		}
 	case ThemeTokyoNightStorm:
 		return bundledThemePalette{

@@ -436,8 +436,16 @@ func (model *Model) applyPublicationAction(action keymap.Action) {
 			model.overlay = OverlayNone
 		}
 	case keymap.ActionStatusDetails:
+		model.statusReturn = OverlaySubmit
 		model.overlay = OverlayStatus
 	case keymap.ActionSubmitReview:
+		if model.publicationIntent == publicationOperationIntentCancel {
+			model.notice = &Notice{
+				Kind: NoticeInformation,
+				Text: "publication cancellation is settling; submission remains disabled",
+			}
+			return
+		}
 		switch summary.Status {
 		case review.PublicationChecking:
 			model.publicationIntent = publicationOperationIntentSubmit
@@ -504,6 +512,7 @@ var publicationEvents = [...]review.PublicationEvent{
 }
 
 const (
+	publicationEventCommentLabel        = "Comment"
 	publicationEventApproveLabel        = "Approve"
 	publicationEventRequestChangesLabel = "Request changes"
 )
@@ -591,16 +600,36 @@ func (model *Model) publicationView(width, height int) string {
 	pending := model.review.PendingReviewSummary()
 	pendingProblem := pendingReviewProblemLine(pending)
 	styles := newSemanticStyles(model.settings)
+	controls := model.publicationBindingRows(width, styles)
+	if model.publicationIntent == publicationOperationIntentCancel {
+		status := "Cancelling publication work…"
+		if summary.Status == review.PublicationPublishing {
+			status = "Cancelling publication; any claimed remote commit remains fenced."
+		}
+		return blockingSurface([]string{
+			styles.heading.Render("Publish GitHub review"),
+			"",
+			styles.heading.Render("Cancelling"),
+			status,
+		}, controls, width, height, styles)
+	}
 	lines := []string{styles.heading.Render("Publish GitHub review")}
 	lines = append(lines, model.publicationEventLines(styles)...)
+	if height <= minimumHeight && model.publicationDraftReady {
+		lines = model.publicationEventLines(styles)
+	}
 	if pendingProblem != "" {
 		lines = append(lines, safeText(pendingProblem))
 	}
 	switch summary.Status {
 	case review.PublicationChecking:
 		status := "Checking immutable repository, pull request, and head…"
-		if model.publicationIntent == publicationOperationIntentSubmit {
+		switch model.publicationIntent {
+		case publicationOperationIntentSubmit:
 			status = "Checking immutable repository, pull request, and head; submission is queued…"
+		case publicationOperationIntentCancel:
+			status = "Cancelling publication preflight…"
+		case publicationOperationIntentNone:
 		}
 		lines = append(lines, "", styles.heading.Render("Submission"), status)
 	case review.PublicationChecked:
@@ -645,10 +674,14 @@ func (model *Model) publicationView(width, height int) string {
 			model.publicationDetailLines(width, detailHeight)...,
 		)
 	case review.PublicationPublishing:
+		status := "Publishing; cancellation after the commit claim produces an unknown result."
+		if model.publicationIntent == publicationOperationIntentCancel {
+			status = "Cancelling publication; a claimed remote commit remains fenced until settlement."
+		}
 		lines = append(lines,
 			"",
 			styles.heading.Render("Submission"),
-			"Publishing; cancellation after the commit claim produces an unknown result.",
+			status,
 		)
 	case review.PublicationUnknown:
 		lines = append(lines,
@@ -677,7 +710,7 @@ func (model *Model) publicationView(width, height int) string {
 		lines = append(lines, "", styles.heading.Render("Submission"),
 			"No publication preflight is active.")
 	}
-	return constrainedPublicationLines(lines, model.publicationBindingSummary(), width, height)
+	return blockingSurface(lines, controls, width, height, styles)
 }
 
 func pendingReviewProblemLine(pending review.PendingReviewSummary) string {
@@ -740,14 +773,7 @@ func (model *Model) publicationEventNavigationHint() string {
 }
 
 func (model *Model) publicationBindingSummary() string {
-	actions := []keymap.Action{keymap.ActionSubmitReview}
-	if model.publicationDraftReady && model.publicationOperation == 0 {
-		actions = append(actions,
-			keymap.ActionPreviousSubmitEvent,
-			keymap.ActionNextSubmitEvent,
-		)
-	}
-	actions = append(actions, keymap.ActionCancel)
+	actions := model.publicationBindingActions()
 	bindings := bindingsForActions(model.effectiveBindings(keymap.ContextSubmit), actions)
 	var summary strings.Builder
 	for index, binding := range bindings {
@@ -756,21 +782,34 @@ func (model *Model) publicationBindingSummary() string {
 	return summary.String()
 }
 
-func constrainedPublicationLines(body []string, controls string, width, height int) string {
-	if width <= 0 || height <= 0 {
-		return ""
+func (model *Model) publicationBindingRows(width int, styles semanticStyles) []string {
+	return model.modalBindingRows(
+		keymap.ContextSubmit,
+		model.publicationBindingActions(),
+		width,
+		styles,
+	)
+}
+
+func (model *Model) publicationBindingActions() []keymap.Action {
+	actions := []keymap.Action{keymap.ActionCancel}
+	if model.publicationIntent == publicationOperationIntentCancel {
+		return actions
 	}
-	body = body[:min(len(body), max(height-1, 0))]
-	lines := make([]string, 0, len(body)+1)
-	lines = append(lines, body...)
-	lines = append(lines, safeText(controls))
-	return constrainedStyledLines(lines, width, height)
+	actions = append(actions, keymap.ActionSubmitReview)
+	if model.publicationDraftReady && model.publicationOperation == 0 {
+		actions = append(actions,
+			keymap.ActionPreviousSubmitEvent,
+			keymap.ActionNextSubmitEvent,
+		)
+	}
+	return actions
 }
 
 func publicationEventLabel(event review.PublicationEvent) string {
 	switch event {
 	case review.PublicationEventComment:
-		return "Comment"
+		return publicationEventCommentLabel
 	case review.PublicationEventApprove:
 		return publicationEventApproveLabel
 	case review.PublicationEventRequestChanges:

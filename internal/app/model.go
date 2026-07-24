@@ -21,10 +21,15 @@ import (
 const (
 	chordTimeout               = 750 * time.Millisecond
 	commentFileOutsideReview   = "comment file is not in this review"
+	commentLabel               = "comment"
+	exportLabel                = "export"
+	helpLabel                  = "help"
 	operationIdentityExhausted = "operation identity exhausted"
 	keyEnter                   = "enter"
 	keyEscape                  = "esc"
 	keyReturn                  = "return"
+	remoteCommentsReadOnly     = NoticeText("remote comments are read-only")
+	searchLabel                = "search"
 	unknownValue               = "unknown"
 )
 
@@ -241,7 +246,7 @@ type Model struct {
 	repeat                    uint16
 	exportPicker              exportSelection
 	publicationAllowStale     bool
-	commentsVisible           bool
+	commentPaneVisibility     paneVisibility
 	publicationIntent         publicationOperationIntent
 	quitting                  bool
 	publicationMoveSummary    bool
@@ -251,8 +256,10 @@ type Model struct {
 	fileTreeVisible           bool
 	filterTreeBuilding        bool
 	overlay                   Overlay
+	statusReturn              Overlay
 	syntaxDeferred            bool
 	focus                     FocusOwner
+	singlePaneOverride        FocusOwner
 	mode                      InteractionMode
 	initialized               bool
 	coordinatorClosed         bool
@@ -264,6 +271,14 @@ type pendingKeyChord struct {
 	strokes    []string
 	generation uint64
 }
+
+type paneVisibility uint8
+
+const (
+	paneVisibilityAuto paneVisibility = iota
+	paneVisibilityShown
+	paneVisibilityHidden
+)
 
 type keyStroke struct {
 	value    string
@@ -315,7 +330,6 @@ func NewModel(
 		review:             current,
 		focus:              FocusDiff,
 		mode:               ModeNormal,
-		commentsVisible:    false,
 		fileTreeVisible:    true,
 		nextOperation:      1,
 		foreground:         newForegroundState(),

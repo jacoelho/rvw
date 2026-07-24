@@ -169,7 +169,7 @@ func TestModalContextsExecuteSequentialMultiStrokeBindings(t *testing.T) {
 			},
 		},
 		{
-			name:    "search",
+			name:    searchLabel,
 			context: keymap.ContextSearch,
 			mode:    ModeNormal,
 			overlay: OverlayFind,
@@ -283,7 +283,7 @@ func TestReloadPreparationActionConsumesPriorRepeat(t *testing.T) {
 	settleModelWork(t, model, coordinator)
 	_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
 	model.focus = FocusFileTree
-	model.commentsVisible = true
+	model.commentPaneVisibility = paneVisibilityShown
 	setModelKeybindings(t, model,
 		keymap.Binding{Context: keymap.ContextNormal, Focus: keymap.FocusFileTree, Chord: "g c", Action: keymap.ActionInterrupt},
 		keymap.Binding{Context: keymap.ContextNormal, Focus: keymap.FocusFileTree, Chord: "j", Action: keymap.ActionFocusNextPane},
@@ -313,7 +313,7 @@ func TestDisallowedReloadPreparationActionConsumesPriorRepeat(t *testing.T) {
 	settleModelWork(t, model, coordinator)
 	_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
 	model.focus = FocusFileTree
-	model.commentsVisible = true
+	model.commentPaneVisibility = paneVisibilityShown
 	setModelKeybindings(t, model,
 		keymap.Binding{Context: keymap.ContextNormal, Focus: keymap.FocusFileTree, Chord: "g x", Action: keymap.ActionToggleWrap},
 		keymap.Binding{Context: keymap.ContextNormal, Focus: keymap.FocusFileTree, Chord: "j", Action: keymap.ActionFocusNextPane},
@@ -409,7 +409,7 @@ func TestAbandonedChordClearsNumericRepeat(t *testing.T) {
 		settleModelWork(t, model, coordinator)
 		_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
 		model.focus = FocusFileTree
-		model.commentsVisible = true
+		model.commentPaneVisibility = paneVisibilityShown
 		setModelKeybindings(t, model,
 			keymap.Binding{Context: keymap.ContextNormal, Focus: keymap.FocusFileTree, Chord: "g g", Action: keymap.ActionToggleWrap},
 			keymap.Binding{Context: keymap.ContextNormal, Focus: keymap.FocusFileTree, Chord: "j", Action: keymap.ActionFocusNextPane},

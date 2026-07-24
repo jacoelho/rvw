@@ -7,6 +7,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestLoadMergesPresenceAwareLayersAndOverrides(t *testing.T) {
@@ -242,7 +244,7 @@ syntax_theme = "syntax.tmTheme"
 		t.Fatal(err)
 	}
 	theme, ok := resolved.Theme(ThemeName("mine.v2"))
-	if !ok || !theme.UserDefined || theme.Colors[ThemeColor("fg_secondary")] != Color("lightblue") ||
+	if !ok || !theme.UserDefined || theme.Colors[themeSecondaryForeground] != Color("lightblue") ||
 		theme.SyntaxTheme.String() != filepath.Join(themesDirectory, "syntax.tmTheme") ||
 		theme.SyntaxColors[SyntaxKeyword] != Color("#123456") {
 		t.Fatalf("unexpected resolved theme: %+v", theme)
@@ -352,7 +354,7 @@ func TestCuratedThemeAliasesResolveTheirOwnPaletteAndSyntaxTheme(t *testing.T) {
 			if !ok {
 				t.Fatalf("theme %q was not resolved", test.name)
 			}
-			if got := theme.Colors[ThemeColor("panel_bg")]; got != test.background {
+			if got := theme.Colors[themePanelBackground]; got != test.background {
 				t.Fatalf("panel_bg = %q, want %q", got, test.background)
 			}
 			if got := theme.SyntaxTheme.String(); got != test.syntax.String() {
@@ -364,33 +366,145 @@ func TestCuratedThemeAliasesResolveTheirOwnPaletteAndSyntaxTheme(t *testing.T) {
 
 func TestBundledTrueColorThemesAddSubtleDiffBackgrounds(t *testing.T) {
 	dark := bundledTheme(ThemeGruvboxDark, AppearanceDark)
-	if got := dark.Colors[ThemeColor("diff_add_bg")]; got != Color("#3a3a28") {
-		t.Fatalf("diff_add_bg = %q, want #3a3a28", got)
-	}
-	if got := dark.Colors[ThemeColor("diff_del_bg")]; got != Color("#422c2a") {
-		t.Fatalf("diff_del_bg = %q, want #422c2a", got)
-	}
 	light := bundledTheme(ThemeGruvboxLight, AppearanceLight)
-	if got := light.Colors[ThemeColor("diff_add_bg")]; got != Color("#ebe1b0") {
-		t.Fatalf("light diff_add_bg = %q, want #ebe1b0", got)
-	}
-	if got := light.Colors[ThemeColor("diff_del_bg")]; got != Color("#efd3af") {
-		t.Fatalf("light diff_del_bg = %q, want #efd3af", got)
-	}
 	for _, theme := range []Theme{dark, light} {
-		if theme.Colors[ThemeColor("diff_add_bg")] == theme.Colors[ThemeColor("panel_bg")] ||
-			theme.Colors[ThemeColor("diff_del_bg")] == theme.Colors[ThemeColor("panel_bg")] {
+		if theme.Colors[themeDiffAdditionBackground] == theme.Colors[themePanelBackground] ||
+			theme.Colors[themeDiffDeletionBackground] == theme.Colors[themePanelBackground] {
 			t.Fatalf("theme %q generated an invisible semantic background", theme.Name)
 		}
 	}
 
 	ansiTheme := bundledTheme(ThemeANSI16Dark, AppearanceDark)
-	if _, exists := ansiTheme.Colors[ThemeColor("diff_add_bg")]; exists {
+	if _, exists := ansiTheme.Colors[themeDiffAdditionBackground]; exists {
 		t.Fatal("ansi16-dark unexpectedly generated an RGB addition background")
 	}
-	if _, exists := ansiTheme.Colors[ThemeColor("diff_del_bg")]; exists {
+	if _, exists := ansiTheme.Colors[themeDiffDeletionBackground]; exists {
 		t.Fatal("ansi16-dark unexpectedly generated an RGB deletion background")
 	}
+}
+
+func TestEveryBundledThemeMeetsCanonicalProfileTextContrast(t *testing.T) {
+	themes := []struct {
+		name       ThemeName
+		appearance Appearance
+	}{
+		{name: ThemeDark, appearance: AppearanceDark},
+		{name: ThemeLight, appearance: AppearanceLight},
+		{name: ThemeANSI16Dark, appearance: AppearanceDark},
+		{name: ThemeTokyoNightStorm, appearance: AppearanceDark},
+		{name: ThemeTokyoNightDay, appearance: AppearanceLight},
+		{name: ThemeGruvboxDark, appearance: AppearanceDark},
+		{name: ThemeGruvboxLight, appearance: AppearanceLight},
+		{name: ThemeCatppuccinLatte, appearance: AppearanceLight},
+		{name: ThemeCatppuccinFrappe, appearance: AppearanceDark},
+		{name: ThemeCatppuccinMacchiato, appearance: AppearanceDark},
+		{name: ThemeCatppuccinMocha, appearance: AppearanceDark},
+	}
+	for name := range embeddedSyntaxThemes {
+		themes = append(themes,
+			struct {
+				name       ThemeName
+				appearance Appearance
+			}{name: name, appearance: AppearanceDark},
+			struct {
+				name       ThemeName
+				appearance Appearance
+			}{name: name, appearance: AppearanceLight},
+		)
+	}
+	pairs := map[ThemeColor][]ThemeColor{
+		themePrimaryForeground:   {themePanelBackground, themeStatusBackground, themeCursorBackground, themeDiffAdditionBackground, themeDiffDeletionBackground},
+		themeSecondaryForeground: {themePanelBackground, themeStatusBackground},
+		themeDimForeground:       {themePanelBackground, themeStatusBackground, themeCursorBackground, themeDiffAdditionBackground, themeDiffDeletionBackground},
+		themeDiffAddition:        {themePanelBackground, themeCursorBackground, themeDiffAdditionBackground},
+		themeDiffDeletion:        {themePanelBackground, themeStatusBackground, themeCursorBackground, themeDiffDeletionBackground},
+		themeDiffContext:         {themePanelBackground, themeCursorBackground},
+		themePending:             {themePanelBackground},
+		themeFocusedBorder:       {themePanelBackground, themeStatusBackground, themeCursorBackground},
+		themeDiffHunkHeader:      {themePanelBackground, themeStatusBackground, themeCursorBackground},
+		themeWarningForeground:   {themePanelBackground, themeStatusBackground},
+	}
+	for _, test := range themes {
+		theme := bundledTheme(test.name, test.appearance)
+		for foregroundRole, backgroundRoles := range pairs {
+			foreground, ok := bundledTestColor(theme.Colors[foregroundRole])
+			if !ok {
+				t.Fatalf("theme %q role %q has unknown color %q", test.name, foregroundRole, theme.Colors[foregroundRole])
+			}
+			for _, backgroundRole := range backgroundRoles {
+				backgroundValue, exists := theme.Colors[backgroundRole]
+				if !exists {
+					continue
+				}
+				background, ok := bundledTestColor(backgroundValue)
+				if !ok {
+					t.Fatalf("theme %q role %q has unknown color %q", test.name, backgroundRole, backgroundValue)
+				}
+				if !contrastsWithProfiles(foreground, [][3]uint8{background}) {
+					t.Fatalf(
+						"theme %q foreground %q %q does not meet %.1f:1 against %q %q across profiles",
+						test.name,
+						foregroundRole,
+						theme.Colors[foregroundRole],
+						minimumTextContrast,
+						backgroundRole,
+						theme.Colors[backgroundRole],
+					)
+				}
+			}
+		}
+		for _, syntaxRole := range []SyntaxColor{SyntaxKeyword, SyntaxString, SyntaxComment, SyntaxNumber} {
+			foreground, ok := bundledTestColor(theme.SyntaxColors[syntaxRole])
+			if !ok {
+				t.Fatalf("theme %q syntax role %q has unknown color %q", test.name, syntaxRole, theme.SyntaxColors[syntaxRole])
+			}
+			for _, backgroundRole := range []ThemeColor{
+				themePanelBackground,
+				themeCursorBackground,
+				themeDiffAdditionBackground,
+				themeDiffDeletionBackground,
+			} {
+				backgroundValue, exists := theme.Colors[backgroundRole]
+				if !exists {
+					continue
+				}
+				background, ok := bundledTestColor(backgroundValue)
+				if !ok || !contrastsWithProfiles(foreground, [][3]uint8{background}) {
+					t.Fatalf(
+						"theme %q syntax %q %q does not meet %.1f:1 against %q %q across canonical profiles",
+						test.name,
+						syntaxRole,
+						theme.SyntaxColors[syntaxRole],
+						minimumTextContrast,
+						backgroundRole,
+						backgroundValue,
+					)
+				}
+			}
+		}
+	}
+}
+
+func bundledTestColor(value Color) ([3]uint8, bool) {
+	if parsed, ok := parseHexColor(string(value)); ok {
+		return parsed, true
+	}
+	named := map[Color]ansi.BasicColor{
+		"black": ansi.Black, "red": ansi.Red, "green": ansi.Green,
+		"yellow": ansi.Yellow, "blue": ansi.Blue, "magenta": ansi.Magenta,
+		"cyan": ansi.Cyan, "gray": ansi.White, "grey": ansi.White,
+		"darkgray": ansi.BrightBlack, "darkgrey": ansi.BrightBlack,
+		"lightred": ansi.BrightRed, "lightgreen": ansi.BrightGreen,
+		"lightyellow": ansi.BrightYellow, "lightblue": ansi.BrightBlue,
+		"lightmagenta": ansi.BrightMagenta, "lightcyan": ansi.BrightCyan,
+		"white": ansi.BrightWhite,
+	}
+	resolved, ok := named[value]
+	if !ok {
+		return [3]uint8{}, false
+	}
+	red, green, blue, _ := resolved.RGBA()
+	return [3]uint8{uint8(red >> 8), uint8(green >> 8), uint8(blue >> 8)}, true
 }
 
 func TestEmbeddedSyntaxThemesUseLightAppearanceFallbackPalette(t *testing.T) {
@@ -420,7 +534,7 @@ func TestEmbeddedSyntaxThemesUseLightAppearanceFallbackPalette(t *testing.T) {
 			if !ok {
 				t.Fatalf("theme %q was not resolved", name)
 			}
-			if got := theme.Colors[ThemeColor("panel_bg")]; got != Color("#fbf1c7") {
+			if got := theme.Colors[themePanelBackground]; got != Color("#fbf1c7") {
 				t.Fatalf("panel_bg = %q, want gruvbox-light fallback", got)
 			}
 			if got := theme.SyntaxTheme.String(); got != name.String() {
