@@ -237,10 +237,14 @@ func streamIndex(
 		previousPath = entry.path
 		previousStage = entry.stage
 	}
-	if err := readIndexExtensions(ctx, reader, limited); err != nil {
+	extensions := &io.LimitedReader{
+		R: reader,
+		N: int64(reader.Buffered()) + limited.N,
+	}
+	if err := readIndexExtensions(ctx, extensions); err != nil {
 		return 0, err
 	}
-	if limited.N != 0 {
+	if extensions.N != 0 {
 		return 0, errors.New("git index contains trailing data before its checksum")
 	}
 	return count, nil
@@ -366,13 +370,13 @@ func readNULTerminatedIndexPath(reader *bufio.Reader, limit int64) (string, erro
 	return "", errors.New("index path exceeds the path limit")
 }
 
-func readIndexExtensions(ctx context.Context, reader io.Reader, limited *io.LimitedReader) error {
+func readIndexExtensions(ctx context.Context, reader *io.LimitedReader) error {
 	var aggregate uint64
-	for limited.N > 0 {
+	for reader.N > 0 {
 		if err := context.Cause(ctx); err != nil {
 			return err
 		}
-		if limited.N < 8 {
+		if reader.N < 8 {
 			return errors.New("git index extension header is truncated")
 		}
 		var header [8]byte
@@ -384,7 +388,7 @@ func readIndexExtensions(ctx context.Context, reader io.Reader, limited *io.Limi
 		if aggregate > uint64(maxIndexExtensionBytes) {
 			return &LimitError{Resource: LimitIndexExtensions, Limit: uint64(maxIndexExtensionBytes)}
 		}
-		if size > uint64(limited.N) {
+		if size > uint64(reader.N) {
 			return errors.New("git index extension is truncated")
 		}
 		if header[0] < 'A' || header[0] > 'Z' {

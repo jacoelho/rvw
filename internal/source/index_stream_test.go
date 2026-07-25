@@ -3,8 +3,12 @@ package source
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
+	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/go-git/go-git/v5/plumbing"
@@ -103,4 +107,76 @@ func TestStreamIndexRejectsChecksumAndHonorsCancellation(t *testing.T) {
 	if _, err := streamIndex(ctx, path, func(streamedIndexEntry) error { return nil }); err == nil {
 		t.Fatal("cancelled decode succeeded")
 	}
+}
+
+func TestStreamIndexAcceptsExtensionPrefetchedWithEntries(t *testing.T) {
+	const entryCount = 180
+	entries := make([]*gitindex.Entry, 0, entryCount)
+	for index := range entryCount {
+		entries = append(entries, &gitindex.Entry{
+			Name: fmt.Sprintf("path-%04d.txt", index),
+			Hash: plumbing.NewHash(fmt.Sprintf("%040x", index+1)),
+			Mode: filemode.Regular,
+		})
+	}
+	encoded := new(bytes.Buffer)
+	if err := gitindex.NewEncoder(encoded).Encode(&gitindex.Index{
+		Version: 2,
+		Entries: entries,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	contents := encoded.Bytes()
+	contents = appendIndexExtension(t, contents, "TEST", bytes.Repeat([]byte{0x5a}, 4<<10))
+	path := filepath.Join(t.TempDir(), "index")
+	if err := os.WriteFile(path, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	count, err := streamIndex(t.Context(), path, func(streamedIndexEntry) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != entryCount {
+		t.Fatalf("count = %d, want %d", count, entryCount)
+	}
+}
+
+func TestStreamIndexRejectsPrefetchedMandatoryExtension(t *testing.T) {
+	encoded := new(bytes.Buffer)
+	if err := gitindex.NewEncoder(encoded).Encode(&gitindex.Index{
+		Version: 2,
+		Entries: []*gitindex.Entry{{
+			Name: "a.txt",
+			Hash: plumbing.NewHash("1111111111111111111111111111111111111111"),
+			Mode: filemode.Regular,
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	contents := appendIndexExtension(t, encoded.Bytes(), "link", []byte{0})
+	path := filepath.Join(t.TempDir(), "index")
+	if err := os.WriteFile(path, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := streamIndex(t.Context(), path, func(streamedIndexEntry) error { return nil })
+	if err == nil || !strings.Contains(err.Error(), "unsupported mandatory Git index extension") {
+		t.Fatalf("mandatory extension error = %v", err)
+	}
+}
+
+func appendIndexExtension(t *testing.T, encoded []byte, signature string, body []byte) []byte {
+	t.Helper()
+	if len(encoded) < indexChecksumBytes || len(signature) != 4 {
+		t.Fatal("invalid encoded index fixture")
+	}
+	contents := bytes.Clone(encoded[:len(encoded)-indexChecksumBytes])
+	var header [8]byte
+	copy(header[:4], signature)
+	binary.BigEndian.PutUint32(header[4:], uint32(len(body)))
+	contents = append(contents, header[:]...)
+	contents = append(contents, body...)
+	checksum := sha1.Sum(contents)
+	return append(contents, checksum[:]...)
 }
