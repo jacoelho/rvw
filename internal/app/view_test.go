@@ -877,17 +877,15 @@ func TestPublicationPreflightRendersCanonicalPayloadAndDecision(t *testing.T) {
 	model.review = current
 	model.overlay = OverlaySubmit
 	_, _ = model.Update(tea.WindowSizeMsg{Width: 100, Height: 25})
-	payloadView := model.View().Content
-	if !strings.Contains(payloadView, "[payload] canonical GitHub request") ||
-		!strings.Contains(payloadView, `"commit_id":"`+head.String()+`"`) {
-		t.Fatalf("preflight omitted canonical payload:\n%s", payloadView)
+	view := ansi.Strip(model.View().Content)
+	if !strings.Contains(view, "Submit Review") ||
+		!strings.Contains(view, "owner/repository#7") ||
+		!strings.Contains(view, "1 to submit") {
+		t.Fatalf("preflight view missing expected content:\n%s", view)
 	}
-
-	model.publicationCursor = 1
-	commentView := model.View().Content
-	if !strings.Contains(commentView, "[summary] full publication comment") ||
-		!strings.Contains(commentView, "Full comment #0") {
-		t.Fatalf("preflight omitted comment decision/detail:\n%s", commentView)
+	if !strings.Contains(view, "(●) Comment") ||
+		!strings.Contains(view, "( ) Approve") {
+		t.Fatalf("preflight view missing radio selector:\n%s", view)
 	}
 }
 

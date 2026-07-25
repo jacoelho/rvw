@@ -585,83 +585,50 @@ func (model *Model) publicationModalView(
 	styles semanticStyles,
 ) (string, boundedPanelLayout) {
 	layout := newBoundedPanelLayout(width, height, boundedPanelRequest{
-		minimumWidth:  60,
-		minimumHeight: 16,
-		maximumWidth:  90,
-		maximumHeight: 32,
+		minimumWidth:  50,
+		minimumHeight: 14,
+		maximumWidth:  70,
+		maximumHeight: 20,
 		inset:         2,
 	})
 	summary := model.review.PublicationSummary()
 	pending := model.review.PendingReviewSummary()
-	pendingProblem := pendingReviewProblemLine(pending)
-	lines := []string{styles.heading.Render("GitHub Review"), "", model.publicationEventSelector()}
-	if pendingProblem != "" {
-		lines = append(lines, styles.warning.Render(pendingProblem))
+	lines := []string{styles.heading.Render("Submit Review")}
+
+	if problem := pendingReviewProblemLine(pending); problem != "" {
+		lines = append(lines, "", styles.warning.Render(problem))
 	}
+
 	switch summary.Status {
 	case review.PublicationChecking:
-		status := "◐ Checking immutable repository, pull request, and head…"
-		if model.publicationIntent == publicationOperationIntentSubmit {
-			status = "◐ Checking; submission is queued…"
-		}
-		lines = append(lines, "", status)
+		lines = append(lines, "", "◐ Checking…")
 	case review.PublicationChecked:
-		unmappablePolicy := "exclude"
-		if model.publicationMoveSummary {
-			unmappablePolicy = "move to summary"
-		}
-		headStatus := "current head"
+		lines = append(lines, "",
+			fmt.Sprintf("Target: %s#%d", summary.Target.Repository(), summary.Target.PullRequest()),
+			fmt.Sprintf("Comments: %d to submit", summary.Included),
+		)
 		if summary.StaleHead {
-			headStatus = styles.warning.Render("stale (override active)")
+			lines = append(lines, styles.warning.Render("⚠ Head is stale"))
 		}
-		stage := "Submit as " + model.publicationEvent.String()
-		if summary.Event == review.PublicationEventDraft {
-			stage = "Synchronize to pending draft"
-		}
-		lines = append(lines, "",
-			fmt.Sprintf("  Target       %s#%d", summary.Target.Repository(), summary.Target.PullRequest()),
-			fmt.Sprintf("  Comments     %d included, %d excluded", summary.Included, summary.Excluded),
-			fmt.Sprintf("  Unmappable   %s", unmappablePolicy),
-			"  Head         "+headStatus,
-		)
-		if pending.Status == review.PendingReviewReady {
-			lines = append(lines, fmt.Sprintf(
-				"  Pending      continue #%d (%d changed, %d conflicts)",
-				pending.ReviewID.Uint64(), pending.Dirty, pending.Conflicts,
+		if pending.Conflicts > 0 {
+			lines = append(lines, styles.warning.Render(
+				fmt.Sprintf("⚠ %d conflicting comments", pending.Conflicts),
 			))
-		} else if pendingProblem == "" {
-			lines = append(lines, "  Pending      "+pending.Status.String())
 		}
-		lines = append(lines, "", "  "+stage)
-		chooserHeight := min(max(layout.innerHeight-len(lines)-5, 1), 6)
-		lines = append(lines, "", styles.muted.Render("── Comments"))
-		lines = append(lines, model.publicationCommentLines(chooserHeight)...)
-		detailHeight := max(layout.innerHeight-len(lines)-2, 0)
-		lines = append(
-			lines,
-			model.publicationDetailLines(layout.innerWidth, detailHeight)...,
-		)
+		lines = append(lines, "", styles.muted.Render("Submit as:"))
+		lines = append(lines, model.publicationEventSelector(styles)...)
 	case review.PublicationPublishing:
-		lines = append(lines, "", "◐ Publishing — cancellation may leave unknown state.")
-	case review.PublicationUnknown:
-		lines = append(lines, "",
-			styles.warning.Render("⚠ Outcome unknown; retry is fenced."),
-			"",
-			fmt.Sprintf("  Target   %s#%d", summary.Target.Repository(), summary.Target.PullRequest()),
-			"  Marker   "+summary.Marker.String(),
-			"",
-			"Use submit-recheck to verify exact remote state.",
-		)
-	case review.PublicationReconciling:
-		lines = append(lines, "", "◐ Checking exact GitHub publication state…")
+		lines = append(lines, "", "◐ Publishing…")
 	case review.PublicationCommitted:
-		lines = append(lines, "", styles.reviewed.Render("✓ Publication committed."))
-	case review.PublicationConfirmedAbsent:
-		lines = append(lines, "", "Marker confirmed absent; safe to submit a new attempt.")
+		lines = append(lines, "", styles.reviewed.Render("✓ Review submitted"))
 	case review.PublicationFailedBeforeCommit:
-		lines = append(lines, "", styles.failure.Render("✗ Publication failed: "+summary.Detail.String()))
+		lines = append(lines, "", styles.failure.Render("✗ Failed: "+summary.Detail.String()))
+	case review.PublicationUnknown:
+		lines = append(lines, "", styles.warning.Render("⚠ Outcome unknown"))
+	case review.PublicationReconciling:
+		lines = append(lines, "", "◐ Reconciling…")
 	default:
-		lines = append(lines, "", "No publication preflight is active.")
+		lines = append(lines, "", "Not ready")
 	}
 	lines = append(lines, "", styles.muted.Render(model.bindingSummary(KeyContextSubmit)))
 	content := constrainedStyledLines(lines, layout.innerWidth, layout.innerHeight)
@@ -690,23 +657,17 @@ func pendingReviewProblemLine(pending review.PendingReviewSummary) string {
 	return line
 }
 
-func (model *Model) publicationEventSelector() string {
-	var selector strings.Builder
-	selector.WriteString("Submit as (h/l): ")
-	for index, event := range publicationEvents {
-		if index != 0 {
-			selector.WriteString("  ")
-		}
+func (model *Model) publicationEventSelector(styles semanticStyles) []string {
+	lines := make([]string, 0, len(publicationEvents))
+	for _, event := range publicationEvents {
 		label := publicationEventLabel(event)
 		if event == model.publicationEvent {
-			selector.WriteByte('[')
-			selector.WriteString(label)
-			selector.WriteByte(']')
+			lines = append(lines, styles.focused.Render("(●) "+label))
 		} else {
-			selector.WriteString(label)
+			lines = append(lines, styles.muted.Render("( ) "+label))
 		}
 	}
-	return selector.String()
+	return lines
 }
 
 func publicationEventLabel(event review.PublicationEvent) string {

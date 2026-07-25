@@ -72,18 +72,18 @@ func TestEnterDuringPublicationCheckSubmitsWhenPreflightIsReady(t *testing.T) {
 func TestPublicationEventSelectorCyclesFinalGitHubActions(t *testing.T) {
 	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	settleModelWork(t, model, coordinator)
-	if got := model.publicationEventSelector(); got !=
-		"Submit as (h/l): [Comment]  Approve  Request changes" {
-		t.Fatalf("default selector = %q", got)
+	styles := newSemanticStyles(model.settings)
+	selector := model.publicationEventSelector(styles)
+	if len(selector) != 3 {
+		t.Fatalf("default selector = %v", selector)
 	}
 	options, err := model.publicationOptions()
 	if err != nil || options.Event() != review.PublicationEventDraft {
 		t.Fatalf("initial publication options = (%s, %v), want draft", options.Event(), err)
 	}
 	model.applyPublicationAction(KeyActionNextSubmitEvent)
-	if model.publicationEvent != review.PublicationEventApprove ||
-		model.publicationEventSelector() != "Submit as (h/l): Comment  [Approve]  Request changes" {
-		t.Fatalf("next selector = %q (%s)", model.publicationEventSelector(), model.publicationEvent)
+	if model.publicationEvent != review.PublicationEventApprove {
+		t.Fatalf("next event = %s, want Approve", model.publicationEvent)
 	}
 	model.applyPublicationAction(KeyActionPreviousSubmitEvent)
 	if model.publicationEvent != review.PublicationEventComment {
