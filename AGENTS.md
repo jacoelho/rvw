@@ -12,6 +12,9 @@ explicit Git range, or a GitHub pull request. Its required outputs are an intera
 Do not introduce new review sources or output modes unless explicitly requested. Avoid unrelated
 feature expansion.
 
+`docs/tui-design.md` is the sole normative presentation authority. Keep visual hierarchy, focus,
+cursor, glyph, responsive, dialog, pointer, contrast, and evidence changes consistent with it.
+
 ## Constraints
 
 - Support Linux and macOS only. Do not add project-owned or direct/runtime Windows code,

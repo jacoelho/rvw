@@ -187,7 +187,7 @@ func TestInteractiveSourceContract(t *testing.T) {
 				w.launchPTY(t, 120, 24, "pr", "7", "--repo", "fixture/repository")
 				w.pty.awaitScreen(t, "pending source", containsScreen("reviewed.go"))
 				w.pty.send(t, "zcj")
-				w.pty.awaitScreen(t, "selected inline draft", containsScreen("▸ [draft] reviewed.go:3"))
+				w.pty.awaitScreen(t, "selected inline draft", containsScreen("> [draft] reviewed.go:3"))
 				w.pty.send(t, "e")
 				w.pty.awaitScreen(t, "comment editor", containsScreen("Comment ·"))
 				w.pty.send(t, " edited")
@@ -418,15 +418,15 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 			)
 			scenario.Then("its anchor is visible and both comment navigation paths reveal its line", func(t testing.TB, w *world) {
 				w.pty.send(t, "gg")
-				w.pty.awaitScreen(t, "visible comment anchor away from cursor", unfocusedCommentAnchor)
+				w.pty.awaitScreen(t, "visible comment anchor away from cursor", unfocusedCommentAnchor(w.pty))
 				w.pty.send(t, "]c")
-				w.pty.awaitScreen(t, "next-comment line", focusedCommentAnchor)
+				w.pty.awaitScreen(t, "next-comment line", focusedCommentAnchor(w.pty))
 				w.pty.send(t, "gg")
-				w.pty.awaitScreen(t, "comment anchor before pane activation", unfocusedCommentAnchor)
+				w.pty.awaitScreen(t, "comment anchor before pane activation", unfocusedCommentAnchor(w.pty))
 				w.pty.send(t, "\t")
 				w.pty.awaitScreen(t, "comments pane focus", containsScreen("▌ COMMENTS ·"))
 				w.pty.send(t, "\r")
-				w.pty.awaitScreen(t, "comments-pane activation line", focusedCommentAnchor)
+				w.pty.awaitScreen(t, "comments-pane activation line", focusedCommentAnchor(w.pty))
 			})
 			scenario.When("quit is declined", func(t testing.TB, w *world) {
 				w.pty.send(t, "q")
@@ -612,12 +612,16 @@ func assertNoEscapedWidgetStyles(t testing.TB, w *world, screen, context string)
 	}
 }
 
-func focusedCommentAnchor(screen string) bool {
-	return commentAnchorHasFocus(screen, commentAnchorFocused)
+func focusedCommentAnchor(session *ptySession) func(string) bool {
+	return func(screen string) bool {
+		return commentAnchorHasFocus(session, screen, commentAnchorFocused)
+	}
 }
 
-func unfocusedCommentAnchor(screen string) bool {
-	return commentAnchorHasFocus(screen, commentAnchorUnfocused)
+func unfocusedCommentAnchor(session *ptySession) func(string) bool {
+	return func(screen string) bool {
+		return commentAnchorHasFocus(session, screen, commentAnchorUnfocused)
+	}
 }
 
 type commentAnchorFocus uint8
@@ -627,12 +631,25 @@ const (
 	commentAnchorFocused
 )
 
-func commentAnchorHasFocus(screen string, focus commentAnchorFocus) bool {
-	for line := range strings.Lines(screen) {
+func commentAnchorHasFocus(
+	session *ptySession,
+	screen string,
+	focus commentAnchorFocus,
+) bool {
+	for row, line := range strings.Split(screen, "\n") {
 		if strings.Contains(line, "staged contents") &&
-			strings.Contains(line, "●") &&
-			strings.Contains(line, "▸") == (focus == commentAnchorFocused) {
-			return true
+			strings.Contains(line, "●") {
+			session.mu.Lock()
+			reversed := false
+			for column := range session.terminal.Width() {
+				cell := session.terminal.CellAt(column, row)
+				if cell != nil && cell.Style.Attrs&(1<<5) != 0 {
+					reversed = true
+					break
+				}
+			}
+			session.mu.Unlock()
+			return reversed == (focus == commentAnchorFocused)
 		}
 	}
 	return false

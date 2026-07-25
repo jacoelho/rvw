@@ -123,6 +123,129 @@ func TestCancelledPatchUsesCompletedOutcomeLabel(t *testing.T) {
 	}
 }
 
+func TestDiffCellSelectionMapsEveryPresentationState(t *testing.T) {
+	model, active := modelWithPreparedPatch(t,
+		"@@ -1,3 +1,3 @@\n"+
+			" first\n"+
+			" second\n"+
+			" third\n",
+	)
+	lines := model.review.PatchLines(active, 0, 10, 4_096)
+	first := lines[1]
+	second := lines[2]
+	third := lines[3]
+
+	model.mode = ModeNormal
+	model.focus = FocusDiff
+	model.diffCursor = second.Number
+	if got := model.diffCellSelection(second); got != diffCellSelectionActive {
+		t.Fatalf("focused cursor selection = %v, want active", got)
+	}
+	if got := model.diffCellSelection(first); got != diffCellSelectionNone {
+		t.Fatalf("ordinary row selection = %v, want none", got)
+	}
+	model.focus = FocusFileTree
+	if got := model.diffCellSelection(second); got != diffCellSelectionRetained {
+		t.Fatalf("unfocused cursor selection = %v, want retained", got)
+	}
+
+	model.mode = ModeVisual
+	model.focus = FocusDiff
+	model.visualAnchor = first.Number
+	model.diffCursor = third.Number
+	if got := model.diffCellSelection(first); got != diffCellSelectionRetained {
+		t.Fatalf("visual anchor selection = %v, want retained", got)
+	}
+	if got := model.diffCellSelection(second); got != diffCellSelectionRange {
+		t.Fatalf("visual interior selection = %v, want range", got)
+	}
+	if got := model.diffCellSelection(third); got != diffCellSelectionActive {
+		t.Fatalf("visual cursor selection = %v, want active", got)
+	}
+	model.overlay = OverlayHelp
+	if got := model.diffCellSelection(third); got != diffCellSelectionRetained {
+		t.Fatalf("cursor under overlay selection = %v, want retained", got)
+	}
+}
+
+func TestVisualRangeMarkersCoverWrappedSegmentsWithoutConsumingSourceGlyphs(t *testing.T) {
+	model, active := modelWithPreparedPatch(t,
+		"@@ -1,3 +1,3 @@\n"+
+			" literal > and │ remain source text\n"+
+			" interior range content is deliberately long enough to wrap across multiple terminal rows\n"+
+			" active endpoint content is deliberately long enough to wrap across multiple terminal rows\n",
+	)
+	lines := model.review.PatchLines(active, 0, 10, 16_384)
+	anchor := lines[1].Number
+	interior := lines[2].Number
+	cursor := lines[3].Number
+	model.mode = ModeVisual
+	model.focus = FocusDiff
+	model.visualAnchor = anchor
+	model.diffCursor = cursor
+	model.settings.wrap = true
+
+	for _, test := range []struct {
+		name  string
+		view  DiffView
+		width int
+	}{
+		{name: "unified", view: DiffViewUnified, width: 24},
+		{name: "side by side", view: DiffViewSideBySide, width: sideBySideContentWidth + diffCommentAnchorColumns},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			model.settings.diffView = test.view
+			rendered, rows := model.diffLines(test.width, 20, newSemanticStyles(model.settings))
+			anchorSegments := 0
+			interiorSegments := 0
+			cursorSegments := 0
+			for index, row := range rows {
+				plain := ansi.Strip(rendered[index])
+				switch row {
+				case anchor:
+					anchorSegments++
+					if anchorSegments == 1 && !strings.HasPrefix(plain, ">") {
+						t.Fatalf("anchor first segment marker = %q", plain)
+					}
+					if anchorSegments > 1 && strings.HasPrefix(plain, ">") {
+						t.Fatalf("anchor continuation repeated cursor marker = %q", plain)
+					}
+				case interior:
+					interiorSegments++
+					if !strings.HasPrefix(plain, "│") {
+						t.Fatalf("range segment omitted rail = %q", plain)
+					}
+				case cursor:
+					cursorSegments++
+					if cursorSegments == 1 && !strings.HasPrefix(plain, ">") {
+						t.Fatalf("cursor first segment marker = %q", plain)
+					}
+					if cursorSegments > 1 && strings.HasPrefix(plain, ">") {
+						t.Fatalf("cursor continuation repeated marker = %q", plain)
+					}
+				}
+			}
+			if anchorSegments == 0 || interiorSegments < 2 || cursorSegments < 2 {
+				t.Fatalf(
+					"wrapped segment counts = anchor %d interior %d cursor %d; rows=%v",
+					anchorSegments,
+					interiorSegments,
+					cursorSegments,
+					rows,
+				)
+			}
+		})
+	}
+	model.mode = ModeNormal
+	model.settings.wrap = false
+	model.settings.diffView = DiffViewUnified
+	rendered, _ := model.diffLines(80, 10, newSemanticStyles(model.settings))
+	content := ansi.Strip(strings.Join(rendered, "\n"))
+	if !strings.Contains(content, "literal > and │ remain source text") {
+		t.Fatalf("source glyphs were normalized as presentation markers:\n%s", content)
+	}
+}
+
 func TestSideBySidePatchStripsOnlyTheOwnedKindPrefix(t *testing.T) {
 	model, active := modelWithPreparedPatch(t,
 		"@@ -1,4 +1,4 @@\n"+
@@ -427,7 +550,7 @@ func TestUnifiedMetadataAndSyntaxRetainTheirCellBases(t *testing.T) {
 		t.Fatal(err)
 	}
 	selectedAddition := rowIndex(t, selectedRows, model.diffCursor)
-	assertVTCellStyleAtRow(t, selectedTerminal, 9, selectedAddition, "#00ff00", "#333333", 1)
+	assertVTCellStyleAtRow(t, selectedTerminal, 9, selectedAddition, "#ffffff", "#333333", 1)
 }
 
 func TestUnifiedWrappedContinuationKeepsSemanticGutterBackground(t *testing.T) {

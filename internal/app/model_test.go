@@ -935,6 +935,8 @@ func TestResponsiveLayoutUsesBothWidthAndHeightBoundaries(t *testing.T) {
 		{width: wideWidth, height: 30, tree: true, comments: true},
 		{width: 120, height: 24, tree: true, comments: false},
 		{width: 120, height: 23, tree: true, comments: false},
+		{width: 80, height: 17, tree: false, comments: false},
+		{width: 79, height: 30, tree: false, comments: false},
 		{width: 85, height: 18, tree: true, comments: false},
 		{width: 84, height: 18, tree: false, comments: false},
 		{width: 85, height: 17, tree: false, comments: false},
@@ -967,6 +969,43 @@ func TestResponsiveLayoutUsesBothWidthAndHeightBoundaries(t *testing.T) {
 	if !model.workspaceLayout(120, 24).sideBySideFallback ||
 		model.workspaceLayout(200, 30).sideBySideFallback {
 		t.Fatal("side-by-side fallback did not follow diff content width")
+	}
+}
+
+func TestSideBySideEligibilityUsesAllocatedDiffPaneWidth(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"a.txt": "changed\n"})
+	model.settings.diffView = DiffViewSideBySide
+	for _, test := range []struct {
+		name          string
+		terminalWidth int
+		height        int
+		diffWidth     int
+		hasTree       bool
+		wantFallback  bool
+	}{
+		{name: "single 101", terminalWidth: 101, height: 17, diffWidth: 101, wantFallback: true},
+		{name: "single 102", terminalWidth: 102, height: 17, diffWidth: 102},
+		{name: "single 103", terminalWidth: 103, height: 17, diffWidth: 103},
+		{name: "multi 101", terminalWidth: 126, height: 18, diffWidth: 101, hasTree: true, wantFallback: true},
+		{name: "multi 102", terminalWidth: 127, height: 18, diffWidth: 102, hasTree: true},
+		{name: "multi 103", terminalWidth: 128, height: 18, diffWidth: 103, hasTree: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			layout := model.workspaceLayout(test.terminalWidth, test.height)
+			if layout.diffWidth != test.diffWidth ||
+				(layout.treeWidth != 0) != test.hasTree ||
+				layout.sideBySideFallback != test.wantFallback {
+				t.Fatalf(
+					"layout %dx%d = %+v, want diff=%d tree=%t fallback=%t",
+					test.terminalWidth,
+					test.height,
+					layout,
+					test.diffWidth,
+					test.hasTree,
+					test.wantFallback,
+				)
+			}
+		})
 	}
 }
 

@@ -134,7 +134,10 @@ func (model *Model) resizePrompts() {
 	if model.overlay == OverlayFind {
 		renderWidth, renderHeight := model.renderSize()
 		layout := newFindModalLayout(renderWidth, renderHeight)
-		width = max(layout.innerWidth-lipgloss.Width(model.searchInput.Prompt)-1, 1)
+		width = max(
+			layout.dialog.inner.width-lipgloss.Width(model.searchInput.Prompt)-1,
+			1,
+		)
 	}
 	model.searchInput.SetWidth(width)
 	commandWidth := min(model.size.Width, maxRenderWidth) -

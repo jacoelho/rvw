@@ -835,7 +835,7 @@ func (model *Model) publicationEventLines(width int, styles semanticStyles) []st
 	lines := []string{styles.heading.Render(safeText(heading))}
 	for _, event := range publicationEvents {
 		if event == model.publicationEvent {
-			lines = append(lines, styles.selected.Render("(●) "+publicationEventLabel(event)))
+			lines = append(lines, styles.selectedControl.Render("(●) "+publicationEventLabel(event)))
 			continue
 		}
 		lines = append(lines, styles.muted.Render("( ) "+publicationEventLabel(event)))

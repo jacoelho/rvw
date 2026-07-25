@@ -808,7 +808,7 @@ func findTabs(active findScope, styles semanticStyles) string {
 	for scope := findCurrent; scope <= findFiles; scope++ {
 		label := " " + scope.label() + " "
 		if scope == active {
-			label = styles.selected.Render(label)
+			label = styles.selectedControl.Render(label)
 		} else {
 			label = styles.muted.Render(label)
 		}
@@ -818,32 +818,25 @@ func findTabs(active findScope, styles semanticStyles) string {
 }
 
 type findModalLayout struct {
-	x           int
-	y           int
-	width       int
-	height      int
-	innerWidth  int
-	innerHeight int
-	inputX      int
-	inputY      int
-	resultY     int
-	resultRows  int
+	dialog     dialogLayout
+	inputX     int
+	inputY     int
+	resultY    int
+	resultRows int
 }
 
 func newFindModalLayout(width, height int) findModalLayout {
-	layout := findModalLayout{width: width, height: height}
-	if width >= 48 && height >= 12 {
-		layout.width = min(width-4, 96)
-		layout.height = min(height-4, 20)
-		layout.x = (width - layout.width) / 2
-		layout.y = (height - layout.height) / 2
+	dialog := newDialogLayout(width, height, dialogSpec{
+		preferredInner: dialogSize{width: 96, height: 20},
+		borderMinimum:  dialogSize{width: 48, height: 12},
+	})
+	layout := findModalLayout{
+		dialog:  dialog,
+		inputX:  dialog.inner.x,
+		inputY:  dialog.inner.y + 1,
+		resultY: dialog.inner.y + 3,
 	}
-	layout.innerWidth = max(layout.width, 1)
-	layout.innerHeight = max(layout.height, 1)
-	layout.inputX = layout.x
-	layout.inputY = layout.y + 1
-	layout.resultY = layout.y + 3
-	layout.resultRows = max(layout.innerHeight-5, 1)
+	layout.resultRows = max(dialog.inner.height-5, 1)
 	return layout
 }
 
@@ -857,8 +850,9 @@ func (model *Model) findModalView(
 	styles semanticStyles,
 ) (string, findModalLayout, []int) {
 	layout := newFindModalLayout(width, height)
-	innerWidth := layout.innerWidth
-	lines := make([]string, 0, layout.innerHeight)
+	innerWidth := layout.dialog.inner.width
+	innerHeight := layout.dialog.inner.height
+	lines := make([]string, 0, innerHeight)
 	title := modalTitle(styles, "Find") + "  " + findTabs(model.find.scope, styles)
 	lines = append(lines, fitCellWidth(title, innerWidth))
 	searchInput := model.searchInput
@@ -906,15 +900,14 @@ func (model *Model) findModalView(
 		bindings: bindingsForActions(model.effectiveBindings(keymap.ContextSearch), actions),
 		labels:   map[keymap.Action]string{keymap.ActionAccept: acceptLabel},
 	}.RenderRows(innerWidth, 2, styles, styles.panel)
-	for len(lines)+len(controls) < layout.innerHeight {
+	for len(lines)+len(controls) < innerHeight {
 		lines = append(lines, strings.Repeat(" ", innerWidth))
 	}
 	for _, control := range controls {
 		lines = append(lines, fitStyledCellWidth(control, innerWidth, styles.panel))
 	}
-	content := strings.Join(lines[:layout.innerHeight], "\n")
-	modalStyle := styles.panel.Width(layout.innerWidth).Height(layout.innerHeight)
-	return modalStyle.Render(content), layout, rows
+	content := strings.Join(lines[:innerHeight], "\n")
+	return frameDialogContent(content, layout.dialog, styles), layout, rows
 }
 
 func (model *Model) findAcceptLabel() string {
@@ -937,7 +930,7 @@ func (model *Model) findAcceptLabel() string {
 func (model *Model) findResultLine(index, width int, styles semanticStyles) string {
 	prefix := "  "
 	if index == model.find.cursor {
-		prefix = "› "
+		prefix = "> "
 	}
 	line := prefix
 	if model.find.scope == findFiles {
@@ -968,7 +961,7 @@ func (model *Model) findResultLine(index, width int, styles semanticStyles) stri
 	}
 	line = fitCellWidth(line, width)
 	if index == model.find.cursor {
-		return styles.selected.Render(line)
+		return styles.activeCursorRow.Render(line)
 	}
 	return line
 }

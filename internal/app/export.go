@@ -112,12 +112,16 @@ func (model *Model) exportPickerView(width, height int) string {
 		return "[ ]"
 	}
 	styles := newSemanticStyles(model.settings)
-	dialogSize := blockingDialogSize{width: 52, height: 9}
-	dialogLayout := newBlockingDialogLayout(width, height, dialogSize)
+	preferred := dialogSize{width: 52, height: 9}
+	spec := dialogSpec{
+		preferredInner: preferred,
+		borderMinimum:  dialogSize{width: 24, height: 10},
+	}
+	dialogLayout := newDialogLayout(width, height, spec)
 	controls := model.modalBindingRows(
 		keymap.ContextExportPicker,
 		[]keymap.Action{keymap.ActionCancel, keymap.ActionExportSelected, keymap.ActionToggleExportUnmap},
-		dialogLayout.width,
+		dialogLayout.inner.width,
 		styles,
 	)
 	toggleChord := model.exportToggleChord()
@@ -125,7 +129,7 @@ func (model *Model) exportPickerView(width, height int) string {
 		checked(review.ExportUnmappable),
 		toggleChord,
 		"include unmappable comments",
-		dialogLayout.width,
+		dialogLayout.inner.width,
 	)
 	body := []string{
 		modalTitle(styles, "Export selection"),
@@ -135,12 +139,12 @@ func (model *Model) exportPickerView(width, height int) string {
 		"",
 		fullOptionLine,
 	}
-	if len(body)+len(controls) > dialogLayout.height || toggleChord != "" && !fullChordVisible {
+	if len(body)+len(controls) > dialogLayout.inner.height || toggleChord != "" && !fullChordVisible {
 		compactOptionLine, _ := exportOptionLine(
 			checked(review.ExportUnmappable),
 			toggleChord,
 			"unmappable",
-			dialogLayout.width,
+			dialogLayout.inner.width,
 		)
 		body = []string{
 			modalTitle(styles, "Export selection"),
@@ -148,8 +152,9 @@ func (model *Model) exportPickerView(width, height int) string {
 			compactOptionLine,
 		}
 	}
-	dialogSize = contentSizedBlockingDialog(dialogSize, body, controls)
-	return boundedBlockingSurface(body, controls, width, height, dialogSize, styles)
+	spec.preferredInner = contentSizedDialog(preferred, body, controls)
+	workspace, _ := model.workspaceView(width, height, model.workspaceLayout(width, height))
+	return standardDialogOverlay(workspace, body, controls, width, height, spec, styles)
 }
 
 func exportOptionLine(check, chord, label string, width int) (string, bool) {

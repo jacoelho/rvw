@@ -112,16 +112,13 @@ func (model *Model) View() tea.View {
 		workspace, _ := model.workspaceView(width, height, layout)
 		styles := newSemanticStyles(model.settings)
 		modal, findLayout, findRows := model.findModalView(width, height, styles)
-		content = lipgloss.NewCompositor(
-			lipgloss.NewLayer(workspace),
-			lipgloss.NewLayer(modal).X(findLayout.x).Y(findLayout.y).Z(1),
-		).Render()
+		content = composeDialog(workspace, modal, findLayout.dialog)
 		mouseHits = mouseHitMap{
 			findRows:       findRows,
-			findX:          findLayout.x,
-			findY:          findLayout.y,
-			findWidth:      findLayout.width,
-			findHeight:     findLayout.height,
+			findX:          findLayout.dialog.inner.x,
+			findY:          findLayout.dialog.inner.y,
+			findWidth:      findLayout.dialog.inner.width,
+			findHeight:     findLayout.dialog.inner.height,
 			findResultY:    findLayout.resultY,
 			findGeneration: model.find.generation,
 		}
@@ -366,10 +363,7 @@ func (model *Model) fileTreeLines(
 		cursor := "  "
 		selected := node.identity == model.treeCursor
 		if selected {
-			cursor = "› "
-			if model.workspaceOwnsInput() && model.focus == FocusFileTree {
-				cursor = "▸ "
-			}
+			cursor = "> "
 		}
 		activeMarker := " "
 		if !node.identity.directory && activeOK && node.identity.file == active {
@@ -397,8 +391,8 @@ func (model *Model) fileTreeLines(
 		}
 		renderedBadge := badgeStyle.Inherit(base).Render(badge)
 		line := base.Render(prefix) + renderedBadge + base.Render(suffix)
-		if selected {
-			line = styles.selected.Render(prefix + badge + suffix)
+		if selected && model.workspaceOwnsInput() && model.focus == FocusFileTree {
+			line = styles.activeCursorRow.Render(prefix + badge + suffix)
 		}
 		lines = append(lines, line)
 		rows = append(rows, node.identity)
@@ -484,10 +478,7 @@ func (model *Model) commentLines(
 	for index := start; index < min(start+height, count); index++ {
 		prefix := "  "
 		if index == cursor && model.commentRowSelected(index) {
-			prefix = "› "
-			if model.workspaceOwnsInput() && model.focus == FocusComments {
-				prefix = "▸ "
-			}
+			prefix = "> "
 		}
 		var line string
 		if index < localCount {
@@ -540,8 +531,8 @@ func (model *Model) commentLines(
 			}
 		}
 		line = fitCellWidth(line, width)
-		if index == cursor {
-			line = styles.selected.Render(line)
+		if index == cursor && model.workspaceOwnsInput() && model.focus == FocusComments {
+			line = styles.activeCursorRow.Render(line)
 		}
 		lines = append(lines, line)
 		rows = append(rows, index)
@@ -1010,95 +1001,120 @@ func constrainedStyledLines(lines []string, width, height int) string {
 	return strings.Join(lines, "\n")
 }
 
-type blockingDialogSize struct {
+type dialogSize struct {
 	width, height int
 }
 
-type blockingDialogLayout struct {
+type cellRect struct {
 	x, y          int
 	width, height int
 }
 
-func contentSizedBlockingDialog(
-	maximum blockingDialogSize,
+type dialogGeometryMode uint8
+
+const (
+	dialogGeometryFullScreen dialogGeometryMode = iota + 1
+	dialogGeometryBordered
+)
+
+type dialogLayout struct {
+	mode  dialogGeometryMode
+	outer cellRect
+	inner cellRect
+}
+
+type dialogSpec struct {
+	preferredInner dialogSize
+	borderMinimum  dialogSize
+}
+
+func contentSizedDialog(
+	maximum dialogSize,
 	body, controls []string,
-) blockingDialogSize {
+) dialogSize {
 	maximum.height = min(maximum.height, max(len(body)+len(controls), 1))
 	return maximum
 }
 
-func newBlockingDialogLayout(
+func newDialogLayout(
 	width, height int,
-	preferred blockingDialogSize,
-) blockingDialogLayout {
-	layout := blockingDialogLayout{
-		width:  min(max(width, 0), preferred.width),
-		height: min(max(height, 0), preferred.height),
+	spec dialogSpec,
+) dialogLayout {
+	fullScreen := cellRect{
+		width:  max(width, 0),
+		height: max(height, 0),
 	}
-	layout.x = max((width-layout.width)/2, 0)
-	layout.y = max((height-layout.height)/2, 0)
-	return layout
-}
-
-func boundedBlockingSurface(
-	body, controls []string,
-	width, height int,
-	preferred blockingDialogSize,
-	styles semanticStyles,
-) string {
-	layout := newBlockingDialogLayout(width, height, preferred)
-	if layout.width == 0 || layout.height == 0 {
-		return ""
-	}
-	modal := blockingSurface(body, controls, layout.width, layout.height, styles)
-	modalRows := strings.Split(modal, "\n")
-	canvasRows := make([]string, height)
-	blank := strings.Repeat(" ", max(width, 0))
-	left := strings.Repeat(" ", layout.x)
-	right := strings.Repeat(" ", max(width-layout.x-layout.width, 0))
-	for row := range height {
-		if row < layout.y || row >= layout.y+len(modalRows) {
-			canvasRows[row] = blank
-			continue
+	if width < spec.borderMinimum.width || height < spec.borderMinimum.height {
+		return dialogLayout{
+			mode:  dialogGeometryFullScreen,
+			outer: fullScreen,
+			inner: fullScreen,
 		}
-		canvasRows[row] = left + modalRows[row-layout.y] + right
 	}
-	return strings.Join(canvasRows, "\n")
+	inner := cellRect{
+		width:  min(spec.preferredInner.width, max(width-4, 1)),
+		height: min(spec.preferredInner.height, max(height-4, 1)),
+	}
+	outer := cellRect{
+		width:  inner.width + 2,
+		height: inner.height + 2,
+	}
+	outer.x = max((width-outer.width)/2, 0)
+	outer.y = max((height-outer.height)/2, 0)
+	inner.x = outer.x + 1
+	inner.y = outer.y + 1
+	return dialogLayout{
+		mode:  dialogGeometryBordered,
+		outer: outer,
+		inner: inner,
+	}
 }
 
-func boundedBlockingOverlay(
+func standardDialogOverlay(
 	background string,
 	body, controls []string,
 	width, height int,
-	preferred blockingDialogSize,
+	spec dialogSpec,
 	styles semanticStyles,
 ) string {
-	layout := newBlockingDialogLayout(width, height, preferred)
-	if layout.width == 0 || layout.height == 0 {
+	layout := newDialogLayout(width, height, spec)
+	if layout.inner.width == 0 || layout.inner.height == 0 {
 		return ""
 	}
-	modalRows := strings.Split(
-		blockingSurface(body, controls, layout.width, layout.height, styles),
-		"\n",
+	content := blockingSurface(
+		body,
+		controls,
+		layout.inner.width,
+		layout.inner.height,
+		styles,
 	)
-	backgroundRows := strings.Split(background, "\n")
-	rows := make([]string, height)
-	for row := range height {
-		backgroundRow := ""
-		if row < len(backgroundRows) {
-			backgroundRow = backgroundRows[row]
-		}
-		backgroundRow = fitStyledCellWidth(backgroundRow, width, styles.panel)
-		if row < layout.y || row >= layout.y+len(modalRows) {
-			rows[row] = backgroundRow
-			continue
-		}
-		rightStart := layout.x + layout.width
-		rows[row] = clipStyled(backgroundRow, 0, layout.x) +
-			modalRows[row-layout.y] +
-			clipStyled(backgroundRow, rightStart, width-rightStart)
+	return composeDialog(background, frameDialogContent(content, layout, styles), layout)
+}
+
+func frameDialogContent(
+	content string,
+	layout dialogLayout,
+	styles semanticStyles,
+) string {
+	if layout.mode == dialogGeometryFullScreen {
+		return styles.panel.Render(content)
 	}
-	return strings.Join(rows, "\n")
+	return styles.panel.
+		Width(layout.outer.width).
+		Height(layout.outer.height).
+		Border(lipgloss.NormalBorder(), true).
+		BorderForeground(styles.focused.GetForeground()).
+		Render(content)
+}
+
+func composeDialog(background, dialog string, layout dialogLayout) string {
+	if layout.mode == dialogGeometryFullScreen {
+		return dialog
+	}
+	return lipgloss.NewCompositor(
+		lipgloss.NewLayer(background),
+		lipgloss.NewLayer(dialog).X(layout.outer.x).Y(layout.outer.y).Z(1),
+	).Render()
 }
 
 func blockingSurface(

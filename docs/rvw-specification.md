@@ -284,7 +284,8 @@ The required theme keys are:
 
 ```text
 panel_bg, fg_primary, fg_secondary, fg_dim, diff_add, diff_del,
-diff_context, pending, border_focused, status_bar_bg, cursor_line_bg
+diff_context, pending, border_focused, status_bar_bg, cursor_line_bg,
+cursor_line_fg
 ```
 
 The optional keys are:
@@ -310,6 +311,11 @@ root, or platform-prefix component. It names a TextMate theme.
 A nonempty `NO_COLOR` disables color only when no `theme`, `theme_dark`, or `theme_light` value is
 configured. Any configured theme value explicitly enables color. Monochrome mode retains focus,
 selection, change, severity, and status distinctions using text and modifiers.
+
+Custom themes are validated across the supported TrueColor, ANSI256, and ANSI16 projections.
+Ordinary text and focused borders require `4.5:1`; `cursor_line_fg` against `cursor_line_bg`
+requires `4.5:1`; `cursor_line_bg` against `panel_bg` requires `3:1`. A failure identifies the
+theme path, role pair, profile, actual ratio, and required ratio.
 
 ### 5. Noninteractive output
 
@@ -831,6 +837,11 @@ does not create a second terminal owner.
 
 ## Terminal presentation
 
+[`tui-design.md`](tui-design.md) is the sole normative authority for visual hierarchy, focus and
+cursor presentation, glyphs, responsive composition, dialog geometry, pointer hit regions, color
+contrast, and reproducible presentation evidence. This section retains interaction and rendering
+behavior that is part of the product contract.
+
 ### 12. Interaction
 
 The normal view contains a file tree, diff, comments, and status. Focus is explicit and cycles
@@ -904,37 +915,20 @@ release its retry fence, or manufacture a reconciled outcome.
 Blocking layers include help, status details, confirmation, export selection, submission preflight,
 and minimum-size fallback. A blocking layer owns input while active. Dirty quit, destructive
 comment deletion, reload that would discard state, export destination, and GitHub publication use
-explicit confirmation or selection.
+explicit confirmation or selection. Exact dialog geometry and context-preservation rules are
+defined in [`tui-design.md`](tui-design.md#dialogs-and-workflows).
 
 When the terminal is below 20 columns or below 6 rows, only configured quit and interrupt bindings
 are accepted. Resizing restores the prior interaction state.
 
-Responsive tiers are:
-
-| Tier | Geometry | Required composition |
-| --- | --- | --- |
-| Wide | at least 180 columns and 30 rows | file tree, dominant diff, comments, compact status/help |
-| Normal | at least 120 columns and 24 rows | file tree and dominant diff; comments remain reachable as a pane or blocking layer |
-| Compact | at least 80 columns and 18 rows | dominant diff plus one user-selected context pane; abbreviated status/help |
-| Narrow | at least 20 columns and 6 rows | one task region, status, and effective task/quit controls |
-| Below minimum | less than 20 columns or less than 6 rows | size requirement plus effective quit/interrupt controls only |
-
-The first matching row wins. The unified diff requires 60 content columns. Side-by-side rendering
-requires 100 content columns; below that width it temporarily renders unified with a visible
-limitation while preserving the selected side-by-side preference. A visible file tree receives at
-least 24 columns and a visible comments pane at least 32 columns. Optional labels, repeated help,
-secondary metadata, comments, and the tree are removed in that order before the diff falls below
-its useful geometry. Hidden panes retain selection, focus-return target, and scroll identity.
+Responsive modes, pane allocation, single-pane overrides, focus fallback, and side-by-side
+eligibility are defined in [`tui-design.md`](tui-design.md#responsive-modes). Hidden panes retain
+selection, focus-return target, and scroll identity.
 
 ### 13. Rendering
 
 Frame construction and rendering are proportional to viewport cells plus fixed overscan, not total
 repository, patch, line, comment, tree, or search-result size.
-
-The visual thesis is a dense review workspace with the diff as the primary task locus, quiet tree
-and comment context, one accent family, stable marker columns, and focus shown without geometry
-changes. Space and at most one boundary between independently scrolling regions establish
-hierarchy; nested decorative boxes are not used.
 
 The renderer:
 

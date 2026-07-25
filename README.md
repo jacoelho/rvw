@@ -110,4 +110,5 @@ choice.
 
 See the [full configuration and theme reference](docs/rvw-specification.md#4-configuration-and-themes)
 for keybindings, custom themes, export-template placeholders, defaults, limits, and validation
-rules.
+rules. See the [TUI design contract](docs/tui-design.md) for focus, cursor, responsive layout,
+dialogs, glyphs, contrast, and presentation evidence.

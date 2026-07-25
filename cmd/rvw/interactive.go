@@ -349,6 +349,7 @@ func interactivePaletteValues(theme config.Theme) map[app.PaletteRole]string {
 		"border_focused":     app.PaletteFocused,
 		"status_bar_bg":      app.PaletteStatusBackground,
 		"cursor_line_bg":     app.PaletteCursorBackground,
+		"cursor_line_fg":     app.PaletteCursorForeground,
 		"diff_add_bg":        app.PaletteDiffAddBackground,
 		"diff_del_bg":        app.PaletteDiffDeleteBackground,
 		"diff_hunk_header":   app.PaletteDiffHunk,

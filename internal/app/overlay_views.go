@@ -47,9 +47,9 @@ func (model *Model) minimumView(width, height int) string {
 func (model *Model) helpView(width, height int) string {
 	styles := newSemanticStyles(model.settings)
 	layout := newHelpDialogLayout(width, height)
-	controls := model.helpControlRows(layout.width, styles)
+	controls := model.helpControlRows(layout.inner.width, styles)
 	helpModel := model.help
-	helpModel.SetWidth(layout.width)
+	helpModel.SetWidth(layout.inner.width)
 	helpModel.Styles = help.Styles{
 		Ellipsis:       styles.muted,
 		ShortKey:       styles.heading,
@@ -72,13 +72,16 @@ func (model *Model) helpView(width, height int) string {
 		strings.Split(rendered, "\n")...,
 	)
 	workspace, _ := model.workspaceView(width, height, model.workspaceLayout(width, height))
-	return boundedBlockingOverlay(
+	return standardDialogOverlay(
 		workspace,
 		lines,
 		controls,
 		width,
 		height,
-		blockingDialogSize{width: helpDialogWidth, height: helpDialogHeight},
+		dialogSpec{
+			preferredInner: dialogSize{width: helpDialogWidth, height: helpDialogHeight},
+			borderMinimum:  dialogSize{width: 24, height: 10},
+		},
 		styles,
 	)
 }
@@ -86,12 +89,13 @@ func (model *Model) helpView(width, height int) string {
 func (model *Model) helpPageSize(width, height int) int {
 	styles := newSemanticStyles(model.settings)
 	layout := newHelpDialogLayout(width, height)
-	return helpPageCapacity(layout, len(model.helpControlRows(layout.width, styles)))
+	return helpPageCapacity(layout, len(model.helpControlRows(layout.inner.width, styles)))
 }
 
-func newHelpDialogLayout(width, height int) blockingDialogLayout {
-	return newBlockingDialogLayout(width, height, blockingDialogSize{
-		width: helpDialogWidth, height: helpDialogHeight,
+func newHelpDialogLayout(width, height int) dialogLayout {
+	return newDialogLayout(width, height, dialogSpec{
+		preferredInner: dialogSize{width: helpDialogWidth, height: helpDialogHeight},
+		borderMinimum:  dialogSize{width: 24, height: 10},
 	})
 }
 
@@ -104,8 +108,8 @@ func (model *Model) helpControlRows(width int, styles semanticStyles) []string {
 	)
 }
 
-func helpPageCapacity(layout blockingDialogLayout, controlRows int) int {
-	return max(layout.height-controlRows-2, 1)
+func helpPageCapacity(layout dialogLayout, controlRows int) int {
+	return max(layout.inner.height-controlRows-2, 1)
 }
 
 func (model *Model) statusView(width, height int) string {

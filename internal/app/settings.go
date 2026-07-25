@@ -406,6 +406,7 @@ const (
 	PaletteFocused
 	PaletteStatusBackground
 	PaletteCursorBackground
+	PaletteCursorForeground
 	PaletteDiffAddBackground
 	PaletteDiffDeleteBackground
 	PaletteDiffHunk
@@ -424,6 +425,21 @@ const (
 // Palette represents palette.
 type Palette struct {
 	colors map[PaletteRole]string
+}
+
+var requiredColorPaletteRoles = [...]PaletteRole{
+	PalettePanelBackground,
+	PalettePrimary,
+	PaletteSecondary,
+	PaletteDim,
+	PaletteDiffAdd,
+	PaletteDiffDelete,
+	PaletteDiffContext,
+	PalettePending,
+	PaletteFocused,
+	PaletteStatusBackground,
+	PaletteCursorBackground,
+	PaletteCursorForeground,
 }
 
 // NewPalette constructs and validates palette.
@@ -537,6 +553,16 @@ func NewSettings(request SettingsRequest) (Settings, error) {
 	if !features.valid() {
 		return Settings{}, errors.New("interactive setting features contain unknown bits")
 	}
+	if features.Has(FeatureColor) {
+		for _, role := range requiredColorPaletteRoles {
+			if request.Palette.color(role, "") == "" {
+				return Settings{}, fmt.Errorf(
+					"color-enabled palette is missing required role %s",
+					paletteRoleName(role),
+				)
+			}
+		}
+	}
 	if diffView != DiffViewUnified && diffView != DiffViewSideBySide {
 		return Settings{}, errors.New("invalid diff view")
 	}
@@ -581,6 +607,37 @@ func NewSettings(request SettingsRequest) (Settings, error) {
 		keymap:           keymap,
 		palette:          request.Palette,
 	}, nil
+}
+
+func paletteRoleName(role PaletteRole) string {
+	switch role {
+	case PalettePanelBackground:
+		return "panel_bg"
+	case PalettePrimary:
+		return "fg_primary"
+	case PaletteSecondary:
+		return "fg_secondary"
+	case PaletteDim:
+		return "fg_dim"
+	case PaletteDiffAdd:
+		return "diff_add"
+	case PaletteDiffDelete:
+		return "diff_del"
+	case PaletteDiffContext:
+		return "diff_context"
+	case PalettePending:
+		return "pending"
+	case PaletteFocused:
+		return "border_focused"
+	case PaletteStatusBackground:
+		return "status_bar_bg"
+	case PaletteCursorBackground:
+		return "cursor_line_bg"
+	case PaletteCursorForeground:
+		return "cursor_line_fg"
+	default:
+		return unknownValue
+	}
 }
 
 func (settings Settings) clone() Settings {
