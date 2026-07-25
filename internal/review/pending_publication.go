@@ -912,11 +912,7 @@ func validatePreparedPendingPublicationBytes(
 		default:
 			return ErrInvalidPublication
 		}
-		wireBytes := len(mutation.body) + markerBytes
-		if mutation.body != "" && markerBytes != 0 {
-			wireBytes += 2
-		}
-		if int64(wireBytes) > MaxCommentBodyBytes {
+		if pendingMarkedBodyBytes(mutation.body, markerBytes) > MaxCommentBodyBytes {
 			return fmt.Errorf(
 				"%w: pending GitHub comment exceeds %d bytes",
 				ErrInvalidPublication,

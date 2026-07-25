@@ -182,7 +182,7 @@ func (service *Service) CheckPublication(
 		return nil, err
 	}
 	if fresh, ok := acquisition.FreshPending(); ok {
-		if prepared.ContinuesPendingPublication() {
+		if mode == PublicationCheckPendingContinuation {
 			prepared, err = prepared.ReconcilePendingPublication(fresh)
 		} else {
 			prepared, err = prepared.ReusePendingPublication(fresh)

@@ -343,9 +343,11 @@ func (coordinator *Coordinator) preparePendingPublicationCheck(
 	fresh review.PendingReview,
 ) (review.PreparedPublication, error) {
 	reuse := !prepared.ContinuesPendingPublication()
-	construction := prepared.PendingReconciliationConstructionBytes(fresh)
+	var construction int64
 	if reuse {
 		construction = prepared.PendingReuseConstructionBytes(fresh)
+	} else {
+		construction = prepared.PendingReconciliationConstructionBytes(fresh)
 	}
 	if construction == 0 {
 		return review.PreparedPublication{}, review.ErrInvalidPublication
