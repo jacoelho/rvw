@@ -2,12 +2,13 @@
 
 **Status:** Draft candidate for explicit acceptance.
 
-**Scope:** Product behavior, architecture, source handling, runtime lifecycle, terminal presentation,
-resource bounds, failure semantics, and verification for `rvw`.
+**Scope:** Product behavior, architecture, source handling, runtime lifecycle, resource bounds,
+failure semantics, and verification for `rvw`, with presentation requirements incorporated from
+[`tui-design.md`](tui-design.md).
 
-This specification is standalone. It does not incorporate another document, implementation file,
-commit, plan, or historical decision. Its exact content remains a proposal until explicitly
-accepted.
+This specification owns product and runtime contracts. [`tui-design.md`](tui-design.md) is its sole
+incorporated presentation authority. Neither document incorporates an implementation file, commit,
+plan, or historical decision. Their exact contents remain proposals until explicitly accepted.
 
 **Reconciliation provenance:** This Go-native revision was reconciled from the Rust draft at
 `../rvw-rewrite/docs/rvw-specification.md`. The source draft's SHA-256 digest is
@@ -309,13 +310,12 @@ nonempty relative path beneath the user themes directory, contains no NUL, and c
 root, or platform-prefix component. It names a TextMate theme.
 
 A nonempty `NO_COLOR` disables color only when no `theme`, `theme_dark`, or `theme_light` value is
-configured. Any configured theme value explicitly enables color. Monochrome mode retains focus,
-selection, change, severity, and status distinctions using text and modifiers.
+configured. Any configured theme value explicitly enables color. Required monochrome distinctions
+are defined in [`tui-design.md`](tui-design.md#color-and-contrast).
 
-Custom themes are validated across the supported TrueColor, ANSI256, and ANSI16 projections.
-Ordinary text and focused borders require `4.5:1`; `cursor_line_fg` against `cursor_line_bg`
-requires `4.5:1`; `cursor_line_bg` against `panel_bg` requires `3:1`. A failure identifies the
-theme path, role pair, profile, actual ratio, and required ratio.
+Custom themes are validated across the supported TrueColor, ANSI256, and ANSI16 projections using
+the contrast requirements and diagnostics defined in
+[`tui-design.md`](tui-design.md#color-and-contrast).
 
 ### 5. Noninteractive output
 
@@ -746,7 +746,9 @@ both.
 Concrete Bubbles own only meaningful local interaction such as text input, textarea, help, or a
 bounded viewport. The root retains every returned child model and every returned command. Each key
 has exactly one owner in this order: blocking layer, focused child, active view, reserved global
-action. The same enabled binding definitions drive routing and visible help.
+action. The same enabled binding definitions drive routing; their visible-help presentation is
+defined in
+[`tui-design.md`](tui-design.md#implementation-basis-and-dependency-decisions).
 
 Ordinary `tea.Cmd` values may:
 
@@ -844,10 +846,10 @@ behavior that is part of the product contract.
 
 ### 12. Interaction
 
-The normal view contains a file tree, diff, comments, and status. Focus is explicit and cycles
-between visible panes. The active file, focused pane, cursor, selections, pending work, stale state,
-errors, review marks, comment anchors, and source identity remain distinguishable in color and
-monochrome modes.
+The normal view provides file tree, diff, comments, and status interactions. Focus cycles between
+visible panes. Their visual hierarchy and distinguishability are defined in
+[`tui-design.md`](tui-design.md#focus-and-input-ownership) and
+[`tui-design.md`](tui-design.md#application-states).
 
 Main default controls are:
 
@@ -879,9 +881,11 @@ Main default controls are:
 
 Comment editing uses `Ctrl-s` to save, `Tab` and `Shift-Tab` to change kind, and `Esc` to cancel.
 Multi-key chords time out after 750 milliseconds. Numeric repeats range from 1 through 9,999.
-Chord/repeat state resets on context changes, invalid continuation, or timeout. Effective help
-reflects user overrides. Search and command-prompt input are each limited to 64 KiB; reaching the
-limit is visible and accepts no further input until the user deletes content or cancels.
+Chord/repeat state resets on context changes, invalid continuation, or timeout. Effective-help
+presentation is defined in
+[`tui-design.md`](tui-design.md#implementation-basis-and-dependency-decisions). Search and
+command-prompt input are each limited to 64 KiB; reaching the limit is visible and accepts no
+further input until the user deletes content or cancels.
 
 The command prompt accepts:
 
@@ -918,8 +922,8 @@ comment deletion, reload that would discard state, export destination, and GitHu
 explicit confirmation or selection. Exact dialog geometry and context-preservation rules are
 defined in [`tui-design.md`](tui-design.md#dialogs-and-workflows).
 
-When the terminal is below 20 columns or below 6 rows, only configured quit and interrupt bindings
-are accepted. Resizing restores the prior interaction state.
+While the [Below minimum mode](tui-design.md#responsive-modes) is active, only configured quit and
+interrupt bindings are accepted. Resizing restores the prior interaction state.
 
 Responsive modes, pane allocation, single-pane overrides, focus fallback, and side-by-side
 eligibility are defined in [`tui-design.md`](tui-design.md#responsive-modes). Hidden panes retain
@@ -927,29 +931,15 @@ selection, focus-return target, and scroll identity.
 
 ### 13. Rendering
 
-Frame construction and rendering are proportional to viewport cells plus fixed overscan, not total
-repository, patch, line, comment, tree, or search-result size.
-
-The renderer:
-
-- clips before expensive text processing;
-- never emits raw control, escape, or bidirectional-override text from external data;
-- treats invalid UTF-8 paths as displayable escaped bytes while preserving identity;
-- handles tabs, wide characters, combining marks, and grapheme boundaries deterministically;
-- bounds work for a single pathological grapheme or line;
-- keeps unified and side-by-side line identity, old/new numbers, hunks, gaps, comments, review
-  state, and selections unambiguous;
-- keeps syntax highlighting optional, bounded, cancellable, revision-bound, and off the event loop;
-- degrades to plain text when highlighting is unavailable or limited;
-- never uses cache or highlight readiness to change review semantics.
+Presentation rendering and its viewport, sanitization, Unicode, identity, syntax-fallback, and
+event-loop bounds are defined in [`tui-design.md`](tui-design.md#rendering-bounds).
 
 Syntax work and cache identity is the pair `(content identity, syntax selector)`. Results for
 different selectors never share identity. A limited result is not retried automatically until that
 identity changes.
 
-Status presentation is deterministic and preserves simultaneous progress, warning, error, stale,
-limited, cancellation, delivery, and publication facts in the status-details layer even when the
-compact status bar can show only one summary.
+Required status presentation and simultaneous-fact preservation are defined in
+[`tui-design.md`](tui-design.md#application-states).
 
 ## Nonfunctional conformance
 
@@ -1069,7 +1059,7 @@ Conformance requires all of the following:
 | Domain | Mutation invariants, typed identities, comments, review marks, filtering, snapshots, stale revisions, reload reconciliation, and invalid transitions |
 | Source | Git/GitHub fixture tests, hostile external data, process limits, cancellation, direct-child reaping, contained-group and escaped-descendant outcomes, lazy materialization, and publication reconciliation |
 | Runtime | Admission/claim/cancel/complete races, byte-credit release, readiness/receiver closure, deadlines, late results, retained-outcome settlement, delivery fencing, panic policy, and shutdown ordering |
-| Terminal | Root/child model retention, command capture, key/help ownership, complete `tea.View` fields, every responsive boundary, viewport bounds, Unicode/path safety, monochrome semantics, signal ownership, startup-release fallback, and PTY restoration |
+| Terminal | Root/child model retention, command capture, key/help ownership, complete `tea.View` fields, Unicode/path safety, signal ownership, startup-release fallback, PTY restoration, and the [TUI presentation evidence matrix](tui-design.md#reproducible-conformance-evidence) |
 | Architecture | Go package dependency edges, effect ownership, pure-review imports, public-surface discipline, forbidden duplicate paths, supported-platform checks, dependency pins, and source-file cohesion |
 | Scale | Counter-based tests for viewport-proportional work plus retained large-file, large-tree, many-comment, search, and syntax benchmarks |
 

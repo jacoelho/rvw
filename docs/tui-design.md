@@ -1,10 +1,15 @@
 # TUI design
 
-This document is the normative presentation authority for `rvw`. The product, review, output,
-configuration, lifecycle, and resource contracts remain in
-[`rvw-specification.md`](rvw-specification.md). Upstream research is recorded in
-[`bubbletea-ui-research.md`](bubbletea-ui-research.md). A presentation rule stated elsewhere is
-informative if it conflicts with this document.
+This document is the sole normative presentation authority for `rvw`. It owns the TUI's visual
+hierarchy, focus and cursor presentation, glyphs, responsive composition, dialog geometry,
+pointer hit regions, color contrast, rendering bounds, upstream presentation rationale, and
+conformance scenarios. The product, review, output, configuration, lifecycle, and resource
+contracts remain in [`rvw-specification.md`](rvw-specification.md).
+
+Other documents MUST link here instead of restating presentation rules. A presentation statement
+elsewhere is informative and this document wins on conflict. TUI plans, research notes, and
+conformance reports MUST NOT become parallel design authorities; durable rationale and evidence
+mappings belong here.
 
 ## Audience and thesis
 
@@ -18,6 +23,47 @@ The visual thesis is:
 
 Position and space establish hierarchy first. Text emphasis, borders, glyphs, and color reinforce
 that hierarchy without changing geometry during focus or cursor movement.
+
+## Implementation basis and dependency decisions
+
+`rvw` follows Bubble Tea's `Msg -> Update -> Model + Cmd` ownership model: observable mutation has
+one owner, blocking contexts route before focused components, and effects remain outside `View`.
+The exact module versions and upgrade contract remain in the product specification's
+[architecture and ownership](rvw-specification.md#6-architecture-and-ownership) section. The
+installed Bubble Tea, Bubbles, and Lip Gloss modules provide this presentation basis:
+
+- [Bubble Tea v2](https://pkg.go.dev/charm.land/bubbletea/v2) defines the message, update, command,
+  and view lifecycle.
+- [Bubbles v2](https://pkg.go.dev/charm.land/bubbles/v2) supplies focused interaction components
+  where a component deletes a complete local responsibility. `rvw` uses its text input behavior
+  for Find and command input, including Unicode editing, cursor, focus, and blink commands.
+- [Lip Gloss v2](https://pkg.go.dev/charm.land/lipgloss/v2) supplies immutable styles and
+  terminal-cell-aware measurement, wrapping, placement, and composition.
+
+Key matching and visible help derive from the same enabled binding definitions. There is no
+separate help-state copy that can advertise an unavailable or remapped action.
+
+The design was also compared with
+[`charmbracelet/crush@e4175c52`](https://github.com/charmbracelet/crush/commit/e4175c52b8e14a4e158106ac5988fd42a8958457).
+Its routing of blocking dialogs before focused components, centralized semantic styles, and
+coherent glyph language are transferable. Its root model, diff renderer, dialog registry, and
+caches are not: those boundaries combine unrelated workflows or do not enforce `rvw`'s entry,
+byte, viewport, and scroll-depth bounds.
+
+Generic list, table, and viewport components do not provide application virtualization; they
+retain or rebuild the content supplied to them. `rvw` therefore keeps direct tree, diff, and
+comment renderers that materialize review-domain windows before presentation. It also keeps the
+bounded local comment editor because byte ownership, grapheme-safe projection, and retained-data
+accounting are product contracts rather than generic textarea behavior.
+
+A copied lexer or Chroma does not replace revision identity, cancellation, visible-line demand,
+byte accounting, multiline state, or safe fallback. Syntax preparation remains requested-line,
+bounded CPU work outside `Update` and `View`.
+
+Use an installed companion component only when it deletes a complete local interaction
+responsibility while preserving ownership, cancellation, byte, work, and viewport bounds. Keep
+direct domain code when a wrapper would retain the same policy or create duplicate state
+ownership.
 
 ## Focus and input ownership
 
@@ -41,12 +87,12 @@ bold and underlined in the focused foreground with no fill.
 
 ## Glyph and emphasis language
 
-The glyph vocabulary is closed:
+The semantic-marker vocabulary is closed:
 
 | Glyph | Meaning |
 | --- | --- |
 | `>` | Active or retained current position; only the active position receives fill |
-| `│` | Every terminal segment of a non-endpoint visual-range row |
+| `│` | Reserved marker cell on every terminal segment of a non-endpoint visual-range row |
 | `▌` | Title of the sole input-owning pane, dialog, or blocking workflow |
 | `•` | Active file |
 | `✓` | Reviewed file or hunk |
@@ -54,9 +100,10 @@ The glyph vocabulary is closed:
 | `▸`, `▾` | Collapsed and expanded disclosure only |
 
 The first terminal segment of an active or retained row contains `>`; wrapped continuations leave
-that marker cell blank. Visual-range endpoints use `>` and intermediate rows use `│` on every
-wrapped segment. Source text containing `>` or `│` is ordinary content and is never normalized or
-interpreted as presentation chrome.
+that marker cell blank. Visual-range endpoints use `>` and intermediate rows use `│` in the
+reserved marker column on every wrapped segment. Structural borders and pane or side-by-side
+separators may also use `│`; they are geometry, not semantic markers. Source text containing `>`
+or `│` is ordinary content and is never normalized or interpreted as presentation chrome.
 
 Active-row styling owns every cell, including marker columns, line-number gutters, badges,
 anchors, unified or side-by-side content, the side separator, wrapped continuations, and trailing
@@ -88,8 +135,9 @@ Pane allocation is deterministic:
 - Compact comments use 32 cells when explicitly shown and feasible. Otherwise a visible tree uses
   24 cells only above 84 columns.
 - One separator cell appears between visible panes. The diff receives the remainder.
-- A hidden tree or comments pane remains reachable through its single-pane override. The override
-  fills the workspace and preserves the pane's selection.
+- A tree or comments pane omitted by responsive allocation remains reachable through its
+  single-pane override unless the user explicitly hid it. The override fills the workspace and
+  preserves the pane's selection.
 - When resize hides the focused pane, focus falls back to the diff and records the return owner.
   When that pane becomes visible again, focus returns.
 
@@ -122,7 +170,11 @@ their operative state can require the available area.
 Loading, ready, empty, unavailable, stale, cancelled, limited, failed, ambiguous, and successful
 states remain explicit. The workspace retains prior valid content during refresh where the product
 contract permits it and labels that content as retained. A compact status line may summarize one
-fact, but Status details retains simultaneous operation, failure, limitation, and recovery facts.
+fact, but Status details retains simultaneous progress, warning, error, stale, limited,
+cancellation, delivery, and publication facts.
+
+The active file, input owner, cursor, selection, pending work, stale state, errors, review marks,
+comment anchors, and source identity remain distinguishable in color and monochrome modes.
 
 Errors and limitations include the next valid action when one exists. Disabled decisions explain
 what must change. Publication failure, reconciliation, retry fencing, and ready state remain
@@ -163,16 +215,28 @@ cues above.
 plus the fixed overscan. File tree nodes, diff rows, comments, Find results, and help entries are
 windowed before styling.
 
+The renderer:
+
+- clips before expensive text processing;
+- never emits raw control, escape, or bidirectional-override text from external data;
+- displays invalid UTF-8 paths as escaped bytes while preserving identity;
+- handles tabs, wide characters, combining marks, and grapheme boundaries deterministically;
+- bounds work for a single pathological grapheme or line;
+- keeps unified and side-by-side line identity, old/new numbers, hunks, gaps, comments, review
+  state, and selections unambiguous;
+- keeps syntax highlighting optional, bounded, cancellable, revision-bound, and off the event
+  loop;
+- degrades to plain text when highlighting is unavailable or limited; and
+- never uses cache or highlight readiness to change review semantics.
+
 Frame work cannot grow with total file count, total patch lines, scroll depth, or full blob size.
 Filesystem, network, subprocess, blocking waits, syntax preparation, and unbounded CPU work stay
-off the terminal event loop. The installed
-[Bubble Tea v2](https://pkg.go.dev/charm.land/bubbletea/v2) message/update/view contract and
-[Lip Gloss v2](https://pkg.go.dev/charm.land/lipgloss/v2) cell-aware measurement contract are the
-implementation baseline.
+off the terminal event loop. The framework contracts named in [Implementation basis and dependency
+decisions](#implementation-basis-and-dependency-decisions) are the implementation baseline.
 
-## Reproducible evidence scenarios
+## Reproducible conformance evidence
 
-The conformance review records results for these stable scenarios:
+The implementation MUST keep these stable evidence scenarios executable:
 
 | ID | Required evidence |
 | --- | --- |
@@ -185,6 +249,26 @@ The conformance review records results for these stable scenarios:
 | E07 | Pointer focus, row click, wheel, Find inner hit, border hit, outside hit, stale revision, and stale resize |
 | E08 | Loading, empty, failure, retained failure, retry, success, publication choice, publication failure, reconciliation, and ready |
 
-Each review classifies hierarchy, contrast, action ownership, constrained adaptation, pointer
-mapping, recovery, and rendering bounds as pass, finding, or unverified. Findings use
-Finding/Evidence/Risk/Smallest correct fix and are repaired before the report records no findings.
+The current executable evidence map is explicit about gaps; a required scenario remains required
+when its status is partially verified:
+
+| Scenario | Status | Primary evidence |
+| --- | --- | --- |
+| E01 | Partially verified | `TestDeterministicANSIRenderAudit` exercises dark and light themes, TrueColor, all workspace focus owners, active rows, retained positions, and a `160×50` wide layout. Exact `160×30` audit coverage remains required. |
+| E02 | Partially verified | The ANSI audit projects frames through ANSI16, and monochrome application and PTY tests require `>`, Reverse, semantic glyphs, and a single active fill. Exact ANSI16 coverage at `120×24` remains required. |
+| E03 | Partially verified | `TestResponsiveLayoutUsesBothWidthAndHeightBoundaries` covers mixed and exact boundary cases, and PTY goldens cover representative compact, normal, and wide layouts. Exact `80×18` and the complete one-cell-above matrix remain required. |
+| E04 | Verified | `TestSideBySideEligibilityUsesAllocatedDiffPaneWidth`, diff renderer tests, and `TestVisualRangeMarkersCoverWrappedSegmentsWithoutConsumingSourceGlyphs` cover allocated widths 101/102/103, wrapping, endpoints, rails, anchors, padding, and literal `>`/`│`. |
+| E05 | Verified | `TestDialogLayoutThresholdAxesAreIndependent`, dialog-context tests, Find caret tests, and Find pointer tests cover each threshold axis, context preservation, absolute inner coordinates, and inert border/exterior cells. |
+| E06 | Partially verified | Minimum-view tests cover `19×6` and `20×6`, pending decisions, exact recovery controls, disabled hidden cursors, and minimum-size input ownership. An explicit disabled-pointer assertion remains required. |
+| E07 | Verified | Mouse translation, stale-review, hidden-pane, Find inner-hit, border-hit, exterior-hit, caret, and focus-restoration tests cover pointer ownership and stale geometry. |
+| E08 | Verified | ANSI scenarios and protocol tests cover loading, empty, unavailable, limited, failed, retained, retry, success, publication choices, publication failure, reconciliation, and ready states. |
+
+Each design review classifies hierarchy, contrast, action ownership, constrained adaptation,
+pointer mapping, recovery, and rendering bounds as pass, finding, or unverified. An actionable
+finding records Finding, Evidence, Risk, and Smallest correct fix. Repair every supported finding
+and repeat the review until no findings remain.
+
+Before accepting a TUI presentation change, run `gofmt` on touched Go files, focused `gopls`
+diagnostics, focused package and tagged E2E tests, `git diff --check`, and `make check` as applicable
+to the change. Record transient run results in the change review, not in another normative design
+document.
