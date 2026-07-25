@@ -239,10 +239,13 @@ func streamIndex(
 	}
 	extensions := &io.LimitedReader{
 		R: reader,
-		N: limited.N + int64(reader.Buffered()),
+		N: int64(reader.Buffered()) + limited.N,
 	}
 	if err := readIndexExtensions(ctx, extensions); err != nil {
 		return 0, err
+	}
+	if extensions.N != 0 {
+		return 0, errors.New("git index contains trailing data before its checksum")
 	}
 	return count, nil
 }
