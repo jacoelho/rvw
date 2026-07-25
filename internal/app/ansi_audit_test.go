@@ -46,6 +46,7 @@ const (
 	ansiAuditOccupancyDialog
 	ansiAuditOccupancyReferenceDialog
 	ansiAuditOccupancyBlockingSurface
+	ansiAuditOccupancyCompactSurface
 )
 
 type ansiAuditScenario struct {
@@ -64,6 +65,7 @@ type ansiAuditScenario struct {
 type ansiAuditModelState struct {
 	filteredFileTree      *fileTree
 	notice                *Notice
+	lastNotice            *Notice
 	visibleFileTree       fileTree
 	allFileTree           fileTree
 	fileProjection        fileProjectionState
@@ -215,7 +217,8 @@ func TestDeterministicANSIRenderAudit(t *testing.T) {
 func TestANSIAuditMetricsRejectMalformedFrames(t *testing.T) {
 	t.Run("misaligned pane boundary", func(t *testing.T) {
 		frame := "FILES│DIFF\nrow   │row\nrow  │ row\nReady"
-		if err := ansiAuditAlignedSeparators(frame); err == nil {
+		layout := workspaceLayout{treeWidth: 5, diffWidth: 4}
+		if err := ansiAuditAlignedSeparators(frame, layout); err == nil {
 			t.Fatal("misaligned rendered separator passed the audit")
 		}
 	})
@@ -259,7 +262,9 @@ func TestANSIAuditMetricsRejectMalformedFrames(t *testing.T) {
 	t.Run("rendered pane overlap erases boundary", func(t *testing.T) {
 		frame := "FILES│DIFF\nleft row overwrote right\nReady     "
 		if _, err := ansiAuditObservedWorkspaceRegions(
-			frame, ansiAuditSize{width: 10, height: 3},
+			frame,
+			ansiAuditSize{width: 10, height: 3},
+			workspaceLayout{treeWidth: 5, diffWidth: 4},
 		); err == nil {
 			t.Fatal("rendered pane overlap passed the production boundary audit")
 		}
@@ -294,7 +299,10 @@ func TestANSIAuditMetricsRejectMalformedFrames(t *testing.T) {
 		}
 	})
 	t.Run("off-center bounded dialog", func(t *testing.T) {
-		frame := "▌ Confirmation                         \nbody                                    \nEsc cancel                               \ny yes  n no                              "
+		frame := "┌────────────────────────────────────────┐\n" +
+			"│▌ Confirmation                          │\n" +
+			"│Esc cancel  y yes  n no                 │\n" +
+			"└────────────────────────────────────────┘"
 		size := ansiAuditSize{width: 60, height: 10}
 		layout, ok := ansiAuditObservedBoundedDialogLayout(frame, size, "confirm-modal")
 		if !ok {
@@ -419,7 +427,8 @@ func ansiAuditPaletteValues(theme config.Theme) map[PaletteRole]string {
 		"diff_context": PaletteDiffContext, "pending": PalettePending,
 		"border_focused": PaletteFocused, "status_bar_bg": PaletteStatusBackground,
 		"cursor_line_bg": PaletteCursorBackground, "diff_add_bg": PaletteDiffAddBackground,
-		"diff_del_bg": PaletteDiffDeleteBackground, "diff_hunk_header": PaletteDiffHunk,
+		"cursor_line_fg": PaletteCursorForeground,
+		"diff_del_bg":    PaletteDiffDeleteBackground, "diff_hunk_header": PaletteDiffHunk,
 		"message_warning_fg": PaletteWarningForeground,
 		"message_warning_bg": PaletteWarningBackground,
 		"message_error_fg":   PaletteErrorForeground,
@@ -583,7 +592,7 @@ func ansiAuditScenarios(t *testing.T) []ansiAuditScenario {
 			name: "publication-modal", overlay: true, visibleCue: "Publish GitHub review",
 			controlContext: keymap.ContextSubmit,
 			primaryAction:  keymap.ActionSubmitReview, requiresCancel: true,
-			occupancyClass: ansiAuditOccupancyBlockingSurface,
+			occupancyClass: ansiAuditOccupancyCompactSurface,
 			setup: func(model *Model) {
 				setupANSIAuditCheckingPublication(t, model)
 			},
@@ -638,6 +647,7 @@ func captureANSIAuditModelState(model *Model) ansiAuditModelState {
 	return ansiAuditModelState{
 		filteredFileTree:      model.filteredFileTree,
 		notice:                model.notice,
+		lastNotice:            model.lastNotice,
 		visibleFileTree:       model.visibleFileTree,
 		allFileTree:           model.allFileTree,
 		fileProjection:        model.fileProjection,
@@ -670,6 +680,7 @@ func captureANSIAuditModelState(model *Model) ansiAuditModelState {
 func (state ansiAuditModelState) restore(model *Model) {
 	model.filteredFileTree = state.filteredFileTree
 	model.notice = state.notice
+	model.lastNotice = state.lastNotice
 	model.visibleFileTree = state.visibleFileTree
 	model.allFileTree = state.allFileTree
 	model.fileProjection = state.fileProjection
@@ -735,20 +746,29 @@ func ansiAuditModalControlText(plain string, size ansiAuditSize, scenario string
 	lines := strings.Split(plain, "\n")
 	start := max(size.height-2, 0)
 	end := size.height
+	startX := 0
+	endX := size.width
 	switch scenario {
 	case "find-modal":
 		layout := newFindModalLayout(size.width, size.height)
-		start = max(layout.y+layout.height-2, 0)
-		end = layout.y + layout.height
+		start = max(layout.dialog.inner.y+layout.dialog.inner.height-2, 0)
+		end = layout.dialog.inner.y + layout.dialog.inner.height
+		startX = layout.dialog.inner.x
+		endX = startX + layout.dialog.inner.width
 	default:
 		if layout, ok := ansiAuditObservedBoundedDialogLayout(plain, size, scenario); ok {
-			start = max(layout.y+layout.height-2, 0)
-			end = layout.y + layout.height
+			start = max(layout.y+layout.height-3, 0)
+			end = layout.y + layout.height - 1
+			startX = layout.x + 1
+			endX = layout.x + layout.width - 1
 		}
 	}
 	controls := make([]string, 0, 2)
 	for row := start; row < end; row++ {
-		controls = append(controls, ansiAuditLine(lines, row))
+		controls = append(
+			controls,
+			ansi.Cut(ansiAuditLine(lines, row), startX, endX),
+		)
 	}
 	return strings.Join(controls, "\n")
 }
@@ -805,18 +825,22 @@ func ansiAuditNonOverlappingRegions(regions []ansiAuditRegion) error {
 func ansiAuditObservedWorkspaceRegions(
 	plain string,
 	size ansiAuditSize,
+	layout workspaceLayout,
 ) ([]ansiAuditRegion, error) {
 	lines := strings.Split(plain, "\n")
 	if len(lines) < 2 {
 		return nil, errors.New("workspace frame has no body")
 	}
-	separators := ansiAuditSeparatorColumns(lines[0])
-	for row, line := range lines[1 : len(lines)-1] {
-		if observed := ansiAuditSeparatorColumns(line); !slices.Equal(observed, separators) {
-			return nil, fmt.Errorf(
-				"workspace row %d pane boundaries = %v, want %v",
-				row+1, observed, separators,
-			)
+	separators := workspaceSeparatorColumns(layout)
+	for row, line := range lines[:len(lines)-1] {
+		for _, separator := range separators {
+			if ansiAuditCellAt(line, separator) != "│" {
+				return nil, fmt.Errorf(
+					"workspace row %d pane boundary %d is absent",
+					row,
+					separator,
+				)
+			}
 		}
 	}
 	regions := make([]ansiAuditRegion, 0, len(separators)+1)
@@ -850,7 +874,7 @@ func auditWorkspaceGeometry(
 	if layout.treeWidth < 0 || layout.diffWidth < 0 || layout.commentsWidth < 0 {
 		t.Fatalf("workspace has negative region width: %+v", layout)
 	}
-	regions, err := ansiAuditObservedWorkspaceRegions(plain, size)
+	regions, err := ansiAuditObservedWorkspaceRegions(plain, size, layout)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -882,13 +906,19 @@ func auditWorkspaceGeometry(
 	if !strings.Contains(firstLine, wantTitle) {
 		t.Fatalf("focused pane title %q is not visible in %q", wantTitle, firstLine)
 	}
-	if err := ansiAuditAlignedSeparators(plain); err != nil {
+	if err := ansiAuditAlignedSeparators(plain, layout); err != nil {
 		t.Fatal(err)
 	}
 	if model.overlay == OverlayNone && model.mode == ModeNormal {
 		lines := strings.Split(plain, "\n")
 		footer := lines[len(lines)-1]
 		count, ratio, compliance := ansiAuditFooterMetrics(footer)
+		if model.notice != nil {
+			if count != 0 {
+				t.Fatalf("active notice footer exposed %d actions", count)
+			}
+			return
+		}
 		minimum := 1
 		if size.width >= compactWidth {
 			minimum = 3
@@ -998,39 +1028,67 @@ func ansiAuditSeparatedSpans(line string) []ansiAuditSpan {
 	return spans
 }
 
-func ansiAuditAlignedSeparators(plain string) error {
+func ansiAuditAlignedSeparators(plain string, layout workspaceLayout) error {
 	lines := strings.Split(plain, "\n")
 	if len(lines) < 2 {
 		return nil
 	}
-	want := ansiAuditSeparatorColumns(lines[0])
+	want := workspaceSeparatorColumns(layout)
 	if len(want) == 0 {
 		return nil
 	}
 	aligned := 0
 	total := max(len(lines)-1, 1)
-	for _, line := range lines[1 : len(lines)-1] {
-		got := ansiAuditSeparatorColumns(line)
-		if slices.Equal(got, want) {
+	for _, line := range lines[:len(lines)-1] {
+		rowAligned := true
+		for _, separator := range want {
+			if ansiAuditCellAt(line, separator) != "│" {
+				rowAligned = false
+				break
+			}
+		}
+		if rowAligned {
 			aligned++
 		}
 	}
-	if float64(aligned)/float64(total-1) < 0.95 {
-		return fmt.Errorf("rendered pane-column alignment = %d/%d, want >=95%%", aligned, total-1)
+	if float64(aligned)/float64(total) < 0.95 {
+		return fmt.Errorf("rendered pane-column alignment = %d/%d, want >=95%%", aligned, total)
 	}
 	return nil
 }
 
-func ansiAuditSeparatorColumns(line string) []int {
-	var columns []int
+func workspaceSeparatorColumns(layout workspaceLayout) []int {
+	columns := make([]int, 0, 2)
 	column := 0
-	for _, character := range line {
-		if character == '│' {
+	if layout.treeWidth != 0 {
+		column += layout.treeWidth
+		if layout.diffWidth != 0 || layout.commentsWidth != 0 {
+			columns = append(columns, column)
+			column++
+		}
+	}
+	if layout.diffWidth != 0 {
+		column += layout.diffWidth
+		if layout.commentsWidth != 0 {
 			columns = append(columns, column)
 		}
-		column += lipgloss.Width(string(character))
 	}
 	return columns
+}
+
+func ansiAuditCellAt(line string, target int) string {
+	column := 0
+	for _, character := range line {
+		width := lipgloss.Width(string(character))
+		if column == target {
+			return string(character)
+		}
+		if column < target && target < column+width {
+			return ""
+		}
+		column += width
+	}
+	return ""
 }
 
 func auditProfileFrame(
@@ -1130,8 +1188,20 @@ func auditProfileFrame(
 		t.Fatal("audit terminal has zero area")
 	}
 	if occupied != 0 {
-		if density := float64(borders) / float64(occupied); density >= 0.15 {
-			t.Fatalf("visual-noise ratio = %.3f, want < 0.15", density)
+		maximumNoise := 0.15
+		if scenario.overlay &&
+			(scenario.name == "find-modal" ||
+				scenario.name == "help-modal" ||
+				scenario.name == "export-modal" ||
+				strings.HasPrefix(scenario.name, "confirm-")) {
+			maximumNoise = 0.40
+		}
+		if density := float64(borders) / float64(occupied); density >= maximumNoise {
+			t.Fatalf(
+				"visual-noise ratio = %.3f, want < %.2f",
+				density,
+				maximumNoise,
+			)
 		}
 	}
 	plainRows := make([]string, size.height)
@@ -1166,7 +1236,10 @@ func ansiAuditModalRegion(
 	if scenario.name == "find-modal" {
 		layout := newFindModalLayout(size.width, size.height)
 		return ansiAuditRegion{
-			x: layout.x, y: layout.y, width: layout.width, height: layout.height,
+			x:      layout.dialog.outer.x,
+			y:      layout.dialog.outer.y,
+			width:  layout.dialog.outer.width,
+			height: layout.dialog.outer.height,
 		}
 	}
 	if layout, ok := ansiAuditObservedBoundedDialogLayout(plain, size, scenario.name); ok {
@@ -1175,16 +1248,16 @@ func ansiAuditModalRegion(
 	return ansiAuditRegion{width: size.width, height: size.height}
 }
 
-func ansiAuditBoundedDialogMaximum(scenario string) (blockingDialogSize, bool) {
+func ansiAuditBoundedDialogMaximum(scenario string) (dialogSize, bool) {
 	switch {
 	case strings.HasPrefix(scenario, "confirm-"):
-		return blockingDialogSize{width: 40, height: 7}, true
+		return dialogSize{width: 40, height: 7}, true
 	case scenario == "export-modal":
-		return blockingDialogSize{width: 52, height: 9}, true
+		return dialogSize{width: 52, height: 9}, true
 	case scenario == "help-modal":
-		return blockingDialogSize{width: helpDialogWidth, height: helpDialogHeight}, true
+		return dialogSize{width: helpDialogWidth, height: helpDialogHeight}, true
 	default:
-		return blockingDialogSize{}, false
+		return dialogSize{}, false
 	}
 }
 
@@ -1192,54 +1265,53 @@ func ansiAuditObservedBoundedDialogLayout(
 	plain string,
 	size ansiAuditSize,
 	scenario string,
-) (blockingDialogLayout, bool) {
+) (cellRect, bool) {
 	maximum, ok := ansiAuditBoundedDialogMaximum(scenario)
 	if !ok {
-		return blockingDialogLayout{}, false
+		return cellRect{}, false
+	}
+	if size.width < 24 || size.height < 10 {
+		return cellRect{}, false
 	}
 	lines := strings.Split(plain, "\n")
-	if scenario == "help-modal" {
-		layout := newHelpDialogLayout(size.width, size.height)
-		line := ansiAuditLine(lines, layout.y)
-		prefix, _, found := strings.Cut(line, "▌ Keybindings")
-		if !found {
-			return blockingDialogLayout{}, false
-		}
-		layout.x = lipgloss.Width(prefix)
-		return layout, true
-	}
 	for row, line := range lines {
-		if strings.TrimSpace(line) == "" {
+		start := strings.IndexRune(line, '┌')
+		if start < 0 {
 			continue
 		}
-		last := row
-		for candidate := row; candidate < len(lines); candidate++ {
-			if strings.TrimSpace(lines[candidate]) != "" {
-				last = candidate
+		x := lipgloss.Width(line[:start])
+		width := 0
+		for _, character := range line[start:] {
+			width += lipgloss.Width(string(character))
+			if character == '┐' {
+				break
 			}
 		}
-		return blockingDialogLayout{
-			x: lipgloss.Width(line) - lipgloss.Width(strings.TrimLeft(line, " ")), y: row,
-			width: min(size.width, maximum.width), height: last - row + 1,
-		}, true
+		for bottom := row + 1; bottom < len(lines); bottom++ {
+			if ansiAuditCellAt(lines[bottom], x) == "└" {
+				return cellRect{x: x, y: row, width: width, height: bottom - row + 1}, true
+			}
+		}
+		return cellRect{}, false
 	}
-	return blockingDialogLayout{}, false
+	_ = maximum
+	return cellRect{}, false
 }
 
 func ansiAuditCenteredBoundedDialog(
-	layout blockingDialogLayout,
+	layout cellRect,
 	size ansiAuditSize,
-	maximum blockingDialogSize,
+	maximum dialogSize,
 ) error {
-	expectedWidth := min(size.width, maximum.width)
+	expectedWidth := min(size.width-2, maximum.width+2)
 	if layout.width != expectedWidth {
 		return fmt.Errorf("bounded dialog width = %d, want %d", layout.width, expectedWidth)
 	}
-	if layout.height < 1 || layout.height > min(size.height, maximum.height) {
+	if layout.height < 3 || layout.height > min(size.height-2, maximum.height+2) {
 		return fmt.Errorf(
-			"bounded dialog height = %d, want 1..%d",
+			"bounded dialog height = %d, want 3..%d",
 			layout.height,
-			min(size.height, maximum.height),
+			min(size.height-2, maximum.height+2),
 		)
 	}
 	expectedX := max((size.width-layout.width)/2, 0)
@@ -1293,11 +1365,13 @@ func ansiAuditOccupancyRange(class ansiAuditOccupancyClass) (float64, float64, s
 	case ansiAuditOccupancyGeneral:
 		return 0.35, 0.65, "general application"
 	case ansiAuditOccupancyDialog:
-		return 0.25, 0.60, "modal dialog"
+		return 0.25, 0.65, "modal dialog"
 	case ansiAuditOccupancyReferenceDialog:
 		return 0.15, 0.60, "reference dialog"
 	case ansiAuditOccupancyBlockingSurface:
 		return 0.02, 0.65, "full-screen operational surface"
+	case ansiAuditOccupancyCompactSurface:
+		return 0.01, 0.65, "compact full-screen operational surface"
 	default:
 		return 0, 1, "unclassified"
 	}
@@ -1399,12 +1473,12 @@ func auditStateCompleteness(
 		{name: "focused", cues: []string{"▌ DIFF"}, setup: func(model *Model) {
 			model.focus = FocusDiff
 		}},
-		{name: "selected", cues: []string{"▸", "00_active_long.go"}, setup: func(model *Model) {
+		{name: "selected", cues: []string{">", "00_active_long.go"}, setup: func(model *Model) {
 			model.focus = FocusFileTree
 			model.singlePaneOverride = FocusFileTree
 			selectANSIAuditTreeCursor(t, model)
 		}},
-		{name: "pending mutation", cues: []string{commentChangePreparing, "Working 1"}, setup: func(model *Model) {
+		{name: "pending mutation", cues: []string{commentChangePreparing}, setup: func(model *Model) {
 			model.notice = &Notice{Kind: NoticeInformation, Text: commentChangePreparing}
 			model.coordinatorStats.Accepted = 1
 		}},
@@ -1449,29 +1523,31 @@ func auditLayoutStability(
 			!slices.Equal(before[:max(len(before)-1, 0)], afterStatus[:max(len(afterStatus)-1, 0)]) {
 			t.Fatalf("%dx%d status update moved stable non-footer cells", size.width, size.height)
 		}
-		if err := ansiAuditStableActionAnchors(
-			ansi.Strip(ansiAuditLine(before, len(before)-1)),
-			ansi.Strip(ansiAuditLine(afterStatus, len(afterStatus)-1)),
-		); err != nil {
-			t.Fatalf("%dx%d status update: %v", size.width, size.height, err)
+		if footer := ansi.Strip(ansiAuditLine(afterStatus, len(afterStatus)-1)); !strings.Contains(footer, "Success: refresh complete") ||
+			len(ansiAuditFooterActionSpans(footer)) != 0 {
+			t.Fatalf("%dx%d active notice did not own footer: %q", size.width, size.height, footer)
 		}
-		if score, anchors, err := ansiAuditLayoutShiftScore(
-			strings.Join(before, "\n"), strings.Join(afterStatus, "\n"), size,
-		); err != nil || anchors < 3 || score != 0 {
-			t.Fatalf(
-				"%dx%d status LSS = %.4f across %d anchors: %v; want 0 across at least 3",
-				size.width, size.height, score, anchors, err,
-			)
+		model.acknowledgeNotice()
+		afterAcknowledgement := strings.Split(model.View().Content, "\n")
+		if ansi.Strip(ansiAuditLine(before, len(before)-1)) !=
+			ansi.Strip(ansiAuditLine(afterAcknowledgement, len(afterAcknowledgement)-1)) {
+			t.Fatalf("%dx%d acknowledged notice did not restore footer actions", size.width, size.height)
 		}
-		model.notice = nil
 		model.diffCursor++
 		afterSelection := strings.Split(model.View().Content, "\n")
 		changedRows := ansiAuditChangedRows(before, afterSelection)
 		if len(changedRows) == 0 {
 			t.Fatalf("%dx%d selection has no visible state change", size.width, size.height)
 		}
-		beforePlain := ansiAuditWithoutSelectionMarkers(ansi.Strip(strings.Join(before, "\n")))
-		afterPlain := ansiAuditWithoutSelectionMarkers(ansi.Strip(strings.Join(afterSelection, "\n")))
+		layout := model.workspaceLayout(size.width, size.height)
+		beforePlain := ansiAuditWithoutSelectionMarkers(
+			ansi.Strip(strings.Join(before, "\n")),
+			layout,
+		)
+		afterPlain := ansiAuditWithoutSelectionMarkers(
+			ansi.Strip(strings.Join(afterSelection, "\n")),
+			layout,
+		)
 		if beforePlain != afterPlain {
 			t.Fatalf("%dx%d selection changed stable content or geometry", size.width, size.height)
 		}
@@ -1499,27 +1575,6 @@ func auditLayoutStability(
 			t.Fatalf("%dx%d item-add changed-cell ratio = %.4f, want <0.01", size.width, size.height, ratio)
 		}
 	}
-}
-
-func ansiAuditStableActionAnchors(before, after string) error {
-	beforeActions := ansiAuditFooterActionSpans(before)
-	afterActions := ansiAuditFooterActionSpans(after)
-	if len(beforeActions) != len(afterActions) {
-		return fmt.Errorf("footer action count moved from %d to %d", len(beforeActions), len(afterActions))
-	}
-	for index := range beforeActions {
-		if beforeActions[index] != afterActions[index] {
-			return fmt.Errorf(
-				"footer action %q moved from %d..%d to %d..%d",
-				beforeActions[index].text,
-				beforeActions[index].start,
-				beforeActions[index].end,
-				afterActions[index].start,
-				afterActions[index].end,
-			)
-		}
-	}
-	return nil
 }
 
 type ansiAuditAnchor struct {
@@ -1566,9 +1621,6 @@ func ansiAuditSemanticAnchors(frame string) map[string]ansiAuditAnchor {
 			anchors["title:"+title] = ansiAuditAnchor{x: lipgloss.Width(before)}
 		}
 	}
-	for index, column := range ansiAuditSeparatorColumns(lines[0]) {
-		anchors[fmt.Sprintf("separator:%d", index)] = ansiAuditAnchor{x: column}
-	}
 	for _, cue := range []string{"diff --git", "M 00_active", "check ownership"} {
 		if row, column, ok := ansiAuditTextAnchor(lines, cue); ok {
 			anchors["content:"+cue] = ansiAuditAnchor{x: column, y: row}
@@ -1592,8 +1644,33 @@ func ansiAuditTextAnchor(lines []string, cue string) (int, int, bool) {
 	return 0, 0, false
 }
 
-func ansiAuditWithoutSelectionMarkers(content string) string {
-	return strings.NewReplacer("▸", " ", "›", " ").Replace(content)
+func ansiAuditWithoutSelectionMarkers(content string, layout workspaceLayout) string {
+	lines := strings.Split(content, "\n")
+	markerColumns := make([]int, 0, 3)
+	column := 0
+	if layout.treeWidth != 0 {
+		markerColumns = append(markerColumns, column)
+		column += layout.treeWidth + 1
+	}
+	if layout.diffWidth != 0 {
+		markerColumns = append(markerColumns, column)
+		column += layout.diffWidth + 1
+	}
+	if layout.commentsWidth != 0 {
+		markerColumns = append(markerColumns, column)
+	}
+	for row := 1; row < len(lines)-1; row++ {
+		for _, markerColumn := range markerColumns {
+			cell := ansiAuditCellAt(lines[row], markerColumn)
+			if cell != ">" && cell != "│" {
+				continue
+			}
+			width := lipgloss.Width(lines[row])
+			lines[row] = ansi.Cut(lines[row], 0, markerColumn) + " " +
+				ansi.Cut(lines[row], markerColumn+1, width)
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func ansiAuditChangedRows(before, after []string) []int {

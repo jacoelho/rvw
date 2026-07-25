@@ -15,6 +15,7 @@ const (
 )
 
 func (model *Model) applyAction(action keymap.Action, repeat int) tea.Cmd {
+	model.acknowledgeNotice()
 	if command, handled := model.applyRestrictedAction(action, repeat); handled {
 		return command
 	}
@@ -45,6 +46,14 @@ func (model *Model) applyAction(action keymap.Action, repeat int) tea.Cmd {
 		Text: NoticeText("unsupported action: " + action.String()),
 	}
 	return nil
+}
+
+func (model *Model) acknowledgeNotice() {
+	if model.notice == nil {
+		return
+	}
+	model.lastNotice = model.notice
+	model.notice = nil
 }
 
 func (model *Model) applyRestrictedAction(action keymap.Action, repeat int) (tea.Cmd, bool) {

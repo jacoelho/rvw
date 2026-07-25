@@ -116,33 +116,46 @@ func (model *Model) confirmationView(width, height int) string {
 		prompt = "Reload and discard review state that cannot be reconciled?"
 	}
 	styles := newSemanticStyles(model.settings)
-	dialogSize := blockingDialogSize{width: 40, height: 7}
-	dialogLayout := newBlockingDialogLayout(width, height, dialogSize)
+	preferred := dialogSize{width: 40, height: 7}
+	spec := dialogSpec{
+		preferredInner: preferred,
+		borderMinimum:  dialogSize{width: 24, height: 10},
+	}
+	dialogLayout := newDialogLayout(width, height, spec)
 	controls := model.modalBindingRows(
 		keymap.ContextConfirm,
 		[]keymap.Action{keymap.ActionCancel, keymap.ActionConfirmYes, keymap.ActionConfirmNo},
-		dialogLayout.width,
+		dialogLayout.inner.width,
 		styles,
 	)
 	promptLines := strings.Split(
-		lipgloss.Wrap(safeText(prompt), max(dialogLayout.width, 1), ""),
+		lipgloss.Wrap(safeText(prompt), max(dialogLayout.inner.width, 1), ""),
 		"\n",
 	)
 	body := []string{modalTitle(styles, "Confirmation")}
-	if dialogLayout.height > minimumHeight {
+	if dialogLayout.inner.height > minimumHeight {
 		body = append(body, "")
 	}
 	body = append(body, promptLines...)
-	if len(body)+len(controls) > dialogLayout.height {
-		body = promptLines
+	if len(body)+len(controls) > dialogLayout.inner.height {
+		body = strings.Split(
+			lipgloss.Wrap(
+				modalTitle(styles, prompt),
+				max(dialogLayout.inner.width, 1),
+				"",
+			),
+			"\n",
+		)
 	}
-	dialogSize = contentSizedBlockingDialog(dialogSize, body, controls)
-	return boundedBlockingSurface(
+	spec.preferredInner = contentSizedDialog(preferred, body, controls)
+	workspace, _ := model.workspaceView(width, height, model.workspaceLayout(width, height))
+	return standardDialogOverlay(
+		workspace,
 		body,
 		controls,
 		width,
 		height,
-		dialogSize,
+		spec,
 		styles,
 	)
 }

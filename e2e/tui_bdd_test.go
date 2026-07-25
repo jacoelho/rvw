@@ -187,7 +187,7 @@ func TestInteractiveSourceContract(t *testing.T) {
 				w.launchPTY(t, 120, 24, "pr", "7", "--repo", "fixture/repository")
 				w.pty.awaitScreen(t, "pending source", containsScreen("reviewed.go"))
 				w.pty.send(t, "zcj")
-				w.pty.awaitScreen(t, "selected inline draft", containsScreen("▸ [draft] reviewed.go:3"))
+				w.pty.awaitScreen(t, "selected inline draft", containsScreen("> [draft] reviewed.go:3"))
 				w.pty.send(t, "e")
 				w.pty.awaitScreen(t, "comment editor", containsScreen("Comment ·"))
 				w.pty.send(t, " edited")
@@ -199,16 +199,15 @@ func TestInteractiveSourceContract(t *testing.T) {
 				w.pty.awaitScreen(t, "draft preflight", func(screen string) bool {
 					return strings.Contains(screen, "Synchronize comments to a pending GitHub draft") &&
 						strings.Contains(screen, "Enter sync draft") &&
-						strings.Contains(screen, "Head: checked at current head") &&
-						strings.Contains(screen, "Pending review: continue 9001 · 1 changed · 0 conflicts") &&
-						strings.Contains(screen, "[modified · inline] existing inline edited")
+						strings.Contains(screen, "Comments: 2 included, 0 excluded") &&
+						strings.Contains(screen, "Pending draft: 1 changed · 0 conflicts")
 				})
 				w.pty.send(t, "\r")
 			})
 			scenario.Then("the same remote comment is updated and the local binding is clean", func(t testing.TB, w *world) {
 				w.pty.awaitScreen(t, "draft synchronized", func(screen string) bool {
 					return strings.Contains(screen, "Submit pending draft as comment") &&
-						strings.Contains(screen, "Pending review: continue 9001 · 0 changed · 0 conflicts")
+						strings.Contains(screen, "Pending draft: 0 changed · 0 conflicts")
 				})
 				calls := w.calls(t)
 				if !slices.ContainsFunc(calls, func(call externalCall) bool {
@@ -327,7 +326,7 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 				assertNoEscapedWidgetStyles(t, w, screen, "current-file find")
 				w.pty.send(t, "staged\r")
 				w.pty.awaitScreen(t, "current-file find result", func(screen string) bool {
-					return strings.Contains(screen, "1 match") &&
+					return strings.Contains(screen, "1 of 1") &&
 						strings.Contains(screen, "staged.txt") && strings.Contains(screen, "staged contents")
 				})
 				w.pty.send(t, kittyEscape)
@@ -336,7 +335,7 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 			scenario.When("the command prompt opens help", func(t testing.TB, w *world) {
 				w.pty.send(t, ":")
 				screen := w.pty.awaitScreen(t, "command footer", func(screen string) bool {
-					return strings.Contains(screen, "DIFF · staged.txt · COMMAND") &&
+					return strings.Contains(screen, "DIFF · staged.txt · 0/6 reviewed · COMMAND") &&
 						strings.Contains(screen, "staged contents")
 				})
 				assertNoEscapedWidgetStyles(t, w, screen, "command prompt")
@@ -364,7 +363,7 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 				})
 				w.pty.send(t, "untracked\r")
 				w.pty.awaitScreen(t, "review find result", func(screen string) bool {
-					return strings.Contains(screen, "1 match") &&
+					return strings.Contains(screen, "1 of 1") &&
 						strings.Contains(screen, "untracked.txt") &&
 						strings.Contains(screen, "untracked contents")
 				})
@@ -383,7 +382,7 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 				})
 				w.pty.send(t, "untr")
 				w.pty.awaitScreen(t, "file find result", func(screen string) bool {
-					return strings.Contains(screen, "1 match") && strings.Contains(screen, "untracked.txt")
+					return strings.Contains(screen, "1 of 1") && strings.Contains(screen, "untracked.txt")
 				})
 				w.pty.send(t, "\r")
 			})
@@ -396,7 +395,7 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 			scenario.When("a later file preview is cancelled", func(t testing.TB, w *world) {
 				w.pty.send(t, "\x10staged")
 				w.pty.awaitScreen(t, "staged file preview", func(screen string) bool {
-					return strings.Contains(screen, "1 match") && strings.Contains(screen, "staged.txt")
+					return strings.Contains(screen, "1 of 1") && strings.Contains(screen, "staged.txt")
 				})
 				w.pty.send(t, kittyEscape)
 			})
@@ -419,15 +418,15 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 			)
 			scenario.Then("its anchor is visible and both comment navigation paths reveal its line", func(t testing.TB, w *world) {
 				w.pty.send(t, "gg")
-				w.pty.awaitScreen(t, "visible comment anchor away from cursor", unfocusedCommentAnchor)
+				w.pty.awaitScreen(t, "visible comment anchor away from cursor", unfocusedCommentAnchor(w.pty))
 				w.pty.send(t, "]c")
-				w.pty.awaitScreen(t, "next-comment line", focusedCommentAnchor)
+				w.pty.awaitScreen(t, "next-comment line", focusedCommentAnchor(w.pty))
 				w.pty.send(t, "gg")
-				w.pty.awaitScreen(t, "comment anchor before pane activation", unfocusedCommentAnchor)
+				w.pty.awaitScreen(t, "comment anchor before pane activation", unfocusedCommentAnchor(w.pty))
 				w.pty.send(t, "\t")
 				w.pty.awaitScreen(t, "comments pane focus", containsScreen("▌ COMMENTS ·"))
 				w.pty.send(t, "\r")
-				w.pty.awaitScreen(t, "comments-pane activation line", focusedCommentAnchor)
+				w.pty.awaitScreen(t, "comments-pane activation line", focusedCommentAnchor(w.pty))
 			})
 			scenario.When("quit is declined", func(t testing.TB, w *world) {
 				w.pty.send(t, "q")
@@ -535,7 +534,7 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 			scenario.Then("the replacement source is reconciled", func(t testing.TB, w *world) {
 				w.pty.awaitScreen(t, "reload completion", func(screen string) bool {
 					return strings.Contains(screen, "reloaded.txt") &&
-						strings.Contains(screen, "Ready")
+						strings.Contains(screen, "Success: reload complete")
 				})
 				w.pty.send(t, xtermF2)
 				w.pty.awaitScreen(t, "reloaded status details", func(screen string) bool {
@@ -613,12 +612,16 @@ func assertNoEscapedWidgetStyles(t testing.TB, w *world, screen, context string)
 	}
 }
 
-func focusedCommentAnchor(screen string) bool {
-	return commentAnchorHasFocus(screen, commentAnchorFocused)
+func focusedCommentAnchor(session *ptySession) func(string) bool {
+	return func(screen string) bool {
+		return commentAnchorHasFocus(session, screen, commentAnchorFocused)
+	}
 }
 
-func unfocusedCommentAnchor(screen string) bool {
-	return commentAnchorHasFocus(screen, commentAnchorUnfocused)
+func unfocusedCommentAnchor(session *ptySession) func(string) bool {
+	return func(screen string) bool {
+		return commentAnchorHasFocus(session, screen, commentAnchorUnfocused)
+	}
 }
 
 type commentAnchorFocus uint8
@@ -628,12 +631,25 @@ const (
 	commentAnchorFocused
 )
 
-func commentAnchorHasFocus(screen string, focus commentAnchorFocus) bool {
-	for line := range strings.Lines(screen) {
+func commentAnchorHasFocus(
+	session *ptySession,
+	screen string,
+	focus commentAnchorFocus,
+) bool {
+	for row, line := range strings.Split(screen, "\n") {
 		if strings.Contains(line, "staged contents") &&
-			strings.Contains(line, "●") &&
-			strings.Contains(line, "▸") == (focus == commentAnchorFocused) {
-			return true
+			strings.Contains(line, "●") {
+			session.mu.Lock()
+			reversed := false
+			for column := range session.terminal.Width() {
+				cell := session.terminal.CellAt(column, row)
+				if cell != nil && cell.Style.Attrs&(1<<5) != 0 {
+					reversed = true
+					break
+				}
+			}
+			session.mu.Unlock()
+			return reversed == (focus == commentAnchorFocused)
 		}
 	}
 	return false
@@ -755,7 +771,7 @@ func TestGitHubPublicationContract(t *testing.T) {
 			scenario.Given("a pull request has one local comment", launchCommentedPullRequest())
 			scenario.When("publication reaches the remote write", publishReview())
 			scenario.Then("the started failure is reconciled as committed", func(t testing.TB, w *world) {
-				w.pty.awaitScreen(t, "committed reconciliation", containsScreen("Publication committed."))
+				w.pty.awaitScreen(t, "committed reconciliation", containsScreen("Review published"))
 				call := publicationCall(t, w.calls(t))
 				var payload struct {
 					Body string `json:"body"`
@@ -797,12 +813,12 @@ func publishReview() bdd.Step[*world] {
 		screen := w.pty.awaitScreen(t, "draft synchronization or publication result", func(screen string) bool {
 			return strings.Contains(screen, "Submit pending draft as") ||
 				strings.Contains(screen, "Outcome unknown; retry is fenced.") ||
-				strings.Contains(screen, "Publication committed.")
+				strings.Contains(screen, "Review published")
 		})
 		if strings.Contains(screen, "Submit pending draft as") {
 			w.pty.send(t, "\r")
 			w.pty.awaitScreen(t, "publication result", func(screen string) bool {
-				return strings.Contains(screen, "Publication committed.") ||
+				return strings.Contains(screen, "Review published") ||
 					strings.Contains(screen, "Outcome unknown; retry is fenced.")
 			})
 		}

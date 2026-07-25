@@ -233,7 +233,8 @@ diff_context = "white"
 pending = "light-yellow"
 border_focused = "light-cyan"
 status_bar_bg = "black"
-cursor_line_bg = "blue"
+cursor_line_bg = "lightcyan"
+cursor_line_fg = "black"
 syntax_theme = "syntax.tmTheme"
 `)
 
@@ -258,6 +259,92 @@ syntax_theme = "syntax.tmTheme"
 	}
 }
 
+func TestLoadRejectsCustomThemeMissingCursorForeground(t *testing.T) {
+	root := projectDirectory(t)
+	home := filepath.Join(root, "home")
+	themesDirectory := filepath.Join(home, ".config", "rvw", "themes")
+	if err := os.MkdirAll(themesDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(
+		t,
+		filepath.Join(home, ".config", "rvw", "config.toml"),
+		"theme = \"missing-cursor-foreground\"\n",
+	)
+	path := filepath.Join(themesDirectory, "missing-cursor-foreground.toml")
+	writeTestFile(t, path, `
+panel_bg = "black"
+fg_primary = "white"
+fg_secondary = "white"
+fg_dim = "white"
+diff_add = "white"
+diff_del = "white"
+diff_context = "white"
+pending = "white"
+border_focused = "white"
+status_bar_bg = "black"
+cursor_line_bg = "lightcyan"
+`)
+
+	_, err := Load(LoadRequest{CWD: root, Environment: []string{"HOME=" + home}})
+	want := "invalid configuration: theme " + path + " is missing cursor_line_fg"
+	if err == nil || err.Error() != want {
+		t.Fatalf("Load() error = %v, want %q", err, want)
+	}
+}
+
+func TestCustomCursorContrastDiagnosticsIdentifyPairProfileAndThreshold(t *testing.T) {
+	tests := []struct {
+		name             string
+		cursorBackground Color
+		cursorForeground Color
+		want             string
+	}{
+		{
+			name:             "foreground against background",
+			cursorBackground: "lightcyan",
+			cursorForeground: "white",
+			want: "invalid configuration: theme cursor.toml contrast for cursor_line_fg against " +
+				"cursor_line_bg is 1.25:1 in TrueColor; minimum is 4.5:1",
+		},
+		{
+			name:             "background against panel",
+			cursorBackground: "black",
+			cursorForeground: "white",
+			want: "invalid configuration: theme cursor.toml contrast for cursor_line_bg against " +
+				"panel_bg is 1.00:1 in TrueColor; minimum is 3.0:1",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			colors := map[ThemeColor]Color{
+				themePanelBackground:     "black",
+				themePrimaryForeground:   "white",
+				themeSecondaryForeground: "white",
+				themeDimForeground:       "white",
+				themeDiffAddition:        "white",
+				themeDiffDeletion:        "white",
+				themeDiffContext:         "white",
+				themePending:             "white",
+				themeFocusedBorder:       "white",
+				themeStatusBackground:    "black",
+				themeCursorBackground:    test.cursorBackground,
+				themeCursorForeground:    test.cursorForeground,
+			}
+			syntax := map[SyntaxColor]Color{
+				SyntaxKeyword: "white",
+				SyntaxString:  "white",
+				SyntaxComment: "white",
+				SyntaxNumber:  "white",
+			}
+			err := validateThemeContrast("cursor.toml", colors, syntax)
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("validateThemeContrast() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestLoadRejectsInvisibleResolvedThemeFallback(t *testing.T) {
 	root := projectDirectory(t)
 	home := filepath.Join(root, "home")
@@ -279,6 +366,7 @@ pending = "lightyellow"
 border_focused = "lightcyan"
 status_bar_bg = "black"
 cursor_line_bg = "blue"
+cursor_line_fg = "white"
 message_error_bg = "white"
 `)
 
@@ -326,6 +414,7 @@ pending = "white"
 border_focused = "white"
 status_bar_bg = "black"
 cursor_line_bg = "blue"
+cursor_line_fg = "white"
 `)
 
 	_, err := Load(LoadRequest{
@@ -449,8 +538,14 @@ func TestCuratedThemeAliasesResolveTheirOwnPaletteAndSyntaxTheme(t *testing.T) {
 }
 
 func TestBundledTrueColorThemesAddSubtleDiffBackgrounds(t *testing.T) {
-	dark := bundledTheme(ThemeGruvboxDark, AppearanceDark)
-	light := bundledTheme(ThemeGruvboxLight, AppearanceLight)
+	dark, err := bundledTheme(ThemeGruvboxDark, AppearanceDark)
+	if err != nil {
+		t.Fatal(err)
+	}
+	light, err := bundledTheme(ThemeGruvboxLight, AppearanceLight)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, theme := range []Theme{dark, light} {
 		if theme.Colors[themeDiffAdditionBackground] == theme.Colors[themePanelBackground] ||
 			theme.Colors[themeDiffDeletionBackground] == theme.Colors[themePanelBackground] {
@@ -458,7 +553,10 @@ func TestBundledTrueColorThemesAddSubtleDiffBackgrounds(t *testing.T) {
 		}
 	}
 
-	ansiTheme := bundledTheme(ThemeANSI16Dark, AppearanceDark)
+	ansiTheme, err := bundledTheme(ThemeANSI16Dark, AppearanceDark)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, exists := ansiTheme.Colors[themeDiffAdditionBackground]; exists {
 		t.Fatal("ansi16-dark unexpectedly generated an RGB addition background")
 	}
@@ -497,7 +595,25 @@ func TestEveryBundledThemeMeetsCanonicalProfileTextContrast(t *testing.T) {
 		)
 	}
 	for _, test := range themes {
-		theme := bundledTheme(test.name, test.appearance)
+		theme, err := bundledTheme(test.name, test.appearance)
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := bundledTheme(test.name, test.appearance)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, role := range []ThemeColor{themeCursorBackground, themeCursorForeground} {
+			if theme.Colors[role] != second.Colors[role] {
+				t.Fatalf(
+					"theme %q generated nondeterministic %q: %q then %q",
+					test.name,
+					role,
+					theme.Colors[role],
+					second.Colors[role],
+				)
+			}
+		}
 		for _, rule := range themeContrastRules {
 			foregroundRole := rule.role
 			foreground, ok := bundledTestColor(theme.Colors[foregroundRole])
@@ -533,7 +649,6 @@ func TestEveryBundledThemeMeetsCanonicalProfileTextContrast(t *testing.T) {
 			}
 			for _, backgroundRole := range []ThemeColor{
 				themePanelBackground,
-				themeCursorBackground,
 				themeDiffAdditionBackground,
 				themeDiffDeletionBackground,
 			} {
@@ -554,6 +669,30 @@ func TestEveryBundledThemeMeetsCanonicalProfileTextContrast(t *testing.T) {
 					)
 				}
 			}
+		}
+		cursorForeground, foregroundOK := bundledTestColor(theme.Colors[themeCursorForeground])
+		cursorBackground, backgroundOK := bundledTestColor(theme.Colors[themeCursorBackground])
+		panel, panelOK := bundledTestColor(theme.Colors[themePanelBackground])
+		if !foregroundOK || !backgroundOK || !panelOK {
+			t.Fatalf("theme %q generated unresolved cursor colors: %+v", test.name, theme.Colors)
+		}
+		if !contrastMeetsProfiles(cursorForeground, cursorBackground, minimumTextContrast) {
+			t.Fatalf(
+				"theme %q cursor foreground %q does not meet %.1f:1 against cursor background %q",
+				test.name,
+				theme.Colors[themeCursorForeground],
+				minimumTextContrast,
+				theme.Colors[themeCursorBackground],
+			)
+		}
+		if !contrastMeetsProfiles(cursorBackground, panel, minimumNonTextContrast) {
+			t.Fatalf(
+				"theme %q cursor background %q does not meet %.1f:1 against panel %q",
+				test.name,
+				theme.Colors[themeCursorBackground],
+				minimumNonTextContrast,
+				theme.Colors[themePanelBackground],
+			)
 		}
 	}
 }

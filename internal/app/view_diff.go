@@ -35,15 +35,30 @@ func (model *Model) diffCellState(
 }
 
 func (model *Model) diffCellSelection(line review.PatchLine) diffCellSelection {
-	if model.mode == ModeVisual &&
-		line.Number >= min(model.visualAnchor, model.diffCursor) &&
-		line.Number <= max(model.visualAnchor, model.diffCursor) {
-		return diffCellRangeSelected
+	activeCursor := model.workspaceOwnsInput() && model.focus == FocusDiff
+	if model.mode == ModeVisual {
+		if line.Number == model.diffCursor {
+			if activeCursor {
+				return diffCellSelectionActive
+			}
+			return diffCellSelectionRetained
+		}
+		if line.Number == model.visualAnchor {
+			return diffCellSelectionRetained
+		}
+		if line.Number > min(model.visualAnchor, model.diffCursor) &&
+			line.Number < max(model.visualAnchor, model.diffCursor) {
+			return diffCellSelectionRange
+		}
+		return diffCellSelectionNone
 	}
-	if line.Number == model.diffCursor {
-		return diffCellCursorSelected
+	if line.Number != model.diffCursor {
+		return diffCellSelectionNone
 	}
-	return diffCellNotSelected
+	if activeCursor {
+		return diffCellSelectionActive
+	}
+	return diffCellSelectionRetained
 }
 
 func (model *Model) diffCellColorMode() diffCellColorMode {
@@ -63,10 +78,32 @@ func (model *Model) sideBySideChromePresentation(
 		accent = styles.hunkBand
 	}
 	base := diffCellBase(selection, model.diffCellColorMode(), accent, styles)
+	gutter := styles.gutter.Inherit(base)
+	if selection == diffCellSelectionActive {
+		gutter = styles.activeCursorRow
+	}
 	return diffCellPresentation{
 		base:   base,
-		gutter: styles.gutter.Inherit(base),
+		gutter: gutter,
 	}
+}
+
+func diffSelectionMarker(
+	selection diffCellSelection,
+	segment int,
+	cell diffCellPresentation,
+	styles semanticStyles,
+) string {
+	switch selection {
+	case diffCellSelectionActive, diffCellSelectionRetained:
+		if segment == 0 {
+			return cell.gutter.Render(">")
+		}
+	case diffCellSelectionRange:
+		return styles.selectionRail.Render("│")
+	case diffCellSelectionNone:
+	}
+	return cell.gutter.Render(" ")
 }
 
 type patchLineDemand struct {
@@ -162,21 +199,13 @@ func (model *Model) diffLines(
 	rows := make([]uint32, 0, min(height, len(lines)))
 	for _, line := range lines {
 		cell := model.diffCellPresentation(line, diffCellUnified, styles)
-		cursor := cell.gutter.Render(" ")
-		if line.Number == model.diffCursor {
-			cursor = cell.gutter.Render("›")
-			if model.workspaceOwnsInput() && model.focus == FocusDiff {
-				cursor = styles.focused.Inherit(cell.base).Render("▸")
-			}
-		}
-		if model.mode == ModeVisual &&
-			line.Number >= min(model.visualAnchor, model.diffCursor) &&
-			line.Number <= max(model.visualAnchor, model.diffCursor) {
-			cursor = cell.gutter.Render("│")
-		}
+		selection := model.diffCellSelection(line)
 		reviewed := cell.gutter.Render(" ")
 		if hunk, exists := line.Hunk(active); exists && model.review.HunkReviewed(hunk) {
 			reviewed = styles.reviewed.Inherit(cell.base).Render("✓")
+			if selection == diffCellSelectionActive {
+				reviewed = cell.gutter.Render("✓")
+			}
 		}
 		contentWidth := max(width-2, 1)
 		segments := model.renderUnifiedPatchLine(
@@ -191,10 +220,7 @@ func (model *Model) diffLines(
 			if len(rendered) == height {
 				break
 			}
-			prefix := cell.gutter.Render(" ")
-			if segmentIndex == 0 {
-				prefix = cursor
-			}
+			prefix := diffSelectionMarker(selection, segmentIndex, cell, styles)
 			mark := cell.gutter.Render(" ")
 			if segmentIndex == 0 {
 				mark = reviewed
@@ -337,6 +363,9 @@ func (model *Model) commentAnchorCell(
 	if !model.review.HasCommentAnchor(file, side, line) {
 		return cell.gutter.Render(" ")
 	}
+	if cell.suppressSyntax {
+		return cell.gutter.Render("●")
+	}
 	return styles.commentAnchor.Inherit(cell.base).Render("●")
 }
 
@@ -347,8 +376,7 @@ func (model *Model) sideBySideDiffLines(
 	numberWidths diffLineNumberWidths,
 	styles semanticStyles,
 ) ([]string, []uint32) {
-	leftWidth := max((width-1)/2, 1)
-	rightWidth := max(width-leftWidth-1, 1)
+	leftWidth, rightWidth := model.sideBySideWidths(fileID, width)
 	rendered := make([]string, 0, min(height, len(lines)))
 	rows := make([]uint32, 0, min(height, len(lines)))
 	for _, line := range lines {
@@ -367,21 +395,16 @@ func (model *Model) sideBySideDiffLines(
 			styles,
 		)
 		separator := styles.gutter.Inherit(lineCell.base).Render("│")
-		cursor := lineCell.gutter.Render(" ")
-		if line.Number == model.diffCursor {
-			cursor = lineCell.gutter.Render("›")
-			if model.workspaceOwnsInput() && model.focus == FocusDiff {
-				cursor = styles.focused.Inherit(lineCell.base).Render("▸")
-			}
-		}
-		if model.mode == ModeVisual &&
-			line.Number >= min(model.visualAnchor, model.diffCursor) &&
-			line.Number <= max(model.visualAnchor, model.diffCursor) {
-			cursor = lineCell.gutter.Render("│")
+		selection := model.diffCellSelection(line)
+		if selection == diffCellSelectionActive {
+			separator = styles.activeCursorRow.Render("│")
 		}
 		reviewed := lineCell.gutter.Render(" ")
 		if hunk, ok := line.Hunk(fileID); ok && model.review.HunkReviewed(hunk) {
 			reviewed = styles.reviewed.Inherit(lineCell.base).Render("✓")
+			if selection == diffCellSelectionActive {
+				reviewed = lineCell.gutter.Render("✓")
+			}
 		}
 		text := line.Text.String()
 		switch line.Kind() {
@@ -424,9 +447,10 @@ func (model *Model) sideBySideDiffLines(
 			if segment < len(rightSegments) {
 				rightValue = rightSegments[segment]
 			}
-			lineCursor, lineReviewed := lineCell.gutter.Render(" "), lineCell.gutter.Render(" ")
+			lineCursor := diffSelectionMarker(selection, segment, lineCell, styles)
+			lineReviewed := lineCell.gutter.Render(" ")
 			if segment == 0 {
-				lineCursor, lineReviewed = cursor, reviewed
+				lineReviewed = reviewed
 			}
 			rendered = append(
 				rendered,
@@ -442,6 +466,29 @@ func (model *Model) sideBySideDiffLines(
 		return []string{styles.muted.Render("Empty patch.")}, nil
 	}
 	return rendered, rows
+}
+
+func (model *Model) sideBySideWidths(fileID review.FileID, width int) (int, int) {
+	kind := review.ChangeModified
+	if file, ok := model.review.Snapshot().File(fileID); ok {
+		kind = file.Change().Kind()
+	}
+	return sideBySideWidths(kind, width)
+}
+
+func sideBySideWidths(kind review.ChangeKind, width int) (int, int) {
+	available := max(width-1, 2)
+	left := available / 2
+	switch kind {
+	case review.ChangeAdded:
+		left = max(available/3, 1)
+	case review.ChangeDeleted:
+		left = max(available*2/3, 1)
+	case review.ChangeModified, review.ChangeRenamed, review.ChangeCopied,
+		review.ChangeBinary, review.ChangeRenameOnly, review.ChangeModeOnly,
+		review.ChangeSubmodule, review.ChangeObjectTypeChanged:
+	}
+	return left, max(available-left, 1)
 }
 
 func (model *Model) renderSidePatchLine(

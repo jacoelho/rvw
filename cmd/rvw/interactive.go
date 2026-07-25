@@ -307,17 +307,6 @@ func interactiveSettings(resolved config.Config) (app.Settings, error) {
 	case config.SubmitRequestChanges:
 		publicationEvent = review.PublicationEventRequestChanges
 	}
-	publicationPolicies, err := review.NewPublicationPolicies()
-	if err != nil {
-		return app.Settings{}, err
-	}
-	publicationOptions, err := review.NewPublicationOptions(
-		publicationEvent,
-		publicationPolicies,
-	)
-	if err != nil {
-		return app.Settings{}, err
-	}
 	keybindings, err := interactiveKeybindings(ui.Keybindings)
 	if err != nil {
 		return app.Settings{}, err
@@ -327,14 +316,14 @@ func interactiveSettings(resolved config.Config) (app.Settings, error) {
 		return app.Settings{}, err
 	}
 	return app.NewSettings(app.SettingsRequest{
-		Features:        settingFeatures,
-		DiffView:        diffView,
-		ContextLines:    contextLines,
-		SyntaxSelector:  syntaxSelector,
-		ExportTemplates: exportTemplates,
-		Publication:     publicationOptions,
-		Keybindings:     keybindings,
-		Palette:         palette,
+		Features:         settingFeatures,
+		DiffView:         diffView,
+		ContextLines:     contextLines,
+		SyntaxSelector:   syntaxSelector,
+		ExportTemplates:  exportTemplates,
+		PublicationEvent: publicationEvent,
+		Keybindings:      keybindings,
+		Palette:          palette,
 	})
 }
 
@@ -360,6 +349,7 @@ func interactivePaletteValues(theme config.Theme) map[app.PaletteRole]string {
 		"border_focused":     app.PaletteFocused,
 		"status_bar_bg":      app.PaletteStatusBackground,
 		"cursor_line_bg":     app.PaletteCursorBackground,
+		"cursor_line_fg":     app.PaletteCursorForeground,
 		"diff_add_bg":        app.PaletteDiffAddBackground,
 		"diff_del_bg":        app.PaletteDiffDeleteBackground,
 		"diff_hunk_header":   app.PaletteDiffHunk,

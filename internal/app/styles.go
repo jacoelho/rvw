@@ -10,7 +10,9 @@ type semanticStyles struct {
 	heading            lipgloss.Style
 	muted              lipgloss.Style
 	focused            lipgloss.Style
-	selected           lipgloss.Style
+	activeCursorRow    lipgloss.Style
+	selectionRail      lipgloss.Style
+	selectedControl    lipgloss.Style
 	paneHeader         lipgloss.Style
 	focusedPaneHeader  lipgloss.Style
 	gutter             lipgloss.Style
@@ -49,9 +51,10 @@ const (
 type diffCellSelection uint8
 
 const (
-	diffCellNotSelected diffCellSelection = iota + 1
-	diffCellCursorSelected
-	diffCellRangeSelected
+	diffCellSelectionNone diffCellSelection = iota + 1
+	diffCellSelectionRetained
+	diffCellSelectionActive
+	diffCellSelectionRange
 )
 
 type diffCellColorMode uint8
@@ -108,11 +111,17 @@ func diffCellStyles(state diffCellState, styles semanticStyles) diffCellPresenta
 		content = styles.metadata
 	}
 	base := diffCellBase(state.selection, state.colorMode, accent, styles)
+	gutter := styles.gutter.Inherit(base)
+	styledContent := content.Inherit(base)
+	if state.selection == diffCellSelectionActive {
+		gutter = styles.activeCursorRow
+		styledContent = styles.activeCursorRow
+	}
 	return diffCellPresentation{
 		base:           base,
-		gutter:         styles.gutter.Inherit(base),
-		content:        content.Inherit(base),
-		suppressSyntax: state.selection != diffCellNotSelected,
+		gutter:         gutter,
+		content:        styledContent,
+		suppressSyntax: state.selection == diffCellSelectionActive,
 	}
 }
 
@@ -127,8 +136,8 @@ func diffCellBase(
 		base = styles.panel
 	}
 	base = accent.Inherit(base)
-	if selection == diffCellCursorSelected || selection == diffCellRangeSelected {
-		base = styles.selected
+	if selection == diffCellSelectionActive {
+		base = styles.activeCursorRow
 	}
 	return base
 }
@@ -141,8 +150,8 @@ func hasStyleBackground(style lipgloss.Style) bool {
 func validDiffCellState(state diffCellState) bool {
 	validKind := state.kind >= review.PatchLineMetadata && state.kind <= review.PatchLineNoNewline
 	validPlacement := state.placement >= diffCellUnified && state.placement <= diffCellNewNeutral
-	validSelection := state.selection >= diffCellNotSelected &&
-		state.selection <= diffCellRangeSelected
+	validSelection := state.selection >= diffCellSelectionNone &&
+		state.selection <= diffCellSelectionRange
 	validColorMode := state.colorMode == diffCellMonochrome || state.colorMode == diffCellColor
 	return validKind && validPlacement && validSelection && validColorMode
 }
@@ -152,7 +161,8 @@ func newSemanticStyles(settings Settings) semanticStyles {
 		heading:           lipgloss.NewStyle().Bold(true),
 		muted:             lipgloss.NewStyle(),
 		focused:           lipgloss.NewStyle().Bold(true).Underline(true),
-		selected:          lipgloss.NewStyle().Reverse(true),
+		activeCursorRow:   lipgloss.NewStyle().Reverse(true),
+		selectedControl:   lipgloss.NewStyle().Bold(true).Underline(true),
 		paneHeader:        lipgloss.NewStyle(),
 		focusedPaneHeader: lipgloss.NewStyle().Bold(true),
 		gutter:            lipgloss.NewStyle(),
@@ -188,10 +198,15 @@ func newSemanticStyles(settings Settings) semanticStyles {
 	styles.focused = styles.focused.Foreground(
 		lipgloss.Color(palette.color(PaletteFocused, "6")),
 	)
-	styles.selected = lipgloss.NewStyle().
+	styles.activeCursorRow = lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color(palette.color(PalettePrimary, "15"))).
+		Foreground(lipgloss.Color(palette.color(PaletteCursorForeground, "15"))).
 		Background(lipgloss.Color(palette.color(PaletteCursorBackground, "8")))
+	styles.selectionRail = lipgloss.NewStyle().
+		Foreground(lipgloss.Color(palette.color(PaletteFocused, "6"))).
+		Background(lipgloss.Color(palette.color(PalettePanelBackground, "")))
+	styles.selectedControl = styles.selectedControl.Foreground(
+		lipgloss.Color(palette.color(PaletteFocused, "6")))
 	styles.paneHeader = lipgloss.NewStyle().Foreground(
 		lipgloss.Color(palette.color(PaletteSecondary, "7")),
 	).Inherit(styles.panel)

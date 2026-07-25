@@ -378,16 +378,16 @@ func (compiled *compiledKeybindings) effectiveBindings(
 
 // Settings describes settings.
 type Settings struct {
-	palette         Palette
-	keymap          *compiledKeybindings
-	syntaxSelector  review.SyntaxSelector
-	exportTemplates review.ExportTemplates
-	publication     review.PublicationOptions
-	patchContext    review.PatchContext
-	mouse           bool
-	colorEnabled    bool
-	wrap            bool
-	diffView        DiffView
+	palette          Palette
+	keymap           *compiledKeybindings
+	syntaxSelector   review.SyntaxSelector
+	exportTemplates  review.ExportTemplates
+	publicationEvent review.PublicationEvent
+	patchContext     review.PatchContext
+	mouse            bool
+	colorEnabled     bool
+	wrap             bool
+	diffView         DiffView
 }
 
 // PaletteRole describes palette role.
@@ -406,6 +406,7 @@ const (
 	PaletteFocused
 	PaletteStatusBackground
 	PaletteCursorBackground
+	PaletteCursorForeground
 	PaletteDiffAddBackground
 	PaletteDiffDeleteBackground
 	PaletteDiffHunk
@@ -424,6 +425,21 @@ const (
 // Palette represents palette.
 type Palette struct {
 	colors map[PaletteRole]string
+}
+
+var requiredColorPaletteRoles = [...]PaletteRole{
+	PalettePanelBackground,
+	PalettePrimary,
+	PaletteSecondary,
+	PaletteDim,
+	PaletteDiffAdd,
+	PaletteDiffDelete,
+	PaletteDiffContext,
+	PalettePending,
+	PaletteFocused,
+	PaletteStatusBackground,
+	PaletteCursorBackground,
+	PaletteCursorForeground,
 }
 
 // NewPalette constructs and validates palette.
@@ -515,14 +531,14 @@ func (features SettingFeatures) valid() bool {
 
 // SettingsRequest describes settings request.
 type SettingsRequest struct {
-	Palette         Palette
-	SyntaxSelector  review.SyntaxSelector
-	Keybindings     []keymap.Binding
-	ExportTemplates review.ExportTemplates
-	Publication     review.PublicationOptions
-	ContextLines    review.ContextLines
-	Features        SettingFeatures
-	DiffView        DiffView
+	Palette          Palette
+	SyntaxSelector   review.SyntaxSelector
+	Keybindings      []keymap.Binding
+	ExportTemplates  review.ExportTemplates
+	PublicationEvent review.PublicationEvent
+	ContextLines     review.ContextLines
+	Features         SettingFeatures
+	DiffView         DiffView
 }
 
 // NewSettings constructs and validates settings.
@@ -532,10 +548,20 @@ func NewSettings(request SettingsRequest) (Settings, error) {
 	contextLines := request.ContextLines
 	syntaxSelector := request.SyntaxSelector
 	exportTemplates := request.ExportTemplates
-	publication := request.Publication
+	publicationEvent := request.PublicationEvent
 	keybindings := request.Keybindings
 	if !features.valid() {
 		return Settings{}, errors.New("interactive setting features contain unknown bits")
+	}
+	if features.Has(FeatureColor) {
+		for _, role := range requiredColorPaletteRoles {
+			if request.Palette.color(role, "") == "" {
+				return Settings{}, fmt.Errorf(
+					"color-enabled palette is missing required role %s",
+					paletteRoleName(role),
+				)
+			}
+		}
 	}
 	if diffView != DiffViewUnified && diffView != DiffViewSideBySide {
 		return Settings{}, errors.New("invalid diff view")
@@ -546,9 +572,13 @@ func NewSettings(request SettingsRequest) (Settings, error) {
 	if !exportTemplates.Ready() {
 		return Settings{}, errors.New("export templates are required")
 	}
+	publicationPolicies, err := review.NewPublicationPolicies()
+	if err != nil {
+		return Settings{}, fmt.Errorf("publication settings: %w", err)
+	}
 	validatedPublication, err := review.NewPublicationOptions(
-		publication.Event(),
-		publication.Policies(),
+		publicationEvent,
+		publicationPolicies,
 	)
 	if err != nil {
 		return Settings{}, fmt.Errorf("publication settings: %w", err)
@@ -556,13 +586,7 @@ func NewSettings(request SettingsRequest) (Settings, error) {
 	if validatedPublication.Event() == review.PublicationEventDraft {
 		return Settings{}, errors.New("publication settings require a final GitHub review event")
 	}
-	validatedPublication, err = validatedPublication.WithExcludedComments(
-		publication.ExcludedComments(),
-	)
-	if err != nil {
-		return Settings{}, fmt.Errorf("publication settings: %w", err)
-	}
-	publication = validatedPublication
+	publicationEvent = validatedPublication.Event()
 	patchContext, err := review.ContextAround(contextLines)
 	if err != nil {
 		return Settings{}, err
@@ -572,27 +596,51 @@ func NewSettings(request SettingsRequest) (Settings, error) {
 		return Settings{}, err
 	}
 	return Settings{
-		mouse:           features.Has(FeatureMouse),
-		colorEnabled:    features.Has(FeatureColor),
-		wrap:            features.Has(FeatureWrap),
-		diffView:        diffView,
-		patchContext:    patchContext,
-		syntaxSelector:  syntaxSelector,
-		exportTemplates: exportTemplates,
-		publication:     publication,
-		keymap:          keymap,
-		palette:         request.Palette,
+		mouse:            features.Has(FeatureMouse),
+		colorEnabled:     features.Has(FeatureColor),
+		wrap:             features.Has(FeatureWrap),
+		diffView:         diffView,
+		patchContext:     patchContext,
+		syntaxSelector:   syntaxSelector,
+		exportTemplates:  exportTemplates,
+		publicationEvent: publicationEvent,
+		keymap:           keymap,
+		palette:          request.Palette,
 	}, nil
 }
 
-func (settings Settings) clone() (Settings, error) {
-	publication, err := settings.publication.WithExcludedComments(
-		settings.publication.ExcludedComments(),
-	)
-	if err != nil {
-		return Settings{}, err
+func paletteRoleName(role PaletteRole) string {
+	switch role {
+	case PalettePanelBackground:
+		return "panel_bg"
+	case PalettePrimary:
+		return "fg_primary"
+	case PaletteSecondary:
+		return "fg_secondary"
+	case PaletteDim:
+		return "fg_dim"
+	case PaletteDiffAdd:
+		return "diff_add"
+	case PaletteDiffDelete:
+		return "diff_del"
+	case PaletteDiffContext:
+		return "diff_context"
+	case PalettePending:
+		return "pending"
+	case PaletteFocused:
+		return "border_focused"
+	case PaletteStatusBackground:
+		return "status_bar_bg"
+	case PaletteCursorBackground:
+		return "cursor_line_bg"
+	case PaletteCursorForeground:
+		return "cursor_line_fg"
+	default:
+		return unknownValue
 	}
-	settings.publication = publication
+}
+
+func (settings Settings) clone() Settings {
 	settings.palette.colors = maps.Clone(settings.palette.colors)
-	return settings, nil
+	return settings
 }

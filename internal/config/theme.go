@@ -43,6 +43,7 @@ const (
 	themeFocusedBorder          ThemeColor = "border_focused"
 	themeStatusBackground       ThemeColor = "status_bar_bg"
 	themeCursorBackground       ThemeColor = "cursor_line_bg"
+	themeCursorForeground       ThemeColor = "cursor_line_fg"
 	themeDiffAdditionBackground ThemeColor = "diff_add_bg"
 	themeDiffDeletionBackground ThemeColor = "diff_del_bg"
 	themeDiffHunkHeader         ThemeColor = "diff_hunk_header"
@@ -77,6 +78,7 @@ var requiredThemeColors = []ThemeColor{
 	themeFocusedBorder,
 	themeStatusBackground,
 	themeCursorBackground,
+	themeCursorForeground,
 }
 
 var optionalThemeColors = stringSet[ThemeColor](
@@ -131,7 +133,11 @@ func resolveThemes(config *Config, environment map[string]string) error {
 			continue
 		}
 		if curatedThemes[name] || embeddedSyntaxThemes[name] {
-			config.themes[name] = bundledTheme(name, config.ui.Appearance)
+			theme, err := bundledTheme(name, config.ui.Appearance)
+			if err != nil {
+				return err
+			}
+			config.themes[name] = theme
 			continue
 		}
 		theme, err := loadUserTheme(name, environment)
@@ -149,7 +155,7 @@ type bundledThemePalette struct {
 	accent, warning, context              string
 }
 
-func bundledTheme(name ThemeName, appearance Appearance) Theme {
+func bundledTheme(name ThemeName, appearance Appearance) (Theme, error) {
 	selector := name
 	paletteName := name
 	switch name {
@@ -200,16 +206,28 @@ func bundledTheme(name ThemeName, appearance Appearance) Theme {
 	if background, ok := subtleDiffBackground(palette.background, palette.deletion); ok {
 		colors[themeDiffDeletionBackground] = background
 	}
-	enforceBundledContrast(colors, syntaxColors, appearance)
+	if err := enforceBundledContrast(
+		name,
+		colors,
+		syntaxColors,
+		Color(palette.selected),
+		Color(palette.primary),
+		appearance,
+	); err != nil {
+		return Theme{}, err
+	}
 	return Theme{
 		Name:         name,
 		SyntaxTheme:  SyntaxThemePath(selector.String()),
 		Colors:       colors,
 		SyntaxColors: syntaxColors,
-	}
+	}, nil
 }
 
-const minimumTextContrast = 4.5
+const (
+	minimumTextContrast    = 4.5
+	minimumNonTextContrast = 3.0
+)
 
 type themeContrastRule struct {
 	role        ThemeColor
@@ -218,32 +236,30 @@ type themeContrastRule struct {
 
 var themeContrastRules = [...]themeContrastRule{
 	{role: themePrimaryForeground, backgrounds: []ThemeColor{
-		themePanelBackground, themeStatusBackground, themeCursorBackground,
+		themePanelBackground, themeStatusBackground,
 		themeDiffAdditionBackground, themeDiffDeletionBackground,
 	}},
 	{role: themeSecondaryForeground, backgrounds: []ThemeColor{
 		themePanelBackground, themeStatusBackground,
 	}},
 	{role: themeDimForeground, backgrounds: []ThemeColor{
-		themePanelBackground, themeStatusBackground, themeCursorBackground,
+		themePanelBackground, themeStatusBackground,
 		themeDiffAdditionBackground, themeDiffDeletionBackground,
 	}},
 	{role: themeDiffAddition, backgrounds: []ThemeColor{
-		themePanelBackground, themeCursorBackground, themeDiffAdditionBackground,
+		themePanelBackground, themeDiffAdditionBackground,
 	}},
 	{role: themeDiffDeletion, backgrounds: []ThemeColor{
-		themePanelBackground, themeStatusBackground, themeCursorBackground,
+		themePanelBackground, themeStatusBackground,
 		themeDiffDeletionBackground,
 	}},
-	{role: themeDiffContext, backgrounds: []ThemeColor{
-		themePanelBackground, themeCursorBackground,
-	}},
+	{role: themeDiffContext, backgrounds: []ThemeColor{themePanelBackground}},
 	{role: themePending, backgrounds: []ThemeColor{themePanelBackground}},
 	{role: themeFocusedBorder, backgrounds: []ThemeColor{
-		themePanelBackground, themeStatusBackground, themeCursorBackground,
+		themePanelBackground, themeStatusBackground,
 	}},
 	{role: themeDiffHunkHeader, backgrounds: []ThemeColor{
-		themePanelBackground, themeStatusBackground, themeCursorBackground,
+		themePanelBackground, themeStatusBackground,
 	}},
 	{role: themeWarningForeground, backgrounds: []ThemeColor{
 		themePanelBackground, themeStatusBackground, themeWarningBackground,
@@ -257,19 +273,29 @@ var themeContrastRules = [...]themeContrastRule{
 }
 
 func enforceBundledContrast(
+	name ThemeName,
 	colors map[ThemeColor]Color,
 	syntaxColors map[SyntaxColor]Color,
+	cursorBackground Color,
+	cursorForeground Color,
 	appearance Appearance,
-) {
+) error {
 	panel := themePanelBackground
 	status := themeStatusBackground
-	selection := themeCursorBackground
 	addition := themeDiffAdditionBackground
 	deletion := themeDiffDeletionBackground
-	for _, role := range []ThemeColor{panel, status, selection, addition, deletion} {
+	for _, role := range []ThemeColor{panel, status, addition, deletion} {
 		if value, exists := colors[role]; exists {
 			colors[role] = contrastSafeBackground(value, appearance)
 		}
+	}
+	if err := generateBundledCursorPair(
+		colors,
+		cursorBackground,
+		cursorForeground,
+		appearance,
+	); err != nil {
+		return fmt.Errorf("%w: construct bundled theme %q: %w", ErrInvalidConfig, name, err)
 	}
 	for _, rule := range themeContrastRules {
 		role := rule.role
@@ -286,7 +312,7 @@ func enforceBundledContrast(
 		colors[role] = contrastSafeColor(value, backgroundValues, appearance)
 	}
 	syntaxBackgrounds := make([]Color, 0, 4)
-	for _, role := range []ThemeColor{panel, selection, addition, deletion} {
+	for _, role := range []ThemeColor{panel, addition, deletion} {
 		if value, exists := colors[role]; exists {
 			syntaxBackgrounds = append(syntaxBackgrounds, value)
 		}
@@ -296,6 +322,58 @@ func enforceBundledContrast(
 			syntaxColors[role] = contrastSafeColor(value, syntaxBackgrounds, appearance)
 		}
 	}
+	return nil
+}
+
+func generateBundledCursorPair(
+	colors map[ThemeColor]Color,
+	background Color,
+	foreground Color,
+	appearance Appearance,
+) error {
+	panel, panelOK := themeColorRGB(colors[themePanelBackground])
+	backgroundRGB, backgroundOK := themeColorRGB(background)
+	foregroundRGB, foregroundOK := themeColorRGB(foreground)
+	if !panelOK || !backgroundOK || !foregroundOK {
+		return errors.New("cursor colors cannot be resolved to sRGB")
+	}
+	backgroundTarget := [3]uint8{255, 255, 255}
+	foregroundTarget := [3]uint8{}
+	if appearance == AppearanceLight {
+		backgroundTarget, foregroundTarget = foregroundTarget, backgroundTarget
+	}
+	for backgroundStep := range 256 {
+		candidateBackground := mixRGB(
+			backgroundRGB,
+			backgroundTarget,
+			uint8(backgroundStep),
+		)
+		if !contrastMeetsProfiles(candidateBackground, panel, minimumNonTextContrast) {
+			continue
+		}
+		for foregroundStep := range 256 {
+			candidateForeground := mixRGB(
+				foregroundRGB,
+				foregroundTarget,
+				uint8(foregroundStep),
+			)
+			if !contrastMeetsProfiles(
+				candidateForeground,
+				candidateBackground,
+				minimumTextContrast,
+			) {
+				continue
+			}
+			colors[themeCursorBackground] = rgbColor(candidateBackground)
+			colors[themeCursorForeground] = rgbColor(candidateForeground)
+			return nil
+		}
+	}
+	return errors.New("no cursor foreground/background pair satisfies terminal profile contrast")
+}
+
+func rgbColor(value [3]uint8) Color {
+	return Color(fmt.Sprintf("#%02x%02x%02x", value[0], value[1], value[2]))
 }
 
 func contrastSafeBackground(background Color, appearance Appearance) Color {
@@ -358,9 +436,7 @@ func mixRGB(first, second [3]uint8, amount uint8) [3]uint8 {
 	for index := range mixed {
 		value := (uint16(first[index])*uint16(255-amount) +
 			uint16(second[index])*uint16(amount) + 127) / 255
-		if value > math.MaxUint8 {
-			panic("mixed RGB component cannot be represented as uint8")
-		}
+		// #nosec G115 -- the weighted average of two uint8 values is at most 255.
 		mixed[index] = uint8(value)
 	}
 	return mixed
@@ -371,15 +447,19 @@ func contrastsWithProfiles(
 	backgrounds [][3]uint8,
 ) bool {
 	for _, background := range backgrounds {
-		foregroundColor := color.RGBA{R: foreground[0], G: foreground[1], B: foreground[2], A: 255}
-		backgroundColor := color.RGBA{R: background[0], G: background[1], B: background[2], A: 255}
-		if contrastRatio(foregroundColor, backgroundColor) < minimumTextContrast ||
-			contrastRatio(ansi.Convert256(foregroundColor), ansi.Convert256(backgroundColor)) < minimumTextContrast ||
-			contrastRatio(ansi.Convert16(foregroundColor), ansi.Convert16(backgroundColor)) < minimumTextContrast {
+		if !contrastMeetsProfiles(foreground, background, minimumTextContrast) {
 			return false
 		}
 	}
 	return true
+}
+
+func contrastMeetsProfiles(first, second [3]uint8, minimum float64) bool {
+	firstColor := color.RGBA{R: first[0], G: first[1], B: first[2], A: 255}
+	secondColor := color.RGBA{R: second[0], G: second[1], B: second[2], A: 255}
+	return contrastRatio(firstColor, secondColor) >= minimum &&
+		contrastRatio(ansi.Convert256(firstColor), ansi.Convert256(secondColor)) >= minimum &&
+		contrastRatio(ansi.Convert16(firstColor), ansi.Convert16(secondColor)) >= minimum
 }
 
 func contrastRatio(first, second color.Color) float64 {
@@ -648,7 +728,6 @@ func validateThemeContrast(
 		}
 		for _, backgroundRole := range []ThemeColor{
 			themePanelBackground,
-			themeCursorBackground,
 			themeDiffAdditionBackground,
 			themeDiffDeletionBackground,
 		} {
@@ -667,7 +746,24 @@ func validateThemeContrast(
 			}
 		}
 	}
-	return nil
+	if err := validateContrastPairWithMinimum(
+		path,
+		string(themeCursorForeground),
+		colors[themeCursorForeground],
+		string(themeCursorBackground),
+		colors[themeCursorBackground],
+		minimumTextContrast,
+	); err != nil {
+		return err
+	}
+	return validateContrastPairWithMinimum(
+		path,
+		string(themeCursorBackground),
+		colors[themeCursorBackground],
+		string(themePanelBackground),
+		colors[themePanelBackground],
+		minimumNonTextContrast,
+	)
 }
 
 func validateContrastPair(
@@ -675,6 +771,23 @@ func validateContrastPair(
 	foreground Color,
 	backgroundRole string,
 	background Color,
+) error {
+	return validateContrastPairWithMinimum(
+		path,
+		foregroundRole,
+		foreground,
+		backgroundRole,
+		background,
+		minimumTextContrast,
+	)
+}
+
+func validateContrastPairWithMinimum(
+	path, foregroundRole string,
+	foreground Color,
+	backgroundRole string,
+	background Color,
+	minimum float64,
 ) error {
 	foregroundColor, foregroundOK := themeColorValue(foreground)
 	backgroundColor, backgroundOK := themeColorValue(background)
@@ -698,7 +811,7 @@ func validateContrastPair(
 	}
 	for _, profile := range profiles {
 		ratio := contrastRatio(profile.foreground, profile.background)
-		if ratio < minimumTextContrast {
+		if ratio < minimum {
 			return fmt.Errorf(
 				"%w: theme %s contrast for %s against %s is %.2f:1 in %s; minimum is %.1f:1",
 				ErrInvalidConfig,
@@ -707,11 +820,23 @@ func validateContrastPair(
 				backgroundRole,
 				ratio,
 				profile.name,
-				minimumTextContrast,
+				minimum,
 			)
 		}
 	}
 	return nil
+}
+
+func themeColorRGB(value Color) ([3]uint8, bool) {
+	resolved, ok := themeColorValue(value)
+	if !ok {
+		return [3]uint8{}, false
+	}
+	converted, ok := color.NRGBAModel.Convert(resolved).(color.NRGBA)
+	if !ok || converted.A == 0 {
+		return [3]uint8{}, false
+	}
+	return [3]uint8{converted.R, converted.G, converted.B}, true
 }
 
 func themeColorValue(value Color) (color.Color, bool) {

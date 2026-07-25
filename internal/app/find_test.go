@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -129,6 +130,31 @@ func TestFindRejectsInvalidUTF8Transactionally(t *testing.T) {
 	}
 }
 
+func TestFindStatusReportsPositionVisibleCountAndLimitedTotal(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	model.searchInput.SetValue("a")
+	model.find = findPalette{
+		scope:        findFiles,
+		phase:        findReady,
+		cursor:       1,
+		fileResults:  make([]fileFindResult, 3),
+		limited:      true,
+		totalMatches: 12,
+	}
+	if got := model.findStatusText(); got != "2 of 3 · 12 total" {
+		t.Fatalf("limited file find status = %q", got)
+	}
+	model.find.cursor = 99
+	model.find.limited = false
+	if got := model.findStatusText(); got != "3 of 3" {
+		t.Fatalf("clamped file find status = %q", got)
+	}
+	model.find.fileResults = nil
+	if got := model.findStatusText(); got != "0 of 0" {
+		t.Fatalf("empty file find status = %q", got)
+	}
+}
+
 func TestReviewFindSearchesOnlyCapturedVisibleProjection(t *testing.T) {
 	model, coordinator := newTestModel(t, map[string]string{
 		"alpha.txt": "visible only\n",
@@ -239,6 +265,91 @@ func TestFindPaletteCompositesWorkspaceAtNormalAndMinimumSizes(t *testing.T) {
 			t.Fatalf("%dx%d rendered %d lines", size.Width, size.Height, lines)
 		}
 		model.closeFind(findCloseCancel)
+	}
+}
+
+func TestFindCaretUsesDialogInnerCoordinatesAcrossThreshold(t *testing.T) {
+	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	settleModelWork(t, model, coordinator)
+	model.searchInput.SetVirtualCursor(false)
+	for _, size := range []TerminalSize{
+		{Width: 47, Height: 12, Known: true},
+		{Width: 48, Height: 12, Known: true},
+		{Width: 49, Height: 12, Known: true},
+		{Width: 48, Height: 13, Known: true},
+	} {
+		t.Run(fmt.Sprintf("%dx%d", size.Width, size.Height), func(t *testing.T) {
+			model.size = size
+			_ = model.openFind(findCurrent)
+			base := model.searchInput.Cursor()
+			view := model.View()
+			layout := newFindModalLayout(size.Width, size.Height)
+			if base == nil || view.Cursor == nil {
+				t.Fatalf("find cursor = base %+v view %+v", base, view.Cursor)
+			}
+			if view.Cursor.X != base.X+layout.inputX ||
+				view.Cursor.Y != base.Y+layout.inputY {
+				t.Fatalf(
+					"find cursor = (%d,%d), want base (%d,%d) + input (%d,%d)",
+					view.Cursor.X,
+					view.Cursor.Y,
+					base.X,
+					base.Y,
+					layout.inputX,
+					layout.inputY,
+				)
+			}
+			model.closeFind(findCloseCancel)
+		})
+	}
+}
+
+func TestFindMouseMappingRejectsBorderAndOutsideClicks(t *testing.T) {
+	for _, size := range []TerminalSize{
+		{Width: 47, Height: 12, Known: true},
+		{Width: 48, Height: 12, Known: true},
+		{Width: 49, Height: 12, Known: true},
+		{Width: 48, Height: 13, Known: true},
+	} {
+		t.Run(fmt.Sprintf("%dx%d", size.Width, size.Height), func(t *testing.T) {
+			layout := newFindModalLayout(size.Width, size.Height)
+			hits := mouseHitMap{
+				findRows:       []int{7},
+				findX:          layout.dialog.inner.x,
+				findY:          layout.dialog.inner.y,
+				findWidth:      layout.dialog.inner.width,
+				findHeight:     layout.dialog.inner.height,
+				findResultY:    layout.resultY,
+				findGeneration: 1,
+			}
+			click := hits.findCommand(tea.MouseClickMsg{
+				X:      layout.dialog.inner.x,
+				Y:      layout.resultY,
+				Button: tea.MouseLeft,
+			})
+			if click == nil {
+				t.Fatal("result click returned no command")
+			}
+			action, ok := click().(mouseActionMsg)
+			if !ok || action.target != mouseTargetFind || action.findIndex != 7 {
+				t.Fatalf("result click translated to %#v", action)
+			}
+			if layout.dialog.mode != dialogGeometryBordered {
+				return
+			}
+			for _, point := range []struct{ x, y int }{
+				{x: layout.dialog.outer.x, y: layout.resultY},
+				{x: layout.dialog.outer.x + layout.dialog.outer.width - 1, y: layout.resultY},
+				{x: layout.dialog.inner.x, y: layout.dialog.outer.y},
+				{x: 0, y: 0},
+			} {
+				if command := hits.findCommand(tea.MouseClickMsg{
+					X: point.x, Y: point.y, Button: tea.MouseLeft,
+				}); command != nil {
+					t.Fatalf("inert click at (%d,%d) returned a command", point.x, point.y)
+				}
+			}
+		})
 	}
 }
 

@@ -51,31 +51,18 @@ func newTestModel(tb testing.TB, changed map[string]string) (*Model, *Coordinato
 		cancelWork()
 		t.Fatal(err)
 	}
-	publicationPolicies, err := review.NewPublicationPolicies()
-	if err != nil {
-		cancelWork()
-		t.Fatal(err)
-	}
-	publicationOptions, err := review.NewPublicationOptions(
-		review.PublicationEventComment,
-		publicationPolicies,
-	)
-	if err != nil {
-		cancelWork()
-		t.Fatal(err)
-	}
 	syntaxSelector, err := review.NewSyntaxSelector("test")
 	if err != nil {
 		cancelWork()
 		t.Fatal(err)
 	}
 	settings, err := NewSettings(SettingsRequest{
-		Features:        features,
-		DiffView:        DiffViewUnified,
-		ContextLines:    contextLines,
-		SyntaxSelector:  syntaxSelector,
-		ExportTemplates: exportTemplates,
-		Publication:     publicationOptions,
+		Features:         features,
+		DiffView:         DiffViewUnified,
+		ContextLines:     contextLines,
+		SyntaxSelector:   syntaxSelector,
+		ExportTemplates:  exportTemplates,
+		PublicationEvent: review.PublicationEventComment,
 		Keybindings: []keymap.Binding{
 			{Context: keymap.ContextNormal, Chord: "q", Action: keymap.ActionQuit},
 			{Context: keymap.ContextNormal, Chord: "j", Action: keymap.ActionMoveDown},

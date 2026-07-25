@@ -127,7 +127,6 @@ func (model *Model) applyCommentMutationOutcome(outcome commentMutationOutcome) 
 	case review.CommentMutationSave:
 		model.mode = ModeNormal
 		model.selectCommentIndex(model.review.CommentCount() - 1)
-		model.reconcilePublicationSelection(selections.publication)
 		model.notice = &Notice{Kind: NoticeSuccess, Text: commentSaved}
 	case review.CommentMutationDelete:
 		model.reconcileReviewSelections(selections)

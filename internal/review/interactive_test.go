@@ -138,6 +138,28 @@ func TestReplaceSnapshotReconcilesByRawPathIdentity(t *testing.T) {
 	}
 }
 
+func TestReviewedFileCountTracksFileMarks(t *testing.T) {
+	current := testReview(t, testSnapshot(t, 1, "a.go", "b.go", "c.go"))
+	if got := current.ReviewedFileCount(); got != 0 {
+		t.Fatalf("initial reviewed file count = %d, want 0", got)
+	}
+	var err error
+	current, err = current.ToggleFileReviewed(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := current.ReviewedFileCount(); got != 1 {
+		t.Fatalf("reviewed file count after mark = %d, want 1", got)
+	}
+	current, err = current.ToggleFileReviewed(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := current.ReviewedFileCount(); got != 0 {
+		t.Fatalf("reviewed file count after unmark = %d, want 0", got)
+	}
+}
+
 func TestReplaceSnapshotPreservesOnlyProvablyIdenticalHunkMarks(t *testing.T) {
 	oldObject, _ := NewObjectID(strings.Repeat("1", 40))
 	newObject, _ := NewObjectID(strings.Repeat("2", 40))
