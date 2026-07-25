@@ -16,28 +16,44 @@ import (
 func (model *Model) diffLines(
 	width, height int,
 	styles semanticStyles,
-) ([]string, []uint32) {
+) ([]string, []diffViewRow) {
 	active, ok := model.review.ActiveFile()
 	if !ok {
-		return []string{styles.muted.Render("No changed files.")}, nil
+		return []string{styles.muted.Render("No changed files in this review.")}, nil
 	}
 	state := model.review.Patch(active)
 	switch state.Status {
 	case review.PatchUnavailable:
-		return []string{styles.muted.Render("Patch is not loaded. Press Enter to retry.")}, nil
+		return []string{styles.muted.Render("Patch not loaded — press Enter to load.")}, nil
 	case review.PatchPending:
 		return []string{styles.pending.Render("Loading patch…")}, nil
 	case review.PatchFailed:
-		return []string{styles.failure.Render("Patch failed: " + safeAndClip(state.Detail.String(), width-14))}, nil
+		return []string{renderNoticeLine(Notice{
+			Kind: NoticeError,
+			Text: NoticeText("Patch failed: " + state.Detail.String()),
+		}, width, styles)}, nil
 	case review.PatchCancelled:
-		return []string{styles.warning.Render("Patch cancelled. Press Enter to retry.")}, nil
+		return []string{renderNoticeLine(Notice{
+			Kind: NoticeWarning,
+			Text: "Patch cancelled. Press Enter to retry.",
+		}, width, styles)}, nil
 	case review.PatchLimited:
-		return []string{styles.warning.Render("Patch limited: " + safeAndClip(state.Detail.String(), width-15))}, nil
+		return []string{renderNoticeLine(Notice{
+			Kind: NoticeWarning,
+			Text: NoticeText("Patch limited: " + state.Detail.String()),
+		}, width, styles)}, nil
 	case review.PatchReady:
 	default:
-		return []string{styles.failure.Render("Invalid patch state.")}, nil
+		return []string{renderNoticeLine(Notice{
+			Kind: NoticeError,
+			Text: "Invalid patch state.",
+		}, width, styles)}, nil
 	}
-	count := uint32FromInt(height + viewportOverscan)
+	rendered, rows, contentHeight := model.initialDiffRows(width, height, styles)
+	if contentHeight <= 0 {
+		return rendered, rows
+	}
+	count := uint32FromInt(contentHeight + viewportOverscan)
 	lineBytes := max(int64(width)*8, 4_096)
 	if model.settings.wrap {
 		lineBytes = max(
@@ -49,26 +65,31 @@ func (model *Model) diffLines(
 	numberWidths := newDiffLineNumberWidths(state)
 	if model.settings.diffView == DiffViewSideBySide &&
 		width >= sideBySideContentWidth+diffCommentAnchorColumns {
-		return model.sideBySideDiffLines(active, lines, width, height, numberWidths, styles)
+		return model.sideBySideDiffLines(active, lines, width, contentHeight, numberWidths, styles)
 	}
-	rendered := make([]string, 0, min(height, len(lines)))
-	rows := make([]uint32, 0, min(height, len(lines)))
+	contentStart := len(rendered)
 	for _, line := range lines {
+		selected := line.Number == model.diffCursor
+		inVisualRange := model.mode == ModeVisual &&
+			line.Number >= min(model.visualAnchor, model.diffCursor) &&
+			line.Number <= max(model.visualAnchor, model.diffCursor)
+		lineStyles := styles
+		if selected {
+			lineStyles = styles.onCursorLine()
+		}
 		cursor := " "
-		if line.Number == model.diffCursor {
+		if selected {
 			cursor = "›"
 			if model.focus == FocusDiff {
-				cursor = styles.focused.Render("▸")
+				cursor = lineStyles.focused.Render("▸")
 			}
 		}
-		if model.mode == ModeVisual &&
-			line.Number >= min(model.visualAnchor, model.diffCursor) &&
-			line.Number <= max(model.visualAnchor, model.diffCursor) {
-			cursor = "│"
+		if inVisualRange {
+			cursor = lineStyles.visualSelection.Render("┃")
 		}
 		reviewed := " "
 		if hunk, exists := line.Hunk(active); exists && model.review.HunkReviewed(hunk) {
-			reviewed = styles.reviewed.Render("✓")
+			reviewed = lineStyles.reviewed.Render("✓")
 		}
 		contentWidth := max(width-2, 1)
 		segments := model.renderUnifiedPatchLine(
@@ -76,10 +97,10 @@ func (model *Model) diffLines(
 			line,
 			contentWidth,
 			numberWidths,
-			styles,
+			lineStyles,
 		)
 		for segmentIndex, segment := range segments {
-			if len(rendered) == height {
+			if len(rendered)-contentStart == contentHeight {
 				break
 			}
 			prefix := " "
@@ -90,17 +111,48 @@ func (model *Model) diffLines(
 			if segmentIndex == 0 {
 				mark = reviewed
 			}
-			rendered = append(rendered, prefix+mark+fitCellWidth(segment, contentWidth))
-			rows = append(rows, line.Number)
+			value := prefix + mark + fitCellWidth(segment, contentWidth)
+			if selected {
+				value = renderPersistentStyle(lineStyles.cursorLine, value)
+			}
+			rendered = append(rendered, value)
+			rows = append(rows, diffViewRow{line: line.Number, selectable: true})
 		}
-		if len(rendered) == height {
+		if len(rendered)-contentStart == contentHeight {
 			break
 		}
 	}
-	if len(rendered) == 0 {
-		return []string{styles.muted.Render("Empty patch.")}, nil
+	if len(rendered) == contentStart {
+		rendered = append(rendered, styles.muted.Render("Empty patch."))
+		rows = append(rows, diffViewRow{})
 	}
 	return rendered, rows
+}
+
+func (model *Model) initialDiffRows(
+	width, height int,
+	styles semanticStyles,
+) ([]string, []diffViewRow, int) {
+	rendered := make([]string, 0, height)
+	rows := make([]diffViewRow, 0, height)
+	contentHeight := height
+	if model.settings.diffView == DiffViewSideBySide &&
+		width < sideBySideContentWidth+diffCommentAnchorColumns {
+		rendered = append(rendered, sideBySideFallbackLine(width, styles))
+		rows = append(rows, diffViewRow{})
+		contentHeight--
+	}
+	return rendered, rows, contentHeight
+}
+
+func sideBySideFallbackLine(width int, styles semanticStyles) string {
+	return renderNoticeLine(Notice{
+		Kind: NoticeWarning,
+		Text: NoticeText(fmt.Sprintf(
+			"Side-by-side needs %d diff columns; showing unified.",
+			sideBySideContentWidth+diffCommentAnchorColumns,
+		)),
+	}, width, styles)
 }
 
 func stylePatchLine(text string, kind review.PatchLineKind, styles semanticStyles) string {
@@ -227,31 +279,35 @@ func (model *Model) sideBySideDiffLines(
 	width, height int,
 	numberWidths diffLineNumberWidths,
 	styles semanticStyles,
-) ([]string, []uint32) {
-	leftWidth := max((width-1)/2, 1)
-	rightWidth := max(width-leftWidth-1, 1)
-	separator := styles.muted.Render("│")
+) ([]string, []diffViewRow) {
+	leftWidth, rightWidth := model.sideBySideWidths(fileID, width)
 	rendered := make([]string, 0, min(height, len(lines)))
-	rows := make([]uint32, 0, min(height, len(lines)))
+	rows := make([]diffViewRow, 0, min(height, len(lines)))
 	for _, line := range lines {
 		if len(rendered) == height {
 			break
 		}
+		selected := line.Number == model.diffCursor
+		inVisualRange := model.mode == ModeVisual &&
+			line.Number >= min(model.visualAnchor, model.diffCursor) &&
+			line.Number <= max(model.visualAnchor, model.diffCursor)
+		lineStyles := styles
+		if selected {
+			lineStyles = styles.onCursorLine()
+		}
 		cursor := " "
-		if line.Number == model.diffCursor {
+		if selected {
 			cursor = "›"
 			if model.focus == FocusDiff {
-				cursor = styles.focused.Render("▸")
+				cursor = lineStyles.focused.Render("▸")
 			}
 		}
-		if model.mode == ModeVisual &&
-			line.Number >= min(model.visualAnchor, model.diffCursor) &&
-			line.Number <= max(model.visualAnchor, model.diffCursor) {
-			cursor = "│"
+		if inVisualRange {
+			cursor = lineStyles.visualSelection.Render("┃")
 		}
 		reviewed := " "
 		if hunk, ok := line.Hunk(fileID); ok && model.review.HunkReviewed(hunk) {
-			reviewed = styles.reviewed.Render("✓")
+			reviewed = lineStyles.reviewed.Render("✓")
 		}
 		text := line.Text.String()
 		switch line.Kind() {
@@ -269,7 +325,7 @@ func (model *Model) sideBySideDiffLines(
 			text,
 			max(leftWidth-2, 1),
 			numberWidths.old,
-			styles,
+			lineStyles,
 		)
 		rightSegments := model.renderSidePatchLine(
 			fileID,
@@ -278,7 +334,7 @@ func (model *Model) sideBySideDiffLines(
 			text,
 			rightWidth,
 			numberWidths.new,
-			styles,
+			lineStyles,
 		)
 		segments := max(len(leftSegments), len(rightSegments))
 		for segment := range segments {
@@ -296,20 +352,62 @@ func (model *Model) sideBySideDiffLines(
 			if segment == 0 {
 				lineCursor, lineReviewed = cursor, reviewed
 			}
-			rendered = append(
-				rendered,
-				lineCursor+lineReviewed+
-					fitCellWidth(leftValue, max(leftWidth-2, 1))+
-					separator+
-					fitCellWidth(rightValue, rightWidth),
-			)
-			rows = append(rows, line.Number)
+			separatorStyle := lineStyles.border
+			if model.focus == FocusDiff {
+				separatorStyle = lineStyles.borderFocused
+			}
+			value := lineCursor + lineReviewed +
+				fitCellWidth(leftValue, max(leftWidth-2, 1)) +
+				separatorStyle.Render("┃") +
+				fitCellWidth(rightValue, rightWidth)
+			if selected {
+				value = renderPersistentStyle(lineStyles.cursorLine, value)
+			}
+			rendered = append(rendered, value)
+			rows = append(rows, diffViewRow{line: line.Number, selectable: true})
 		}
 	}
 	if len(rendered) == 0 {
 		return []string{styles.muted.Render("Empty patch.")}, nil
 	}
 	return rendered, rows
+}
+
+func (model *Model) sideBySideWidths(fileID review.FileID, width int) (int, int) {
+	file, ok := model.review.Snapshot().File(fileID)
+	kind := review.ChangeModified
+	if ok {
+		kind = file.Change().Kind()
+	}
+	return sideBySideWidths(kind, width)
+}
+
+func sideBySideWidths(kind review.ChangeKind, width int) (int, int) {
+	available := max(width-1, 2)
+	left := available / 2
+	switch kind {
+	case review.ChangeAdded:
+		left = max(available/3, 1)
+	case review.ChangeDeleted:
+		left = max(available-available/3, 1)
+	case review.ChangeModified, review.ChangeRenamed, review.ChangeCopied,
+		review.ChangeBinary, review.ChangeRenameOnly, review.ChangeModeOnly,
+		review.ChangeSubmodule, review.ChangeObjectTypeChanged:
+	}
+	right := max(available-left, 1)
+	return left, right
+}
+
+func renderPersistentStyle(style lipgloss.Style, value string) string {
+	const sentinel = "\x00"
+	styled := style.Render(sentinel)
+	prefix, suffix, ok := strings.Cut(styled, sentinel)
+	if !ok || prefix == "" {
+		return value
+	}
+	value = strings.ReplaceAll(value, ansi.ResetStyle, ansi.ResetStyle+prefix)
+	value = strings.ReplaceAll(value, "\x1b[0m", "\x1b[0m"+prefix)
+	return prefix + value + suffix
 }
 
 func (model *Model) renderSidePatchLine(
@@ -572,6 +670,8 @@ func renderSyntaxSpans(
 		value := sanitizer.render(raw[runStart:runEnd])
 		if runKind != 0 {
 			value = syntaxStyle(runKind, styles).Render(value)
+		} else {
+			value = styles.base.Render(value)
 		}
 		rendered.WriteString(value)
 	}

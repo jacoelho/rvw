@@ -335,6 +335,32 @@ func (model *Model) commentEditorBindingSummary() string {
 	return model.settings.keymap.commentEditorSummary()
 }
 
+type actionHint struct {
+	action KeyAction
+	label  string
+}
+
+func (model *Model) actionHintSummary(contextName KeyContext, hints ...actionHint) string {
+	var summary strings.Builder
+	for _, hint := range hints {
+		chord, ok := model.settings.keymap.primaryChord(
+			contextName,
+			model.configFocus(),
+			hint.action,
+		)
+		if !ok {
+			continue
+		}
+		if summary.Len() != 0 {
+			summary.WriteString("  ")
+		}
+		summary.WriteString(chord.String())
+		summary.WriteByte(' ')
+		summary.WriteString(hint.label)
+	}
+	return summary.String()
+}
+
 func chordTimeoutCmd(ctx context.Context, generation uint64) tea.Cmd {
 	return func() tea.Msg {
 		timer := time.NewTimer(chordTimeout)

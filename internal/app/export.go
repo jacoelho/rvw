@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/jacoelho/rvw/internal/delivery"
 	"github.com/jacoelho/rvw/internal/review"
@@ -94,7 +95,17 @@ func (model *Model) startExport(selection exportSelection) {
 	model.notice = &Notice{Kind: NoticeInformation, Text: "preparing export"}
 }
 
-func (model *Model) exportPickerView(width, height int) string {
+func (model *Model) exportModalView(
+	width, height int,
+	styles semanticStyles,
+) (string, boundedPanelLayout) {
+	layout := newBoundedPanelLayout(width, height, boundedPanelRequest{
+		minimumWidth:  40,
+		minimumHeight: 12,
+		maximumWidth:  60,
+		maximumHeight: 14,
+		inset:         2,
+	})
 	format := "Markdown"
 	if model.exportPicker.format == review.ExportJSON {
 		format = "JSON"
@@ -105,20 +116,31 @@ func (model *Model) exportPickerView(width, height int) string {
 	}
 	checked := func(option review.ExportOption) string {
 		if model.exportPicker.options.Has(option) {
-			return "[x]"
+			return "[✓]"
 		}
 		return "[ ]"
 	}
-	return constrainedLines([]string{
-		"Export selection",
+	lines := []string{
+		styles.heading.Render("Export"),
 		"",
-		"format       " + format,
-		"destination  " + destination,
+		styles.muted.Render("── Options"),
+		"  Format       " + format,
+		"  Destination  " + destination,
 		"",
-		checked(review.ExportUnmappable) + " include unmappable comments",
+		styles.muted.Render("── Include"),
+		"  " + checked(review.ExportUnmappable) + " unmappable comments",
 		"",
-		model.bindingSummary(KeyContextExportPicker),
-	}, width, height)
+		styles.muted.Render(model.bindingSummary(KeyContextExportPicker)),
+	}
+	content := constrainedStyledLines(lines, layout.innerWidth, layout.innerHeight)
+	panelStyle := styles.panel.Width(layout.width).Height(layout.height)
+	if layout.bordered {
+		panelStyle = panelStyle.Border(lipgloss.RoundedBorder())
+		if foreground := styles.borderFocused.GetForeground(); foreground != nil {
+			panelStyle = panelStyle.BorderForeground(foreground)
+		}
+	}
+	return panelStyle.Render(content), layout
 }
 
 func (model *Model) applyExportOutcome(outcome ExportOutcome) tea.Cmd {

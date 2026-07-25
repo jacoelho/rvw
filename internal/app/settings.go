@@ -418,6 +418,7 @@ var (
 
 type compiledKeyScope struct {
 	chords               map[keyChordKey]compiledChordBinding
+	primaryChords        map[KeyAction]KeyChord
 	bindingSummary       string
 	normalStatusSummary  string
 	commentEditorSummary string
@@ -584,7 +585,13 @@ func compileKeyScope(sources []compiledBindingSource, scope keyBindingScope) *co
 	compiled := &compiledKeyScope{
 		bindings:       bindings,
 		chords:         chords,
+		primaryChords:  make(map[KeyAction]KeyChord, len(bindings)),
 		bindingSummary: formatBindingSummary(bindings, 4),
+	}
+	for _, binding := range bindings {
+		if _, exists := compiled.primaryChords[binding.Action]; !exists {
+			compiled.primaryChords[binding.Action] = binding.Chord
+		}
 	}
 	if scope.context == KeyContextNormal {
 		compiled.normalStatusSummary = formatActionSummary(bindings, normalStatusSummaryActions[:])
@@ -704,6 +711,19 @@ func (compiled *compiledKeybindings) commentEditorSummary() string {
 	return scope.commentEditorSummary
 }
 
+func (compiled *compiledKeybindings) primaryChord(
+	context KeyContext,
+	focus KeyFocus,
+	action KeyAction,
+) (KeyChord, bool) {
+	scope := compiled.scope(context, focus)
+	if scope == nil {
+		return "", false
+	}
+	chord, ok := scope.primaryChords[action]
+	return chord, ok
+}
+
 func (compiled *compiledKeybindings) effectiveBindings(
 	context KeyContext,
 	focus KeyFocus,
@@ -754,6 +774,9 @@ const (
 	PaletteSyntaxNumber
 	PaletteWarningForeground
 	PaletteWarningBackground
+	PaletteTreeDirectory
+	PaletteTreeFile
+	PaletteNotice
 )
 
 // Palette represents palette.
@@ -765,7 +788,7 @@ type Palette struct {
 func NewPalette(values map[PaletteRole]string) (Palette, error) {
 	colors := make(map[PaletteRole]string, len(values))
 	for role, value := range values {
-		if role < PalettePanelBackground || role > PaletteWarningBackground ||
+		if role < PalettePanelBackground || role > PaletteNotice ||
 			value == "" || len(value) > 64 {
 			return Palette{}, errors.New("invalid presentation palette")
 		}

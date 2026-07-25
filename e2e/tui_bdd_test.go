@@ -334,7 +334,7 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 			scenario.When("the command prompt opens help", func(t testing.TB, w *world) {
 				w.pty.send(t, ":")
 				screen := w.pty.awaitScreen(t, "command footer", func(screen string) bool {
-					return strings.Contains(screen, "[focus:command]") &&
+					return strings.Contains(screen, "rvw [command] staged.txt") &&
 						strings.Contains(screen, "staged contents")
 				})
 				assertNoEscapedWidgetStyles(t, w, screen, "command prompt")
@@ -370,7 +370,7 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 			scenario.Then("escape restores the file active before the preview", func(t testing.TB, w *world) {
 				w.pty.send(t, kittyEscape)
 				w.pty.awaitScreen(t, "restored staged file", func(screen string) bool {
-					return strings.Contains(screen, "[focus:diff]  staged.txt") &&
+					return strings.Contains(screen, "rvw [diff] staged.txt") &&
 						strings.Contains(screen, "staged contents")
 				})
 			})
@@ -387,7 +387,7 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 			})
 			scenario.Then("accepted file navigation remains active", func(t testing.TB, w *world) {
 				w.pty.awaitScreen(t, "accepted untracked file", func(screen string) bool {
-					return strings.Contains(screen, "[focus:diff]  untracked.txt") &&
+					return strings.Contains(screen, "rvw [diff] untracked.txt") &&
 						strings.Contains(screen, "untracked contents")
 				})
 			})
@@ -400,7 +400,7 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 			})
 			scenario.Then("the accepted file is restored and the terminal exits cleanly", func(t testing.TB, w *world) {
 				w.pty.awaitScreen(t, "restored accepted file", func(screen string) bool {
-					return strings.Contains(screen, "[focus:diff]  untracked.txt") &&
+					return strings.Contains(screen, "rvw [diff] untracked.txt") &&
 						strings.Contains(screen, "untracked contents")
 				})
 				w.pty.send(t, "q")
@@ -422,8 +422,9 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 				w.pty.awaitScreen(t, "next-comment line", focusedCommentAnchor)
 				w.pty.send(t, "gg")
 				w.pty.awaitScreen(t, "comment anchor before pane activation", unfocusedCommentAnchor)
+				w.pty.send(t, "zc")
 				w.pty.send(t, "\t")
-				w.pty.awaitScreen(t, "comments pane focus", containsScreen("[focus:comments]"))
+				w.pty.awaitScreen(t, "comments pane focus", containsScreen("rvw [comments] staged.txt"))
 				w.pty.send(t, "\r")
 				w.pty.awaitScreen(t, "comments-pane activation line", focusedCommentAnchor)
 			})
@@ -532,9 +533,9 @@ func TestTerminalBehaviorAndExportContract(t *testing.T) {
 			})
 			scenario.Then("the replacement source is reconciled", func(t testing.TB, w *world) {
 				w.pty.awaitScreen(t, "reload completion", func(screen string) bool {
-					return strings.Contains(screen, "[source:2 workspace:2]") &&
+					return strings.Contains(screen, "[i] reload complete:") &&
 						strings.Contains(screen, "reloaded.txt") &&
-						strings.Contains(screen, "work 0/64")
+						strings.Contains(screen, "files 0/7")
 				})
 				w.pty.send(t, "q")
 				w.pty.awaitExit(t)

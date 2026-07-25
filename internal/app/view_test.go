@@ -59,7 +59,7 @@ func TestCommentEditorDockKeepsCodeVisibleWithoutEscapedWidgetStyles(t *testing.
 	if !strings.Contains(plain, "changed") {
 		t.Fatalf("comment editor hid the selected code:\n%s", plain)
 	}
-	if !strings.Contains(plain, "Comment ·") || !strings.Contains(plain, "[focus:comment]") {
+	if !strings.Contains(plain, "Comment ·") || !strings.Contains(plain, "comment") {
 		t.Fatalf("comment editor omitted its visible focus state:\n%s", plain)
 	}
 	if strings.Contains(plain, "enter activate") || !strings.Contains(plain, "comment editor owns input") {
@@ -117,7 +117,7 @@ func TestCommandPromptUsesFocusedWorkspaceFooter(t *testing.T) {
 	if len(lines) != 24 {
 		t.Fatalf("command prompt rendered %d lines, want 24", len(lines))
 	}
-	if !strings.Contains(lines[0], "[focus:command]") ||
+	if !strings.Contains(lines[0], "command") ||
 		!strings.Contains(lines[0], "alpha.txt") {
 		t.Fatalf("command prompt hid or misidentified the workspace:\n%s", plain)
 	}
@@ -304,21 +304,24 @@ func beginTestLineComment(t *testing.T, model *Model) {
 	t.Fatal("fixture patch has no commentable addition")
 }
 
-func TestResizeClampsAndRestoresFocusForHiddenPanes(t *testing.T) {
+func TestResizePreservesFocusedPaneThroughExclusiveLayout(t *testing.T) {
 	for _, focus := range []FocusOwner{FocusFileTree, FocusComments} {
 		t.Run(fmt.Sprint(focus), func(t *testing.T) {
 			model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+			if focus == FocusComments {
+				model.panels = model.panels.with(workspacePanelComments)
+			}
 			_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
-			model.focus = focus
+			model.setFocus(focus)
 
 			_, _ = model.Update(tea.WindowSizeMsg{Width: compactWidth, Height: 18})
-			if model.focus != FocusDiff || model.focusReturn != focus {
-				t.Fatalf("compact focus = %v return = %v, want diff then %v", model.focus, model.focusReturn, focus)
+			if model.focus != focus || !model.focusVisible(focus) {
+				t.Fatalf("compact focus = %v visible=%t, want exclusive %v", model.focus, model.focusVisible(focus), focus)
 			}
 
 			_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
-			if model.focus != focus || model.focusReturn != 0 {
-				t.Fatalf("restored focus = %v return = %v, want %v then none", model.focus, model.focusReturn, focus)
+			if model.focus != focus || !model.focusVisible(focus) {
+				t.Fatalf("restored focus = %v visible=%t, want %v", model.focus, model.focusVisible(focus), focus)
 			}
 		})
 	}
@@ -487,7 +490,7 @@ func TestDiffLineNumberGuttersUsePatchDigitWidths(t *testing.T) {
 	model.settings.diffView = DiffViewSideBySide
 	sideBySide, _ := model.diffLines(normalWidth, 12, styles)
 	sideRow := renderedLineContaining(t, sideBySide, "line-0001")
-	_, right, ok := strings.Cut(sideRow, "│")
+	_, right, ok := strings.Cut(sideRow, "┃")
 	if !ok || !strings.HasPrefix(right, "   1  line-0001") {
 		t.Fatalf("side-by-side first source row = %q", sideRow)
 	}
@@ -556,7 +559,7 @@ func TestCommentAnchorsRemainSideSpecificStableAndVisibleWithoutColor(t *testing
 		sideBySideContentWidth+diffCommentAnchorColumns-1,
 		12,
 		styles,
-	); strings.Contains(renderedLineContaining(t, fallback, "original"), "│") {
+	); strings.Contains(renderedLineContaining(t, fallback, "original"), "┃") {
 		t.Fatal("side-by-side activated below its content-width requirement")
 	}
 	sideBySide, _ := model.diffLines(
@@ -565,7 +568,7 @@ func TestCommentAnchorsRemainSideSpecificStableAndVisibleWithoutColor(t *testing
 		styles,
 	)
 	row := renderedLineContaining(t, sideBySide, "original")
-	left, right, ok := strings.Cut(row, "│")
+	left, right, ok := strings.Cut(row, "┃")
 	if !ok || !strings.Contains(left, "1● original") ||
 		!strings.Contains(right, "1● original") {
 		t.Fatalf("side-by-side markers are not attached to their halves: %q", row)

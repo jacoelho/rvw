@@ -17,6 +17,7 @@ import (
 const (
 	maxThemeBytes          int64 = 1 << 20
 	ansiBlack                    = "black"
+	ansiWhite                    = "white"
 	gruvboxLightForeground       = "#ebdbb2"
 	gruvboxDarkBackground        = "#3c3836"
 )
@@ -54,7 +55,7 @@ var optionalThemeColors = stringSet[ThemeColor](
 var namedColors = stringSet[string](
 	"reset", ansiBlack, "red", "green", "yellow", "blue", "magenta", "cyan", "gray", "grey",
 	"darkgray", "darkgrey", "lightred", "lightgreen", "lightyellow", "lightblue",
-	"lightmagenta", "lightcyan", "white",
+	"lightmagenta", "lightcyan", ansiWhite,
 )
 
 func resolveThemes(config *Config, environment map[string]string) error {
@@ -153,7 +154,7 @@ func bundledPalette(name ThemeName, appearance Appearance) bundledThemePalette {
 	switch name {
 	case ThemeDark:
 		return bundledThemePalette{
-			"#18181c", "white", "#d2d2d2", "#a0a0a0",
+			"#18181c", ansiWhite, "#d2d2d2", "#a0a0a0",
 			"#1e1e1e", "#28282d", "#50dc78", "#f05a5a",
 			"#5ac8ff", "#ffd25a", "#c8c8c8",
 		}
@@ -165,53 +166,53 @@ func bundledPalette(name ThemeName, appearance Appearance) bundledThemePalette {
 		}
 	case ThemeANSI16Dark:
 		return bundledThemePalette{
-			ansiBlack, "white", "gray", "darkgray",
+			ansiBlack, ansiWhite, "gray", "darkgray",
 			"darkgray", "cyan", "green", "red",
 			"cyan", "yellow", "gray",
 		}
 	case ThemeTokyoNightStorm:
 		return bundledThemePalette{
-			"#24283b", "#c0caf5", "#a9b1d6", "#545c7e",
+			"#24283b", "#c0caf5", "#a9b1d6", "#898fa6",
 			"#1f2335", "#292e42", "#9ece6a", "#f7768e",
 			"#7aa2f7", "#e0af68", "#a9b1d6",
 		}
 	case ThemeTokyoNightDay:
 		return bundledThemePalette{
-			"#e1e2e7", "#3760bf", "#6172b0", "#848cb5",
-			"#d0d5e3", "#c4c8da", "#587539", "#f52a65",
-			"#2e7de9", "#8c6c3e", "#3760bf",
+			"#e1e2e7", "#2e51a0", "#4d5a8c", "#5e6381",
+			"#d0d5e3", "#c4c8da", "#526d35", "#c12150",
+			"#2564b9", "#7d6037", "#3760bf",
 		}
 	case ThemeCatppuccinLatte:
 		return catppuccinPalette(AppearanceLight,
-			"#4c4f69", "#5c5f77", "#9ca0b0", "#bcc0cc",
+			"#4b4d67", "#5c5f77", "#6b6e78", "#bcc0cc",
 			"#eff1f5", "#e6e9ef", "#dcE0e8", "#d20f39",
-			"#df8e1d", "#40a02b", "#1e66f5")
+			"#996214", "#327d22", "#1d64ef")
 	case ThemeCatppuccinFrappe:
 		return catppuccinPalette(AppearanceDark,
-			"#c6d0f5", "#b5bfe2", "#737994", "#51576d",
+			"#c6d0f5", "#b5bfe2", "#979cb0", "#51576d",
 			"#303446", "#292c3c", "#232634", "#e78284",
 			"#e5c890", "#a6d189", "#8caaee")
 	case ThemeCatppuccinMacchiato:
 		return catppuccinPalette(AppearanceDark,
-			"#cad3f5", "#b8c0e0", "#6e738d", "#494d64",
+			"#cad3f5", "#b8c0e0", "#898ea3", "#494d64",
 			"#24273a", "#1e2030", "#181926", "#ed8796",
 			"#eed49f", "#a6da95", "#8aadf4")
 	case ThemeCatppuccinMocha:
 		return catppuccinPalette(AppearanceDark,
-			"#cdd6f4", "#bac2de", "#6c7086", "#45475a",
+			"#cdd6f4", "#bac2de", "#828698", "#45475a",
 			"#1e1e2e", "#181825", "#11111b", "#f38ba8",
 			"#f9e2af", "#a6e3a1", "#89b4fa")
 	case ThemeGruvboxDark:
 		return bundledThemePalette{
-			"#282828", gruvboxLightForeground, "#d5c4a1", "#928374",
-			gruvboxDarkBackground, gruvboxDarkBackground, "#b8bb26", "#fb4934",
+			"#282828", gruvboxLightForeground, "#d5c4a1", "#9a8c7e",
+			gruvboxDarkBackground, gruvboxDarkBackground, "#b8bb26", "#fb533f",
 			"#8ec07c", "#fabd2f", gruvboxLightForeground,
 		}
 	case ThemeGruvboxLight:
 		return bundledThemePalette{
-			"#fbf1c7", gruvboxDarkBackground, "#504945", "#928374",
-			gruvboxLightForeground, gruvboxLightForeground, "#79740e", "#9d0006",
-			"#427b58", "#b57614", gruvboxDarkBackground,
+			"#fbf1c7", gruvboxDarkBackground, "#504945", "#786c60",
+			gruvboxLightForeground, gruvboxLightForeground, "#75700e", "#9d0006",
+			"#417957", "#976311", gruvboxDarkBackground,
 		}
 	default:
 		if appearance == AppearanceLight {

@@ -2,6 +2,7 @@ package app
 
 import (
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/jacoelho/rvw/internal/review"
 )
@@ -96,23 +97,63 @@ func (model *Model) applyConfirmationAction(action KeyAction) tea.Cmd {
 	return nil
 }
 
-func (model *Model) confirmationView(width, height int) string {
+func (model *Model) confirmationModalView(
+	width, height int,
+	styles semanticStyles,
+) (string, boundedPanelLayout) {
 	prompt := "Confirm action?"
+	isDestructive := false
 	switch model.confirmation.kind {
 	case confirmationNone:
 	case confirmationQuit:
 		prompt = "Discard local review changes and quit?"
+		isDestructive = true
 	case confirmationDeleteComment:
 		prompt = "Delete the selected comment?"
+		isDestructive = true
 		if model.review.PendingBindingState(model.confirmation.comment) != review.PendingBindingNew {
 			prompt = "Delete this GitHub draft on the next save?"
 		}
 	case confirmationReload:
 		prompt = "Reload and discard review state that cannot be reconciled?"
+		isDestructive = true
 	}
-	return constrainedLines(
-		[]string{"Confirmation", "", prompt, "", model.bindingSummary(KeyContextConfirm)},
-		width,
-		height,
+	layout := newBoundedPanelLayout(width, height, boundedPanelRequest{
+		minimumWidth:  32,
+		minimumHeight: 8,
+		maximumWidth:  72,
+		maximumHeight: 10,
+		inset:         2,
+	})
+	actions := model.actionHintSummary(
+		KeyContextConfirm,
+		actionHint{action: KeyActionConfirmYes, label: "Yes"},
+		actionHint{action: KeyActionConfirmNo, label: "No"},
+		actionHint{action: KeyActionCancel, label: "Cancel"},
 	)
+	title := "Confirmation"
+	if isDestructive {
+		title = "⚠ " + title
+	}
+	lines := []string{
+		styles.warning.Render(title),
+		"",
+		safeAndClip(prompt, layout.innerWidth),
+		"",
+		styles.muted.Render(safeAndClip(actions, layout.innerWidth)),
+	}
+	content := constrainedStyledLines(lines, layout.innerWidth, layout.innerHeight)
+	panelStyle := styles.panel.Width(layout.width).Height(layout.height)
+	if layout.bordered {
+		borderStyle := lipgloss.RoundedBorder()
+		panelStyle = panelStyle.Border(borderStyle)
+		if isDestructive {
+			if foreground := styles.warning.GetForeground(); foreground != nil {
+				panelStyle = panelStyle.BorderForeground(foreground)
+			}
+		} else if foreground := styles.borderFocused.GetForeground(); foreground != nil {
+			panelStyle = panelStyle.BorderForeground(foreground)
+		}
+	}
+	return panelStyle.Render(content), layout
 }

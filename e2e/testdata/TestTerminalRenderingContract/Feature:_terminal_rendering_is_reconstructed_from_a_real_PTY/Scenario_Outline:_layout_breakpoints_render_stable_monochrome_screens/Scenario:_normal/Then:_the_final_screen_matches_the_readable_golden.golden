@@ -1,7 +1,7 @@
-rvw  [focus:diff]  staged.txt  [source:1 workspace:1]
-› •  staged.txt         │▸       diff --git a/staged.txt b/staged.txt
-     tracked.txt        │        new file mode 100644
-     untracked.txt      │        index 0000000..4480ae4
+rvw [diff] staged.txt  files 0/6
+› • staged.txt          │▸       diff --git a/staged.txt b/staged.txt
+    tracked.txt         │        new file mode 100644
+    untracked.txt       │        index 0000000..4480ae4
                         │        --- /dev/null
                         │        +++ b/staged.txt
                         │        @@ -0,0 +1 @@

@@ -272,6 +272,7 @@ func (model *Model) handleFindKey(message tea.KeyPressMsg) tea.Cmd {
 		if action == KeyActionNone {
 			return command
 		}
+		model.acknowledgeNotice()
 		switch action {
 		case KeyActionCancel, KeyActionInterrupt:
 			model.closeFind(findCloseCancel)
@@ -724,32 +725,42 @@ func (model *Model) findStatusText() string {
 		}
 		return "Enter searches changed patch lines"
 	case findDebouncing:
-		return "Waiting for input…"
+		return "◌ Waiting for input…"
 	case findMatching:
 		if model.find.fileBuild == nil {
-			return "Matching visible files…"
+			return "◐ Matching visible files…"
 		}
+		progress := (model.find.fileBuild.position * 100) / max(len(model.find.candidates), 1)
 		return fmt.Sprintf(
-			"Matching visible files %d/%d…",
-			model.find.fileBuild.position,
-			len(model.find.candidates),
+			"◐ Matching files %d%%",
+			progress,
 		)
 	case findSearching:
 		if progress, ok := model.operationProgress[model.find.searchOperation]; ok && progress.Total != 0 {
-			return fmt.Sprintf("Searching patches %d/%d…", progress.Completed, progress.Total)
+			pct := (progress.Completed * 100) / max(progress.Total, 1)
+			return fmt.Sprintf("◐ Searching patches %d%%", pct)
 		}
-		return "Searching changed patches…"
+		return "◐ Searching changed patches…"
 	case findFailed:
 		return model.find.failure
 	case findReady:
 		count := model.findResultCount()
+		position := 0
+		if count != 0 {
+			position = min(max(model.find.cursor+1, 1), count)
+		}
+		matchPosition := fmt.Sprintf("%d of %d", position, count)
 		if model.find.scope != findFiles {
 			summary := model.review.SearchSummary()
 			switch summary.Status {
 			case review.SearchPartial:
-				return fmt.Sprintf("%d matches; %d files unavailable", count, summary.UnavailableFiles)
+				return fmt.Sprintf(
+					"%s · %d files unavailable",
+					matchPosition,
+					summary.UnavailableFiles,
+				)
 			case review.SearchLimited:
-				return fmt.Sprintf("%d matches; result limit reached", count)
+				return matchPosition + " · limit reached"
 			case review.SearchCancelled:
 				return "Search cancelled"
 			case review.SearchFailed:
@@ -759,12 +770,14 @@ func (model *Model) findStatusText() string {
 			}
 		}
 		if model.find.scope == findFiles && model.find.limited {
-			return fmt.Sprintf("Top %d of %d matching files", count, model.find.totalMatches)
+			return fmt.Sprintf(
+				"%d of %d · %d total",
+				position,
+				count,
+				model.find.totalMatches,
+			)
 		}
-		if count == 1 {
-			return "1 match"
-		}
-		return strconv.Itoa(count) + " matches"
+		return matchPosition
 	default:
 		return ""
 	}
@@ -814,34 +827,29 @@ func findTabs(active findScope, styles semanticStyles) string {
 }
 
 type findModalLayout struct {
-	x           int
-	y           int
-	width       int
-	height      int
-	innerWidth  int
-	innerHeight int
-	inputX      int
-	inputY      int
-	resultY     int
-	resultRows  int
-	bordered    bool
+	boundedPanelLayout
+	inputX     int
+	inputY     int
+	resultY    int
+	resultRows int
 }
 
 func newFindModalLayout(width, height int) findModalLayout {
-	layout := findModalLayout{width: width, height: height}
-	if width >= 48 && height >= 12 {
-		layout.width = min(width-4, 96)
-		layout.height = min(height-4, 20)
-		layout.x = (width - layout.width) / 2
-		layout.y = (height - layout.height) / 2
-		layout.bordered = true
-	}
+	layout := findModalLayout{boundedPanelLayout: newBoundedPanelLayout(
+		width,
+		height,
+		boundedPanelRequest{
+			minimumWidth:  48,
+			minimumHeight: 12,
+			maximumWidth:  96,
+			maximumHeight: 20,
+			inset:         2,
+		},
+	)}
 	border := 0
 	if layout.bordered {
 		border = 1
 	}
-	layout.innerWidth = max(layout.width-border*2, 1)
-	layout.innerHeight = max(layout.height-border*2, 1)
 	layout.inputX = layout.x + border
 	layout.inputY = layout.y + border + 1
 	layout.resultY = layout.y + border + 3
@@ -866,7 +874,11 @@ func (model *Model) findModalView(
 	lines = append(lines, fitCellWidth(model.searchInput.View(), innerWidth))
 	status := safeAndClip(model.findStatusText(), innerWidth)
 	if model.find.phase == findFailed {
-		status = styles.failure.Render(status)
+		status = renderNoticeLine(
+			Notice{Kind: NoticeError, Text: NoticeText(status)},
+			innerWidth,
+			styles,
+		)
 	} else {
 		status = styles.muted.Render(status)
 	}
@@ -889,25 +901,40 @@ func (model *Model) findModalView(
 		}
 		lines = append(lines, fitCellWidth(line, innerWidth))
 	}
-	help := styles.muted.Render("Tab scope  ↑↓ preview  Enter select  Esc close")
+	help := styles.muted.Render(model.actionHintSummary(
+		KeyContextSearch,
+		actionHint{action: KeyActionNextSearchScope, label: "scope"},
+		actionHint{action: KeyActionMoveUp, label: "previous"},
+		actionHint{action: KeyActionMoveDown, label: "next"},
+		actionHint{action: KeyActionAccept, label: "select"},
+		actionHint{action: KeyActionCancel, label: "close"},
+	))
 	lines = append(lines, fitCellWidth(help, innerWidth))
 	for len(lines) < layout.innerHeight {
 		lines = append(lines, strings.Repeat(" ", innerWidth))
 	}
 	content := strings.Join(lines[:layout.innerHeight], "\n")
-	modalStyle := styles.panel.Width(layout.innerWidth).Height(layout.innerHeight)
+	modalStyle := styles.panel.Width(layout.width).Height(layout.height)
 	if layout.bordered {
 		modalStyle = modalStyle.Border(lipgloss.RoundedBorder())
+		if foreground := styles.borderFocused.GetForeground(); foreground != nil {
+			modalStyle = modalStyle.BorderForeground(foreground)
+		}
 	}
 	return modalStyle.Render(content), layout, rows
 }
 
 func (model *Model) findResultLine(index, width int, styles semanticStyles) string {
+	isCursor := index == model.find.cursor
 	prefix := "  "
-	if index == model.find.cursor {
-		prefix = "› "
+	if isCursor {
+		prefix = styles.focused.Render("▸") + " "
 	}
-	line := prefix
+
+	var line strings.Builder
+	line.Grow(width + 32)
+	line.WriteString(prefix)
+
 	if model.find.scope == findFiles {
 		fileID, ok := model.findFileAt(index)
 		if !ok {
@@ -917,7 +944,10 @@ func (model *Model) findResultLine(index, width int, styles semanticStyles) stri
 		if !ok {
 			return ""
 		}
-		line += safeAndClip(file.DisplayPath(), max(width-2, 1))
+		icon := fileIcon(file.DisplayPath())
+		line.WriteString(styles.muted.Render(icon))
+		line.WriteString(" ")
+		line.WriteString(safeAndClip(file.DisplayPath(), max(width-5, 1)))
 	} else {
 		hit, ok := model.review.SearchHit(index)
 		if !ok {
@@ -928,15 +958,22 @@ func (model *Model) findResultLine(index, width int, styles semanticStyles) stri
 			return ""
 		}
 		location := findLineLocation(hit)
-		pathWidth := max(width-len(location)-6, 1)
-		line += safeAndClip(file.DisplayPath(), pathWidth) + ":" + location
+		styledLocation := styles.muted.Render(":" + location)
+		pathWidth := max(width-lipgloss.Width(styledLocation)-4, 1)
+		line.WriteString(safeAndClip(file.DisplayPath(), pathWidth))
+		line.WriteString(styledLocation)
 		if excerpt := hit.Excerpt(); excerpt != "" {
-			line += "  " + safeAndClip(excerpt, max(width-lipgloss.Width(line)-2, 1))
+			remaining := max(width-lipgloss.Width(line.String())-2, 0)
+			if remaining > 3 {
+				line.WriteString("  ")
+				line.WriteString(styles.muted.Render(safeAndClip(excerpt, remaining)))
+			}
 		}
 	}
-	line = fitCellWidth(line, width)
-	if index == model.find.cursor {
-		return styles.selected.Render(line)
+
+	result := fitCellWidth(line.String(), width)
+	if isCursor {
+		return styles.selected.Render(result)
 	}
-	return line
+	return result
 }

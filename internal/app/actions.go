@@ -14,6 +14,7 @@ const (
 )
 
 func (model *Model) applyAction(action KeyAction, repeat int) tea.Cmd {
+	model.acknowledgeNotice()
 	if command, handled := model.applyRestrictedAction(action, repeat); handled {
 		return command
 	}
@@ -44,6 +45,14 @@ func (model *Model) applyAction(action KeyAction, repeat int) tea.Cmd {
 		Text: NoticeText("unsupported action: " + action.String()),
 	}
 	return nil
+}
+
+func (model *Model) acknowledgeNotice() {
+	if model.notice == nil {
+		return
+	}
+	model.lastNotice = model.notice
+	model.notice = nil
 }
 
 func (model *Model) applyRestrictedAction(action KeyAction, repeat int) (tea.Cmd, bool) {
@@ -230,11 +239,9 @@ func (model *Model) applyViewAction(action KeyAction) (tea.Cmd, bool) {
 		}
 		model.selectFileOrder()
 	case KeyActionToggleComments:
-		model.commentsVisible = !model.commentsVisible
-		model.clampFocus()
+		model.toggleWorkspacePane(workspacePaneComments)
 	case KeyActionToggleFilePanel:
-		model.fileTreeVisible = !model.fileTreeVisible
-		model.clampFocus()
+		model.toggleWorkspacePane(workspacePaneFiles)
 	case KeyActionHelp:
 		model.overlay = OverlayHelp
 	case KeyActionStatusDetails:
@@ -243,6 +250,32 @@ func (model *Model) applyViewAction(action KeyAction) (tea.Cmd, bool) {
 		return nil, false
 	}
 	return nil, true
+}
+
+func (model *Model) toggleWorkspacePane(pane workspacePane) {
+	panel := panelForPane(pane)
+	width, _ := model.renderSize()
+	if !paneCanSplit(pane, width) {
+		if model.activePane == pane {
+			model.panels = model.panels.without(panel)
+			model.activePane = workspacePaneDiff
+			model.setFocus(FocusDiff)
+		} else {
+			model.panels = model.panels.with(panel)
+			model.preferredPane = pane
+			model.activePane = pane
+			model.setFocus(focusForPane(pane))
+		}
+		return
+	}
+	model.panels = model.panels.toggle(panel)
+	if model.panels.has(panel) {
+		model.preferredPane = pane
+	}
+	if !model.panels.has(panel) && model.activePane == pane {
+		model.activePane = workspacePaneDiff
+	}
+	model.clampFocus()
 }
 
 func (model *Model) applyCommandAction(action KeyAction) (tea.Cmd, bool) {

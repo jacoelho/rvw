@@ -309,6 +309,11 @@ func (model *Model) activateSelection() {
 		return
 	}
 	model.requestActivePatch()
+	width, height := model.renderSize()
+	if model.workspaceLayout(width, height).kind == workspaceLayoutFilesOnly {
+		model.activePane = workspacePaneDiff
+		model.setFocus(FocusDiff)
+	}
 }
 
 func (model *Model) activateFile(file review.FileID) bool {
@@ -385,10 +390,14 @@ func (model *Model) cycleFocus(delta int) {
 }
 
 func (model *Model) clampFocus() {
-	if model.focus == FocusFileTree && !model.showFileTree() ||
-		model.focus == FocusComments && !model.showCommentsPane() {
+	if !model.focusVisible(model.focus) {
 		model.focusReturn = model.focus
-		model.setFocus(FocusDiff)
+		for _, owner := range []FocusOwner{FocusDiff, FocusFileTree, FocusComments} {
+			if model.focusVisible(owner) {
+				model.setFocus(owner)
+				break
+			}
+		}
 		return
 	}
 	if model.focus == FocusDiff &&
@@ -404,6 +413,16 @@ func (model *Model) setFocus(owner FocusOwner) {
 		return
 	}
 	model.focus = owner
+	switch owner {
+	case FocusFileTree:
+		model.activePane = workspacePaneFiles
+		model.preferredPane = workspacePaneFiles
+	case FocusComments:
+		model.activePane = workspacePaneComments
+		model.preferredPane = workspacePaneComments
+	case FocusDiff:
+		model.activePane = workspacePaneDiff
+	}
 	model.abandonChord()
 }
 
@@ -412,7 +431,11 @@ func (model *Model) focusVisible(owner FocusOwner) bool {
 	case FocusFileTree:
 		return model.showFileTree()
 	case FocusDiff:
-		return true
+		if !model.size.Known {
+			return true
+		}
+		width, height := model.renderSize()
+		return model.workspaceLayout(width, height).diffWidth != 0
 	case FocusComments:
 		return model.showCommentsPane()
 	default:

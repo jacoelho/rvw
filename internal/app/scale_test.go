@@ -227,7 +227,7 @@ func appScaleModel(tb testing.TB) (*Model, *Coordinator) {
 	model.ambiguousPaths = index.AmbiguousPaths
 	model.collapsedTree = index.Collapsed
 	model.notice = nil
-	model.commentsVisible = true
+	model.panels = model.panels.with(workspacePanelComments)
 	model.focus = FocusDiff
 	model.size = TerminalSize{Width: wideWidth, Height: 30, Known: true}
 	model.selectFileOrder()

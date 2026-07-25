@@ -192,6 +192,7 @@ type Model struct {
 	pendingStdout             *review.PreparedExport
 	ambiguousPaths            map[string]struct{}
 	notice                    *Notice
+	lastNotice                *Notice
 	findRestore               *findReturnState
 	searchAfterSyntax         *pendingSearch
 	help                      help.Model
@@ -240,14 +241,15 @@ type Model struct {
 	repeat                    uint16
 	exportPicker              exportSelection
 	publicationAllowStale     bool
-	commentsVisible           bool
 	publicationIntent         publicationOperationIntent
 	quitting                  bool
 	publicationMoveSummary    bool
 	publicationDraftReady     bool
 	publicationEvent          review.PublicationEvent
 	focusReturn               FocusOwner
-	fileTreeVisible           bool
+	panels                    workspacePanels
+	activePane                workspacePane
+	preferredPane             workspacePane
 	filterTreeBuilding        bool
 	overlay                   Overlay
 	syntaxDeferred            bool
@@ -314,8 +316,9 @@ func NewModel(
 		review:             current,
 		focus:              FocusDiff,
 		mode:               ModeNormal,
-		commentsVisible:    false,
-		fileTreeVisible:    true,
+		panels:             newWorkspacePanels(workspacePanelFiles),
+		activePane:         workspacePaneDiff,
+		preferredPane:      workspacePaneFiles,
 		nextOperation:      1,
 		foreground:         newForegroundState(),
 		operationProgress:  make(map[review.OperationID]Progress),
@@ -461,6 +464,7 @@ func (model *Model) applyMouseAction(message mouseActionMsg) tea.Cmd {
 	model.setFocus(message.focus)
 	model.focusReturn = 0
 	if message.delta != 0 || message.target != mouseTargetNone {
+		model.acknowledgeNotice()
 		model.foreground.clearPendingDiffTarget()
 	}
 	var command tea.Cmd
@@ -543,9 +547,14 @@ func (model *Model) MaterializedRows() int {
 		findRows = model.findResultRows()
 	}
 	bodyHeight := max(min(model.size.Height, maxRenderHeight)-2, 1)
+	width, height := model.renderSize()
+	layout := model.workspaceLayout(width, height)
 	rows := 0
-	if model.showFileTree() {
+	if layout.treeWidth != 0 {
 		rows += min(len(model.fileOrder), bodyHeight)
+	}
+	if layout.diffWidth == 0 {
+		return rows + findRows
 	}
 	active, ok := model.review.ActiveFile()
 	if !ok {

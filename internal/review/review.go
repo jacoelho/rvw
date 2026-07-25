@@ -423,6 +423,11 @@ func (review Review) FileReviewed(id FileID) bool {
 	return review.fileMarks.has(id)
 }
 
+// ReviewedFileCount returns the number of files explicitly marked reviewed.
+func (review Review) ReviewedFileCount() uint32 {
+	return review.fileMarks.count
+}
+
 // HunkReviewed performs the hunk reviewed operation.
 func (review Review) HunkReviewed(id HunkID) bool {
 	return review.hunkMarks.has(id)

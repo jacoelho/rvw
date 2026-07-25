@@ -580,80 +580,99 @@ func (model *Model) acknowledgePublication() {
 	model.notice = &Notice{Kind: NoticeInformation, Text: "publication fact acknowledged"}
 }
 
-func (model *Model) publicationView(width, height int) string {
+func (model *Model) publicationModalView(
+	width, height int,
+	styles semanticStyles,
+) (string, boundedPanelLayout) {
+	layout := newBoundedPanelLayout(width, height, boundedPanelRequest{
+		minimumWidth:  60,
+		minimumHeight: 16,
+		maximumWidth:  90,
+		maximumHeight: 32,
+		inset:         2,
+	})
 	summary := model.review.PublicationSummary()
 	pending := model.review.PendingReviewSummary()
 	pendingProblem := pendingReviewProblemLine(pending)
-	lines := []string{"GitHub review", model.publicationEventSelector()}
+	lines := []string{styles.heading.Render("GitHub Review"), "", model.publicationEventSelector()}
 	if pendingProblem != "" {
-		lines = append(lines, pendingProblem)
+		lines = append(lines, styles.warning.Render(pendingProblem))
 	}
 	switch summary.Status {
 	case review.PublicationChecking:
-		status := "Checking immutable repository, pull request, and head…"
+		status := "◐ Checking immutable repository, pull request, and head…"
 		if model.publicationIntent == publicationOperationIntentSubmit {
-			status = "Checking immutable repository, pull request, and head; submission is queued…"
+			status = "◐ Checking; submission is queued…"
 		}
-		lines = append(lines, status)
+		lines = append(lines, "", status)
 	case review.PublicationChecked:
 		unmappablePolicy := "exclude"
 		if model.publicationMoveSummary {
 			unmappablePolicy = "move to summary"
 		}
-		headStatus := "checked at current head"
+		headStatus := "current head"
 		if summary.StaleHead {
-			headStatus = "stale head explicitly overridden"
+			headStatus = styles.warning.Render("stale (override active)")
 		}
-		stage := "Submit pending draft as " + model.publicationEvent.String()
+		stage := "Submit as " + model.publicationEvent.String()
 		if summary.Event == review.PublicationEventDraft {
-			stage = "Synchronize comments to a pending GitHub draft"
+			stage = "Synchronize to pending draft"
 		}
-		lines = append(lines,
-			"Target: "+summary.Target.Repository()+"#"+
-				fmt.Sprintf("%d", summary.Target.PullRequest()),
-			"Next step: "+stage,
-			fmt.Sprintf("Comments: %d included, %d excluded", summary.Included, summary.Excluded),
-			"Unmappable policy: "+unmappablePolicy,
-			"Source/head: "+headStatus,
+		lines = append(lines, "",
+			fmt.Sprintf("  Target       %s#%d", summary.Target.Repository(), summary.Target.PullRequest()),
+			fmt.Sprintf("  Comments     %d included, %d excluded", summary.Included, summary.Excluded),
+			fmt.Sprintf("  Unmappable   %s", unmappablePolicy),
+			"  Head         "+headStatus,
 		)
 		if pending.Status == review.PendingReviewReady {
 			lines = append(lines, fmt.Sprintf(
-				"Pending review: continue %d · %d changed · %d conflicts",
+				"  Pending      continue #%d (%d changed, %d conflicts)",
 				pending.ReviewID.Uint64(), pending.Dirty, pending.Conflicts,
 			))
 		} else if pendingProblem == "" {
-			lines = append(lines, "Pending review: "+pending.Status.String())
+			lines = append(lines, "  Pending      "+pending.Status.String())
 		}
-		chooserHeight := min(max(height-len(lines)-5, 1), 6)
+		lines = append(lines, "", "  "+stage)
+		chooserHeight := min(max(layout.innerHeight-len(lines)-5, 1), 6)
+		lines = append(lines, "", styles.muted.Render("── Comments"))
 		lines = append(lines, model.publicationCommentLines(chooserHeight)...)
-		detailHeight := max(height-len(lines)-2, 0)
+		detailHeight := max(layout.innerHeight-len(lines)-2, 0)
 		lines = append(
 			lines,
-			model.publicationDetailLines(width, detailHeight)...,
+			model.publicationDetailLines(layout.innerWidth, detailHeight)...,
 		)
 	case review.PublicationPublishing:
-		lines = append(lines, "Publishing; cancellation after the commit claim produces an unknown result.")
+		lines = append(lines, "", "◐ Publishing — cancellation may leave unknown state.")
 	case review.PublicationUnknown:
-		lines = append(lines,
-			"Outcome unknown; retry is fenced.",
-			"Target: "+summary.Target.Repository()+"#"+
-				fmt.Sprintf("%d", summary.Target.PullRequest()),
-			"Marker: "+summary.Marker.String(),
+		lines = append(lines, "",
+			styles.warning.Render("⚠ Outcome unknown; retry is fenced."),
+			"",
+			fmt.Sprintf("  Target   %s#%d", summary.Target.Repository(), summary.Target.PullRequest()),
+			"  Marker   "+summary.Marker.String(),
+			"",
 			"Use submit-recheck to verify exact remote state.",
 		)
 	case review.PublicationReconciling:
-		lines = append(lines, "Checking exact GitHub publication state…")
+		lines = append(lines, "", "◐ Checking exact GitHub publication state…")
 	case review.PublicationCommitted:
-		lines = append(lines, "Publication committed.")
+		lines = append(lines, "", styles.reviewed.Render("✓ Publication committed."))
 	case review.PublicationConfirmedAbsent:
-		lines = append(lines, "Marker confirmed absent; a new checked attempt may be submitted safely.")
+		lines = append(lines, "", "Marker confirmed absent; safe to submit a new attempt.")
 	case review.PublicationFailedBeforeCommit:
-		lines = append(lines, "Publication failed before commit: "+summary.Detail.String())
+		lines = append(lines, "", styles.failure.Render("✗ Publication failed: "+summary.Detail.String()))
 	default:
-		lines = append(lines, "No publication preflight is active.")
+		lines = append(lines, "", "No publication preflight is active.")
 	}
-	lines = append(lines, model.bindingSummary(KeyContextSubmit))
-	return constrainedLines(lines, width, height)
+	lines = append(lines, "", styles.muted.Render(model.bindingSummary(KeyContextSubmit)))
+	content := constrainedStyledLines(lines, layout.innerWidth, layout.innerHeight)
+	panelStyle := styles.panel.Width(layout.width).Height(layout.height)
+	if layout.bordered {
+		panelStyle = panelStyle.Border(lipgloss.RoundedBorder())
+		if foreground := styles.borderFocused.GetForeground(); foreground != nil {
+			panelStyle = panelStyle.BorderForeground(foreground)
+		}
+	}
+	return panelStyle.Render(content), layout
 }
 
 func pendingReviewProblemLine(pending review.PendingReviewSummary) string {

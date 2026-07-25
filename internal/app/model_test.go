@@ -171,6 +171,7 @@ func TestCommentEditorAnchorsSemanticLineAndRetainsChildState(t *testing.T) {
 	if !ok || side != review.LineNew || start != end || start.Uint32() != 2 {
 		t.Fatalf("saved target = side %d start %d end %d ok %v", side, start, end, ok)
 	}
+	model.panels = model.panels.with(workspacePanelComments)
 	if !strings.Contains(model.View().Content, "fix this") {
 		t.Fatal("wide view does not expose the saved comment")
 	}
@@ -248,11 +249,9 @@ func TestExportPickerDefaultsAndTogglesUnmappableComments(t *testing.T) {
 	if !model.exportPicker.options.Has(review.ExportUnmappable) {
 		t.Fatalf("toggled picker = %#v", model.exportPicker)
 	}
-	view := model.exportPickerView(80, 20)
-	for _, want := range []string{"[x] include unmappable comments"} {
-		if !strings.Contains(view, want) {
-			t.Fatalf("picker view omitted %q:\n%s", want, view)
-		}
+	modal, _ := model.exportModalView(80, 20, newSemanticStyles(model.settings))
+	if !strings.Contains(modal, "[✓] unmappable comments") {
+		t.Fatalf("picker view omitted unmappable checkbox:\n%s", modal)
 	}
 }
 
@@ -827,6 +826,7 @@ func TestMouseTranslationReturnsOnlyImmediateTypedActions(t *testing.T) {
 		"b.txt": "changed\n",
 	})
 	_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
+	model.panels = model.panels.with(workspacePanelComments)
 	view := model.View()
 	if view.OnMouse == nil {
 		t.Fatal("enabled mouse has no bounded action owner")
@@ -878,12 +878,15 @@ func TestMouseActionForHiddenPaneDoesNotMutateInputOwnership(t *testing.T) {
 		hideHeight int
 	}{
 		{name: "file tree", mouseX: 0, hideWidth: compactWidth, hideHeight: 18},
-		{name: "comments", mouseX: wideWidth - 1, hideWidth: normalWidth, hideHeight: 24},
+		{name: "comments", mouseX: wideWidth - 1, hideWidth: compactWidth, hideHeight: 24},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 			settleModelWork(t, model, coordinator)
 			_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
+			if testCase.name == "comments" {
+				model.panels = model.panels.with(workspacePanelComments)
+			}
 			view := model.View()
 			command := view.OnMouse(tea.MouseClickMsg{
 				X: testCase.mouseX, Y: 1, Button: tea.MouseLeft,
@@ -923,7 +926,7 @@ func TestMouseActionForHiddenPaneDoesNotMutateInputOwnership(t *testing.T) {
 	}
 }
 
-func TestResponsiveLayoutUsesBothWidthAndHeightBoundaries(t *testing.T) {
+func TestResponsiveLayoutUsesContentWidthBoundaries(t *testing.T) {
 	model, _ := newTestModel(t, map[string]string{"a.txt": "changed\n"})
 	tests := []struct {
 		width, height  int
@@ -931,12 +934,12 @@ func TestResponsiveLayoutUsesBothWidthAndHeightBoundaries(t *testing.T) {
 	}{
 		{width: 179, height: 30, tree: true, comments: false},
 		{width: 180, height: 29, tree: true, comments: false},
-		{width: 180, height: 30, tree: true, comments: true},
+		{width: 180, height: 30, tree: true, comments: false},
 		{width: 120, height: 24, tree: true, comments: false},
 		{width: 120, height: 23, tree: true, comments: false},
 		{width: 85, height: 18, tree: true, comments: false},
 		{width: 84, height: 18, tree: false, comments: false},
-		{width: 85, height: 17, tree: false, comments: false},
+		{width: 85, height: 17, tree: true, comments: false},
 		{width: 20, height: 6, tree: false, comments: false},
 	}
 	for _, test := range tests {
@@ -957,7 +960,7 @@ func TestResponsiveLayoutUsesBothWidthAndHeightBoundaries(t *testing.T) {
 		}
 	}
 
-	model.commentsVisible = true
+	model.panels = model.panels.with(workspacePanelComments)
 	layout := model.workspaceLayout(120, 24)
 	if layout.treeWidth < 24 || layout.commentsWidth < 32 || layout.diffWidth < 60 {
 		t.Fatalf("normal comments layout = %+v", layout)

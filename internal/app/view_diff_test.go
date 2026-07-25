@@ -32,7 +32,7 @@ func TestSideBySidePatchStripsOnlyTheOwnedKindPrefix(t *testing.T) {
 		newDiffLineNumberWidths(model.review.Patch(active)),
 		newSemanticStyles(model.settings),
 	)
-	if want := []uint32{0, 1, 2, 3, 4, 5, 6}; !slices.Equal(rows, want) {
+	if want := []uint32{0, 1, 2, 3, 4, 5, 6}; !slices.Equal(diffRowLines(rows), want) {
 		t.Fatalf("side-by-side row mapping = %v, want %v", rows, want)
 	}
 	for index, row := range rendered {
@@ -122,7 +122,7 @@ func TestSideBySideNoNewlineMarkersRenderOnlyOnTheirOwnedSides(t *testing.T) {
 		newDiffLineNumberWidths(model.review.Patch(active)),
 		newSemanticStyles(model.settings),
 	)
-	if len(direct) != 1 || !slices.Equal(directRows, []uint32{2}) {
+	if len(direct) != 1 || !slices.Equal(diffRowLines(directRows), []uint32{2}) {
 		t.Fatalf("direct marker viewport = %d rows %v", len(direct), directRows)
 	}
 	left, right := sideBySideCells(t, direct[0])
@@ -153,7 +153,7 @@ func TestSideBySideNoNewlineMarkerWrapsWithinWidthAndHeight(t *testing.T) {
 		widths,
 		styles,
 	)
-	if len(wrapped) != 2 || !slices.Equal(wrappedRows, []uint32{2, 2}) {
+	if len(wrapped) != 2 || !slices.Equal(diffRowLines(wrappedRows), []uint32{2, 2}) {
 		t.Fatalf("wrapped marker = %d rows %v, want two mapped rows", len(wrapped), wrappedRows)
 	}
 	for index, row := range wrapped {
@@ -169,7 +169,7 @@ func TestSideBySideNoNewlineMarkerWrapsWithinWidthAndHeight(t *testing.T) {
 		widths,
 		styles,
 	)
-	if len(truncated) != 1 || !slices.Equal(truncatedRows, []uint32{2}) {
+	if len(truncated) != 1 || !slices.Equal(diffRowLines(truncatedRows), []uint32{2}) {
 		t.Fatalf("height-truncated marker = %d rows %v", len(truncated), truncatedRows)
 	}
 
@@ -182,7 +182,7 @@ func TestSideBySideNoNewlineMarkerWrapsWithinWidthAndHeight(t *testing.T) {
 		widths,
 		styles,
 	)
-	if len(clipped) != 1 || !slices.Equal(clippedRows, []uint32{2}) ||
+	if len(clipped) != 1 || !slices.Equal(diffRowLines(clippedRows), []uint32{2}) ||
 		lipgloss.Width(clipped[0]) != width {
 		t.Fatalf(
 			"clipped marker = %d rows %v width %d",
@@ -226,18 +226,30 @@ func modelWithPreparedPatch(t *testing.T, patchText string) (*Model, review.File
 	return model, active
 }
 
-func rowIndex(t *testing.T, rows []uint32, row uint32) int {
+func rowIndex(t *testing.T, rows []diffViewRow, row uint32) int {
 	t.Helper()
-	index := slices.Index(rows, row)
-	if index < 0 {
-		t.Fatalf("rendered row mapping omitted patch row %d: %v", row, rows)
+	for index, candidate := range rows {
+		if candidate.selectable && candidate.line == row {
+			return index
+		}
 	}
-	return index
+	t.Fatalf("rendered row mapping omitted patch row %d: %v", row, rows)
+	return -1
+}
+
+func diffRowLines(rows []diffViewRow) []uint32 {
+	lines := make([]uint32, 0, len(rows))
+	for _, row := range rows {
+		if row.selectable {
+			lines = append(lines, row.line)
+		}
+	}
+	return lines
 }
 
 func sideBySideCells(t *testing.T, row string) (string, string) {
 	t.Helper()
-	left, right, ok := strings.Cut(ansi.Strip(row), "│")
+	left, right, ok := strings.Cut(ansi.Strip(row), "┃")
 	if !ok {
 		t.Fatalf("side-by-side row omitted separator: %q", row)
 	}

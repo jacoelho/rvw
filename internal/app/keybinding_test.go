@@ -281,7 +281,7 @@ func TestReloadPreparationActionConsumesPriorRepeat(t *testing.T) {
 	settleModelWork(t, model, coordinator)
 	_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
 	model.focus = FocusFileTree
-	model.commentsVisible = true
+	model.panels = model.panels.with(workspacePanelComments)
 	setModelKeybindings(t, model,
 		Keybinding{Context: KeyContextNormal, Focus: KeyFocusFileTree, Chord: "g c", Action: KeyActionInterrupt},
 		Keybinding{Context: KeyContextNormal, Focus: KeyFocusFileTree, Chord: "j", Action: KeyActionFocusNextPane},
@@ -311,7 +311,7 @@ func TestDisallowedReloadPreparationActionConsumesPriorRepeat(t *testing.T) {
 	settleModelWork(t, model, coordinator)
 	_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
 	model.focus = FocusFileTree
-	model.commentsVisible = true
+	model.panels = model.panels.with(workspacePanelComments)
 	setModelKeybindings(t, model,
 		Keybinding{Context: KeyContextNormal, Focus: KeyFocusFileTree, Chord: "g x", Action: KeyActionToggleWrap},
 		Keybinding{Context: KeyContextNormal, Focus: KeyFocusFileTree, Chord: "j", Action: KeyActionFocusNextPane},
@@ -407,7 +407,7 @@ func TestAbandonedChordClearsNumericRepeat(t *testing.T) {
 		settleModelWork(t, model, coordinator)
 		_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
 		model.focus = FocusFileTree
-		model.commentsVisible = true
+		model.panels = model.panels.with(workspacePanelComments)
 		setModelKeybindings(t, model,
 			Keybinding{Context: KeyContextNormal, Focus: KeyFocusFileTree, Chord: "g g", Action: KeyActionToggleWrap},
 			Keybinding{Context: KeyContextNormal, Focus: KeyFocusFileTree, Chord: "j", Action: KeyActionFocusNextPane},
