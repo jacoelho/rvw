@@ -181,9 +181,6 @@ const (
 	ActionToggleExportUnmap   Action = "toggle-export-unmappable"
 	ActionExportSelected      Action = "export-selected"
 	ActionSubmitRecheck       Action = "submit-recheck"
-	ActionToggleStaleOverride Action = "toggle-stale-head-override"
-	ActionToggleSubmitExclude Action = "toggle-submit-exclusion"
-	ActionToggleSubmitSummary Action = "toggle-submit-summary"
 	ActionPreviousSubmitEvent Action = "previous-submit-event"
 	ActionNextSubmitEvent     Action = "next-submit-event"
 	ActionSubmitReview        Action = "submit-review"
@@ -270,9 +267,6 @@ var actionDescriptions = map[Action]string{
 	ActionToggleExportUnmap:   "include unmappable comments",
 	ActionExportSelected:      "export",
 	ActionSubmitRecheck:       "recheck",
-	ActionToggleStaleOverride: "allow stale head",
-	ActionToggleSubmitExclude: "include/exclude comment",
-	ActionToggleSubmitSummary: "include/exclude summary",
 	ActionPreviousSubmitEvent: "previous review action",
 	ActionNextSubmitEvent:     "next review action",
 	ActionSubmitReview:        "publish review",
@@ -795,10 +789,8 @@ var contextActions = map[Context]map[Action]struct{}{
 	),
 	ContextSubmit: actionSet(
 		ActionCancel, ActionInterrupt, ActionStatusDetails,
-		ActionSubmitRecheck, ActionToggleStaleOverride,
-		ActionToggleSubmitExclude, ActionToggleSubmitSummary,
-		ActionPreviousSubmitEvent, ActionNextSubmitEvent, ActionSubmitReview,
-		ActionMoveUp, ActionMoveDown, ActionPageUp, ActionPageDown,
+		ActionSubmitRecheck, ActionPreviousSubmitEvent,
+		ActionNextSubmitEvent, ActionSubmitReview,
 	),
 	ContextMinimumSize: actionSet(ActionQuit, ActionInterrupt),
 }

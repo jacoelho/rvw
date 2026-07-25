@@ -46,6 +46,7 @@ const (
 	ansiAuditOccupancyDialog
 	ansiAuditOccupancyReferenceDialog
 	ansiAuditOccupancyBlockingSurface
+	ansiAuditOccupancyCompactSurface
 )
 
 type ansiAuditScenario struct {
@@ -64,6 +65,7 @@ type ansiAuditScenario struct {
 type ansiAuditModelState struct {
 	filteredFileTree      *fileTree
 	notice                *Notice
+	lastNotice            *Notice
 	visibleFileTree       fileTree
 	allFileTree           fileTree
 	fileProjection        fileProjectionState
@@ -583,7 +585,7 @@ func ansiAuditScenarios(t *testing.T) []ansiAuditScenario {
 			name: "publication-modal", overlay: true, visibleCue: "Publish GitHub review",
 			controlContext: keymap.ContextSubmit,
 			primaryAction:  keymap.ActionSubmitReview, requiresCancel: true,
-			occupancyClass: ansiAuditOccupancyBlockingSurface,
+			occupancyClass: ansiAuditOccupancyCompactSurface,
 			setup: func(model *Model) {
 				setupANSIAuditCheckingPublication(t, model)
 			},
@@ -638,6 +640,7 @@ func captureANSIAuditModelState(model *Model) ansiAuditModelState {
 	return ansiAuditModelState{
 		filteredFileTree:      model.filteredFileTree,
 		notice:                model.notice,
+		lastNotice:            model.lastNotice,
 		visibleFileTree:       model.visibleFileTree,
 		allFileTree:           model.allFileTree,
 		fileProjection:        model.fileProjection,
@@ -670,6 +673,7 @@ func captureANSIAuditModelState(model *Model) ansiAuditModelState {
 func (state ansiAuditModelState) restore(model *Model) {
 	model.filteredFileTree = state.filteredFileTree
 	model.notice = state.notice
+	model.lastNotice = state.lastNotice
 	model.visibleFileTree = state.visibleFileTree
 	model.allFileTree = state.allFileTree
 	model.fileProjection = state.fileProjection
@@ -889,6 +893,12 @@ func auditWorkspaceGeometry(
 		lines := strings.Split(plain, "\n")
 		footer := lines[len(lines)-1]
 		count, ratio, compliance := ansiAuditFooterMetrics(footer)
+		if model.notice != nil {
+			if count != 0 {
+				t.Fatalf("active notice footer exposed %d actions", count)
+			}
+			return
+		}
 		minimum := 1
 		if size.width >= compactWidth {
 			minimum = 3
@@ -1298,6 +1308,8 @@ func ansiAuditOccupancyRange(class ansiAuditOccupancyClass) (float64, float64, s
 		return 0.15, 0.60, "reference dialog"
 	case ansiAuditOccupancyBlockingSurface:
 		return 0.02, 0.65, "full-screen operational surface"
+	case ansiAuditOccupancyCompactSurface:
+		return 0.01, 0.65, "compact full-screen operational surface"
 	default:
 		return 0, 1, "unclassified"
 	}
@@ -1404,7 +1416,7 @@ func auditStateCompleteness(
 			model.singlePaneOverride = FocusFileTree
 			selectANSIAuditTreeCursor(t, model)
 		}},
-		{name: "pending mutation", cues: []string{commentChangePreparing, "Working 1"}, setup: func(model *Model) {
+		{name: "pending mutation", cues: []string{commentChangePreparing}, setup: func(model *Model) {
 			model.notice = &Notice{Kind: NoticeInformation, Text: commentChangePreparing}
 			model.coordinatorStats.Accepted = 1
 		}},
@@ -1449,21 +1461,16 @@ func auditLayoutStability(
 			!slices.Equal(before[:max(len(before)-1, 0)], afterStatus[:max(len(afterStatus)-1, 0)]) {
 			t.Fatalf("%dx%d status update moved stable non-footer cells", size.width, size.height)
 		}
-		if err := ansiAuditStableActionAnchors(
-			ansi.Strip(ansiAuditLine(before, len(before)-1)),
-			ansi.Strip(ansiAuditLine(afterStatus, len(afterStatus)-1)),
-		); err != nil {
-			t.Fatalf("%dx%d status update: %v", size.width, size.height, err)
+		if footer := ansi.Strip(ansiAuditLine(afterStatus, len(afterStatus)-1)); !strings.Contains(footer, "Success: refresh complete") ||
+			len(ansiAuditFooterActionSpans(footer)) != 0 {
+			t.Fatalf("%dx%d active notice did not own footer: %q", size.width, size.height, footer)
 		}
-		if score, anchors, err := ansiAuditLayoutShiftScore(
-			strings.Join(before, "\n"), strings.Join(afterStatus, "\n"), size,
-		); err != nil || anchors < 3 || score != 0 {
-			t.Fatalf(
-				"%dx%d status LSS = %.4f across %d anchors: %v; want 0 across at least 3",
-				size.width, size.height, score, anchors, err,
-			)
+		model.acknowledgeNotice()
+		afterAcknowledgement := strings.Split(model.View().Content, "\n")
+		if ansi.Strip(ansiAuditLine(before, len(before)-1)) !=
+			ansi.Strip(ansiAuditLine(afterAcknowledgement, len(afterAcknowledgement)-1)) {
+			t.Fatalf("%dx%d acknowledged notice did not restore footer actions", size.width, size.height)
 		}
-		model.notice = nil
 		model.diffCursor++
 		afterSelection := strings.Split(model.View().Content, "\n")
 		changedRows := ansiAuditChangedRows(before, afterSelection)
@@ -1499,27 +1506,6 @@ func auditLayoutStability(
 			t.Fatalf("%dx%d item-add changed-cell ratio = %.4f, want <0.01", size.width, size.height, ratio)
 		}
 	}
-}
-
-func ansiAuditStableActionAnchors(before, after string) error {
-	beforeActions := ansiAuditFooterActionSpans(before)
-	afterActions := ansiAuditFooterActionSpans(after)
-	if len(beforeActions) != len(afterActions) {
-		return fmt.Errorf("footer action count moved from %d to %d", len(beforeActions), len(afterActions))
-	}
-	for index := range beforeActions {
-		if beforeActions[index] != afterActions[index] {
-			return fmt.Errorf(
-				"footer action %q moved from %d..%d to %d..%d",
-				beforeActions[index].text,
-				beforeActions[index].start,
-				beforeActions[index].end,
-				afterActions[index].start,
-				afterActions[index].end,
-			)
-		}
-	}
-	return nil
 }
 
 type ansiAuditAnchor struct {

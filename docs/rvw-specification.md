@@ -242,8 +242,7 @@ extend-up, extend-down, next-help-page, previous-help-page, help-line-up,
 help-line-down, help-page-up, help-page-down, help-home, help-end,
 toggle-export-unmappable,
 export-selected, copy-markdown, export-markdown, export-json,
-submit-recheck, toggle-stale-head-override, toggle-submit-exclusion,
-toggle-submit-summary, previous-submit-event, next-submit-event,
+submit-recheck, previous-submit-event, next-submit-event,
 submit-review, reload, toggle-file-panel,
 toggle-comments, toggle-hidden-files
 ```
@@ -654,15 +653,17 @@ only to GitHub publication.
 GitHub publication first creates or synchronizes a pending review. It then requires a separate
 submission confirmation with a selector for `comment`, `approve`, or `request changes`.
 `github.submit_default` chooses only the selector's initial value. GitHub submission always uses
-an explicit preflight that shows:
+an internal validation check. The submission UI shows:
 
+- the repository and pull-request target;
 - the selected final event: comment, approve, or request changes;
 - whether the next step synchronizes the pending draft or submits it;
-- summary body;
-- included and excluded comments;
-- unmappable-comment policy;
-- source/head staleness;
-- any explicit stale-head override.
+- included and excluded comment counts;
+- concise pending-review, conflict, unmappable-comment, and stale-head warnings.
+
+Interactive publication includes every eligible comment, excludes comments that cannot be mapped
+safely, and rejects a stale pull-request head. It does not expose canonical request JSON, payload
+byte ranges, operation markers, or database identifiers in the submission UI.
 
 Publication distinguishes:
 

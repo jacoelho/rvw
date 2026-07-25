@@ -347,8 +347,7 @@ func (model *Model) sideBySideDiffLines(
 	numberWidths diffLineNumberWidths,
 	styles semanticStyles,
 ) ([]string, []uint32) {
-	leftWidth := max((width-1)/2, 1)
-	rightWidth := max(width-leftWidth-1, 1)
+	leftWidth, rightWidth := model.sideBySideWidths(fileID, width)
 	rendered := make([]string, 0, min(height, len(lines)))
 	rows := make([]uint32, 0, min(height, len(lines)))
 	for _, line := range lines {
@@ -442,6 +441,29 @@ func (model *Model) sideBySideDiffLines(
 		return []string{styles.muted.Render("Empty patch.")}, nil
 	}
 	return rendered, rows
+}
+
+func (model *Model) sideBySideWidths(fileID review.FileID, width int) (int, int) {
+	kind := review.ChangeModified
+	if file, ok := model.review.Snapshot().File(fileID); ok {
+		kind = file.Change().Kind()
+	}
+	return sideBySideWidths(kind, width)
+}
+
+func sideBySideWidths(kind review.ChangeKind, width int) (int, int) {
+	available := max(width-1, 2)
+	left := available / 2
+	switch kind {
+	case review.ChangeAdded:
+		left = max(available/3, 1)
+	case review.ChangeDeleted:
+		left = max(available*2/3, 1)
+	case review.ChangeModified, review.ChangeRenamed, review.ChangeCopied,
+		review.ChangeBinary, review.ChangeRenameOnly, review.ChangeModeOnly,
+		review.ChangeSubmodule, review.ChangeObjectTypeChanged:
+	}
+	return left, max(available-left, 1)
 }
 
 func (model *Model) renderSidePatchLine(

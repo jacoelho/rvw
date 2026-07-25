@@ -654,6 +654,11 @@ func (model *Model) workspaceHeaderLine(layout workspaceLayout, styles semanticS
 					activeText = fmt.Sprintf("%d/%d · %s", position+1, len(model.fileOrder), activeText)
 				}
 			}
+			activeText += fmt.Sprintf(
+				" · %d/%d reviewed",
+				model.review.ReviewedFileCount(),
+				model.review.Snapshot().FileCount(),
+			)
 		}
 	}
 	diffTitle := "DIFF · " + activeText
@@ -792,6 +797,9 @@ func paneHeader(
 }
 
 func (model *Model) statusLine(width int, styles semanticStyles) string {
+	if model.notice != nil {
+		return renderNoticeLine(*model.notice, width, styles)
+	}
 	status := model.operationSummary()
 	if conditions := model.workspaceConditionSummary(); conditions != "" {
 		status = conditions + "  " + status
@@ -808,19 +816,6 @@ func (model *Model) statusLine(width int, styles semanticStyles) string {
 	}
 	if layout.sideBySideFallback {
 		status = "unified fallback: side-by-side needs 100 columns  " + status
-	}
-	if model.notice != nil {
-		prefix := ""
-		switch model.notice.Kind {
-		case NoticeInformation:
-		case NoticeSuccess:
-			prefix = "Success: "
-		case NoticeWarning:
-			prefix = "Warning: "
-		case NoticeError:
-			prefix = "Error: "
-		}
-		status = prefix + string(model.notice.Text) + "  " + status
 	}
 	if model.mode == ModeCommentEdit {
 		status = safeAndClip(status+"  comment editor owns input", width)
@@ -840,18 +835,25 @@ func (model *Model) statusLine(width int, styles semanticStyles) string {
 			status = safeAndClip(status, width)
 		}
 	}
-	if model.notice != nil {
-		switch model.notice.Kind {
-		case NoticeInformation:
-		case NoticeSuccess:
-			return fitStyledCellWidth(status, width, styles.success.Inherit(styles.status))
-		case NoticeWarning:
-			return fitStyledCellWidth(status, width, styles.warning.Inherit(styles.status))
-		case NoticeError:
-			return fitStyledCellWidth(status, width, styles.failure.Inherit(styles.status))
-		}
-	}
 	return fitStyledCellWidth(status, width, styles.status)
+}
+
+func renderNoticeLine(notice Notice, width int, styles semanticStyles) string {
+	prefix := ""
+	style := styles.status
+	switch notice.Kind {
+	case NoticeInformation:
+	case NoticeSuccess:
+		prefix = "Success: "
+		style = styles.success.Inherit(styles.status)
+	case NoticeWarning:
+		prefix = "Warning: "
+		style = styles.warning.Inherit(styles.status)
+	case NoticeError:
+		prefix = "Error: "
+		style = styles.failure.Inherit(styles.status)
+	}
+	return fitStyledCellWidth(safeAndClip(prefix+string(notice.Text), width), width, style)
 }
 
 func (model *Model) workspaceConditionSummary() string {

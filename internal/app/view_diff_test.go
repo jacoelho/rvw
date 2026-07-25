@@ -13,6 +13,22 @@ import (
 	"github.com/jacoelho/rvw/internal/review"
 )
 
+func TestSideBySideWidthsFollowChangeKind(t *testing.T) {
+	for _, test := range []struct {
+		kind        review.ChangeKind
+		left, right int
+	}{
+		{kind: review.ChangeAdded, left: 39, right: 80},
+		{kind: review.ChangeDeleted, left: 79, right: 40},
+		{kind: review.ChangeModified, left: 59, right: 60},
+	} {
+		left, right := sideBySideWidths(test.kind, 120)
+		if left != test.left || right != test.right {
+			t.Fatalf("%s widths = %d/%d, want %d/%d", test.kind, left, right, test.left, test.right)
+		}
+	}
+}
+
 func TestPatchRecoveryLineKeepsStateAndActionAheadOfDetail(t *testing.T) {
 	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	for _, test := range []struct {

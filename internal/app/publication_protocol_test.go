@@ -104,14 +104,6 @@ func TestPublicationEventChoicesExposeAndCycleFinalGitHubActions(t *testing.T) {
 		keymap.Binding{Context: keymap.ContextSubmit, Chord: "h", Action: keymap.ActionPreviousSubmitEvent},
 		keymap.Binding{Context: keymap.ContextSubmit, Chord: "l", Action: keymap.ActionNextSubmitEvent},
 	)
-	draftChoices := ansi.Strip(strings.Join(
-		model.publicationEventLines(normalWidth, newSemanticStyles(model.settings)),
-		"\n",
-	))
-	if !strings.Contains(draftChoices, "Synchronize draft comments") ||
-		strings.Contains(draftChoices, "Leave feedback without approving") {
-		t.Fatalf("draft choices = %q", draftChoices)
-	}
 	options, err := model.publicationOptions()
 	if err != nil || options.Event() != review.PublicationEventDraft {
 		t.Fatalf("initial publication options = (%s, %v), want draft", options.Event(), err)
@@ -124,12 +116,9 @@ func TestPublicationEventChoicesExposeAndCycleFinalGitHubActions(t *testing.T) {
 	))
 	for _, want := range []string{
 		"h or l to change",
-		"▸ Comment",
-		publicationEventApproveLabel,
-		publicationEventRequestChangesLabel,
-		"Leave feedback without approving",
-		"Approve the pull request",
-		"Require updates before merge",
+		"(●) Comment",
+		"( ) " + publicationEventApproveLabel,
+		"( ) " + publicationEventRequestChangesLabel,
 	} {
 		if !strings.Contains(choices, want) {
 			t.Fatalf("choices omitted %q:\n%s", want, choices)
@@ -141,7 +130,7 @@ func TestPublicationEventChoicesExposeAndCycleFinalGitHubActions(t *testing.T) {
 		"\n",
 	))
 	if model.publicationEvent != review.PublicationEventApprove ||
-		!strings.Contains(choices, "▸ Approve") {
+		!strings.Contains(choices, "(●) Approve") {
 		t.Fatalf("next choices = %q (%s)", choices, model.publicationEvent)
 	}
 	model.applyPublicationAction(keymap.ActionPreviousSubmitEvent)
@@ -199,7 +188,7 @@ func TestPublicationChoiceAndPrimaryActionSurviveMinimumViewport(t *testing.T) {
 		t.Fatalf("publication view rows = %d, want 6:\n%s", len(lines), view)
 	}
 	for _, want := range []string{
-		"Action · h/l",
+		"Ready to publish",
 		publicationEventCommentLabel,
 		publicationEventApproveLabel,
 		publicationEventRequestChangesLabel,
@@ -228,7 +217,7 @@ func TestMinimumPublicationNavigationOmitsOverWidthChordsAtomically(t *testing.T
 		},
 	)
 	view := ansi.Strip(model.publicationView(minimumWidth, minimumHeight))
-	if strings.Contains(view, "Ctrl+") || !strings.Contains(view, "▌ Action") {
+	if strings.Contains(view, "Ctrl+") || !strings.Contains(view, "▌ Ready to publish") {
 		t.Fatalf("over-width publication chord was partially rendered:\n%s", view)
 	}
 	for _, want := range []string{
@@ -332,13 +321,13 @@ func TestMinimumPublicationStatesPreserveOperativeStatus(t *testing.T) {
 		intent publicationOperationIntent
 		cues   []string
 	}{
-		{name: "checking", status: review.PublicationChecking, cues: []string{"Checking preflight"}},
-		{name: "queued", status: review.PublicationChecking, intent: publicationOperationIntentSubmit, cues: []string{"Checking preflight", "Submission queued"}},
+		{name: "checking", status: review.PublicationChecking, cues: []string{"Checking GitHub"}},
+		{name: "queued", status: review.PublicationChecking, intent: publicationOperationIntentSubmit, cues: []string{"Submission queued"}},
 		{name: "publishing", status: review.PublicationPublishing, cues: []string{"Publishing review"}},
 		{name: "draft checked", status: review.PublicationChecked, event: review.PublicationEventDraft, cues: []string{"Ready to sync draft"}},
 		{name: "draft publishing", status: review.PublicationPublishing, event: review.PublicationEventDraft, cues: []string{"Syncing draft"}},
 		{name: "draft committed", status: review.PublicationCommitted, event: review.PublicationEventDraft, cues: []string{"Draft synchronized"}},
-		{name: "unknown", status: review.PublicationUnknown, cues: []string{"Outcome unknown", "Recheck remote state"}},
+		{name: "unknown", status: review.PublicationUnknown, cues: []string{"Outcome unknown"}},
 		{name: "reconciling", status: review.PublicationReconciling, cues: []string{"Reconciling review"}},
 		{name: "committed", status: review.PublicationCommitted, cues: []string{"Review published"}},
 		{name: "failed", status: review.PublicationFailedBeforeCommit, cues: []string{"Failed before commit"}},
@@ -377,16 +366,22 @@ func TestLockedPublicationStatePrecedesChoicesAcrossHeightBoundary(t *testing.T)
 			keymap.Binding{Context: keymap.ContextSubmit, Chord: "l", Action: keymap.ActionNextSubmitEvent},
 		)
 	}
-	assertAcrossHeights := func(t *testing.T, model *Model, cue string) {
+	assertAcrossHeights := func(t *testing.T, model *Model, cue string, expectChoices bool) {
 		t.Helper()
 		for _, height := range []int{6, 7, 8, 9, 10} {
 			plain := strings.ToLower(ansi.Strip(model.publicationView(minimumWidth, height)))
 			if !strings.Contains(plain, strings.ToLower(cue)) {
 				t.Fatalf("20x%d locked publication omitted %q:\n%s", height, cue, plain)
 			}
-			if strings.Contains(plain, strings.ToLower(publicationEventApproveLabel)) ||
-				strings.Contains(plain, strings.ToLower(publicationEventRequestChangesLabel)) {
-				t.Fatalf("20x%d locked choices displaced operative state:\n%s", height, plain)
+			for _, choice := range []string{
+				publicationEventCommentLabel,
+				publicationEventApproveLabel,
+				publicationEventRequestChangesLabel,
+			} {
+				hasChoice := strings.Contains(plain, strings.ToLower(") "+choice))
+				if hasChoice != expectChoices {
+					t.Fatalf("20x%d locked publication omitted %q:\n%s", height, choice, plain)
+				}
 			}
 		}
 	}
@@ -396,9 +391,9 @@ func TestLockedPublicationStatePrecedesChoicesAcrossHeightBoundary(t *testing.T)
 	setBindings(t, checking)
 	checking.publicationDraftReady = true
 	_, _ = beginTestPublicationCheck(t, checking)
-	assertAcrossHeights(t, checking, "Checking")
+	assertAcrossHeights(t, checking, "Checking", true)
 	checking.publicationIntent = publicationOperationIntentSubmit
-	assertAcrossHeights(t, checking, "Submission queued")
+	assertAcrossHeights(t, checking, "Submission queued", true)
 
 	unknown, _ := checkedPublicationModel(t)
 	setBindings(t, unknown)
@@ -419,7 +414,7 @@ func TestLockedPublicationStatePrecedesChoicesAcrossHeightBoundary(t *testing.T)
 		unknownResult.Detail,
 	)
 	unknown.publicationOperation = 0
-	assertAcrossHeights(t, unknown, "Outcome unknown")
+	assertAcrossHeights(t, unknown, "Outcome unknown", true)
 
 	draft, draftCoordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	settleModelWork(t, draft, draftCoordinator)
@@ -427,34 +422,35 @@ func TestLockedPublicationStatePrecedesChoicesAcrossHeightBoundary(t *testing.T)
 	draft.publicationDraftReady = false
 	draftID, draftCheck := beginTestPublicationCheck(t, draft)
 	draft.applyPublicationCheckOutcome(PublicationCheckOutcome{ID: draftID, Check: draftCheck})
-	assertAcrossHeights(t, draft, "sync")
+	assertAcrossHeights(t, draft, "sync", false)
 }
 
-func TestCheckedPublicationShowsConfiguredContentAndPolicyControls(t *testing.T) {
+func TestCheckedPublicationShowsOnlyReviewEventControls(t *testing.T) {
 	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	settleModelWork(t, model, coordinator)
 	appendTestReviewComments(t, model, "inspect me")
 	setModelKeybindings(t, model,
 		keymap.Binding{Context: keymap.ContextSubmit, Chord: "esc", Action: keymap.ActionCancel},
 		keymap.Binding{Context: keymap.ContextSubmit, Chord: "enter", Action: keymap.ActionSubmitReview},
-		keymap.Binding{Context: keymap.ContextSubmit, Chord: "x", Action: keymap.ActionToggleSubmitExclude},
-		keymap.Binding{Context: keymap.ContextSubmit, Chord: "m", Action: keymap.ActionToggleSubmitSummary},
-		keymap.Binding{Context: keymap.ContextSubmit, Chord: "s", Action: keymap.ActionToggleStaleOverride},
-		keymap.Binding{Context: keymap.ContextSubmit, Chord: "n", Action: keymap.ActionMoveDown},
-		keymap.Binding{Context: keymap.ContextSubmit, Chord: "p", Action: keymap.ActionMoveUp},
-		keymap.Binding{Context: keymap.ContextSubmit, Chord: "]", Action: keymap.ActionPageDown},
-		keymap.Binding{Context: keymap.ContextSubmit, Chord: "[", Action: keymap.ActionPageUp},
+		keymap.Binding{Context: keymap.ContextSubmit, Chord: "h", Action: keymap.ActionPreviousSubmitEvent},
+		keymap.Binding{Context: keymap.ContextSubmit, Chord: "l", Action: keymap.ActionNextSubmitEvent},
 	)
 	model.publicationDraftReady = true
 	id, result := beginTestPublicationCheck(t, model)
 	model.applyPublicationCheckOutcome(PublicationCheckOutcome{ID: id, Check: result})
 	view := ansi.Strip(model.publicationView(wideWidth, 30))
 	for _, want := range []string{
-		"x include/exclude", "n select", "p select",
-		"m toggle", "s allow stale", "] details", "[ details",
+		"(●) Comment", "( ) Approve", "( ) Request changes",
+		"Comments: 1 included, 0 excluded", "h previous review action",
+		"l next review action",
 	} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("checked publication view omitted %q:\n%s", want, view)
+		}
+	}
+	for _, hidden := range []string{"canonical", "bytes ", "marker", "preflight"} {
+		if strings.Contains(strings.ToLower(view), hidden) {
+			t.Fatalf("checked publication view exposed %q:\n%s", hidden, view)
 		}
 	}
 }
@@ -715,9 +711,13 @@ func TestPublicationWorkerCommitBoundary(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		options, err := model.publicationOptions()
+		if err != nil {
+			t.Fatal(err)
+		}
 		if _, _, err := model.review.StartPublicationCheck(
 			retryID,
-			model.settings.publication,
+			options,
 		); err != nil {
 			t.Fatalf("cancelled-before-commit publication is not retryable: %v", err)
 		}

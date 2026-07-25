@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"unicode/utf8"
 
 	"charm.land/lipgloss/v2"
 
@@ -13,7 +12,6 @@ import (
 )
 
 func (model *Model) openPublication() {
-	model.reconcilePublicationSelection(model.currentPublicationSelection())
 	pending := model.review.PendingReviewSummary()
 	model.publicationDraftReady = pending.Status == review.PendingReviewReady &&
 		pending.Dirty == 0 && pending.Conflicts == 0
@@ -73,21 +71,11 @@ func (model *Model) startPublicationCheck() {
 	model.review = next
 	model.publicationOperation = operationID
 	model.overlay = OverlaySubmit
-	model.notice = &Notice{Kind: NoticeInformation, Text: "checking publication preflight"}
+	model.notice = &Notice{Kind: NoticeInformation, Text: "checking GitHub review"}
 }
 
 func (model *Model) publicationOptions() (review.PublicationOptions, error) {
-	var policies []review.PublicationPolicy
-	configured := model.settings.publication.Policies()
-	if configured.Has(review.PublicationMoveUnmappableToSummary) ||
-		model.publicationMoveSummary {
-		policies = append(policies, review.PublicationMoveUnmappableToSummary)
-	}
-	if configured.Has(review.PublicationAllowStaleHead) ||
-		model.publicationAllowStale {
-		policies = append(policies, review.PublicationAllowStaleHead)
-	}
-	typedPolicies, err := review.NewPublicationPolicies(policies...)
+	policies, err := review.NewPublicationPolicies()
 	if err != nil {
 		return review.PublicationOptions{}, err
 	}
@@ -95,11 +83,7 @@ func (model *Model) publicationOptions() (review.PublicationOptions, error) {
 	if model.publicationDraftReady {
 		event = model.publicationEvent
 	}
-	options, err := review.NewPublicationOptions(event, typedPolicies)
-	if err != nil {
-		return review.PublicationOptions{}, err
-	}
-	return options.WithExclusions(model.publicationExcluded)
+	return review.NewPublicationOptions(event, policies)
 }
 
 func (model *Model) nextOperationID() (review.OperationID, error) {
@@ -192,7 +176,7 @@ func (model *Model) applyPublicationCheckOutcome(outcome PublicationCheckOutcome
 			}
 		}
 		model.overlay = OverlayNone
-		model.notice = &Notice{Kind: NoticeInformation, Text: "publication preflight cancelled"}
+		model.notice = &Notice{Kind: NoticeInformation, Text: "GitHub review check cancelled"}
 		return
 	}
 	if result.Checked == nil {
@@ -203,7 +187,7 @@ func (model *Model) applyPublicationCheckOutcome(outcome PublicationCheckOutcome
 		model.startPublication()
 		return
 	}
-	model.notice = &Notice{Kind: NoticeInformation, Text: "publication preflight is ready"}
+	model.notice = &Notice{Kind: NoticeInformation, Text: "GitHub review is ready"}
 }
 
 func (model *Model) startPublication() {
@@ -397,7 +381,7 @@ func (model *Model) applyReconciliationOutcome(outcome ReconciliationOutcome) {
 	case review.ReconciliationNotCommitted:
 		model.notice = &Notice{
 			Kind: NoticeWarning,
-			Text: "publication marker confirmed absent; retry is safe after a new preflight",
+			Text: "GitHub review was not published; retry is safe after a new check",
 		}
 	case review.ReconciliationStillUnknown:
 		model.notice = &Notice{
@@ -462,7 +446,7 @@ func (model *Model) applyPublicationAction(action keymap.Action) {
 			model.publicationIntent = publicationOperationIntentSubmit
 			model.notice = &Notice{
 				Kind: NoticeInformation,
-				Text: "submission requested; waiting for publication preflight",
+				Text: "submission requested; waiting for the GitHub review check",
 			}
 		case review.PublicationChecked:
 			model.startPublication()
@@ -471,41 +455,10 @@ func (model *Model) applyPublicationAction(action keymap.Action) {
 		}
 	case keymap.ActionSubmitRecheck:
 		model.recheckPublication(summary.Status)
-	case keymap.ActionToggleStaleOverride:
-		if model.publicationOptionsEditable() {
-			model.publicationAllowStale = !model.publicationAllowStale
-			model.restartPublicationCheck()
-		}
-	case keymap.ActionToggleSubmitSummary:
-		if model.publicationOptionsEditable() {
-			model.publicationMoveSummary = !model.publicationMoveSummary
-			model.restartPublicationCheck()
-		}
-	case keymap.ActionToggleSubmitExclude:
-		if model.publicationOptionsEditable() {
-			model.togglePublicationExclusion()
-			model.restartPublicationCheck()
-		}
 	case keymap.ActionPreviousSubmitEvent:
 		model.movePublicationEvent(-1)
 	case keymap.ActionNextSubmitEvent:
 		model.movePublicationEvent(1)
-	case keymap.ActionMoveUp:
-		model.selectPublicationIndex(model.publicationCursor - 1)
-		model.publicationDetailTop = 0
-	case keymap.ActionMoveDown:
-		model.selectPublicationIndex(model.publicationCursor + 1)
-		model.publicationDetailTop = 0
-	case keymap.ActionPageUp:
-		model.publicationDetailTop = max(
-			model.publicationDetailTop-model.publicationDetailStep(),
-			0,
-		)
-	case keymap.ActionPageDown:
-		model.publicationDetailTop = min(
-			model.publicationDetailTop+model.publicationDetailStep(),
-			review.MaxPublicationBytes,
-		)
 	default:
 	}
 }
@@ -609,30 +562,6 @@ func (model *Model) cancelPublicationCheck() bool {
 	return true
 }
 
-func (model *Model) togglePublicationExclusion() {
-	if model.publicationCursor == 0 {
-		return
-	}
-	comment, ok := model.review.CommentAt(model.publicationCursor - 1)
-	if !ok {
-		return
-	}
-	if model.review.PendingReviewSummary().Status == review.PendingReviewReady &&
-		model.review.PendingBindingState(comment.ID()) != review.PendingBindingNew {
-		model.notice = &Notice{
-			Kind: NoticeInformation,
-			Text: "existing GitHub drafts can be removed with delete, not excluded from their review",
-		}
-		return
-	}
-	exclusions, err := model.publicationExcluded.Toggle(comment.ID())
-	if err != nil {
-		model.notice = &Notice{Kind: NoticeWarning, Text: NoticeText(err.Error())}
-		return
-	}
-	model.publicationExcluded = exclusions
-}
-
 func (model *Model) acknowledgePublication() {
 	next, err := model.review.AcknowledgePublication()
 	if err != nil {
@@ -666,43 +595,70 @@ func (model *Model) publicationView(width, height int) string {
 	}
 	if height <= minimumHeight {
 		body := publicationCompactStateLines(summary, model.publicationIntent, styles)
-		if model.publicationEventEditable() {
-			body = model.publicationEventLines(width, styles)
+		if model.publicationDraftReady {
+			state := body[len(body)-1]
+			choices := model.publicationEventLines(width, styles)
+			body = append([]string{state}, choices[1:]...)
 			body[0] = styles.focused.Render("▌ ") + body[0]
 		}
 		return blockingSurface(body, controls, width, height, styles)
 	}
 	lines := []string{modalTitle(styles, "Publish GitHub review")}
-	if model.publicationEventEditable() {
-		lines = append(lines, model.publicationEventLines(width, styles)...)
+	lockedChoices := model.publicationDraftReady && !model.publicationEventEditable()
+	if model.publicationDraftReady {
+		choices := model.publicationEventLines(width, styles)
+		if lockedChoices {
+			state := publicationCompactStateLines(summary, model.publicationIntent, styles)
+			lines = append(lines, state[len(state)-1])
+			lines = append(lines, choices[1:]...)
+		} else {
+			lines = append(lines, choices...)
+		}
 	}
 	if pendingProblem != "" {
 		lines = append(lines, safeText(pendingProblem))
 	}
+	lines = append(lines, model.publicationStateLines(
+		summary,
+		pending,
+		pendingProblem,
+		lockedChoices,
+		styles,
+	)...)
+	return blockingSurface(lines, controls, width, height, styles)
+}
+
+func (model *Model) publicationStateLines(
+	summary review.PublicationSummary,
+	pending review.PendingReviewSummary,
+	pendingProblem string,
+	lockedChoices bool,
+	styles semanticStyles,
+) []string {
+	var lines []string
 	switch summary.Status {
 	case review.PublicationChecking:
+		if lockedChoices {
+			break
+		}
 		status := "Checking immutable repository, pull request, and head…"
 		switch model.publicationIntent {
 		case publicationOperationIntentSubmit:
 			status = "Submission queued; checking immutable repository, pull request, and head…"
 		case publicationOperationIntentCancel:
-			status = "Cancelling publication preflight…"
+			status = "Cancelling GitHub review check…"
 		case publicationOperationIntentNone:
 		}
 		lines = append(lines, "", styles.heading.Render("Submission"), status)
-		context := model.publicationEventLines(width, styles)
-		if width >= compactWidth && height-len(controls) >= len(lines)+1+len(context) {
-			lines = append(lines, "")
-			lines = append(lines, context...)
-		}
 	case review.PublicationChecked:
 		lines = append(
 			lines,
-			model.publicationCheckedLines(
-				summary, pending, pendingProblem, width, height, len(lines), styles,
-			)...,
+			model.publicationCheckedLines(summary, pending, pendingProblem, styles)...,
 		)
 	case review.PublicationPublishing:
+		if lockedChoices {
+			break
+		}
 		status := "Publishing; cancellation after the commit claim produces an unknown result."
 		if model.publicationIntent == publicationOperationIntentCancel {
 			status = "Cancelling publication; a claimed remote commit remains fenced until settlement."
@@ -713,6 +669,14 @@ func (model *Model) publicationView(width, height int) string {
 			status,
 		)
 	case review.PublicationUnknown:
+		if lockedChoices {
+			lines = append(lines,
+				safeText("Target: "+summary.Target.Repository()+"#"+
+					fmt.Sprintf("%d", summary.Target.PullRequest())),
+				"Reconciliation is required before retrying.",
+			)
+			break
+		}
 		lines = append(lines,
 			"",
 			styles.heading.Render("Submission"),
@@ -720,43 +684,48 @@ func (model *Model) publicationView(width, height int) string {
 			safeText("Target: "+summary.Target.Repository()+"#"+
 				fmt.Sprintf("%d", summary.Target.PullRequest()),
 			),
-			safeText("Marker: "+summary.Marker.String()),
 			"Recheck to verify exact remote state before retrying.",
 		)
 	case review.PublicationReconciling:
+		if lockedChoices {
+			break
+		}
 		lines = append(lines, "", styles.heading.Render("Submission"),
 			"Checking exact GitHub publication state…")
 	case review.PublicationCommitted:
+		if lockedChoices {
+			break
+		}
 		lines = append(lines, "", styles.heading.Render("Submission"),
-			"Publication committed.")
+			"Review published.")
 	case review.PublicationConfirmedAbsent:
+		if lockedChoices {
+			break
+		}
 		lines = append(lines, "", styles.heading.Render("Submission"),
-			"Marker confirmed absent; a new checked attempt may be submitted safely.")
+			"No matching GitHub review was found; a checked retry is safe.")
 	case review.PublicationFailedBeforeCommit:
+		if lockedChoices {
+			if !summary.Detail.IsEmpty() {
+				lines = append(lines, safeText(summary.Detail.String()))
+			}
+			break
+		}
 		lines = append(lines, "", styles.heading.Render("Submission"),
 			safeText("Publication failed before commit: "+summary.Detail.String()))
 	default:
 		lines = append(lines, "", styles.heading.Render("Submission"),
-			"No publication preflight is active.")
+			"No GitHub review check is active.")
 	}
-	return blockingSurface(lines, controls, width, height, styles)
+	return lines
 }
 
 func (model *Model) publicationCheckedLines(
 	summary review.PublicationSummary,
 	pending review.PendingReviewSummary,
 	pendingProblem string,
-	width, height, prefixRows int,
 	styles semanticStyles,
 ) []string {
-	unmappablePolicy := "exclude"
-	if model.publicationMoveSummary {
-		unmappablePolicy = "move to summary"
-	}
-	headStatus := "checked at current head"
-	if summary.StaleHead {
-		headStatus = "stale head explicitly overridden"
-	}
 	stage := "Submit pending draft as " + model.publicationEvent.String()
 	if summary.Event == review.PublicationEventDraft {
 		stage = "Synchronize comments to a pending GitHub draft"
@@ -769,53 +738,31 @@ func (model *Model) publicationCheckedLines(
 		),
 		"Next step: " + stage,
 		fmt.Sprintf("Comments: %d included, %d excluded", summary.Included, summary.Excluded),
-		model.publicationLineWithBindings(
-			"Unmappable: "+unmappablePolicy,
-			width,
-			styles,
-			publicationBindingHint{
-				action: keymap.ActionToggleSubmitSummary,
-				label:  "toggle",
-			},
-		),
-		model.publicationLineWithBindings(
-			"Head: "+headStatus,
-			width,
-			styles,
-			publicationBindingHint{
-				action: keymap.ActionToggleStaleOverride,
-				label:  "allow stale",
-			},
-		),
 	}
 	if pending.Status == review.PendingReviewReady {
 		lines = append(lines, fmt.Sprintf(
-			"Pending review: continue %d · %d changed · %d conflicts",
-			pending.ReviewID.Uint64(), pending.Dirty, pending.Conflicts,
+			"Pending draft: %d changed · %d conflicts",
+			pending.Dirty, pending.Conflicts,
 		))
 	} else if pendingProblem == "" {
-		lines = append(lines, safeText("Pending review: "+pending.Status.String()))
+		lines = append(lines, safeText("Pending draft: "+pending.Status.String()))
 	}
-	contentHints := []publicationBindingHint{
-		{action: keymap.ActionMoveDown, label: "select"},
-		{action: keymap.ActionMoveUp, label: "select"},
+	if summary.Excluded != 0 {
+		lines = append(lines, styles.warning.Render(
+			fmt.Sprintf("Warning: %d comments cannot be safely mapped and will be excluded", summary.Excluded),
+		))
 	}
-	if model.review.CommentCount() != 0 {
-		contentHints = append([]publicationBindingHint{
-			{action: keymap.ActionToggleSubmitExclude, label: "include/exclude"},
-		}, contentHints...)
+	if pending.Conflicts != 0 {
+		lines = append(lines, styles.warning.Render(
+			fmt.Sprintf("Warning: %d pending draft conflicts must be resolved", pending.Conflicts),
+		))
 	}
-	lines = append(lines, "", model.publicationLineWithBindings(
-		styles.heading.Render("Contents"),
-		width,
-		styles,
-		contentHints...,
-	))
-	bodyHeight := max(height-1, 0)
-	chooserHeight := min(max(bodyHeight-prefixRows-len(lines)-4, 1), 6)
-	lines = append(lines, model.publicationCommentLines(chooserHeight)...)
-	detailHeight := max(bodyHeight-prefixRows-len(lines), 0)
-	return append(lines, model.publicationDetailLines(width, detailHeight, styles)...)
+	if summary.StaleHead {
+		lines = append(lines, styles.warning.Render(
+			"Warning: the pull request head changed; submission is blocked",
+		))
+	}
+	return lines
 }
 
 func publicationCompactStateLines(
@@ -827,9 +774,8 @@ func publicationCompactStateLines(
 	var status string
 	switch summary.Status {
 	case review.PublicationChecking:
-		status = "Checking preflight…"
+		status = "Checking GitHub…"
 		if intent == publicationOperationIntentSubmit {
-			lines = append(lines, styles.heading.Render(status))
 			status = "Submission queued"
 		}
 	case review.PublicationChecked:
@@ -850,49 +796,15 @@ func publicationCompactStateLines(
 	case review.PublicationFailedBeforeCommit:
 		status = "Failed before commit"
 	case review.PublicationUnknown:
-		lines = append(lines, styles.warning.Render("Outcome unknown"))
-		status = "Recheck remote state"
+		status = "Outcome unknown"
 	case review.PublicationReconciling:
 		status = "Reconciling review…"
 	case review.PublicationConfirmedAbsent:
 		status = "Remote review absent"
 	default:
-		status = "No preflight active"
+		status = "No review check active"
 	}
 	return append(lines, styles.heading.Render(status))
-}
-
-type publicationBindingHint struct {
-	action keymap.Action
-	label  string
-}
-
-func (model *Model) publicationLineWithBindings(
-	base string,
-	width int,
-	styles semanticStyles,
-	hints ...publicationBindingHint,
-) string {
-	remaining := width - lipgloss.Width(base) - lipgloss.Width(" · ")
-	if remaining <= 0 {
-		return base
-	}
-	bindings := make([]keymap.Binding, 0, len(hints))
-	labels := make(map[keymap.Action]string, len(hints))
-	effective := model.effectiveBindings(keymap.ContextSubmit)
-	for _, hint := range hints {
-		matches := bindingsForActions(effective, []keymap.Action{hint.action})
-		if len(matches) == 0 {
-			continue
-		}
-		bindings = append(bindings, matches[0])
-		labels[hint.action] = hint.label
-	}
-	rendered := bindingBar{bindings: bindings, labels: labels}.Render(remaining, styles)
-	if rendered == "" {
-		return base
-	}
-	return base + styles.muted.Render(" · ") + rendered
 }
 
 func pendingReviewProblemLine(pending review.PendingReviewSummary) string {
@@ -911,15 +823,6 @@ func pendingReviewProblemLine(pending review.PendingReviewSummary) string {
 }
 
 func (model *Model) publicationEventLines(width int, styles semanticStyles) []string {
-	if !model.publicationDraftReady {
-		return []string{
-			styles.heading.Render("Review action · draft synchronization required"),
-			styles.selected.Render("▸ Synchronize draft comments"),
-			styles.muted.Render(
-				"  Comment, Approve, and Request changes follow after the draft is current.",
-			),
-		}
-	}
 	headingWidth := max(width-lipgloss.Width("▌ "), 1)
 	heading := "Review action · " + model.publicationEventNavigationHint(width, false)
 	if lipgloss.Width(heading) > headingWidth {
@@ -931,13 +834,11 @@ func (model *Model) publicationEventLines(width int, styles semanticStyles) []st
 	}
 	lines := []string{styles.heading.Render(safeText(heading))}
 	for _, event := range publicationEvents {
-		label := fmt.Sprintf("%-15s", publicationEventLabel(event))
-		description := publicationEventDescription(event)
 		if event == model.publicationEvent {
-			lines = append(lines, styles.selected.Render("▸ "+label+" "+description))
+			lines = append(lines, styles.selected.Render("(●) "+publicationEventLabel(event)))
 			continue
 		}
-		lines = append(lines, "  "+label+" "+styles.muted.Render(description))
+		lines = append(lines, styles.muted.Render("( ) "+publicationEventLabel(event)))
 	}
 	return lines
 }
@@ -1045,101 +946,6 @@ func publicationEventLabel(event review.PublicationEvent) string {
 	default:
 		return event.String()
 	}
-}
-
-func publicationEventDescription(event review.PublicationEvent) string {
-	switch event {
-	case review.PublicationEventComment:
-		return "Leave feedback without approving"
-	case review.PublicationEventApprove:
-		return "Approve the pull request"
-	case review.PublicationEventRequestChanges:
-		return "Require updates before merge"
-	default:
-		return ""
-	}
-}
-
-func (model *Model) publicationCommentLines(limit int) []string {
-	if limit <= 0 {
-		return nil
-	}
-	start := max(model.publicationCursor-limit/2, 0)
-	count := model.review.CommentCount() + 1
-	start = min(start, max(count-limit, 0))
-	lines := make([]string, 0, min(limit, count-start))
-	pendingReady := model.review.Snapshot().PendingReviewSummary().Status ==
-		review.PendingReviewReady
-	for index := start; index < min(start+limit, count); index++ {
-		cursor := "  "
-		if index == model.publicationCursor {
-			cursor = "▸ "
-		}
-		if index == 0 {
-			lines = append(lines, cursor+"[payload] canonical GitHub request")
-			continue
-		}
-		comment, ok := model.review.CommentAt(index - 1)
-		if !ok {
-			continue
-		}
-		state := "unchecked"
-		if decision, ok := model.review.PublicationDecisionAt(index - 1); ok &&
-			decision.CommentID() == comment.ID() {
-			state = decision.Decision().String()
-		}
-		label := state
-		if pendingReady {
-			binding := model.review.PendingBindingState(comment.ID()).String()
-			label = binding + " · " + state
-		}
-		lines = append(lines, cursor+"["+label+"] "+safeAndClip(comment.Body().String(), 80))
-	}
-	return lines
-}
-
-func (model *Model) publicationDetailLines(
-	width, height int,
-	styles semanticStyles,
-) []string {
-	if width <= 0 || height <= 0 {
-		return nil
-	}
-	label := "Canonical payload"
-	value := model.review.PublicationPreflightPayload()
-	if model.publicationCursor != 0 {
-		if comment, ok := model.review.CommentAt(model.publicationCursor - 1); ok {
-			label = "Full comment #" + fmt.Sprint(comment.ID().Uint32())
-			value = comment.Body().String()
-		}
-	}
-	top := min(max(model.publicationDetailTop, 0), len(value))
-	for top < len(value) && !utf8.RuneStart(value[top]) {
-		top++
-	}
-	maxBytes := max(width*max(height-1, 1)*4, 256)
-	end := min(top+maxBytes, len(value))
-	for end > top && end < len(value) && !utf8.RuneStart(value[end]) {
-		end--
-	}
-	header := model.publicationLineWithBindings(
-		fmt.Sprintf("%s · bytes %d–%d/%d", label, top, end, len(value)),
-		width,
-		styles,
-		publicationBindingHint{action: keymap.ActionPageDown, label: "details"},
-		publicationBindingHint{action: keymap.ActionPageUp, label: "details"},
-	)
-	if value == "" {
-		return []string{header, "(empty)"}
-	}
-	wrapped := lipgloss.Wrap(safeText(value[top:end]), max(width, 1), "")
-	rows := strings.Split(wrapped, "\n")
-	return append([]string{header}, rows[:min(len(rows), max(height-1, 0))]...)
-}
-
-func (model *Model) publicationDetailStep() int {
-	width, height := model.renderSize()
-	return max(width*max(height/2, 1)*2, 256)
 }
 
 func boundedOperationDetail(value string) review.OperationDetail {

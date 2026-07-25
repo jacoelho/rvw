@@ -129,6 +129,31 @@ func TestFindRejectsInvalidUTF8Transactionally(t *testing.T) {
 	}
 }
 
+func TestFindStatusReportsPositionVisibleCountAndLimitedTotal(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	model.searchInput.SetValue("a")
+	model.find = findPalette{
+		scope:        findFiles,
+		phase:        findReady,
+		cursor:       1,
+		fileResults:  make([]fileFindResult, 3),
+		limited:      true,
+		totalMatches: 12,
+	}
+	if got := model.findStatusText(); got != "2 of 3 · 12 total" {
+		t.Fatalf("limited file find status = %q", got)
+	}
+	model.find.cursor = 99
+	model.find.limited = false
+	if got := model.findStatusText(); got != "3 of 3" {
+		t.Fatalf("clamped file find status = %q", got)
+	}
+	model.find.fileResults = nil
+	if got := model.findStatusText(); got != "0 of 0" {
+		t.Fatalf("empty file find status = %q", got)
+	}
+}
+
 func TestReviewFindSearchesOnlyCapturedVisibleProjection(t *testing.T) {
 	model, coordinator := newTestModel(t, map[string]string{
 		"alpha.txt": "visible only\n",

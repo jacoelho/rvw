@@ -215,10 +215,7 @@ func TestCompiledKeybindingsEnforceFixedRuntimeBounds(t *testing.T) {
 
 func TestSettingsCloneSharesCompiledKeybindings(t *testing.T) {
 	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
-	clone, err := model.settings.clone()
-	if err != nil {
-		t.Fatalf("clone settings: %v", err)
-	}
+	clone := model.settings.clone()
 	if clone.keymap == nil || clone.keymap != model.settings.keymap {
 		t.Fatal("settings clone did not share the immutable compiled keybindings")
 	}

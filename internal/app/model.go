@@ -183,11 +183,11 @@ type pendingSearch struct {
 
 // Model represents model.
 type Model struct {
-	commentEditor             *commentEditor
 	commandContext            context.Context
-	deliveryOperations        map[review.OperationID]delivery.Destination
+	lastNotice                *Notice
+	pendingStdout             *review.PreparedExport
 	filteredFileTree          *fileTree
-	commentSelection          commentRowIdentity
+	commentEditor             *commentEditor
 	receiver                  *ReadyReceiver
 	operationProgress         map[review.OperationID]Progress
 	filterBuild               *fileFilterBuild
@@ -200,30 +200,30 @@ type Model struct {
 	reloadPreparationDocument *source.Document
 	syntaxOld                 *review.PreparedSyntax
 	coordinator               *Coordinator
-	pendingStdout             *review.PreparedExport
-	ambiguousPaths            map[string]struct{}
-	notice                    *Notice
 	findRestore               *findReturnState
+	ambiguousPaths            map[string]struct{}
+	deliveryOperations        map[review.OperationID]delivery.Destination
+	notice                    *Notice
 	searchAfterSyntax         *pendingSearch
 	help                      help.Model
 	fileProjection            fileProjectionState
-	visibleFileTree           fileTree
 	allFileTree               fileTree
-	filterTreeFiles           []review.FileID
-	cleanupSources            []*source.Cleanup
-	treeCursor                treeNodeIdentity
-	visibleFileOrder          []review.FileID
+	visibleFileTree           fileTree
 	allFileOrder              []review.FileID
 	fileOrder                 []review.FileID
+	cleanupSources            []*source.Cleanup
+	visibleFileOrder          []review.FileID
+	treeCursor                treeNodeIdentity
+	filterTreeFiles           []review.FileID
 	searchInput               textinput.Model
 	commandInput              textinput.Model
 	chord                     pendingKeyChord
 	foreground                foregroundState
+	commentSelection          commentRowIdentity
 	collapsedTree             collapsedTreeState
+	settings                  Settings
 	review                    review.Review
 	find                      findPalette
-	settings                  Settings
-	publicationExcluded       review.PublicationExclusions
 	coordinatorStats          CoordinatorStats
 	size                      TerminalSize
 	searchCursor              int
@@ -234,9 +234,6 @@ type Model struct {
 	diffLeft                  int
 	filterTreeGeneration      uint64
 	commentCursor             int
-	publicationDetailTop      int
-	publicationCursor         int
-	publicationSelection      publicationRowIdentity
 	helpTop                   int
 	statusTop                 int
 	nextOperation             uint64
@@ -251,12 +248,10 @@ type Model struct {
 	diffCursor                uint32
 	repeat                    uint16
 	exportPicker              exportSelection
-	publicationAllowStale     bool
 	commentSelectionKnown     bool
 	commentPaneVisibility     paneVisibility
 	publicationIntent         publicationOperationIntent
 	quitting                  bool
-	publicationMoveSummary    bool
 	publicationDraftReady     bool
 	publicationEvent          review.PublicationEvent
 	focusReturn               FocusOwner
@@ -303,10 +298,7 @@ func NewModel(
 	if ctx == nil || document == nil || coordinator == nil || receiver == nil {
 		return nil, errors.New("interactive model requires context, document, coordinator, and receiver")
 	}
-	settings, err := settings.clone()
-	if err != nil {
-		return nil, err
-	}
+	settings = settings.clone()
 	current, err := review.NewReview(review.ReviewRequest{
 		Snapshot: document.Snapshot(),
 	})
@@ -329,7 +321,7 @@ func NewModel(
 		coordinator:      coordinator,
 		receiver:         receiver,
 		settings:         settings,
-		publicationEvent: settings.publication.Event(),
+		publicationEvent: settings.publicationEvent,
 		help:             helpModel,
 		commentEditor:    editor,
 		searchInput:      searchInput,
@@ -468,6 +460,12 @@ func (model *Model) applyMouseAction(message mouseActionMsg) tea.Cmd {
 		if message.findGeneration != model.find.generation || model.find.phase != findReady {
 			return nil
 		}
+		handled := message.delta != 0 ||
+			message.target == mouseTargetFind &&
+				message.findIndex >= 0 && message.findIndex < model.findResultCount()
+		if handled {
+			model.acknowledgeNotice()
+		}
 		if message.delta != 0 {
 			model.moveFind(message.delta)
 		}
@@ -484,6 +482,7 @@ func (model *Model) applyMouseAction(message mouseActionMsg) tea.Cmd {
 		!model.focusVisible(message.focus) {
 		return nil
 	}
+	model.acknowledgeNotice()
 	model.setFocus(message.focus)
 	model.focusReturn = 0
 	if message.delta != 0 || message.target != mouseTargetNone {

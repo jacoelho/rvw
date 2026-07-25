@@ -98,44 +98,57 @@ func TestSelectedFileTreeRowEmphasizesItsFullWidth(t *testing.T) {
 	}
 }
 
-func TestStatusLineNeverClipsPartOfABindingHint(t *testing.T) {
+func TestStatusLineNoticeOwnsFooterUntilAcknowledged(t *testing.T) {
 	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	model.notice = &Notice{Kind: NoticeInformation, Text: "reload complete"}
 	styles := newSemanticStyles(model.settings)
-	prefix := string(model.notice.Text) + "  " + model.operationSummary()
-	model.size = TerminalSize{Width: minimumWidth, Height: 24, Known: true}
-	first := model.workspaceStatusBindings(model.workspaceLayout(minimumWidth, 24))[0]
-	firstHint := first.Chord.Display() + " " + first.Action.Description()
-	width := lipgloss.Width(prefix) + 2 + lipgloss.Width(firstHint) + 1
-	model.size = TerminalSize{Width: width, Height: 24, Known: true}
+	model.size = TerminalSize{Width: 80, Height: 24, Known: true}
 
-	got := ansi.Strip(model.statusLine(width, styles))
-	if !strings.HasPrefix(got, "reload complete") || !strings.Contains(got, "j next row") {
-		t.Fatalf("status line clipped or displaced a binding hint: %q (first %q)", got, firstHint)
+	got := ansi.Strip(model.statusLine(80, styles))
+	if !strings.HasPrefix(got, "reload complete") || strings.Contains(got, "j next row") {
+		t.Fatalf("active notice did not own the footer: %q", got)
+	}
+	model.applyAction(keymap.ActionMoveDown, 1)
+	got = ansi.Strip(model.statusLine(80, styles))
+	if model.notice != nil || model.lastNotice == nil || !strings.Contains(got, "j next row") {
+		t.Fatalf("acknowledged notice state = active=%+v last=%+v footer=%q", model.notice, model.lastNotice, got)
 	}
 }
 
-func TestStatusOnlyUpdatesKeepFooterBindingsAnchored(t *testing.T) {
-	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
-	model.size = TerminalSize{Width: 80, Height: 24, Known: true}
+func TestWorkspaceHeaderShowsReviewedFileProgressBesidePath(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{
+		"alpha.txt": "changed\n",
+		"beta.txt":  "changed\n",
+	})
+	model.size = TerminalSize{Width: 120, Height: 24, Known: true}
 	styles := newSemanticStyles(model.settings)
-	model.notice = &Notice{Kind: NoticeInformation, Text: "short"}
-	shortLine := ansi.Strip(model.statusLine(80, styles))
-	model.notice = &Notice{
-		Kind: NoticeInformation,
-		Text: "a substantially longer status update that must not shift controls",
+	header := ansi.Strip(model.workspaceHeaderLine(model.workspaceLayout(120, 24), styles))
+	if !strings.Contains(header, "alpha.txt · 0/2 reviewed") {
+		t.Fatalf("initial header omitted reviewed progress: %q", header)
 	}
-	longLine := ansi.Strip(model.statusLine(80, styles))
-	shortAnchor := -1
-	longAnchor := -1
-	if prefix, _, found := strings.Cut(shortLine, "j next row"); found {
-		shortAnchor = lipgloss.Width(prefix)
+	active, ok := model.review.ActiveFile()
+	if !ok {
+		t.Fatal("test review has no active file")
 	}
-	if prefix, _, found := strings.Cut(longLine, "j next row"); found {
-		longAnchor = lipgloss.Width(prefix)
+	next, err := model.review.ToggleFileReviewed(active)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if shortAnchor < 0 || shortAnchor != longAnchor {
-		t.Fatalf("binding anchor shifted from %d to %d:\n%s\n%s", shortAnchor, longAnchor, shortLine, longLine)
+	model.review = next
+	header = ansi.Strip(model.workspaceHeaderLine(model.workspaceLayout(120, 24), styles))
+	if !strings.Contains(header, "alpha.txt · 1/2 reviewed") {
+		t.Fatalf("updated header omitted reviewed progress: %q", header)
+	}
+}
+
+func TestStatusDetailsRetainsAcknowledgedNotice(t *testing.T) {
+	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
+	model.notice = &Notice{Kind: NoticeWarning, Text: "remote refresh incomplete"}
+	model.applyAction(keymap.ActionStatusDetails, 1)
+	facts := strings.Join(model.statusFactLines(), "\n")
+	if model.notice != nil || model.lastNotice == nil ||
+		!strings.Contains(facts, "latest warning: remote refresh incomplete") {
+		t.Fatalf("status facts lost acknowledged notice: active=%+v last=%+v\n%s", model.notice, model.lastNotice, facts)
 	}
 }
 
@@ -392,7 +405,8 @@ func TestCommentEditorDockKeepsCodeVisibleWithoutEscapedWidgetStyles(t *testing.
 	if !strings.Contains(plain, "changed") {
 		t.Fatalf("comment editor hid the selected code:\n%s", plain)
 	}
-	if !strings.Contains(plain, "Comment ·") || !strings.Contains(plain, "DIFF · alpha.txt · COMMENT") {
+	if !strings.Contains(plain, "Comment ·") ||
+		!strings.Contains(plain, "DIFF · alpha.txt · 0/1 reviewed · COMMENT") {
 		t.Fatalf("comment editor omitted its visible focus state:\n%s", plain)
 	}
 	if strings.Contains(plain, "enter activate") || !strings.Contains(plain, "comment editor owns input") {
@@ -503,7 +517,7 @@ func TestCommandPromptUsesFocusedWorkspaceFooter(t *testing.T) {
 	if len(lines) != 24 {
 		t.Fatalf("command prompt rendered %d lines, want 24", len(lines))
 	}
-	if !strings.Contains(lines[0], "DIFF · alpha.txt · COMMAND") ||
+	if !strings.Contains(lines[0], "DIFF · alpha.txt · 0/1 reviewed · COMMAND") ||
 		!strings.Contains(lines[0], "alpha.txt") {
 		t.Fatalf("command prompt hid or misidentified the workspace:\n%s", plain)
 	}
@@ -746,6 +760,7 @@ func TestSelectedRemoteCommentDoesNotAdvertiseLocalEdit(t *testing.T) {
 	_, _ = model.Update(tea.WindowSizeMsg{Width: wideWidth, Height: 30})
 	model.focus = FocusComments
 	model.commentCursor = model.review.CommentCount()
+	model.acknowledgeNotice()
 
 	lines := strings.Split(ansi.Strip(model.View().Content), "\n")
 	footer := lines[len(lines)-1]
@@ -1545,7 +1560,7 @@ func TestSyntaxRenderingWithoutSpansUsesPlainSanitizedPath(t *testing.T) {
 	}
 }
 
-func TestPublicationPreflightRendersCanonicalPayloadAndDecision(t *testing.T) {
+func TestPublicationViewRendersConciseReviewChoicesWithoutProtocolDetails(t *testing.T) {
 	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	target, _ := review.FileCommentTarget(0)
 	current, err := model.review.BeginDraft(target)
@@ -1613,20 +1628,19 @@ func TestPublicationPreflightRendersCanonicalPayloadAndDecision(t *testing.T) {
 	payloadView := model.View().Content
 	plainPayloadView := ansi.Strip(payloadView)
 	if !strings.Contains(plainPayloadView, "Publish GitHub review") ||
-		!strings.Contains(plainPayloadView, "▸ Comment") ||
+		!strings.Contains(plainPayloadView, "(●) Comment") ||
 		!strings.Contains(plainPayloadView, publicationEventApproveLabel) ||
 		!strings.Contains(plainPayloadView, publicationEventRequestChangesLabel) ||
-		!strings.Contains(plainPayloadView, "[payload] canonical GitHub request") ||
-		!strings.Contains(plainPayloadView, `"commit_id":"`+head.String()+`"`) {
-		t.Fatalf("preflight omitted canonical payload:\n%s", payloadView)
+		!strings.Contains(plainPayloadView, "Target: owner/repository#7") ||
+		!strings.Contains(plainPayloadView, "Comments: 1 included, 0 excluded") {
+		t.Fatalf("publication view omitted concise review information:\n%s", payloadView)
 	}
-
-	model.publicationCursor = 1
-	commentView := model.View().Content
-	plainCommentView := ansi.Strip(commentView)
-	if !strings.Contains(plainCommentView, "[summary] full publication comment") ||
-		!strings.Contains(plainCommentView, "Full comment #0") {
-		t.Fatalf("preflight omitted comment decision/detail:\n%s", commentView)
+	for _, hidden := range []string{
+		marker.String(), head.String(), "full publication comment", "canonical", "bytes ", "preflight",
+	} {
+		if strings.Contains(strings.ToLower(plainPayloadView), strings.ToLower(hidden)) {
+			t.Fatalf("publication view exposed protocol detail %q:\n%s", hidden, payloadView)
+		}
 	}
 }
 

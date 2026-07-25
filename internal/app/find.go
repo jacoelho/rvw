@@ -273,6 +273,7 @@ func (model *Model) handleFindKey(message tea.KeyPressMsg) tea.Cmd {
 		if action == keymap.ActionNone {
 			return command
 		}
+		model.acknowledgeNotice()
 		switch action {
 		case keymap.ActionCancel, keymap.ActionInterrupt:
 			model.closeFind(findCloseCancel)
@@ -744,13 +745,18 @@ func (model *Model) findStatusText() string {
 		return "Error: " + model.find.failure
 	case findReady:
 		count := model.findResultCount()
+		position := 0
+		if count != 0 {
+			position = min(max(model.find.cursor, 0), count-1) + 1
+		}
+		matchPosition := fmt.Sprintf("%d of %d", position, count)
 		if model.find.scope != findFiles {
 			summary := model.review.SearchSummary()
 			switch summary.Status {
 			case review.SearchPartial:
-				return fmt.Sprintf("%d matches; %d files unavailable", count, summary.UnavailableFiles)
+				return fmt.Sprintf("%s · %d files unavailable", matchPosition, summary.UnavailableFiles)
 			case review.SearchLimited:
-				return fmt.Sprintf("%d matches; result limit reached", count)
+				return matchPosition + " · limit reached"
 			case review.SearchCancelled:
 				return "Search cancelled"
 			case review.SearchFailed:
@@ -760,12 +766,9 @@ func (model *Model) findStatusText() string {
 			}
 		}
 		if model.find.scope == findFiles && model.find.limited {
-			return fmt.Sprintf("Top %d of %d matching files", count, model.find.totalMatches)
+			return fmt.Sprintf("%s · %d total", matchPosition, model.find.totalMatches)
 		}
-		if count == 1 {
-			return "1 match"
-		}
-		return strconv.Itoa(count) + " matches"
+		return matchPosition
 	default:
 		return ""
 	}

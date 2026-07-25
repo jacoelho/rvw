@@ -176,48 +176,6 @@ func TestCommentNavigationEntersExplicitEmptySelectionAtNearestEnd(t *testing.T)
 	}
 }
 
-func TestPublicationSelectionFollowsCommentIdentityAcrossMutation(t *testing.T) {
-	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
-	ids := appendTestReviewComments(t, model, "first", "second", "third")
-	model.selectPublicationIndex(2)
-	selection := model.currentPublicationSelection()
-
-	next, err := model.review.DeleteComment(ids[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	model.review = next
-	model.reconcilePublicationSelection(selection)
-	assertSelectedPublicationComment(t, model, 1, ids[1])
-
-	selection = model.currentPublicationSelection()
-	next, err = model.review.DeleteComment(ids[1])
-	if err != nil {
-		t.Fatal(err)
-	}
-	model.review = next
-	model.reconcilePublicationSelection(selection)
-	assertSelectedPublicationComment(t, model, 1, ids[2])
-}
-
-func TestPublicationSelectionFallsBackToPayloadWhenOnlyCommentDisappears(t *testing.T) {
-	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
-	ids := appendTestReviewComments(t, model, "selected")
-	model.selectPublicationIndex(1)
-	selection := model.currentPublicationSelection()
-
-	next, err := model.review.DeleteComment(ids[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	model.review = next
-	appendTestReviewComments(t, model, "unrelated replacement")
-	model.reconcilePublicationSelection(selection)
-	if model.publicationCursor != 0 || model.publicationSelection.kind != publicationRowPayload {
-		t.Fatalf("publication selection = cursor %d, identity %#v; want payload", model.publicationCursor, model.publicationSelection)
-	}
-}
-
 func TestFindReturnRestoresCommentIdentityAfterRowsMove(t *testing.T) {
 	model, _ := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	ids := appendTestReviewComments(t, model, "first", "second")
@@ -288,21 +246,5 @@ func assertSelectedLocalComment(
 	comment, ok := model.review.CommentAt(model.commentCursor)
 	if !ok || comment.ID() != wantID {
 		t.Fatalf("selected comment = %v, present=%t, want ID %d", comment.ID(), ok, wantID)
-	}
-}
-
-func assertSelectedPublicationComment(
-	t *testing.T,
-	model *Model,
-	wantIndex int,
-	wantID review.CommentID,
-) {
-	t.Helper()
-	if model.publicationCursor != wantIndex {
-		t.Fatalf("publication cursor = %d, want %d", model.publicationCursor, wantIndex)
-	}
-	comment, ok := model.review.CommentAt(model.publicationCursor - 1)
-	if !ok || comment.ID() != wantID {
-		t.Fatalf("published comment = %v, present=%t, want ID %d", comment.ID(), ok, wantID)
 	}
 }

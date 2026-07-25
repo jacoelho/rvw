@@ -185,9 +185,13 @@ func (model *Model) statusFactLines() []string {
 		fmt.Sprintf("I/O workers          %d/%d", stats.IOWorkers, MaxIOWorkers),
 		fmt.Sprintf("CPU workers          %d/%d", stats.CPUWorkers, MaxCPUWorkers),
 	}
-	if model.notice != nil {
+	latest := model.notice
+	if latest == nil {
+		latest = model.lastNotice
+	}
+	if latest != nil {
 		label := "latest"
-		switch model.notice.Kind {
+		switch latest.Kind {
 		case NoticeSuccess:
 			label = "latest success"
 		case NoticeWarning:
@@ -196,7 +200,7 @@ func (model *Model) statusFactLines() []string {
 			label = "latest error"
 		case NoticeInformation:
 		}
-		lines = append(lines, "", label+": "+string(model.notice.Text))
+		lines = append(lines, "", label+": "+string(latest.Text))
 	}
 	switch model.fileProjection.workspace {
 	case projectionInitial, projectionLoading:
@@ -230,9 +234,6 @@ func (model *Model) statusFactLines() []string {
 		lines = append(lines, "", "publication          "+publication.Status.String())
 		if !publication.Detail.IsEmpty() {
 			lines = append(lines, "publication detail   "+publication.Detail.String())
-		}
-		if publication.Marker != "" {
-			lines = append(lines, "publication marker   "+publication.Marker.String())
 		}
 	}
 	remoteThreads := model.review.Snapshot().RemoteThreadSummary()

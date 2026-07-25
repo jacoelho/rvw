@@ -138,6 +138,33 @@ func TestDefaultSubmitKeybindingsExposeStatusDetails(t *testing.T) {
 	t.Fatal("submit context has no default F2 status-details binding")
 }
 
+func TestSubmitKeybindingsRejectRemovedAdvancedActions(t *testing.T) {
+	for _, action := range []string{
+		"toggle-stale-head-override",
+		"toggle-submit-exclusion",
+		"toggle-submit-summary",
+	} {
+		if _, err := resolveKeybindings([]Keybinding{{
+			Context: keymap.ContextSubmit,
+			Chord:   "x",
+			Action:  keymap.Action(action),
+		}}); err == nil {
+			t.Errorf("removed submit action %q was accepted", action)
+		}
+	}
+
+	for _, action := range []keymap.Action{
+		keymap.ActionMoveUp,
+		keymap.ActionMoveDown,
+		keymap.ActionPageUp,
+		keymap.ActionPageDown,
+	} {
+		if keymap.ActionAllowed(keymap.ContextSubmit, action) {
+			t.Errorf("generic action %q remains available in submit context", action)
+		}
+	}
+}
+
 func TestDefaultVisualKeybindingsPreserveNavigationAlternatives(t *testing.T) {
 	bindings, err := resolveKeybindings(nil)
 	if err != nil {

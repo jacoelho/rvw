@@ -143,94 +143,16 @@ func (model *Model) commentReferenceIndex(reference commentRowReference) (int, b
 	})
 }
 
-type publicationRowKind uint8
-
-const (
-	publicationRowPayload publicationRowKind = iota + 1
-	publicationRowComment
-)
-
-type publicationRowIdentity struct {
-	next     review.CommentID
-	previous review.CommentID
-	fallback int
-	comment  review.CommentID
-	kind     publicationRowKind
-}
-
-func (model *Model) currentPublicationSelection() publicationRowIdentity {
-	if model.publicationCursor <= 0 {
-		return publicationRowIdentity{kind: publicationRowPayload}
-	}
-	comment, ok := model.review.CommentAt(model.publicationCursor - 1)
-	if !ok {
-		return publicationRowIdentity{fallback: max(model.publicationCursor, 0)}
-	}
-	identity := publicationRowIdentity{
-		kind: publicationRowComment, comment: comment.ID(), fallback: model.publicationCursor,
-	}
-	if next, exists := model.review.CommentAt(model.publicationCursor); exists {
-		identity.next = next.ID()
-	}
-	if previous, exists := model.review.CommentAt(model.publicationCursor - 2); exists {
-		identity.previous = previous.ID()
-	}
-	return identity
-}
-
-func (model *Model) selectPublicationIndex(index int) {
-	model.publicationCursor = min(max(index, 0), model.review.CommentCount())
-	if model.publicationCursor == 0 {
-		model.publicationSelection = publicationRowIdentity{kind: publicationRowPayload}
-		return
-	}
-	comment, ok := model.review.CommentAt(model.publicationCursor - 1)
-	if !ok {
-		model.publicationSelection = publicationRowIdentity{}
-		return
-	}
-	model.publicationSelection = publicationRowIdentity{
-		kind: publicationRowComment, comment: comment.ID(), fallback: model.publicationCursor,
-	}
-}
-
-func (model *Model) reconcilePublicationSelection(selection publicationRowIdentity) {
-	if selection.kind == publicationRowPayload {
-		model.selectPublicationIndex(0)
-		return
-	}
-	if selection.kind == publicationRowComment {
-		if index, ok := model.review.CommentIndex(selection.comment); ok {
-			model.selectPublicationIndex(index + 1)
-			return
-		}
-		if index, ok := model.review.CommentIndex(selection.next); ok {
-			model.selectPublicationIndex(index + 1)
-			return
-		}
-		if index, ok := model.review.CommentIndex(selection.previous); ok {
-			model.selectPublicationIndex(index + 1)
-			return
-		}
-		model.selectPublicationIndex(0)
-		return
-	}
-	model.selectPublicationIndex(selection.fallback)
-}
-
 type reviewSelections struct {
-	comment     commentRowIdentity
-	publication publicationRowIdentity
+	comment commentRowIdentity
 }
 
 func (model *Model) captureReviewSelections() reviewSelections {
 	return reviewSelections{
-		comment:     model.currentCommentSelection(),
-		publication: model.currentPublicationSelection(),
+		comment: model.currentCommentSelection(),
 	}
 }
 
 func (model *Model) reconcileReviewSelections(selections reviewSelections) {
 	model.reconcileCommentSelection(selections.comment)
-	model.reconcilePublicationSelection(selections.publication)
 }
