@@ -181,6 +181,181 @@ func TestPullRequestUsesNativeGitHubAndFilteredSmartGit(t *testing.T) {
 	if !ok || document.Snapshot().FileCount() != 1 || file.DisplayPath() != "reviewed.go" {
 		t.Fatalf("pull-request snapshot = %+v, present=%v", document.Snapshot(), ok)
 	}
+	if _, ok := document.PublicationTarget(); !ok {
+		t.Fatal("open pull request did not expose a publication target")
+	}
+}
+
+func TestPullRequestHistoricalBaseDependsOnTerminalState(t *testing.T) {
+	service, repository := newHistoricalPullRequestTestService(t)
+	tests := []struct {
+		name      string
+		state     GitHubState
+		number    string
+		wantStale bool
+	}{
+		{name: "merged", number: "8", state: GitHubMerged},
+		{name: "closed-unmerged", number: "9", state: GitHubClosed},
+		{name: "active", number: "10", state: GitHubOpen, wantStale: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			selector, err := NewPullRequestSelector(test.number, &repository)
+			if err != nil {
+				t.Fatal(err)
+			}
+			target, err := NewPullRequestTarget(selector)
+			if err != nil {
+				t.Fatal(err)
+			}
+			document, revision, err := service.Open(t.Context(), OpenRequest{
+				Target:  target,
+				Options: OpenOptions{BuiltinDefaults: true},
+			})
+			if test.wantStale {
+				if !errors.Is(err, ErrSourceStale) {
+					t.Fatalf("open error = %v, want stale source", err)
+				}
+				var failure *FailureError
+				if !errors.As(err, &failure) || failure.Kind != FailureStale {
+					t.Fatalf("open failure = %#v, want stale classification", failure)
+				}
+				if revision != nil {
+					t.Fatal("stale open returned a live revision")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer closeTestRevision(t, revision)
+			details, ok := document.PullRequest()
+			if !ok || details.State != test.state {
+				t.Fatalf("pull-request details = %+v, present=%v", details, ok)
+			}
+			if _, ok := document.PublicationTarget(); ok {
+				t.Fatal("terminal pull request exposed a publication target")
+			}
+			file, ok := document.Snapshot().File(0)
+			if !ok || document.Snapshot().FileCount() != 1 || file.DisplayPath() != "reviewed.go" {
+				t.Fatalf("historical snapshot = %+v, present=%v", document.Snapshot(), ok)
+			}
+		})
+	}
+}
+
+func newHistoricalPullRequestTestService(
+	t *testing.T,
+) (*Service, OwnerRepository) {
+	t.Helper()
+	root := t.TempDir()
+	seed := filepath.Join(root, "seed")
+	if err := os.Mkdir(seed, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, seed, "init", "-b", "main")
+	runGitTest(t, seed, "config", "user.email", "rvw@example.test")
+	runGitTest(t, seed, "config", "user.name", "rvw test")
+	writeFile(t, filepath.Join(seed, "reviewed.go"), "package reviewed\n\nconst Value = 1\n")
+	runGitTest(t, seed, "add", "reviewed.go")
+	runGitTest(t, seed, "commit", "-m", "base")
+	base := strings.TrimSpace(runGitTest(t, seed, "rev-parse", "HEAD"))
+	runGitTest(t, seed, "switch", "-c", "feature")
+	writeFile(t, filepath.Join(seed, "reviewed.go"), "package reviewed\n\nconst Value = 2\n")
+	runGitTest(t, seed, "commit", "-am", "head")
+	head := strings.TrimSpace(runGitTest(t, seed, "rev-parse", "HEAD"))
+	runGitTest(t, seed, "switch", "main")
+	writeFile(t, filepath.Join(seed, "current-only.txt"), "current base only\n")
+	runGitTest(t, seed, "add", "current-only.txt")
+	runGitTest(t, seed, "commit", "-m", "advance base")
+	currentBase := strings.TrimSpace(runGitTest(t, seed, "rev-parse", "HEAD"))
+
+	projectRoot := filepath.Join(root, "projects")
+	bare := filepath.Join(projectRoot, "fixture", "repository.git")
+	if err := os.MkdirAll(filepath.Dir(bare), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, seed, "init", "--bare", bare)
+	runGitTest(t, bare, "config", "uploadpack.allowFilter", "true")
+	runGitTest(t, bare, "config", "uploadpack.allowTipSHA1InWant", "true")
+	runGitTest(t, bare, "config", "uploadpack.allowReachableSHA1InWant", "true")
+	runGitTest(
+		t,
+		seed,
+		"push",
+		bare,
+		currentBase+":refs/heads/main",
+		head+":refs/pull/8/head",
+		head+":refs/pull/9/head",
+		head+":refs/pull/10/head",
+	)
+
+	metadata := map[string]string{
+		"/repos/fixture/repository/pulls/8": historicalPullRequestMetadataForTest(
+			8, GitHubMerged, `"2026-07-26T07:07:19Z"`, base, head,
+		),
+		"/repos/fixture/repository/pulls/9": historicalPullRequestMetadataForTest(
+			9, GitHubClosed, "null", base, head,
+		),
+		"/repos/fixture/repository/pulls/10": historicalPullRequestMetadataForTest(
+			10, GitHubOpen, "null", base, head,
+		),
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(
+		writer http.ResponseWriter,
+		request *http.Request,
+	) {
+		if value, ok := metadata[request.URL.Path]; ok {
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(writer, value)
+			return
+		}
+		serveGitHTTPBackend(t, projectRoot, writer, request)
+	}))
+	t.Cleanup(server.Close)
+
+	token, err := NewGitHubToken("test-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workingDirectory, err := NewWorkingDirectory(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(workingDirectory, ServiceOptions{GitHubToken: &token})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closeTestService(t, service) })
+	service.github.apiBase = server.URL
+	service.github.gitBase = server.URL
+	repository, err := NewOwnerRepository("fixture/repository")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return service, repository
+}
+
+func historicalPullRequestMetadataForTest(
+	number uint64,
+	state GitHubState,
+	mergedAt, base, head string,
+) string {
+	if state == GitHubMerged {
+		state = GitHubClosed
+	}
+	return fmt.Sprintf(
+		`{"number":%d,"title":"Historical PR","html_url":"https://github.com/fixture/repository/pull/%d",`+
+			`"state":%q,"merged_at":%s,"draft":false,"changed_files":1,`+
+			`"user":{"login":"reviewer"},"base":{"ref":"main","sha":%q},`+
+			`"head":{"ref":"feature","sha":%q}}`,
+		number,
+		number,
+		strings.ToLower(string(state)),
+		mergedAt,
+		base,
+		head,
+	)
 }
 
 func serveGitHTTPBackend(

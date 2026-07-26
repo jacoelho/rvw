@@ -9,6 +9,7 @@ import (
 
 	"github.com/jacoelho/rvw/internal/change"
 	"github.com/jacoelho/rvw/internal/keymap"
+	"github.com/jacoelho/rvw/internal/source"
 	"github.com/jacoelho/rvw/internal/tui/render"
 )
 
@@ -26,11 +27,16 @@ func (model *Model) startPublicationCheck() {
 		model.startReconciliation()
 		return
 	}
-	if _, ok := model.document.PullRequest(); !ok {
+	pullRequest, ok := model.document.PullRequest()
+	if !ok {
 		model.notice = &Notice{
 			Kind: NoticeWarning,
 			Text: "GitHub publication is available only for a pull-request source",
 		}
+		return
+	}
+	if text, terminal := terminalPullRequestPublicationNotice(pullRequest.State); terminal {
+		model.notice = &Notice{Kind: NoticeWarning, Text: text}
 		return
 	}
 	target, ok := model.document.PublicationTarget()
@@ -73,6 +79,17 @@ func (model *Model) startPublicationCheck() {
 	model.publicationOperation = operationID
 	model.overlay = OverlaySubmit
 	model.notice = &Notice{Kind: NoticeInformation, Text: "checking GitHub review"}
+}
+
+func terminalPullRequestPublicationNotice(state source.GitHubState) (NoticeText, bool) {
+	switch state {
+	case source.GitHubClosed:
+		return "GitHub publication is unavailable because the pull request is closed", true
+	case source.GitHubMerged:
+		return "GitHub publication is unavailable because the pull request is already merged", true
+	default:
+		return "", false
+	}
 }
 
 func (model *Model) publicationOptions() (change.PublicationOptions, error) {

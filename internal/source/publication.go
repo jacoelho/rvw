@@ -82,6 +82,9 @@ func (service *Service) AcquirePublicationCheck(
 			errors.New("GitHub publication target identity changed"),
 		)
 	}
+	if stateErr := pullRequestPublicationStateError(currentDetails.State); stateErr != nil {
+		return PublicationCheckAcquisition{}, sourceFailure(OperationCheckPublication, stateErr)
+	}
 	staleHead := currentDetails.BaseOID != target.base ||
 		currentDetails.HeadOID != target.head
 	if staleHead &&
@@ -121,6 +124,19 @@ func (service *Service) AcquirePublicationCheck(
 		acquisition.hasFresh = true
 	}
 	return acquisition, nil
+}
+
+func pullRequestPublicationStateError(state GitHubState) error {
+	switch state {
+	case GitHubOpen:
+		return nil
+	case GitHubClosed:
+		return errors.New("pull request is closed")
+	case GitHubMerged:
+		return errors.New("pull request is already merged")
+	default:
+		return errors.New("pull request has an invalid GitHub state")
+	}
 }
 
 // FinishPublicationCheck binds CPU-reconciled preparation to the acquired target.

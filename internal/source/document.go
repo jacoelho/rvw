@@ -233,9 +233,9 @@ type PublicationTarget struct {
 	source     change.SourceID
 }
 
-// PublicationTarget returns the source-bound pull-request publication target.
+// PublicationTarget returns the source-bound open pull-request publication target.
 func (opened Opened) PublicationTarget() (PublicationTarget, bool) {
-	if opened.pull == nil || opened.snapshot.SourceID() == 0 {
+	if opened.pull == nil || opened.pull.State != GitHubOpen || opened.snapshot.SourceID() == 0 {
 		return PublicationTarget{}, false
 	}
 	return PublicationTarget{

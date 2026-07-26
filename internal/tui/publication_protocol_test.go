@@ -43,6 +43,31 @@ func TestPublicationCheckReadyAndCancellation(t *testing.T) {
 	})
 }
 
+func TestTerminalPullRequestPublicationNotice(t *testing.T) {
+	tests := []struct {
+		state source.GitHubState
+		want  NoticeText
+	}{
+		{
+			state: source.GitHubClosed,
+			want:  "GitHub publication is unavailable because the pull request is closed",
+		},
+		{
+			state: source.GitHubMerged,
+			want:  "GitHub publication is unavailable because the pull request is already merged",
+		},
+	}
+	for _, test := range tests {
+		got, ok := terminalPullRequestPublicationNotice(test.state)
+		if !ok || got != test.want {
+			t.Fatalf("terminal publication notice = (%q, %v), want %q", got, ok, test.want)
+		}
+	}
+	if got, ok := terminalPullRequestPublicationNotice(source.GitHubOpen); ok || got != "" {
+		t.Fatalf("open publication notice = (%q, %v), want unavailable=false", got, ok)
+	}
+}
+
 func TestEnterDuringPublicationCheckSubmitsWhenPreflightIsReady(t *testing.T) {
 	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	settleModelWork(t, model, coordinator)

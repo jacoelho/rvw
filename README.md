@@ -44,6 +44,10 @@ rvw pr https://github.com/owner/repo/pull/123
 Use `--repo` with a numeric selector to target another repository. A canonical pull-request URL
 already supplies the repository; if `--repo` is also present, it must match the URL.
 
+Closed and merged pull requests remain reviewable from their recorded base and head revisions.
+They support local comments and export, but GitHub publication is available only for open pull
+requests.
+
 Pull-request filtering uses built-in defaults and explicit include/exclude patterns only;
 `.gitignore` and `.rvwignore` do not apply. At most 3,000 filtered pull-request records are
 retained. Worktree comparison supports Git text/EOL and `ident` clean conversion, but does not run

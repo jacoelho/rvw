@@ -624,6 +624,11 @@ raw SHA-1 when more than one is best. PR filters are built-in defaults plus expl
 exclude patterns only; `.gitignore` and `.rvwignore` are disabled. No more than 3,000 filtered
 records or 6,000 selected blob OIDs are retained.
 
+An open pull request whose metadata base differs from the advertised base branch is stale. Closed
+and merged pull requests instead use their recorded base and head object IDs, including when the
+base branch has advanced or been removed. Historical acquisition MUST require reachable-object
+fetch support and MUST NOT substitute the current base branch tip.
+
 GitHub REST and GraphQL requests use one bounded native HTTP client. `GITHUB_TOKEN` is required;
 `GH_TOKEN`, `gh` configuration/keychains, anonymous access, and ambient credential discovery are
 forbidden. Repository inference recognizes only canonical GitHub HTTPS and `git`-user SSH remotes
@@ -677,6 +682,10 @@ an internal validation check. The submission UI shows:
 - whether the next step synchronizes the pending draft or submits it;
 - included and excluded comment counts;
 - concise pending-review, conflict, unmappable-comment, and stale-head warnings.
+
+Only an open pull request exposes a GitHub publication target. Closed and merged pull requests
+remain available for local review and export, and publication preflight MUST reject a pull request
+that becomes closed or merged after its source revision was opened.
 
 Interactive publication includes every eligible comment, excludes comments that cannot be mapped
 safely, and rejects a stale pull-request head. It does not expose canonical request JSON, payload

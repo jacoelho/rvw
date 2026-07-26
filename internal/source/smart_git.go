@@ -204,14 +204,30 @@ func (acquisition *smartGitAcquisition) fetchCommitAncestry(
 	base, head plumbing.Hash,
 	baseRef GitReference,
 	number PullRequestNumber,
+	state GitHubState,
 ) error {
 	if !acquisition.advertised.Capabilities.Supports(capability.Filter) ||
 		!acquisition.advertised.Capabilities.Supports(capability.Shallow) {
 		return errors.New("remote does not advertise required filter and shallow capabilities")
 	}
+	required := []capability.Capability{capability.Shallow, capability.Filter}
 	baseAdvertised := acquisition.advertised.References["refs/heads/"+baseRef.String()]
 	if baseAdvertised != base {
-		return fmt.Errorf("%w: advertised base branch tip changed", ErrSourceStale)
+		switch state {
+		case GitHubOpen:
+			return fmt.Errorf("%w: advertised base branch tip changed", ErrSourceStale)
+		case GitHubClosed, GitHubMerged:
+			if !acquisition.advertised.Capabilities.Supports(
+				capability.AllowReachableSHA1InWant,
+			) {
+				return errors.New(
+					"remote cannot fetch the historical pull-request base revision",
+				)
+			}
+			required = append(required, capability.AllowReachableSHA1InWant)
+		default:
+			return errors.New("pull request has an invalid GitHub state")
+		}
 	}
 	headAdvertised := false
 	for name, hash := range acquisition.advertised.References {
@@ -231,8 +247,7 @@ func (acquisition *smartGitAcquisition) fetchCommitAncestry(
 		pullRequestCommitWireLimit,
 		pullRequestCommitExpandedLimit,
 		plumbing.CommitObject,
-		capability.Shallow,
-		capability.Filter,
+		required...,
 	)
 	acquisition.commitWire += read
 	return err
