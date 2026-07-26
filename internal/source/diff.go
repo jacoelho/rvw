@@ -6,15 +6,15 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 type diffRecord struct {
-	unmerged   *review.FileSemanticIdentity
-	oldOID     *review.ObjectID
-	newOID     *review.ObjectID
-	oldMode    review.FileMode
-	newMode    review.FileMode
+	unmerged   *change.FileSemanticIdentity
+	oldOID     *change.ObjectID
+	newOID     *change.ObjectID
+	oldMode    change.FileMode
+	newMode    change.FileMode
 	oldPath    string
 	newPath    string
 	additions  uint32
@@ -31,40 +31,40 @@ const diffRecordConstructionCharge int64 = 320
 func (service *Service) snapshot(
 	ctx context.Context,
 	runCPU CPUAdmission,
-	sourceID review.SourceID,
+	sourceID change.SourceID,
 	repository *repositorySession,
 	records []diffRecord,
 	options OpenOptions,
-) (review.Snapshot, error) {
+) (change.Snapshot, error) {
 	var recordBytes int64
 	if err := runCPU(ctx, func() error {
 		recordBytes = sourceSnapshotRecordBytes(records) + options.RetainedBytes()
 		return context.Cause(ctx)
 	}); err != nil {
-		return review.Snapshot{}, err
+		return change.Snapshot{}, err
 	}
 	ledger, err := newSourceLedger(recordBytes)
 	if err != nil {
-		return review.Snapshot{}, err
+		return change.Snapshot{}, err
 	}
 	projectionBytes := int64(len(records)) * 4
 	if reserveErr := ledger.reserve(projectionBytes); reserveErr != nil {
-		return review.Snapshot{}, reserveErr
+		return change.Snapshot{}, reserveErr
 	}
 	var rules []ignoreRule
 	if options.Gitignore && len(records) != 0 {
 		if repository == nil {
-			return review.Snapshot{}, errors.New("native repository is required for ignore evaluation")
+			return change.Snapshot{}, errors.New("native repository is required for ignore evaluation")
 		}
 		rules, err = nativeGitignoreRules(ctx, repository, records)
 		if err != nil {
-			return review.Snapshot{}, err
+			return change.Snapshot{}, err
 		}
 	}
 	if options.RVWIgnore && options.IgnoreFile != "" {
 		contents, readErr := readIgnoreRuleContents(repository, options.IgnoreFile)
 		if readErr != nil {
-			return review.Snapshot{}, readErr
+			return change.Snapshot{}, readErr
 		}
 		if err := runCPU(ctx, func() error {
 			var rvwRules []ignoreRule
@@ -72,7 +72,7 @@ func (service *Service) snapshot(
 			rules = append(rules, rvwRules...)
 			return readErr
 		}); err != nil {
-			return review.Snapshot{}, err
+			return change.Snapshot{}, err
 		}
 	}
 	var filters filterProjection
@@ -87,89 +87,89 @@ func (service *Service) snapshot(
 		)
 		return filterErr
 	}); err != nil {
-		return review.Snapshot{}, err
+		return change.Snapshot{}, err
 	}
-	var snapshot review.Snapshot
+	var snapshot change.Snapshot
 	if err := runCPU(ctx, func() error {
 		var buildErr error
 		snapshot, buildErr = buildSnapshot(ctx, sourceID, records, filters, ledger)
 		return buildErr
 	}); err != nil {
-		return review.Snapshot{}, err
+		return change.Snapshot{}, err
 	}
 	return snapshot, nil
 }
 
 func buildSnapshot(
 	ctx context.Context,
-	sourceID review.SourceID,
+	sourceID change.SourceID,
 	records []diffRecord,
 	filters filterProjection,
 	ledger *sourceLedger,
-) (review.Snapshot, error) {
+) (change.Snapshot, error) {
 	if len(filters.flags) != len(records) {
-		return review.Snapshot{}, errors.New("snapshot filter projection is incomplete")
+		return change.Snapshot{}, errors.New("snapshot filter projection is incomplete")
 	}
-	builderBytes := review.SnapshotBuilderConstructionBytes(len(records))
+	builderBytes := change.SnapshotBuilderConstructionBytes(len(records))
 	if reserveErr := ledger.reserve(builderBytes); reserveErr != nil {
-		return review.Snapshot{}, reserveErr
+		return change.Snapshot{}, reserveErr
 	}
-	builder, err := review.NewSnapshotBuilder(sourceID, len(records))
+	builder, err := change.NewSnapshotBuilder(sourceID, len(records))
 	if err != nil {
-		return review.Snapshot{}, err
+		return change.Snapshot{}, err
 	}
 
 	for index, record := range records {
 		if index%filterCancellationRecords == 0 {
 			if err := context.Cause(ctx); err != nil {
-				return review.Snapshot{}, err
+				return change.Snapshot{}, err
 			}
 		}
 		oldPathValue, hasOldPath, err := reviewPath(record.oldPath)
 		if err != nil {
-			return review.Snapshot{}, fmt.Errorf("file %d old path: %w", index, err)
+			return change.Snapshot{}, fmt.Errorf("file %d old path: %w", index, err)
 		}
 		newPathValue, hasNewPath, err := reviewPath(record.newPath)
 		if err != nil {
-			return review.Snapshot{}, fmt.Errorf("file %d new path: %w", index, err)
+			return change.Snapshot{}, fmt.Errorf("file %d new path: %w", index, err)
 		}
-		var oldPath, newPath *review.Path
+		var oldPath, newPath *change.Path
 		if hasOldPath {
 			oldPath = new(oldPathValue)
 		}
 		if hasNewPath {
 			newPath = new(newPathValue)
 		}
-		change, err := changeFromDiff(record)
+		fileChange, err := changeFromDiff(record)
 		if err != nil {
-			return review.Snapshot{}, fmt.Errorf("file %d change: %w", index, err)
+			return change.Snapshot{}, fmt.Errorf("file %d change: %w", index, err)
 		}
 		flags := filters.flags[index]
-		var contentValues []review.FileContent
-		if record.oldOID != nil && objectKind(record.oldMode) == review.ObjectBlob {
-			contentValues = append(contentValues, review.OldFileContent(*record.oldOID))
+		var contentValues []change.FileContent
+		if record.oldOID != nil && objectKind(record.oldMode) == change.ObjectBlob {
+			contentValues = append(contentValues, change.OldFileContent(*record.oldOID))
 		}
-		if record.newOID != nil && objectKind(record.newMode) == review.ObjectBlob {
-			contentValues = append(contentValues, review.NewFileContent(*record.newOID))
+		if record.newOID != nil && objectKind(record.newMode) == change.ObjectBlob {
+			contentValues = append(contentValues, change.NewFileContent(*record.newOID))
 		}
-		contents, err := review.NewFileContents(contentValues...)
+		contents, err := change.NewFileContents(contentValues...)
 		if record.unmerged != nil {
-			contents, err = review.NewFileContentsWithSemanticIdentity(
+			contents, err = change.NewFileContentsWithSemanticIdentity(
 				*record.unmerged,
 				contentValues...,
 			)
 		}
 		if err != nil {
-			return review.Snapshot{}, fmt.Errorf("file %d content identities: %w", index, err)
+			return change.Snapshot{}, fmt.Errorf("file %d content identities: %w", index, err)
 		}
 		if _, err := builder.AddFileWithContents(
 			oldPath,
 			newPath,
-			change,
+			fileChange,
 			flags,
 			contents,
 		); err != nil {
-			return review.Snapshot{}, fmt.Errorf("file %d: %w", index, err)
+			return change.Snapshot{}, fmt.Errorf("file %d: %w", index, err)
 		}
 	}
 	return builder.FinishCancellable(func() error { return context.Cause(ctx) })
@@ -186,92 +186,92 @@ func sourceSnapshotRecordBytes(records []diffRecord) int64 {
 	return retained
 }
 
-func changeFromDiff(record diffRecord) (review.Change, error) {
+func changeFromDiff(record diffRecord) (change.Change, error) {
 	mode := optionalMode(record.oldMode, record.newMode)
 	oldKind := objectKind(record.oldMode)
 	newKind := objectKind(record.newMode)
 	if oldKind != newKind && record.oldOID != nil && record.newOID != nil {
-		oldObject, err := review.NewGitObject(oldKind, *record.oldOID, record.oldMode)
+		oldObject, err := change.NewGitObject(oldKind, *record.oldOID, record.oldMode)
 		if err != nil {
-			return review.Change{}, err
+			return change.Change{}, err
 		}
-		newObject, err := review.NewGitObject(newKind, *record.newOID, record.newMode)
+		newObject, err := change.NewGitObject(newKind, *record.newOID, record.newMode)
 		if err != nil {
-			return review.Change{}, err
+			return change.Change{}, err
 		}
-		return review.NewObjectTypeChange(record.additions, record.deletions, 0, oldObject, newObject)
+		return change.NewObjectTypeChange(record.additions, record.deletions, 0, oldObject, newObject)
 	}
-	if oldKind == review.ObjectGitlink || newKind == review.ObjectGitlink {
-		return review.NewSubmoduleChange(record.oldOID, record.newOID)
+	if oldKind == change.ObjectGitlink || newKind == change.ObjectGitlink {
+		return change.NewSubmoduleChange(record.oldOID, record.newOID)
 	}
 	if record.binary {
-		return review.NewSimpleChange(review.ChangeBinary, mode)
+		return change.NewSimpleChange(change.ChangeBinary, mode)
 	}
 	if record.status == 'R' && record.additions == 0 && record.deletions == 0 {
-		return review.NewSimpleChange(review.ChangeRenameOnly, mode)
+		return change.NewSimpleChange(change.ChangeRenameOnly, mode)
 	}
 	if record.status == 'M' && record.additions == 0 && record.deletions == 0 && mode != nil {
-		return review.NewSimpleChange(review.ChangeModeOnly, mode)
+		return change.NewSimpleChange(change.ChangeModeOnly, mode)
 	}
 	kind, err := pathKind(record.status)
 	if err != nil {
-		return review.Change{}, err
+		return change.Change{}, err
 	}
-	return review.NewUnclassifiedChange(kind, record.additions, record.deletions)
+	return change.NewUnclassifiedChange(kind, record.additions, record.deletions)
 }
 
-func pathKind(status byte) (review.ChangeKind, error) {
+func pathKind(status byte) (change.ChangeKind, error) {
 	switch status {
 	case 'A':
-		return review.ChangeAdded, nil
+		return change.ChangeAdded, nil
 	case 'D':
-		return review.ChangeDeleted, nil
+		return change.ChangeDeleted, nil
 	case 'R':
-		return review.ChangeRenamed, nil
+		return change.ChangeRenamed, nil
 	case 'C':
-		return review.ChangeCopied, nil
+		return change.ChangeCopied, nil
 	case 'M', 'T', 'U':
-		return review.ChangeModified, nil
+		return change.ChangeModified, nil
 	default:
 		return "", fmt.Errorf("unsupported Git status %q", status)
 	}
 }
 
-func reviewPath(raw string) (review.Path, bool, error) {
+func reviewPath(raw string) (change.Path, bool, error) {
 	if raw == "" {
-		return review.Path{}, false, nil
+		return change.Path{}, false, nil
 	}
-	path, err := review.NewPathString(raw)
+	path, err := change.NewPathString(raw)
 	if err != nil {
-		return review.Path{}, false, err
+		return change.Path{}, false, err
 	}
 	return path, true, nil
 }
 
-func optionalMode(oldMode, newMode review.FileMode) *review.Mode {
+func optionalMode(oldMode, newMode change.FileMode) *change.Mode {
 	if oldMode == newMode {
 		return nil
 	}
-	mode, err := review.NewMode(oldMode.String(), newMode.String())
+	mode, err := change.NewMode(oldMode.String(), newMode.String())
 	if err != nil {
 		return nil
 	}
 	return new(mode)
 }
 
-func objectKind(mode review.FileMode) review.ObjectKind {
+func objectKind(mode change.FileMode) change.ObjectKind {
 	if mode.String() == "160000" {
-		return review.ObjectGitlink
+		return change.ObjectGitlink
 	}
-	return review.ObjectBlob
+	return change.ObjectBlob
 }
 
 func validateRawPath(path []byte) error {
 	switch {
 	case len(path) == 0:
 		return errors.New("git path is empty")
-	case int64(len(path)) > review.MaxPathBytes:
-		return fmt.Errorf("git path exceeds %d bytes", review.MaxPathBytes)
+	case int64(len(path)) > change.MaxPathBytes:
+		return fmt.Errorf("git path exceeds %d bytes", change.MaxPathBytes)
 	case bytes.IndexByte(path, 0) >= 0:
 		return errors.New("git path contains NUL")
 	default:

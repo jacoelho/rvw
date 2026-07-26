@@ -521,12 +521,15 @@ cmd/rvw
   -> internal/delivery
   -> internal/output
   -> internal/source
-  -> internal/review
-  -> internal/app
+  -> internal/change
+  -> internal/tui
 
-internal/app -> internal/review, internal/source, internal/delivery
-internal/output -> internal/review, internal/source
-internal/source -> internal/review, go-git plumbing, GitHub HTTPS
+internal/tui -> internal/change, internal/coordinator, internal/projection, internal/source,
+                internal/delivery
+internal/coordinator -> internal/change, internal/source
+internal/projection -> internal/change
+internal/output -> internal/change, internal/source
+internal/source -> internal/change, go-git plumbing, GitHub HTTPS
 ```
 
 `cmd/rvw` parses CLI input, composes dependencies and distinct program/work contexts, opens the
@@ -538,7 +541,7 @@ no review policy.
 and themes. `internal/output` streams the human and JSON contracts to an `io.Writer`; it never
 constructs or starts a TUI.
 
-`internal/review` owns validated identities, source and workspace generations, files, selection,
+`internal/change` owns validated identities, source and workspace generations, files, selection,
 marks, comments, drafts, reload reconciliation, export/publication state, and pure transitions. It
 imports no terminal, filesystem, network, subprocess, clock, or concurrency package. It exposes
 concrete domain operations and immutable snapshots, not a generic effect interface.
@@ -548,16 +551,24 @@ search-input, and GitHub publication boundary. It never invokes `git` or `gh`. A
 `repositorySession` owns local repositories and immutable pull-request object layers; a
 `githubClient` owns bounded REST, GraphQL, authentication, pagination, and publication. Source
 configuration is passed explicitly through `ServiceOptions`; `GITHUB_TOKEN` is the only GitHub
-credential admitted by the command boundary.
+credential admitted by the command boundary. `Service.Open` returns immutable `Opened` facts and
+a separate opaque `Revision` resource owner. Retiring and closing that owner does not invalidate
+the opened facts. Patch and syntax acquisitions are shared one-shot leases: copying a lease cannot
+consume or close its payload twice.
 
-`internal/delivery` owns destination permits and stdout/clipboard commit states. It returns an
-immutable stdout payload to the post-Program root adapter. Its private bounded helper may execute
-only `pbcopy`, `wl-copy`, or `xclip`; source acquisition and publication cannot use it.
+`internal/delivery` owns the clipboard permit and its commit state. Its private bounded helper may
+execute only `pbcopy`, `wl-copy`, or `xclip`; source acquisition, stdout, and publication cannot use
+it. The TUI returns a prepared stdout value after `tea.Program` restores the terminal.
 
-`internal/app` owns the one root Bubble Tea model, concrete child Bubbles, effective key bindings,
+`internal/projection` owns source-bound immutable file/path indexes and construction-time retained
+byte accounting. `internal/coordinator` owns source revision transfer, required-work fairness, and
+CPU admission. The remaining concrete queue orchestration stays adjacent to the TUI while its
+feature-specific work types still depend on workspace projection values.
+
+`internal/tui` owns the one root Bubble Tea model, concrete child Bubbles, effective key bindings,
 responsive layout, semantic Lip Gloss styles, command constructors, and the closed coordinator
-described in section 10. Rendering remains beside the model until a demonstrated independent
-invariant justifies another boundary.
+described in section 10. `internal/tui/render` owns terminal-safe text cells, tab expansion, and
+bidirectional-control escaping; feature-specific viewport composition remains beside the model.
 
 Reverse edges, same-level cycles other than the listed edges, and imports that bypass the effect
 owner are forbidden. Public APIs expose domain operations and validated values, not internal
@@ -650,11 +661,11 @@ whether unmappable comments are included. Preparation is bounded and cancellable
 
 Interactive copy/write actions are in-session deliveries, not additional top-level output modes.
 
-Destinations are clipboard or stdout. Destination delivery is separate from export preparation. A
-delivery permit prevents overlapping or reordered writes. A destination that may have committed
-before reporting failure remains fenced through physical worker cleanup. If the outcome remains
-unknown, that destination remains unavailable for the process lifetime. Reconciliation applies
-only to GitHub publication.
+Interactive export targets are clipboard or stdout. Clipboard delivery is separate from export
+preparation and owns the only delivery permit. A clipboard write that may have committed before
+reporting failure remains fenced through physical worker cleanup and unavailable for the process
+lifetime. Stdout is a prepared post-program result and has no delivery state. Reconciliation
+applies only to GitHub publication.
 
 GitHub publication first creates or synchronizes a pending review. It then requires a separate
 submission confirmation with a selector for `comment`, `approve`, or `request changes`.

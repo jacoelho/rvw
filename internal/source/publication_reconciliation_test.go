@@ -7,7 +7,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 func TestPublicationReconciliationFinishRejectsInvalidUTF8AndClosesSpool(t *testing.T) {
@@ -24,12 +24,12 @@ func TestPublicationReconciliationFinishRejectsInvalidUTF8AndClosesSpool(t *test
 	if _, err := file.Seek(0, 0); err != nil {
 		t.Fatal(err)
 	}
-	marker, _ := review.NewPublicationMarker(
+	marker, _ := change.NewPublicationMarker(
 		"<!-- rvw-publication:v1:0123456789abcdef0123456789abcdef -->",
 	)
 	acquisition := &PublicationReconciliationAcquisition{
 		spool: &githubSpool{file: file},
-		request: review.ReconciliationRequest{
+		request: change.ReconciliationRequest{
 			Operation: 1,
 			Workspace: 1,
 			Source:    1,
@@ -37,7 +37,7 @@ func TestPublicationReconciliationFinishRejectsInvalidUTF8AndClosesSpool(t *test
 		},
 	}
 	result := acquisition.Finish(t.Context(), directCPUAdmission)
-	if result.Disposition != review.ReconciliationStillUnknown || result.Detail.IsEmpty() {
+	if result.Disposition != change.ReconciliationStillUnknown || result.Detail.IsEmpty() {
 		t.Fatalf("invalid UTF-8 reconciliation result = %+v", result)
 	}
 	if acquisition.spool != nil {
@@ -60,12 +60,12 @@ func TestPublicationReconciliationFinishKeepsSpoolIOOutsideAdmission(t *testing.
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		t.Fatal(err)
 	}
-	marker, _ := review.NewPublicationMarker(
+	marker, _ := change.NewPublicationMarker(
 		"<!-- rvw-publication:v1:0123456789abcdef0123456789abcdef -->",
 	)
 	acquisition := &PublicationReconciliationAcquisition{
 		spool: &githubSpool{file: file},
-		request: review.ReconciliationRequest{
+		request: change.ReconciliationRequest{
 			Operation: 1,
 			Workspace: 1,
 			Source:    1,
@@ -95,7 +95,7 @@ func TestPublicationReconciliationFinishKeepsSpoolIOOutsideAdmission(t *testing.
 		return workErr
 	}
 	result := acquisition.Finish(t.Context(), runCPU)
-	if result.Disposition != review.ReconciliationCommitted {
+	if result.Disposition != change.ReconciliationCommitted {
 		t.Fatalf("reconciliation result = %+v", result)
 	}
 	if acquisition.spool != nil {

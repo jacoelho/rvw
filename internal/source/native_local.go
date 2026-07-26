@@ -11,7 +11,7 @@ import (
 	"strings"
 
 	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 type nativeIndexGroup struct {
@@ -49,7 +49,7 @@ func nativeLocalRecords(
 	session *repositorySession,
 	target Target,
 	options OpenOptions,
-) (review.ObjectID, review.ObjectID, []diffRecord, map[string]review.FileSemanticIdentity, error) {
+) (change.ObjectID, change.ObjectID, []diffRecord, map[string]change.FileSemanticIdentity, error) {
 	if session == nil {
 		return "", "", nil, nil, errors.New("repository session is nil")
 	}
@@ -110,7 +110,7 @@ func nativeTreeDiff(
 	session *repositorySession,
 	oldTree, newTree plumbing.Hash,
 ) ([]diffRecord, error) {
-	records, err := nativeTreeRecords(ctx, session, oldTree, newTree, review.MaxFiles)
+	records, err := nativeTreeRecords(ctx, session, oldTree, newTree, change.MaxFiles)
 	if err != nil {
 		return nil, err
 	}
@@ -229,7 +229,7 @@ func nativeIndexProjection(
 	indexPath string,
 	target TargetKind,
 	includeUntracked bool,
-) (_ []diffRecord, _ map[string]review.FileSemanticIdentity, returnErr error) {
+) (_ []diffRecord, _ map[string]change.FileSemanticIdentity, returnErr error) {
 	iterator, err := newNativeTreeIterator(ctx, session, baseTree)
 	if err != nil {
 		return nil, nil, err
@@ -239,7 +239,7 @@ func nativeIndexProjection(
 		return nil, nil, advanceErr
 	}
 	records := make([]diffRecord, 0, 128)
-	unmerged := make(map[string]review.FileSemanticIdentity)
+	unmerged := make(map[string]change.FileSemanticIdentity)
 	var tracked *trackedPathSet
 	if target == TargetWorktree && includeUntracked {
 		workspace, workspaceErr := session.ensureWorkspace()
@@ -303,8 +303,8 @@ func nativeIndexProjection(
 		}
 		group.path = ""
 		group.entries = group.entries[:0]
-		if len(records) > review.MaxFiles {
-			return &LimitError{Resource: LimitChangedFiles, Limit: review.MaxFiles}
+		if len(records) > change.MaxFiles {
+			return &LimitError{Resource: LimitChangedFiles, Limit: change.MaxFiles}
 		}
 		return nil
 	}
@@ -332,8 +332,8 @@ func nativeIndexProjection(
 			return nil, nil, recordErr
 		}
 		records = append(records, record)
-		if len(records) > review.MaxFiles {
-			return nil, nil, &LimitError{Resource: LimitChangedFiles, Limit: review.MaxFiles}
+		if len(records) > change.MaxFiles {
+			return nil, nil, &LimitError{Resource: LimitChangedFiles, Limit: change.MaxFiles}
 		}
 		if advanceErr := cursor.advance(ctx); advanceErr != nil {
 			return nil, nil, advanceErr
@@ -506,31 +506,31 @@ func stagedConflictRecord(group nativeIndexGroup) (*diffRecord, error) {
 	return &record, nil
 }
 
-func nativeUnmergedIdentity(group nativeIndexGroup) (review.FileSemanticIdentity, error) {
-	stages := make([]review.FileSemanticStage, 0, len(group.entries))
+func nativeUnmergedIdentity(group nativeIndexGroup) (change.FileSemanticIdentity, error) {
+	stages := make([]change.FileSemanticStage, 0, len(group.entries))
 	for _, entry := range group.entries {
 		if entry.stage == 0 {
-			return review.FileSemanticIdentity{}, errors.New("stage-zero index entry is not unmerged")
+			return change.FileSemanticIdentity{}, errors.New("stage-zero index entry is not unmerged")
 		}
 		mode, err := indexEntryMode(entry)
 		if err != nil {
-			return review.FileSemanticIdentity{}, err
+			return change.FileSemanticIdentity{}, err
 		}
 		oid, err := hashObjectID(entry.oid)
 		if err != nil {
-			return review.FileSemanticIdentity{}, err
+			return change.FileSemanticIdentity{}, err
 		}
-		object, err := review.NewGitObject(objectKind(mode), oid, mode)
+		object, err := change.NewGitObject(objectKind(mode), oid, mode)
 		if err != nil {
-			return review.FileSemanticIdentity{}, err
+			return change.FileSemanticIdentity{}, err
 		}
-		stage, err := review.NewFileSemanticStage(entry.stage, object)
+		stage, err := change.NewFileSemanticStage(entry.stage, object)
 		if err != nil {
-			return review.FileSemanticIdentity{}, err
+			return change.FileSemanticIdentity{}, err
 		}
 		stages = append(stages, stage)
 	}
-	return review.NewFileSemanticIdentity(stages...)
+	return change.NewFileSemanticIdentity(stages...)
 }
 
 func nativeTreeEntryFromIndex(entry streamedIndexEntry) (nativeTreeEntry, error) {
@@ -541,11 +541,11 @@ func nativeTreeEntryFromIndex(entry streamedIndexEntry) (nativeTreeEntry, error)
 	return nativeTreeEntry{path: entry.path, oid: entry.oid, mode: mode}, nil
 }
 
-func indexEntryMode(entry streamedIndexEntry) (review.FileMode, error) {
-	return review.NewFileMode(fmt.Sprintf("%06o", entry.mode))
+func indexEntryMode(entry streamedIndexEntry) (change.FileMode, error) {
+	return change.NewFileMode(fmt.Sprintf("%06o", entry.mode))
 }
 
-func preferredConflictMode(entries []streamedIndexEntry) (review.FileMode, error) {
+func preferredConflictMode(entries []streamedIndexEntry) (change.FileMode, error) {
 	for _, preferred := range []uint8{2, 3, 1} {
 		for _, entry := range entries {
 			if entry.stage == preferred {
@@ -564,7 +564,7 @@ func nativeEntriesEqual(left, right *nativeTreeEntry) bool {
 }
 
 func nativeRecord(oldEntry, newEntry *nativeTreeEntry) (diffRecord, error) {
-	zeroMode, err := review.NewFileMode("000000")
+	zeroMode, err := change.NewFileMode("000000")
 	if err != nil {
 		return diffRecord{}, err
 	}
@@ -633,8 +633,8 @@ func populateNativeRecords(
 
 func enrichExactNativeRenames(records []diffRecord) []diffRecord {
 	type exactKey struct {
-		oid  review.ObjectID
-		kind review.ObjectKind
+		oid  change.ObjectID
+		kind change.ObjectKind
 	}
 	deletions := make(map[exactKey][]int)
 	surviving := make(map[exactKey][]int)
@@ -726,7 +726,7 @@ func appendNativeUntracked(
 				if embedded > 100_000 {
 					return false, &LimitError{Resource: LimitEmbeddedRepositories, Limit: 100_000}
 				}
-				mode, modeErr := review.NewFileMode("160000")
+				mode, modeErr := change.NewFileMode("160000")
 				if modeErr != nil {
 					return false, modeErr
 				}
@@ -744,8 +744,8 @@ func appendNativeUntracked(
 				}
 				retained = append(retained, record)
 				*records = retained
-				if len(*records) > review.MaxFiles {
-					return false, &LimitError{Resource: LimitChangedFiles, Limit: review.MaxFiles}
+				if len(*records) > change.MaxFiles {
+					return false, &LimitError{Resource: LimitChangedFiles, Limit: change.MaxFiles}
 				}
 				return false, nil
 			}
@@ -758,7 +758,7 @@ func appendNativeUntracked(
 		if exists {
 			return false, nil
 		}
-		mode, err := review.NewFileMode("100644")
+		mode, err := change.NewFileMode("100644")
 		if err != nil {
 			return false, err
 		}
@@ -775,8 +775,8 @@ func appendNativeUntracked(
 			return false, err
 		}
 		*records = append(*records, record)
-		if len(*records) > review.MaxFiles {
-			return false, &LimitError{Resource: LimitChangedFiles, Limit: review.MaxFiles}
+		if len(*records) > change.MaxFiles {
+			return false, &LimitError{Resource: LimitChangedFiles, Limit: change.MaxFiles}
 		}
 		return false, nil
 	})

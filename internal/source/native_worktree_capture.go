@@ -8,7 +8,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 	"golang.org/x/sys/unix"
 )
 
@@ -28,7 +28,7 @@ type rawWorktreeCapture struct {
 	info os.FileInfo
 	path string
 	link string
-	mode review.FileMode
+	mode change.FileMode
 	size int64
 	kind rawWorktreeCaptureKind
 }
@@ -40,7 +40,7 @@ type rawWorktreeOptions struct {
 func openRawWorktreePath(
 	root *os.Root,
 	name string,
-	indexMode review.FileMode,
+	indexMode change.FileMode,
 	options rawWorktreeOptions,
 ) (rawWorktreeCapture, error) {
 	before, err := root.Lstat(name)
@@ -73,7 +73,7 @@ func openRawWorktreePath(
 			(indexMode.String() == "100644" || indexMode.String() == "100755") {
 			mode = indexMode.String()
 		}
-		validated, err := review.NewFileMode(mode)
+		validated, err := change.NewFileMode(mode)
 		if err != nil {
 			return rawWorktreeCapture{}, errors.Join(err, file.Close())
 		}
@@ -91,7 +91,7 @@ func openRawWorktreePath(
 				Resource: LimitWorktreeSymlink, Limit: 16 << 10,
 			}
 		}
-		mode, err := review.NewFileMode("120000")
+		mode, err := change.NewFileMode("120000")
 		if err != nil {
 			return rawWorktreeCapture{}, err
 		}

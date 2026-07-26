@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 func TestDecodeRemoteThreadPagesRequiresExactUTF8SlurpedEnvelope(t *testing.T) {
@@ -348,7 +348,7 @@ func TestLoadRemainingRemoteCommentsRejectsRepeatedCursor(t *testing.T) {
 		details,
 		"thread-1",
 		initial,
-		review.MaxRemoteThreadBytes,
+		change.MaxRemoteThreadBytes,
 		ledger,
 		directCPUAdmission,
 	); err == nil || !strings.Contains(err.Error(), "cursor repeated") {
@@ -531,7 +531,7 @@ func TestRemoteThreadInstallationAccountingStopsNearEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	threads := make([]review.RemoteThread, 513)
+	threads := make([]change.RemoteThread, 513)
 	for index := range threads {
 		threads[index] = thread
 	}
@@ -546,7 +546,7 @@ func TestRemoteThreadInstallationAccountingStopsNearEnd(t *testing.T) {
 				}
 				return nil
 			},
-			review.Snapshot{},
+			change.Snapshot{},
 			threads,
 		)
 		if !errors.Is(err, cause) {
@@ -598,7 +598,7 @@ func TestRemoteThreadCollectorDiscardsStateAndCheckpointRollsBack(t *testing.T) 
 
 func TestRemoteCommentRejectsOversizedTimestampAndURLBeforeParsing(t *testing.T) {
 	comment := (*remoteThreadNodeForCancellationTest(1).Comments.Nodes)[0]
-	comment.CreatedAt = strings.Repeat("x", int(review.MaxPathBytes)+1)
+	comment.CreatedAt = strings.Repeat("x", int(change.MaxPathBytes)+1)
 	if _, err := validateRemoteComment(comment); err == nil ||
 		!strings.Contains(err.Error(), "timestamp") {
 		t.Fatalf("oversized timestamp error = %v", err)
@@ -710,11 +710,11 @@ func remoteThreadDetailsForTest(t *testing.T) PullRequestDetails {
 	if err != nil {
 		t.Fatal(err)
 	}
-	base, err := review.NewObjectID(strings.Repeat("1", 40))
+	base, err := change.NewObjectID(strings.Repeat("1", 40))
 	if err != nil {
 		t.Fatal(err)
 	}
-	head, err := review.NewObjectID(strings.Repeat("2", 40))
+	head, err := change.NewObjectID(strings.Repeat("2", 40))
 	if err != nil {
 		t.Fatal(err)
 	}

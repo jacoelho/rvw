@@ -15,7 +15,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 func TestTargetValidation(t *testing.T) {
@@ -50,7 +50,7 @@ func TestServiceSerializesRepositoryDiscoveryAndSourceIdentity(t *testing.T) {
 	defer closeTestService(t, service)
 
 	const calls = 32
-	identities := make(chan review.SourceID, calls)
+	identities := make(chan change.SourceID, calls)
 	errs := make(chan error, calls*2)
 	var workers sync.WaitGroup
 	for range calls {
@@ -73,7 +73,7 @@ func TestServiceSerializesRepositoryDiscoveryAndSourceIdentity(t *testing.T) {
 	for err := range errs {
 		t.Error(err)
 	}
-	seen := make(map[review.SourceID]bool, calls)
+	seen := make(map[change.SourceID]bool, calls)
 	for identity := range identities {
 		if seen[identity] {
 			t.Fatalf("duplicate source identity %d", identity)
@@ -98,19 +98,19 @@ func TestOpenLocalSources(t *testing.T) {
 	service := newTestService(t, root)
 	defer closeTestService(t, service)
 	options := OpenOptions{IncludeUntracked: true}
-	worktree, err := service.Open(t.Context(), WorktreeTarget(), options)
+	worktree, worktreeRevision, err := service.Open(t.Context(), OpenRequest{Target: WorktreeTarget(), Options: options})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if worktree.Snapshot().FileCount() != 2 {
 		t.Fatalf("worktree file count = %d", worktree.Snapshot().FileCount())
 	}
-	if err := worktree.Close(); err != nil {
+	if err := worktreeRevision.Retire().Close(); err != nil {
 		t.Fatal(err)
 	}
 
 	runGitTest(t, root, "add", "tracked.txt")
-	staged, err := service.Open(t.Context(), StagedTarget(), options)
+	staged, stagedRevision, err := service.Open(t.Context(), OpenRequest{Target: StagedTarget(), Options: options})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestOpenLocalSources(t *testing.T) {
 	if staged.Snapshot().FileCount() != 1 || stagedFile.DisplayPath() != "tracked.txt" {
 		t.Fatalf("unexpected staged snapshot: %+v", staged.Snapshot())
 	}
-	if err := staged.Close(); err != nil {
+	if err := stagedRevision.Retire().Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -128,7 +128,7 @@ func TestOpenLocalSources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ranged, err := service.Open(t.Context(), target, options)
+	ranged, rangedRevision, err := service.Open(t.Context(), OpenRequest{Target: target, Options: options})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestOpenLocalSources(t *testing.T) {
 	if ranged.Snapshot().FileCount() != 1 || rangedFile.DisplayPath() != "tracked.txt" {
 		t.Fatalf("unexpected range snapshot: %+v", ranged.Snapshot())
 	}
-	if err := ranged.Close(); err != nil {
+	if err := rangedRevision.Retire().Close(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -164,7 +164,7 @@ func TestWorktreeSnapshotRejectsFilterDriversWithoutExecutingThem(t *testing.T) 
 
 	service := newTestService(t, root)
 	defer closeTestService(t, service)
-	if _, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{}); err == nil ||
+	if _, _, err := service.Open(t.Context(), OpenRequest{Target: WorktreeTarget(), Options: OpenOptions{}}); err == nil ||
 		!strings.Contains(err.Error(), "clean/process filters") {
 		t.Fatalf("filtered worktree error = %v", err)
 	}
@@ -189,15 +189,13 @@ func TestWorktreeFilterInspectionAcceptsExactFivePathResponse(t *testing.T) {
 
 	service := newTestService(t, root)
 	defer closeTestService(t, service)
-	document, err := service.Open(
-		t.Context(),
-		WorktreeTarget(),
-		OpenOptions{IncludeUntracked: true},
-	)
+	document, documentRevision, err := service.Open(
+		t.Context(), OpenRequest{Target: WorktreeTarget(), Options: OpenOptions{IncludeUntracked: true}})
+
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer document.Close()
+	defer closeTestRevision(t, documentRevision)
 	paths := make([]string, 0, document.Snapshot().FileCount())
 	for file := range document.Snapshot().AllFiles() {
 		paths = append(paths, file.DisplayPath())
@@ -233,7 +231,7 @@ func TestWorktreeRejectsAmbiguousFilterDriverNamesWithoutExecutingThem(t *testin
 
 				service := newTestService(t, root)
 				defer closeTestService(t, service)
-				if _, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{}); err == nil ||
+				if _, _, err := service.Open(t.Context(), OpenRequest{Target: WorktreeTarget(), Options: OpenOptions{}}); err == nil ||
 					!strings.Contains(err.Error(), "ambiguous with configured driver name") {
 					t.Fatalf("ambiguous filter error = %v", err)
 				}
@@ -264,12 +262,12 @@ func TestWorktreeAcceptsGenuinelyUnspecifiedFilterWithSameNamedDriverConfigured(
 		runGitTest(t, root, "config", "filter.unspecified.clean", driver)
 
 		service := newTestService(t, root)
-		document, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{})
+		_, documentRevision, err := service.Open(t.Context(), OpenRequest{Target: WorktreeTarget(), Options: OpenOptions{}})
 		if err != nil {
 			closeTestService(t, service)
 			t.Fatalf("genuinely unspecified filter was rejected: %v", err)
 		}
-		if err := document.Close(); err != nil {
+		if err := documentRevision.Retire().Close(); err != nil {
 			t.Error(err)
 		}
 		closeTestService(t, service)
@@ -294,20 +292,20 @@ func TestTrackedWorktreeUsesLiveIndexMembership(t *testing.T) {
 
 	service := newTestService(t, root)
 	defer closeTestService(t, service)
-	document, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{})
+	document, documentRevision, err := service.Open(t.Context(), OpenRequest{Target: WorktreeTarget(), Options: OpenOptions{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer document.Close()
+	defer closeTestRevision(t, documentRevision)
 
-	got := make(map[string]review.ChangeKind)
+	got := make(map[string]change.ChangeKind)
 	for file := range document.Snapshot().AllFiles() {
 		got[file.DisplayPath()] = file.Change().Kind()
 	}
-	want := map[string]review.ChangeKind{
-		"tracked.txt":            review.ChangeModified,
-		"removed-from-index.txt": review.ChangeDeleted,
-		"staged.txt":             review.ChangeAdded,
+	want := map[string]change.ChangeKind{
+		"tracked.txt":            change.ChangeModified,
+		"removed-from-index.txt": change.ChangeDeleted,
+		"staged.txt":             change.ChangeAdded,
 	}
 	if !maps.Equal(got, want) {
 		t.Fatalf("tracked-only worktree changes = %v, want %v", got, want)
@@ -336,11 +334,11 @@ func TestWorktreeHonorsCoreFileMode(t *testing.T) {
 
 			service := newTestService(t, root)
 			defer closeTestService(t, service)
-			document, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{})
+			document, documentRevision, err := service.Open(t.Context(), OpenRequest{Target: WorktreeTarget(), Options: OpenOptions{}})
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer document.Close()
+			defer closeTestRevision(t, documentRevision)
 			if document.Snapshot().FileCount() != test.wantChanges {
 				t.Fatalf("file count = %d, want %d", document.Snapshot().FileCount(), test.wantChanges)
 			}
@@ -349,7 +347,7 @@ func TestWorktreeHonorsCoreFileMode(t *testing.T) {
 			}
 			file, _ := document.Snapshot().File(0)
 			mode, ok := file.Change().Mode()
-			if file.Change().Kind() != review.ChangeModeOnly || !ok ||
+			if file.Change().Kind() != change.ChangeModeOnly || !ok ||
 				mode.Old().String() != "100644" || mode.New().String() != "100755" {
 				t.Fatalf("executable-bit change = %+v, mode=%+v", file.Change(), mode)
 			}
@@ -371,18 +369,18 @@ func TestWorktreeDetectsEditedRenameWithoutCommandFallback(t *testing.T) {
 
 	service := newTestService(t, root)
 	defer closeTestService(t, service)
-	document, err := service.Open(
-		t.Context(), WorktreeTarget(), OpenOptions{IncludeUntracked: true},
-	)
+	document, documentRevision, err := service.Open(
+		t.Context(), OpenRequest{Target: WorktreeTarget(), Options: OpenOptions{IncludeUntracked: true}})
+
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer document.Close()
+	defer closeTestRevision(t, documentRevision)
 	file, ok := document.Snapshot().File(0)
 	old, hasOld := file.OldPath()
 	newer, hasNew := file.NewPath()
 	if !ok || document.Snapshot().FileCount() != 1 ||
-		file.Change().Kind() != review.ChangeRenamed || !hasOld || !hasNew ||
+		file.Change().Kind() != change.ChangeRenamed || !hasOld || !hasNew ||
 		string(old.Raw()) != "old.txt" || string(newer.Raw()) != "new.txt" {
 		t.Fatalf("edited rename snapshot = %+v, present=%v", document.Snapshot(), ok)
 	}
@@ -393,7 +391,7 @@ func TestWorktreeDetectsEditedRenameWithoutCommandFallback(t *testing.T) {
 }
 
 func TestNativePatchMetadataUsesSelectedSimilarityScore(t *testing.T) {
-	mode, err := review.NewFileMode("100644")
+	mode, err := change.NewFileMode("100644")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +400,7 @@ func TestNativePatchMetadataUsesSelectedSimilarityScore(t *testing.T) {
 		newPath:    "new.txt",
 		oldMode:    mode,
 		newMode:    mode,
-		kind:       review.ChangeRenamed,
+		kind:       change.ChangeRenamed,
 		similarity: 45_000,
 	})
 	if len(lines) < 2 || string(lines[1].Text) != "similarity index 75%" {
@@ -411,11 +409,11 @@ func TestNativePatchMetadataUsesSelectedSimilarityScore(t *testing.T) {
 }
 
 func TestNativeSimilarityCandidatesExcludeConsumedRenameSources(t *testing.T) {
-	mode, err := review.NewFileMode("100644")
+	mode, err := change.NewFileMode("100644")
 	if err != nil {
 		t.Fatal(err)
 	}
-	oid, err := review.NewObjectID(strings.Repeat("1", 40))
+	oid, err := change.NewObjectID(strings.Repeat("1", 40))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -451,7 +449,7 @@ func TestWorktreeRejectsIndexFlagsThatHideTrackedChanges(t *testing.T) {
 
 	service := newTestService(t, root)
 	defer closeTestService(t, service)
-	if _, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{}); err == nil ||
+	if _, _, err := service.Open(t.Context(), OpenRequest{Target: WorktreeTarget(), Options: OpenOptions{}}); err == nil ||
 		!strings.Contains(err.Error(), "assume-unchanged") {
 		t.Fatalf("hidden worktree change error = %v", err)
 	}
@@ -465,11 +463,11 @@ func TestServiceRejectsRepositoryReplacementBetweenOpens(t *testing.T) {
 
 	service := newTestService(t, root)
 	defer closeTestService(t, service)
-	document, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{})
+	_, documentRevision, err := service.Open(t.Context(), OpenRequest{Target: WorktreeTarget(), Options: OpenOptions{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := document.Close(); err != nil {
+	if err := documentRevision.Retire().Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -482,7 +480,7 @@ func TestServiceRejectsRepositoryReplacementBetweenOpens(t *testing.T) {
 	}
 	runGitTest(t, root, "init", "--quiet")
 
-	_, err = service.Open(t.Context(), WorktreeTarget(), OpenOptions{})
+	_, _, err = service.Open(t.Context(), OpenRequest{Target: WorktreeTarget(), Options: OpenOptions{}})
 	if !errors.Is(err, ErrSourceStale) {
 		t.Fatalf("replacement open error = %v, want ErrSourceStale", err)
 	}
@@ -517,11 +515,11 @@ func TestRangeReadsPinnedObjectAlternateWithoutGitFallback(t *testing.T) {
 	}
 	service := newTestService(t, dependent)
 	defer closeTestService(t, service)
-	document, err := service.Open(t.Context(), target, OpenOptions{})
+	document, documentRevision, err := service.Open(t.Context(), OpenRequest{Target: target, Options: OpenOptions{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer document.Close()
+	defer closeTestRevision(t, documentRevision)
 	file, ok := document.Snapshot().File(0)
 	if !ok || document.Snapshot().FileCount() != 1 || file.DisplayPath() != "tracked.txt" ||
 		file.Change().Additions() != 1 {
@@ -539,7 +537,7 @@ func TestObjectAlternateCycleIsRejected(t *testing.T) {
 
 	service := newTestService(t, first)
 	defer closeTestService(t, service)
-	_, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{})
+	_, _, err := service.Open(t.Context(), OpenRequest{Target: WorktreeTarget(), Options: OpenOptions{}})
 	if err == nil || !strings.Contains(err.Error(), "alternates contain a cycle") {
 		t.Fatalf("alternate cycle error = %v", err)
 	}
@@ -562,14 +560,14 @@ func TestWorktreeSnapshotsInitializedGitlinks(t *testing.T) {
 
 	service := newTestService(t, root)
 	defer closeTestService(t, service)
-	unchanged, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{})
+	unchanged, unchangedRevision, err := service.Open(t.Context(), OpenRequest{Target: WorktreeTarget(), Options: OpenOptions{}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if unchanged.Snapshot().FileCount() != 0 {
 		t.Fatalf("unchanged submodule produced %d changes", unchanged.Snapshot().FileCount())
 	}
-	if err := unchanged.Close(); err != nil {
+	if err := unchangedRevision.Retire().Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -580,15 +578,15 @@ func TestWorktreeSnapshotsInitializedGitlinks(t *testing.T) {
 	runGitTest(t, module, "add", "child.txt")
 	runGitTest(t, module, "commit", "-m", "advance")
 
-	advanced, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{})
+	advanced, advancedRevision, err := service.Open(t.Context(), OpenRequest{Target: WorktreeTarget(), Options: OpenOptions{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer advanced.Close()
+	defer closeTestRevision(t, advancedRevision)
 	file, ok := advanced.Snapshot().File(0)
 	if !ok || advanced.Snapshot().FileCount() != 1 ||
 		file.DisplayPath() != "module" ||
-		file.Change().Kind() != review.ChangeSubmodule {
+		file.Change().Kind() != change.ChangeSubmodule {
 		t.Fatalf("advanced submodule snapshot = %+v, present=%v", file, ok)
 	}
 }
@@ -609,25 +607,23 @@ func TestWorktreeSnapshotsCommittedUntrackedRepositoryAsGitlink(t *testing.T) {
 	writeFile(t, filepath.Join(nested, "child.txt"), "child\n")
 	runGitTest(t, nested, "add", "child.txt")
 	runGitTest(t, nested, "commit", "-m", "child")
-	wantOID, err := review.NewObjectID(strings.TrimSpace(runGitTest(t, nested, "rev-parse", "HEAD")))
+	wantOID, err := change.NewObjectID(strings.TrimSpace(runGitTest(t, nested, "rev-parse", "HEAD")))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	service := newTestService(t, root)
 	defer closeTestService(t, service)
-	document, err := service.Open(
-		t.Context(),
-		WorktreeTarget(),
-		OpenOptions{IncludeUntracked: true},
-	)
+	document, documentRevision, err := service.Open(
+		t.Context(), OpenRequest{Target: WorktreeTarget(), Options: OpenOptions{IncludeUntracked: true}})
+
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer document.Close()
+	defer closeTestRevision(t, documentRevision)
 	file, ok := document.Snapshot().File(0)
 	if !ok || document.Snapshot().FileCount() != 1 || file.DisplayPath() != "nested" ||
-		file.Change().Kind() != review.ChangeSubmodule {
+		file.Change().Kind() != change.ChangeSubmodule {
 		t.Fatalf("embedded repository snapshot = %+v, present=%v", file, ok)
 	}
 	oldCommit, newCommit := file.Change().SubmoduleCommits()
@@ -657,22 +653,20 @@ func TestWorktreeCollapsesEmbeddedRepositoryAboveTrackedDescendants(t *testing.T
 	writeFile(t, filepath.Join(slot, "child.txt"), "nested\n")
 	runGitTest(t, slot, "add", "child.txt")
 	runGitTest(t, slot, "commit", "-m", "nested")
-	wantOID, err := review.NewObjectID(strings.TrimSpace(runGitTest(t, slot, "rev-parse", "HEAD")))
+	wantOID, err := change.NewObjectID(strings.TrimSpace(runGitTest(t, slot, "rev-parse", "HEAD")))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	service := newTestService(t, root)
 	defer closeTestService(t, service)
-	document, err := service.Open(
-		t.Context(),
-		WorktreeTarget(),
-		OpenOptions{IncludeUntracked: true},
-	)
+	document, documentRevision, err := service.Open(
+		t.Context(), OpenRequest{Target: WorktreeTarget(), Options: OpenOptions{IncludeUntracked: true}})
+
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer document.Close()
+	defer closeTestRevision(t, documentRevision)
 	var foundGitlink bool
 	for file := range document.Snapshot().AllFiles() {
 		if file.DisplayPath() == "slot/child.txt" {
@@ -682,7 +676,7 @@ func TestWorktreeCollapsesEmbeddedRepositoryAboveTrackedDescendants(t *testing.T
 			continue
 		}
 		foundGitlink = true
-		if file.Change().Kind() != review.ChangeSubmodule {
+		if file.Change().Kind() != change.ChangeSubmodule {
 			t.Fatalf("embedded repository change = %s", file.Change().Kind())
 		}
 		_, newCommit := file.Change().SubmoduleCommits()
@@ -712,18 +706,16 @@ func TestWorktreeDoesNotCollapseOrdinaryDirectoryWithInvalidGitMarker(t *testing
 
 	service := newTestService(t, root)
 	defer closeTestService(t, service)
-	document, err := service.Open(
-		t.Context(),
-		WorktreeTarget(),
-		OpenOptions{IncludeUntracked: true},
-	)
+	document, documentRevision, err := service.Open(
+		t.Context(), OpenRequest{Target: WorktreeTarget(), Options: OpenOptions{IncludeUntracked: true}})
+
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer document.Close()
+	defer closeTestRevision(t, documentRevision)
 	var found bool
 	for file := range document.Snapshot().AllFiles() {
-		if file.DisplayPath() == "ordinary/file.txt" && file.Change().Kind() == review.ChangeAdded {
+		if file.DisplayPath() == "ordinary/file.txt" && file.Change().Kind() == change.ChangeAdded {
 			found = true
 		}
 	}
@@ -745,11 +737,8 @@ func TestWorktreeRejectsUnbornUntrackedRepository(t *testing.T) {
 
 	service := newTestService(t, root)
 	defer closeTestService(t, service)
-	if _, err := service.Open(
-		t.Context(),
-		WorktreeTarget(),
-		OpenOptions{IncludeUntracked: true},
-	); err == nil || !strings.Contains(err.Error(), "HEAD does not resolve to a commit") {
+	if _, _, err := service.Open(
+		t.Context(), OpenRequest{Target: WorktreeTarget(), Options: OpenOptions{IncludeUntracked: true}}); err == nil || !strings.Contains(err.Error(), "HEAD does not resolve to a commit") {
 		t.Fatalf("unborn embedded repository error = %v", err)
 	}
 }
@@ -777,39 +766,39 @@ func TestOpenStagedPreservesUnmergedIndexAsUnavailablePatch(t *testing.T) {
 
 	service := newTestService(t, root)
 	defer closeTestService(t, service)
-	document, err := service.Open(t.Context(), StagedTarget(), OpenOptions{})
+	document, documentRevision, err := service.Open(t.Context(), OpenRequest{Target: StagedTarget(), Options: OpenOptions{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer document.Close()
+	defer closeTestRevision(t, documentRevision)
 	file, _ := document.Snapshot().File(0)
 	if document.Snapshot().FileCount() != 1 || file.DisplayPath() != "conflict.txt" ||
-		file.Change().Kind() != review.ChangeModified {
+		file.Change().Kind() != change.ChangeModified {
 		t.Fatalf("unexpected staged conflict snapshot: %+v", document.Snapshot())
 	}
 
-	current, err := review.NewReview(testReviewRequest(document.Snapshot()))
+	current, err := change.NewReview(testReviewRequest(document.Snapshot()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	contextLines, _ := review.NewContextLines(3)
-	patchContext, _ := review.ContextAround(contextLines)
+	contextLines, _ := change.NewContextLines(3)
+	patchContext, _ := change.ContextAround(contextLines)
 	current, request, err := current.RequestPatch(file.ID(), patchContext)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := service.LoadPatch(t.Context(), document, request)
+	result, err := service.LoadPatch(t.Context(), document, documentRevision, request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != review.PatchUnavailable ||
+	if result.Status != change.PatchUnavailable ||
 		!strings.Contains(result.Detail.String(), "unmerged index") {
 		t.Fatalf("unmerged patch result = %+v", result)
 	}
 	if current, err = current.ApplyPatch(result); err != nil {
 		t.Fatal(err)
 	}
-	if current.Patch(file.ID()).Status != review.PatchUnavailable {
+	if current.Patch(file.ID()).Status != change.PatchUnavailable {
 		t.Fatal("unavailable patch state was not retained")
 	}
 }
@@ -824,27 +813,27 @@ func TestLoadPatchAndReloadUseGenerationFencedIdentities(t *testing.T) {
 	service := newTestService(t, root)
 	defer closeTestService(t, service)
 	options := OpenOptions{IncludeUntracked: true}
-	document, err := service.Open(t.Context(), WorktreeTarget(), options)
+	document, documentRevision, err := service.Open(t.Context(), OpenRequest{Target: WorktreeTarget(), Options: options})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer document.Close()
+	defer closeTestRevision(t, documentRevision)
 
-	current, err := review.NewReview(testReviewRequest(document.Snapshot()))
+	current, err := change.NewReview(testReviewRequest(document.Snapshot()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	contextLines, _ := review.NewContextLines(3)
-	patchContext, _ := review.ContextAround(contextLines)
+	contextLines, _ := change.NewContextLines(3)
+	patchContext, _ := change.ContextAround(contextLines)
 	current, request, err := current.RequestPatch(0, patchContext)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := service.LoadPatch(t.Context(), document, request)
+	result, err := service.LoadPatch(t.Context(), document, documentRevision, request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != review.PatchReady || result.Prepared.Hunks() == 0 {
+	if result.Status != change.PatchReady || result.Prepared.Hunks() == 0 {
 		t.Fatalf("unexpected patch result: %+v", result)
 	}
 	current, err = current.ApplyPatch(result)
@@ -855,15 +844,15 @@ func TestLoadPatchAndReloadUseGenerationFencedIdentities(t *testing.T) {
 		t.Fatalf("unexpected patch text:\n%s", lines)
 	}
 
-	reloaded, err := service.Reload(t.Context(), document, options, directCPUAdmission)
+	reloaded, reloadedRevision, err := service.Reload(t.Context(), document, documentRevision, options, directCPUAdmission)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reloaded.Close()
+	defer closeTestRevision(t, reloadedRevision)
 	if reloaded.Snapshot().SourceID() == document.Snapshot().SourceID() {
 		t.Fatal("reload reused source identity")
 	}
-	if _, err := service.LoadPatch(t.Context(), reloaded, request); err == nil {
+	if _, err := service.LoadPatch(t.Context(), reloaded, reloadedRevision, request); err == nil {
 		t.Fatal("stale patch request was accepted by reloaded source")
 	}
 }
@@ -883,30 +872,30 @@ func TestLoadPatchStreamsLargeContentThroughDiskDiff(t *testing.T) {
 
 	service := newTestService(t, root)
 	defer closeTestService(t, service)
-	document, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{})
+	document, documentRevision, err := service.Open(t.Context(), OpenRequest{Target: WorktreeTarget(), Options: OpenOptions{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer document.Close()
+	defer closeTestRevision(t, documentRevision)
 	file, ok := document.Snapshot().File(0)
 	if !ok || file.Change().Additions() != 1 || file.Change().Deletions() != 1 {
 		t.Fatalf("large diff file = %+v, present %v", file, ok)
 	}
-	current, err := review.NewReview(testReviewRequest(document.Snapshot()))
+	current, err := change.NewReview(testReviewRequest(document.Snapshot()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	contextLines, _ := review.NewContextLines(2)
-	patchContext, _ := review.ContextAround(contextLines)
+	contextLines, _ := change.NewContextLines(2)
+	patchContext, _ := change.ContextAround(contextLines)
 	current, request, err := current.RequestPatch(file.ID(), patchContext)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := service.LoadPatch(t.Context(), document, request)
+	result, err := service.LoadPatch(t.Context(), document, documentRevision, request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != review.PatchReady || result.Prepared.Hunks() != 1 {
+	if result.Status != change.PatchReady || result.Prepared.Hunks() != 1 {
 		t.Fatalf("large patch result = %+v", result)
 	}
 	current, err = current.ApplyPatch(result)
@@ -938,30 +927,30 @@ func TestLoadPatchPreservesCrossoverPatchSemantics(t *testing.T) {
 
 	service := newTestService(t, root)
 	defer closeTestService(t, service)
-	document, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{})
+	document, documentRevision, err := service.Open(t.Context(), OpenRequest{Target: WorktreeTarget(), Options: OpenOptions{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer document.Close()
+	defer closeTestRevision(t, documentRevision)
 	file, ok := document.Snapshot().File(0)
 	if !ok || file.Change().Additions() != 2 || file.Change().Deletions() != 2 {
 		t.Fatalf("crossover diff file = %+v, present %v", file, ok)
 	}
-	current, err := review.NewReview(testReviewRequest(document.Snapshot()))
+	current, err := change.NewReview(testReviewRequest(document.Snapshot()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	contextLines, _ := review.NewContextLines(2)
-	patchContext, _ := review.ContextAround(contextLines)
+	contextLines, _ := change.NewContextLines(2)
+	patchContext, _ := change.ContextAround(contextLines)
 	current, request, err := current.RequestPatch(file.ID(), patchContext)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := service.LoadPatch(t.Context(), document, request)
+	result, err := service.LoadPatch(t.Context(), document, documentRevision, request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != review.PatchReady || result.Prepared.Hunks() != 2 {
+	if result.Status != change.PatchReady || result.Prepared.Hunks() != 2 {
 		t.Fatalf("crossover patch result = %+v", result)
 	}
 	current, err = current.ApplyPatch(result)
@@ -1000,16 +989,16 @@ func BenchmarkOpenWorktreeCrossoverDiff(b *testing.B) {
 	b.ReportAllocs()
 	b.SetBytes(int64(len(oldContents) + len(newContents)))
 	for b.Loop() {
-		document, err := service.Open(b.Context(), WorktreeTarget(), OpenOptions{})
+		document, documentRevision, err := service.Open(b.Context(), OpenRequest{Target: WorktreeTarget(), Options: OpenOptions{}})
 		if err != nil {
 			b.Fatal(err)
 		}
 		file, ok := document.Snapshot().File(0)
 		if !ok || file.Change().Additions() != 2 || file.Change().Deletions() != 2 {
-			_ = document.Close()
+			_ = documentRevision.Retire().Close()
 			b.Fatalf("crossover diff file = %+v, present %v", file, ok)
 		}
-		if err := document.Close(); err != nil {
+		if err := documentRevision.Retire().Close(); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -1028,16 +1017,16 @@ func TestLoadPatchTreatsRawPathAsLiteral(t *testing.T) {
 
 	service := newTestService(t, root)
 	defer closeTestService(t, service)
-	document, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{})
+	document, documentRevision, err := service.Open(t.Context(), OpenRequest{Target: WorktreeTarget(), Options: OpenOptions{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer document.Close()
-	current, err := review.NewReview(testReviewRequest(document.Snapshot()))
+	defer closeTestRevision(t, documentRevision)
+	current, err := change.NewReview(testReviewRequest(document.Snapshot()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var hostileID review.FileID
+	var hostileID change.FileID
 	found := false
 	for file := range document.Snapshot().AllFiles() {
 		if file.DisplayPath() == hostileName {
@@ -1049,14 +1038,14 @@ func TestLoadPatchTreatsRawPathAsLiteral(t *testing.T) {
 	if !found {
 		t.Fatal("hostile path is missing from snapshot")
 	}
-	contextLines, _ := review.NewContextLines(3)
-	patchContext, _ := review.ContextAround(contextLines)
-	var request review.PatchRequest
+	contextLines, _ := change.NewContextLines(3)
+	patchContext, _ := change.ContextAround(contextLines)
+	var request change.PatchRequest
 	current, request, err = current.RequestPatch(hostileID, patchContext)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := service.LoadPatch(t.Context(), document, request)
+	result, err := service.LoadPatch(t.Context(), document, documentRevision, request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1095,7 +1084,7 @@ func TestRepositoryRootIsDiscoveredOnceAndCached(t *testing.T) {
 func TestSourceFailureIsTypedAtPublicBoundary(t *testing.T) {
 	service := newTestService(t, t.TempDir())
 	defer closeTestService(t, service)
-	_, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{})
+	_, _, err := service.Open(t.Context(), OpenRequest{Target: WorktreeTarget(), Options: OpenOptions{}})
 	var failure *FailureError
 	if !errors.As(err, &failure) || failure.Kind != FailureFailed ||
 		failure.Operation != OperationDiscoverRepository {
@@ -1161,11 +1150,11 @@ func TestOpenUnbornWorktree(t *testing.T) {
 	writeFile(t, filepath.Join(root, "new.txt"), "new\n")
 	service := newTestService(t, root)
 	defer closeTestService(t, service)
-	document, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{IncludeUntracked: true})
+	document, documentRevision, err := service.Open(t.Context(), OpenRequest{Target: WorktreeTarget(), Options: OpenOptions{IncludeUntracked: true}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer document.Close()
+	defer closeTestRevision(t, documentRevision)
 	file, _ := document.Snapshot().File(0)
 	if document.Snapshot().FileCount() != 1 || file.DisplayPath() != "new.txt" {
 		t.Fatalf("unexpected snapshot: %+v", document.Snapshot())
@@ -1180,15 +1169,16 @@ func TestFiltersHideWithoutRemovingMembership(t *testing.T) {
 	writeFile(t, filepath.Join(root, "ignored.txt"), "ignored\n")
 	service := newTestService(t, root)
 	defer closeTestService(t, service)
-	document, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{
+	document, documentRevision, err := service.Open(t.Context(), OpenRequest{Target: WorktreeTarget(), Options: OpenOptions{
 		IncludeUntracked: true,
 		BuiltinDefaults:  true,
 		Gitignore:        true,
-	})
+	}})
+
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer document.Close()
+	defer closeTestRevision(t, documentRevision)
 	if document.Snapshot().FileCount() != 4 {
 		t.Fatalf("file count = %d", document.Snapshot().FileCount())
 	}
@@ -1294,7 +1284,7 @@ func writeFile(tb testing.TB, path, contents string) {
 	}
 }
 
-func patchLinesText(lines []review.PatchLine) string {
+func patchLinesText(lines []change.PatchLine) string {
 	values := make([]string, len(lines))
 	for index, line := range lines {
 		values[index] = line.Text.String()

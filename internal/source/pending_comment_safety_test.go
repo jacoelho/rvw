@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 func TestLoadPendingReviewRejectsUnsafeSummaryOrInlineBodyWithoutReplacement(t *testing.T) {
@@ -46,7 +46,7 @@ func TestLoadPendingReviewRejectsUnsafeSummaryOrInlineBodyWithoutReplacement(t *
 				details,
 				directCPUAdmission,
 			)
-			if status != review.PendingReviewUnavailable || detail.IsEmpty() {
+			if status != change.PendingReviewUnavailable || detail.IsEmpty() {
 				t.Fatalf("status %s, detail %q", status, detail.String())
 			}
 			if pending.DatabaseID() != 0 || pending.CommentCount() != 0 {

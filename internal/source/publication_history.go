@@ -8,26 +8,26 @@ import (
 	"math"
 	"strings"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 // Finish validates and classifies acquired history without network I/O.
 func (acquisition *PublicationReconciliationAcquisition) Finish(
 	ctx context.Context,
 	runCPU CPUAdmission,
-) review.ReconciliationResult {
+) change.ReconciliationResult {
 	if acquisition == nil || acquisition.spool == nil {
-		return review.ReconciliationResult{
-			Disposition: review.ReconciliationStillUnknown,
+		return change.ReconciliationResult{
+			Disposition: change.ReconciliationStillUnknown,
 			Detail:      boundedOperationDetail("publication reconciliation acquisition is unavailable"),
 		}
 	}
 	request := acquisition.request
-	result := review.ReconciliationResult{
+	result := change.ReconciliationResult{
 		Operation:   request.Operation,
 		Workspace:   request.Workspace,
 		Source:      request.Source,
-		Disposition: review.ReconciliationStillUnknown,
+		Disposition: change.ReconciliationStillUnknown,
 	}
 	spool := acquisition.spool
 	acquisition.spool = nil
@@ -81,10 +81,10 @@ func (acquisition *PublicationReconciliationAcquisition) Finish(
 		return result
 	}
 	if matches == 1 {
-		result.Disposition = review.ReconciliationCommitted
+		result.Disposition = change.ReconciliationCommitted
 		result.Detail = boundedOperationDetail("publication marker confirmed")
 	} else {
-		result.Disposition = review.ReconciliationNotCommitted
+		result.Disposition = change.ReconciliationNotCommitted
 		result.Detail = boundedOperationDetail("publication marker confirmed absent")
 	}
 	return result

@@ -8,7 +8,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 const trackedPathSlotBytes = 40
@@ -154,10 +154,10 @@ func (set *trackedPathSet) slotPathEqual(
 	if uint64(length) != uint64(len(path)) {
 		return false, nil
 	}
-	if int64(length) > review.MaxPathBytes {
+	if int64(length) > change.MaxPathBytes {
 		return false, errors.New("tracked path table contains an invalid path length")
 	}
-	var stored [review.MaxPathBytes]byte
+	var stored [change.MaxPathBytes]byte
 	offset := binary.BigEndian.Uint64(entry[8:16])
 	if _, err := set.paths.ReadAt(stored[:length], int64(offset)); err != nil { //nolint:gosec // Index path-byte admission bounds the offset.
 		return false, err

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 const pendingReviewsQuery = `query($owner:String!,$name:String!,$number:Int!,$endCursor:String){viewer{login}repository(owner:$owner,name:$name){nameWithOwner pullRequest(number:$number){number baseRefOid headRefOid reviews(first:100,after:$endCursor,states:[PENDING]){pageInfo{hasNextPage endCursor}nodes{id fullDatabaseId body state viewerDidAuthor viewerCanUpdate commit{oid}}}}}}`
@@ -73,7 +73,7 @@ type pendingReviewCommentPayload struct {
 	Path                string        `json:"path"`
 	ID                  githubUint64  `json:"id"`
 	PullRequestReviewID githubUint64  `json:"pull_request_review_id"`
-	capabilities        review.PendingCapabilities
+	capabilities        change.PendingCapabilities
 }
 
 type pendingCommentCapabilityPage struct {
@@ -119,10 +119,10 @@ func (service *Service) loadPendingReview(
 	ctx context.Context,
 	details PullRequestDetails,
 	runCPU CPUAdmission,
-) (review.PendingReview, review.PendingReviewStatus, review.OperationDetail) {
+) (change.PendingReview, change.PendingReviewStatus, change.OperationDetail) {
 	ledger, err := newSourceLedger(0)
 	if err != nil {
-		return review.PendingReview{}, pendingFailureStatus(err), boundedOperationDetail(err.Error())
+		return change.PendingReview{}, pendingFailureStatus(err), boundedOperationDetail(err.Error())
 	}
 	return service.loadPendingReviewWithLedger(ctx, details, ledger, runCPU)
 }
@@ -132,22 +132,22 @@ func (service *Service) loadPendingReviewWithLedger(
 	details PullRequestDetails,
 	ledger *sourceLedger,
 	runCPU CPUAdmission,
-) (review.PendingReview, review.PendingReviewStatus, review.OperationDetail) {
+) (change.PendingReview, change.PendingReviewStatus, change.OperationDetail) {
 	checkpoint := ledger.checkpoint()
 	defer checkpoint.rollback()
 	node, status, err := service.findPendingReviewWithLedger(ctx, details, ledger, runCPU)
 	if err != nil {
-		return review.PendingReview{}, pendingFailureStatus(err), boundedOperationDetail(err.Error())
+		return change.PendingReview{}, pendingFailureStatus(err), boundedOperationDetail(err.Error())
 	}
-	if status != review.PendingReviewReady {
-		detail := review.EmptyOperationDetail()
-		if status == review.PendingReviewAmbiguous {
+	if status != change.PendingReviewReady {
+		detail := change.EmptyOperationDetail()
+		if status == change.PendingReviewAmbiguous {
 			detail = boundedOperationDetail("GitHub returned multiple viewer-owned pending reviews")
 		}
 		if commitErr := checkpoint.commit(0); commitErr != nil {
-			return review.PendingReview{}, pendingFailureStatus(commitErr), boundedOperationDetail(commitErr.Error())
+			return change.PendingReview{}, pendingFailureStatus(commitErr), boundedOperationDetail(commitErr.Error())
 		}
-		return review.PendingReview{}, status, detail
+		return change.PendingReview{}, status, detail
 	}
 	comments, err := service.loadPendingReviewCommentsWithLedger(
 		ctx,
@@ -157,7 +157,7 @@ func (service *Service) loadPendingReviewWithLedger(
 		runCPU,
 	)
 	if err != nil {
-		return review.PendingReview{}, pendingFailureStatus(err), boundedOperationDetail(err.Error())
+		return change.PendingReview{}, pendingFailureStatus(err), boundedOperationDetail(err.Error())
 	}
 	comments, err = service.attachPendingCommentCapabilitiesWithLedger(
 		ctx,
@@ -168,26 +168,26 @@ func (service *Service) loadPendingReviewWithLedger(
 		runCPU,
 	)
 	if err != nil {
-		return review.PendingReview{}, pendingFailureStatus(err), boundedOperationDetail(err.Error())
+		return change.PendingReview{}, pendingFailureStatus(err), boundedOperationDetail(err.Error())
 	}
 	accountingScratch := int64(len(comments)) * 48
 	if reserveErr := ledger.reserve(accountingScratch); reserveErr != nil {
-		return review.PendingReview{}, pendingFailureStatus(reserveErr), boundedOperationDetail(reserveErr.Error())
+		return change.PendingReview{}, pendingFailureStatus(reserveErr), boundedOperationDetail(reserveErr.Error())
 	}
 	constructionBytes := pendingReviewConstructionBytes(node, comments)
 	if reserveErr := ledger.reserve(constructionBytes); reserveErr != nil {
-		return review.PendingReview{}, pendingFailureStatus(reserveErr), boundedOperationDetail(reserveErr.Error())
+		return change.PendingReview{}, pendingFailureStatus(reserveErr), boundedOperationDetail(reserveErr.Error())
 	}
 	pending, err := validatePendingReview(node, comments)
 	if err != nil {
-		return review.PendingReview{}, review.PendingReviewUnavailable,
+		return change.PendingReview{}, change.PendingReviewUnavailable,
 			boundedOperationDetail(err.Error())
 	}
 	if err := checkpoint.commit(pending.RetainedBytes()); err != nil {
-		return review.PendingReview{}, review.PendingReviewUnavailable,
+		return change.PendingReview{}, change.PendingReviewUnavailable,
 			boundedOperationDetail(err.Error())
 	}
-	return pending, review.PendingReviewReady, review.EmptyOperationDetail()
+	return pending, change.PendingReviewReady, change.EmptyOperationDetail()
 }
 
 func (service *Service) attachPendingCommentCapabilitiesWithLedger(
@@ -218,12 +218,12 @@ func (service *Service) attachPendingCommentCapabilitiesWithLedger(
 			githubFieldOwner: owner, githubFieldName: repository,
 			githubFieldNumber: details.Number.Uint64(), "id": node.ID,
 		},
-		review.MaxPendingReviewBytes,
+		change.MaxPendingReviewBytes,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("load GitHub pending comment capabilities: %w", err)
 	}
-	limits, err := newJSONFramingLimits(review.MaxComments, maxGitHubPageCollectionElements)
+	limits, err := newJSONFramingLimits(change.MaxComments, maxGitHubPageCollectionElements)
 	if err != nil {
 		return nil, errors.Join(err, spool.Close())
 	}
@@ -273,14 +273,14 @@ func (service *Service) attachPendingCommentCapabilitiesWithLedger(
 		if !exists || uint64(capability.FullDatabaseID) != uint64(comments[index].ID) {
 			return nil, errors.New("GitHub pending comment capability identities do not match REST")
 		}
-		values := make([]review.PendingCapability, 0, 2)
+		values := make([]change.PendingCapability, 0, 2)
 		if *capability.ViewerCanUpdate {
-			values = append(values, review.PendingCapabilityUpdate)
+			values = append(values, change.PendingCapabilityUpdate)
 		}
 		if *capability.ViewerCanDelete {
-			values = append(values, review.PendingCapabilityDelete)
+			values = append(values, change.PendingCapabilityDelete)
 		}
-		validated, err := review.NewPendingCapabilities(values...)
+		validated, err := change.NewPendingCapabilities(values...)
 		if err != nil {
 			return nil, fmt.Errorf("validate GitHub pending comment capabilities: %w", err)
 		}
@@ -351,12 +351,12 @@ func collectPendingCommentCapabilities(
 	return nil
 }
 
-func pendingFailureStatus(err error) review.PendingReviewStatus {
+func pendingFailureStatus(err error) change.PendingReviewStatus {
 	var limited *LimitError
 	if errors.As(err, &limited) || errors.Is(err, ErrSourceLimited) {
-		return review.PendingReviewLimited
+		return change.PendingReviewLimited
 	}
-	return review.PendingReviewUnavailable
+	return change.PendingReviewUnavailable
 }
 
 func (service *Service) findPendingReviewWithLedger(
@@ -364,7 +364,7 @@ func (service *Service) findPendingReviewWithLedger(
 	details PullRequestDetails,
 	ledger *sourceLedger,
 	runCPU CPUAdmission,
-) (pendingReviewNode, review.PendingReviewStatus, error) {
+) (pendingReviewNode, change.PendingReviewStatus, error) {
 	checkpoint := ledger.checkpoint()
 	defer checkpoint.rollback()
 	owner, repository, ok := strings.Cut(details.Repository.String(), "/")
@@ -379,12 +379,12 @@ func (service *Service) findPendingReviewWithLedger(
 			githubFieldOwner: owner, githubFieldName: repository,
 			githubFieldNumber: details.Number.Uint64(),
 		},
-		review.MaxPendingReviewBytes,
+		change.MaxPendingReviewBytes,
 	)
 	if err != nil {
 		return pendingReviewNode{}, 0, fmt.Errorf("load GitHub pending reviews: %w", err)
 	}
-	limits, err := newJSONFramingLimits(review.MaxComments, maxGitHubPageCollectionElements)
+	limits, err := newJSONFramingLimits(change.MaxComments, maxGitHubPageCollectionElements)
 	if err != nil {
 		return pendingReviewNode{}, 0, errors.Join(err, spool.Close())
 	}
@@ -420,7 +420,7 @@ func (service *Service) findPendingReviewWithLedger(
 		if commitErr := checkpoint.commit(0); commitErr != nil {
 			return pendingReviewNode{}, 0, commitErr
 		}
-		return pendingReviewNode{}, review.PendingReviewAmbiguous, spool.Close()
+		return pendingReviewNode{}, change.PendingReviewAmbiguous, spool.Close()
 	}
 	if err != nil {
 		return pendingReviewNode{}, 0, errors.Join(err, spool.Close())
@@ -432,19 +432,19 @@ func (service *Service) findPendingReviewWithLedger(
 		if err := checkpoint.commit(0); err != nil {
 			return pendingReviewNode{}, 0, err
 		}
-		return pendingReviewNode{}, review.PendingReviewAmbiguous, nil
+		return pendingReviewNode{}, change.PendingReviewAmbiguous, nil
 	}
 	if len(collector.selected) == 0 {
 		if err := checkpoint.commit(0); err != nil {
 			return pendingReviewNode{}, 0, err
 		}
-		return pendingReviewNode{}, review.PendingReviewAbsent, nil
+		return pendingReviewNode{}, change.PendingReviewAbsent, nil
 	}
 	selected := collector.selected[0]
 	if err := checkpoint.commit(pendingReviewNodeBytes(selected)); err != nil {
 		return pendingReviewNode{}, 0, err
 	}
-	return selected, review.PendingReviewReady, nil
+	return selected, change.PendingReviewReady, nil
 }
 
 type pendingReviewCollector struct {
@@ -510,8 +510,8 @@ func (collector *pendingReviewCollector) add(candidate pendingReviewNode) error 
 	}
 	collector.seenNodes[candidate.ID] = struct{}{}
 	collector.seenDatabases[candidate.FullDatabaseID] = struct{}{}
-	if len(collector.seenNodes) > review.MaxComments {
-		return &LimitError{Resource: LimitPendingReview, Limit: review.MaxComments}
+	if len(collector.seenNodes) > change.MaxComments {
+		return &LimitError{Resource: LimitPendingReview, Limit: change.MaxComments}
 	}
 	if *candidate.ViewerDidAuthor {
 		domainBytes := pendingReviewNodeBytes(candidate)
@@ -531,16 +531,16 @@ func validatePendingReviewNode(node pendingReviewNode) error {
 		node.ViewerDidAuthor == nil || node.ViewerCanUpdate == nil || node.Commit == nil {
 		return errors.New("GitHub pending review is incomplete")
 	}
-	if _, err := review.NewReviewNodeID(node.ID); err != nil {
+	if _, err := change.NewReviewNodeID(node.ID); err != nil {
 		return err
 	}
-	if _, err := review.NewReviewDatabaseID(uint64(node.FullDatabaseID)); err != nil {
+	if _, err := change.NewReviewDatabaseID(uint64(node.FullDatabaseID)); err != nil {
 		return err
 	}
-	if _, err := review.NewObjectID(node.Commit.OID); err != nil {
+	if _, err := change.NewObjectID(node.Commit.OID); err != nil {
 		return err
 	}
-	if !utf8.ValidString(*node.Body) || int64(len(*node.Body)) > review.MaxCommentBodyBytes {
+	if !utf8.ValidString(*node.Body) || int64(len(*node.Body)) > change.MaxCommentBodyBytes {
 		return errors.New("GitHub pending review body is invalid")
 	}
 	return nil
@@ -579,11 +579,11 @@ func (service *Service) loadPendingReviewCommentsWithLedger(
 	endpoint := "/repos/" + details.Repository.String() + "/pulls/" +
 		strconv.FormatUint(details.Number.Uint64(), 10) + "/reviews/" +
 		strconv.FormatUint(uint64(node.FullDatabaseID), 10) + "/comments?per_page=100"
-	spool, err := service.restSpool(ctx, endpoint, review.MaxPendingReviewBytes)
+	spool, err := service.restSpool(ctx, endpoint, change.MaxPendingReviewBytes)
 	if err != nil {
 		return nil, fmt.Errorf("load GitHub pending review comments: %w", err)
 	}
-	limits, err := newJSONFramingLimits(review.MaxComments, maxGitHubPageCollectionElements)
+	limits, err := newJSONFramingLimits(change.MaxComments, maxGitHubPageCollectionElements)
 	if err != nil {
 		return nil, errors.Join(err, spool.Close())
 	}
@@ -604,11 +604,11 @@ func (service *Service) loadPendingReviewCommentsWithLedger(
 				if comment == nil {
 					return errors.New("GitHub pending review comments contain a null comment")
 				}
-				if len(comments) >= review.MaxComments {
-					return &LimitError{Resource: LimitPendingReview, Limit: review.MaxComments}
+				if len(comments) >= change.MaxComments {
+					return &LimitError{Resource: LimitPendingReview, Limit: change.MaxComments}
 				}
 				if len(comments) == cap(comments) {
-					capacity := min(max(1, cap(comments)*2), review.MaxComments)
+					capacity := min(max(1, cap(comments)*2), change.MaxComments)
 					storageBytes := int64(capacity) * jsonDecodedElementBytes
 					if reserveErr := ledger.reserve(storageBytes); reserveErr != nil {
 						return reserveErr
@@ -645,28 +645,28 @@ func (service *Service) loadPendingReviewCommentsWithLedger(
 func validatePendingReview(
 	node pendingReviewNode,
 	comments []pendingReviewCommentPayload,
-) (review.PendingReview, error) {
+) (change.PendingReview, error) {
 	if node.ID == "" || node.FullDatabaseID == 0 || node.Body == nil || node.State != githubPending ||
 		node.ViewerCanUpdate == nil || node.Commit == nil {
-		return review.PendingReview{}, errors.New("GitHub pending review is incomplete")
+		return change.PendingReview{}, errors.New("GitHub pending review is incomplete")
 	}
-	nodeID, err := review.NewReviewNodeID(node.ID)
+	nodeID, err := change.NewReviewNodeID(node.ID)
 	if err != nil {
-		return review.PendingReview{}, err
+		return change.PendingReview{}, err
 	}
-	databaseID, err := review.NewReviewDatabaseID(uint64(node.FullDatabaseID))
+	databaseID, err := change.NewReviewDatabaseID(uint64(node.FullDatabaseID))
 	if err != nil {
-		return review.PendingReview{}, err
+		return change.PendingReview{}, err
 	}
-	commit, err := review.NewObjectID(node.Commit.OID)
+	commit, err := change.NewObjectID(node.Commit.OID)
 	if err != nil {
-		return review.PendingReview{}, err
+		return change.PendingReview{}, err
 	}
 	validatedComments, err := validatePendingComments(databaseID, comments)
 	if err != nil {
-		return review.PendingReview{}, err
+		return change.PendingReview{}, err
 	}
-	return review.TakePendingReview(review.PendingReviewDescriptor{
+	return change.TakePendingReview(change.PendingReviewDescriptor{
 		NodeID:       nodeID,
 		DatabaseID:   databaseID,
 		Commit:       commit,
@@ -677,16 +677,16 @@ func validatePendingReview(
 }
 
 func validatePendingComments(
-	reviewID review.ReviewDatabaseID,
+	reviewID change.ReviewDatabaseID,
 	values []pendingReviewCommentPayload,
-) ([]review.PendingComment, error) {
-	nodeByDatabase := make(map[githubUint64]review.CommentNodeID, len(values))
+) ([]change.PendingComment, error) {
+	nodeByDatabase := make(map[githubUint64]change.CommentNodeID, len(values))
 	for _, value := range values {
 		if value.ID == 0 || value.NodeID == "" ||
 			uint64(value.PullRequestReviewID) != reviewID.Uint64() {
 			return nil, errors.New("GitHub pending review comment identity is incomplete")
 		}
-		nodeID, err := review.NewCommentNodeID(value.NodeID)
+		nodeID, err := change.NewCommentNodeID(value.NodeID)
 		if err != nil {
 			return nil, err
 		}
@@ -695,7 +695,7 @@ func validatePendingComments(
 		}
 		nodeByDatabase[value.ID] = nodeID
 	}
-	comments := make([]review.PendingComment, 0, len(values))
+	comments := make([]change.PendingComment, 0, len(values))
 	for _, value := range values {
 		comment, err := validatePendingComment(value, nodeByDatabase)
 		if err != nil {
@@ -708,10 +708,10 @@ func validatePendingComments(
 
 func validatePendingComment(
 	value pendingReviewCommentPayload,
-	nodeByDatabase map[githubUint64]review.CommentNodeID,
-) (review.PendingComment, error) {
+	nodeByDatabase map[githubUint64]change.CommentNodeID,
+) (change.PendingComment, error) {
 	if value.Body == nil {
-		return review.PendingComment{}, errors.New("GitHub pending review comment body is incomplete")
+		return change.PendingComment{}, errors.New("GitHub pending review comment body is incomplete")
 	}
 	for _, line := range []*uint32{
 		value.Line,
@@ -720,27 +720,27 @@ func validatePendingComment(
 		value.OriginalStartLine,
 	} {
 		if line != nil && *line == 0 {
-			return review.PendingComment{}, errors.New("GitHub pending review comment line is invalid")
+			return change.PendingComment{}, errors.New("GitHub pending review comment line is invalid")
 		}
 	}
 	nodeID := nodeByDatabase[value.ID]
-	databaseID, err := review.NewCommentDatabaseID(uint64(value.ID))
+	databaseID, err := change.NewCommentDatabaseID(uint64(value.ID))
 	if err != nil {
-		return review.PendingComment{}, err
+		return change.PendingComment{}, err
 	}
-	path, err := review.NewPathString(strings.Clone(value.Path))
+	path, err := change.NewPathString(strings.Clone(value.Path))
 	if err != nil {
-		return review.PendingComment{}, err
+		return change.PendingComment{}, err
 	}
-	commit, err := review.NewObjectID(value.CommitID)
+	commit, err := change.NewObjectID(value.CommitID)
 	if err != nil {
-		return review.PendingComment{}, err
+		return change.PendingComment{}, err
 	}
-	originalCommit, err := review.NewObjectID(value.OriginalCommitID)
+	originalCommit, err := change.NewObjectID(value.OriginalCommitID)
 	if err != nil {
-		return review.PendingComment{}, err
+		return change.PendingComment{}, err
 	}
-	target := review.PendingCommentTargetDescriptor{
+	target := change.PendingCommentTargetDescriptor{
 		Path:           path,
 		Commit:         commit,
 		OriginalCommit: originalCommit,
@@ -751,17 +751,17 @@ func validatePendingComment(
 	}
 	switch {
 	case value.InReplyToID != nil:
-		target.Subject = review.PendingSubjectReply
-		replyDatabase, replyErr := review.NewCommentDatabaseID(uint64(*value.InReplyToID))
+		target.Subject = change.PendingSubjectReply
+		replyDatabase, replyErr := change.NewCommentDatabaseID(uint64(*value.InReplyToID))
 		if replyErr != nil {
-			return review.PendingComment{}, replyErr
+			return change.PendingComment{}, replyErr
 		}
 		target.ReplyDatabase = replyDatabase
 		target.ReplyTo = nodeByDatabase[*value.InReplyToID]
 	case value.SubjectType == "file":
-		target.Subject = review.PendingSubjectFile
+		target.Subject = change.PendingSubjectFile
 	case value.SubjectType == githubSubjectLine || value.SubjectType == "" && value.Line != nil:
-		target.Subject = review.PendingSubjectLine
+		target.Subject = change.PendingSubjectLine
 		if target.Line == nil {
 			target.Line = target.OriginalLine
 			target.StartLine = target.OriginalStart
@@ -769,26 +769,26 @@ func validatePendingComment(
 		}
 		target.Side, err = pendingSide(value.Side)
 		if err != nil {
-			return review.PendingComment{}, err
+			return change.PendingComment{}, err
 		}
 		if target.StartLine != nil {
 			if value.StartSide == nil {
-				return review.PendingComment{}, errors.New("GitHub pending review start side is incomplete")
+				return change.PendingComment{}, errors.New("GitHub pending review start side is incomplete")
 			}
 			target.StartSide, err = pendingSide(*value.StartSide)
 			if err != nil {
-				return review.PendingComment{}, err
+				return change.PendingComment{}, err
 			}
 		}
 	default:
-		return review.PendingComment{}, errors.New("GitHub pending review comment subject is invalid")
+		return change.PendingComment{}, errors.New("GitHub pending review comment subject is invalid")
 	}
-	target.Outdated = target.Outdated || target.Subject == review.PendingSubjectLine && value.Line == nil
-	validatedTarget, err := review.NewPendingCommentTarget(target)
+	target.Outdated = target.Outdated || target.Subject == change.PendingSubjectLine && value.Line == nil
+	validatedTarget, err := change.NewPendingCommentTarget(target)
 	if err != nil {
-		return review.PendingComment{}, err
+		return change.PendingComment{}, err
 	}
-	return review.TakePendingComment(review.PendingCommentDescriptor{
+	return change.TakePendingComment(change.PendingCommentDescriptor{
 		NodeID:       nodeID,
 		DatabaseID:   databaseID,
 		Body:         *value.Body,
@@ -797,23 +797,23 @@ func validatePendingComment(
 	})
 }
 
-func pendingLine(value *uint32) *review.LineNumber {
+func pendingLine(value *uint32) *change.LineNumber {
 	if value == nil || *value == 0 {
 		return nil
 	}
-	line, err := review.NewLineNumber(*value)
+	line, err := change.NewLineNumber(*value)
 	if err != nil {
 		return nil
 	}
 	return new(line)
 }
 
-func pendingSide(value string) (review.LineSide, error) {
+func pendingSide(value string) (change.LineSide, error) {
 	switch value {
 	case githubSideLeft:
-		return review.LineOld, nil
+		return change.LineOld, nil
 	case githubSideRight:
-		return review.LineNew, nil
+		return change.LineNew, nil
 	default:
 		return 0, errors.New("GitHub pending review comment side is invalid")
 	}

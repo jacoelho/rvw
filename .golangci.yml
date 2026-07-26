@@ -128,19 +128,19 @@ linters:
           allow:
             - $gostd
             - charm.land/bubbletea/v2
-            - github.com/jacoelho/rvw/internal/app$
+            - github.com/jacoelho/rvw/internal/tui$
             - github.com/jacoelho/rvw/internal/config$
             - github.com/jacoelho/rvw/internal/delivery$
             - github.com/jacoelho/rvw/internal/keymap$
             - github.com/jacoelho/rvw/internal/output$
-            - github.com/jacoelho/rvw/internal/review$
+            - github.com/jacoelho/rvw/internal/change$
             - github.com/jacoelho/rvw/internal/source$
             - golang.org/x/sys/unix$
 
-        app-production:
+        tui-production:
           list-mode: strict
           files:
-            - "**/internal/app/*.go"
+            - "**/internal/tui/*.go"
             - "!**/*_test.go"
           allow:
             - $gostd
@@ -148,11 +148,23 @@ linters:
             - charm.land/bubbletea/v2
             - charm.land/lipgloss/v2
             - github.com/charmbracelet/x/ansi$
+            - github.com/jacoelho/rvw/internal/coordinator$
             - github.com/jacoelho/rvw/internal/delivery$
             - github.com/jacoelho/rvw/internal/keymap$
-            - github.com/jacoelho/rvw/internal/review$
+            - github.com/jacoelho/rvw/internal/change$
+            - github.com/jacoelho/rvw/internal/projection$
             - github.com/jacoelho/rvw/internal/source$
+            - github.com/jacoelho/rvw/internal/tui/render$
             - github.com/rivo/uniseg$
+
+        tui-render-production:
+          list-mode: strict
+          files:
+            - "**/internal/tui/render/*.go"
+            - "!**/*_test.go"
+          allow:
+            - $gostd
+            - charm.land/lipgloss/v2
 
         config-production:
           list-mode: strict
@@ -173,6 +185,25 @@ linters:
           allow:
             - $gostd
 
+        coordinator-production:
+          list-mode: strict
+          files:
+            - "**/internal/coordinator/*.go"
+            - "!**/*_test.go"
+          allow:
+            - $gostd
+            - github.com/jacoelho/rvw/internal/change$
+            - github.com/jacoelho/rvw/internal/source$
+
+        projection-production:
+          list-mode: strict
+          files:
+            - "**/internal/projection/*.go"
+            - "!**/*_test.go"
+          allow:
+            - $gostd
+            - github.com/jacoelho/rvw/internal/change$
+
         output-production:
           list-mode: strict
           files:
@@ -180,13 +211,13 @@ linters:
             - "!**/*_test.go"
           allow:
             - $gostd
-            - github.com/jacoelho/rvw/internal/review$
+            - github.com/jacoelho/rvw/internal/change$
             - github.com/jacoelho/rvw/internal/source$
 
-        review-production:
+        change-production:
           list-mode: strict
           files:
-            - "**/internal/review/*.go"
+            - "**/internal/change/*.go"
             - "!**/*_test.go"
           allow:
             - bytes$
@@ -216,7 +247,7 @@ linters:
             - github.com/go-git/gcfg$
             - github.com/go-git/go-billy/v5
             - github.com/go-git/go-git/v5
-            - github.com/jacoelho/rvw/internal/review$
+            - github.com/jacoelho/rvw/internal/change$
             - golang.org/x/sys/unix$
 
     revive:
@@ -270,7 +301,7 @@ linters:
         - empty
         - stdlib
         - generic
-        - github\.com/jacoelho/rvw/internal/app\.Outcome$
+        - github\.com/jacoelho/rvw/internal/tui\.Outcome$
         - charm\.land/bubbletea/v2\.Model$
 
     dupl:

@@ -4,50 +4,55 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 // PatchAcquisition owns patch bytes acquired from Git until CPU preparation.
 type PatchAcquisition struct {
+	state *patchAcquisitionState
+}
+
+type patchAcquisitionState struct {
 	native  *nativePatchInput
-	result  review.PatchResult
+	result  change.PatchResult
 	valid   bool
 	prepare bool
+	mu      sync.Mutex
 }
 
 // RequiresPreparation reports whether Finish must run under CPU admission.
 func (acquisition *PatchAcquisition) RequiresPreparation() bool {
-	return acquisition != nil && acquisition.valid && acquisition.prepare
+	if acquisition == nil || acquisition.state == nil {
+		return false
+	}
+	acquisition.state.mu.Lock()
+	defer acquisition.state.mu.Unlock()
+	return acquisition.state.valid && acquisition.state.prepare
 }
 
 // Close releases unprepared patch bytes.
 func (acquisition *PatchAcquisition) Close() {
-	if acquisition == nil {
-		return
-	}
-	*acquisition = PatchAcquisition{}
+	acquisition.consume()
 }
 
 // Finish consumes an acquisition and performs only cancellable CPU preparation.
 func (acquisition *PatchAcquisition) Finish(
 	ctx context.Context,
 	runCPU CPUAdmission,
-) (review.PatchResult, error) {
-	if acquisition == nil || !acquisition.valid {
-		return review.PatchResult{}, errors.New("patch acquisition is invalid")
-	}
+) (change.PatchResult, error) {
 	if runCPU == nil {
-		return review.PatchResult{}, errors.New("patch CPU admission is nil")
+		return change.PatchResult{}, errors.New("patch CPU admission is nil")
 	}
-	result := acquisition.result
-	native := acquisition.native
-	prepare := acquisition.prepare
-	acquisition.Close()
+	result, native, prepare, ok := acquisition.consume()
+	if !ok {
+		return change.PatchResult{}, errors.New("patch acquisition is invalid")
+	}
 	if !prepare {
 		return result, nil
 	}
-	var prepared *review.PreparedPatch
+	var prepared *change.PreparedPatch
 	var prepareErr error
 	admissionErr := runCPU(ctx, func() error {
 		if native == nil {
@@ -59,33 +64,58 @@ func (acquisition *PatchAcquisition) Finish(
 	})
 	if admissionErr != nil {
 		if !contextCancellation(ctx, admissionErr) {
-			return review.PatchResult{}, admissionErr
+			return change.PatchResult{}, admissionErr
 		}
 		prepareErr = admissionErr
 	}
 	if prepareErr != nil {
 		if contextCancellation(ctx, prepareErr) {
-			result.Status = review.PatchCancelled
+			result.Status = change.PatchCancelled
 		} else {
-			result.Status = review.PatchLimited
+			result.Status = change.PatchLimited
 		}
-		result.Detail = review.PatchDetail(boundedText(prepareErr.Error(), 16<<10))
+		result.Detail = change.PatchDetail(boundedText(prepareErr.Error(), 16<<10))
 		return result, nil
 	}
-	result.Status = review.PatchReady
+	result.Status = change.PatchReady
 	result.Prepared = prepared
 	return result, nil
+}
+
+func (acquisition *PatchAcquisition) consume() (
+	change.PatchResult,
+	*nativePatchInput,
+	bool,
+	bool,
+) {
+	if acquisition == nil || acquisition.state == nil {
+		return change.PatchResult{}, nil, false, false
+	}
+	state := acquisition.state
+	acquisition.state = nil
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if !state.valid {
+		return change.PatchResult{}, nil, false, false
+	}
+	result, native, prepare := state.result, state.native, state.prepare
+	state.result = change.PatchResult{}
+	state.native = nil
+	state.valid = false
+	state.prepare = false
+	return result, native, prepare, true
 }
 
 // LoadPatch loads and prepares a patch without scheduler integration.
 func (service *Service) LoadPatch(
 	ctx context.Context,
-	document *Document,
-	request review.PatchRequest,
-) (review.PatchResult, error) {
-	acquisition, err := service.AcquirePatch(ctx, document, request)
+	opened Opened,
+	revision *Revision,
+	request change.PatchRequest,
+) (change.PatchResult, error) {
+	acquisition, err := service.AcquirePatch(ctx, opened, revision, request)
 	if err != nil {
-		return review.PatchResult{}, err
+		return change.PatchResult{}, err
 	}
 	defer acquisition.Close()
 	return acquisition.Finish(ctx, directCPUAdmission)
@@ -94,28 +124,29 @@ func (service *Service) LoadPatch(
 // AcquirePatch performs validation, filesystem inspection, and Git acquisition only.
 func (service *Service) AcquirePatch(
 	ctx context.Context,
-	document *Document,
-	request review.PatchRequest,
+	opened Opened,
+	revision *Revision,
+	request change.PatchRequest,
 ) (PatchAcquisition, error) {
-	if document == nil {
-		return PatchAcquisition{}, errors.New("source document is nil")
+	if revision == nil || revision.retired {
+		return PatchAcquisition{}, errors.New("source revision is unavailable")
 	}
 
-	result := review.PatchResult{
+	result := change.PatchResult{
 		Workspace: request.Workspace,
 		Handle:    request.Handle,
 	}
-	if request.Handle.SourceID() != document.snapshot.SourceID() {
+	if request.Handle.SourceID() != opened.snapshot.SourceID() {
 		return PatchAcquisition{}, errors.New("patch request has a stale source identity")
 	}
 	fileID := request.Handle.FileID()
-	file, ok := document.snapshot.File(fileID)
+	file, ok := opened.snapshot.File(fileID)
 	if !ok || file.PatchHandle() != request.Handle {
 		return PatchAcquisition{}, errors.New("patch request has an invalid file identity")
 	}
 
-	if document.revision.repository == nil {
-		return PatchAcquisition{}, errors.New("source document has no native repository revision")
+	if revision.state.repository == nil {
+		return PatchAcquisition{}, errors.New("source revision has no native repository")
 	}
 	oldPath, newPath := "", ""
 	if path, ok := file.OldPath(); ok {
@@ -124,60 +155,67 @@ func (service *Service) AcquirePatch(
 	if path, ok := file.NewPath(); ok {
 		newPath = string(path.Raw())
 	}
-	if _, conflict := document.revision.unmerged[primaryAvailablePath(oldPath, newPath)]; conflict {
-		result.Status = review.PatchUnavailable
-		result.Detail = review.PatchDetail("unmerged index path has no single prepared patch")
-		return PatchAcquisition{result: result, valid: true}, nil
+	if _, conflict := revision.state.unmerged[primaryAvailablePath(oldPath, newPath)]; conflict {
+		result.Status = change.PatchUnavailable
+		result.Detail = change.PatchDetail("unmerged index path has no single prepared patch")
+		return newPatchAcquisition(result, nil, false), nil
 	}
-	native, err := acquireNativePatch(ctx, document, file, request.Context)
+	native, err := acquireNativePatch(ctx, revision, file, request.Context)
 	if err != nil {
 		if strings.Contains(err.Error(), "submodule") {
-			result.Status = review.PatchUnavailable
-			result.Detail = review.PatchDetail(boundedText(err.Error(), 16<<10))
-			return PatchAcquisition{result: result, valid: true}, nil
+			result.Status = change.PatchUnavailable
+			result.Detail = change.PatchDetail(boundedText(err.Error(), 16<<10))
+			return newPatchAcquisition(result, nil, false), nil
 		}
 		return PatchAcquisition{}, err
 	}
-	return PatchAcquisition{
-		result: result, native: native, valid: true, prepare: true,
-	}, nil
+	return newPatchAcquisition(result, native, true), nil
+}
+
+func newPatchAcquisition(
+	result change.PatchResult,
+	native *nativePatchInput,
+	prepare bool,
+) PatchAcquisition {
+	return PatchAcquisition{state: &patchAcquisitionState{
+		result: result, native: native, valid: true, prepare: prepare,
+	}}
 }
 
 // SyntaxAcquisition owns one Git blob until CPU preparation completes.
 type SyntaxAcquisition struct {
-	identity review.SyntaxIdentity
-	lines    []review.LineNumber
+	state *syntaxAcquisitionState
+}
+
+type syntaxAcquisitionState struct {
+	identity change.SyntaxIdentity
+	lines    []change.LineNumber
 	blob     []byte
 	valid    bool
+	mu       sync.Mutex
 }
 
 // Close releases an unprepared blob.
 func (acquisition *SyntaxAcquisition) Close() {
-	if acquisition == nil {
-		return
-	}
-	*acquisition = SyntaxAcquisition{}
+	acquisition.consume()
 }
 
 // Finish consumes a blob and performs only cancellable CPU preparation.
 func (acquisition *SyntaxAcquisition) Finish(
 	ctx context.Context,
 	runCPU CPUAdmission,
-) (*review.PreparedSyntax, error) {
-	if acquisition == nil || !acquisition.valid {
-		return nil, errors.New("syntax acquisition is invalid")
-	}
+) (*change.PreparedSyntax, error) {
 	if runCPU == nil {
 		return nil, errors.New("syntax CPU admission is nil")
 	}
-	identity := acquisition.identity
-	lines := acquisition.lines
-	blob := acquisition.blob
-	acquisition.Close()
-	var prepared *review.PreparedSyntax
+	identity, lines, blob, ok := acquisition.consume()
+	if !ok {
+		return nil, errors.New("syntax acquisition is invalid")
+	}
+	var prepared *change.PreparedSyntax
 	var prepareErr error
 	if err := runCPU(ctx, func() error {
-		prepared, prepareErr = review.PrepareSyntaxCancellable(
+		prepared, prepareErr = change.PrepareSyntaxCancellable(
 			func() error { return context.Cause(ctx) },
 			identity,
 			lines,
@@ -193,34 +231,60 @@ func (acquisition *SyntaxAcquisition) Finish(
 	return prepared, nil
 }
 
+func (acquisition *SyntaxAcquisition) consume() (
+	change.SyntaxIdentity,
+	[]change.LineNumber,
+	[]byte,
+	bool,
+) {
+	if acquisition == nil || acquisition.state == nil {
+		return change.SyntaxIdentity{}, nil, nil, false
+	}
+	state := acquisition.state
+	acquisition.state = nil
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if !state.valid {
+		return change.SyntaxIdentity{}, nil, nil, false
+	}
+	identity, lines, blob := state.identity, state.lines, state.blob
+	state.identity = change.SyntaxIdentity{}
+	state.lines = nil
+	state.blob = nil
+	state.valid = false
+	return identity, lines, blob, true
+}
+
 // LoadSyntax loads syntax without scheduler integration.
 func (service *Service) LoadSyntax(
 	ctx context.Context,
-	document *Document,
-	request review.SyntaxRequest,
-) (review.SyntaxResult, error) {
-	return service.LoadSyntaxWithCPUAdmission(ctx, document, request, directCPUAdmission)
+	opened Opened,
+	revision *Revision,
+	request change.SyntaxRequest,
+) (change.SyntaxResult, error) {
+	return service.LoadSyntaxWithCPUAdmission(ctx, opened, revision, request, directCPUAdmission)
 }
 
 // LoadSyntaxWithCPUAdmission acquires Git blobs outside CPU admission and
 // prepares each acquired blob synchronously under admission.
 func (service *Service) LoadSyntaxWithCPUAdmission(
 	ctx context.Context,
-	document *Document,
-	request review.SyntaxRequest,
+	opened Opened,
+	revision *Revision,
+	request change.SyntaxRequest,
 	runCPU CPUAdmission,
-) (review.SyntaxResult, error) {
-	result := review.SyntaxResult{
+) (change.SyntaxResult, error) {
+	result := change.SyntaxResult{
 		Operation: request.Operation,
 		Workspace: request.Workspace,
 		Source:    request.Source,
 		File:      request.File,
 	}
-	if document == nil || request.Operation == 0 ||
-		request.Source != document.Snapshot().SourceID() {
+	if revision == nil || revision.retired || request.Operation == 0 ||
+		request.Source != opened.Snapshot().SourceID() {
 		return result, errors.New("syntax request has a stale source identity")
 	}
-	file, ok := document.Snapshot().File(request.File)
+	file, ok := opened.Snapshot().File(request.File)
 	if !ok || len(request.Demands) == 0 {
 		return result, errors.New("syntax request file is unavailable")
 	}
@@ -234,12 +298,12 @@ func (service *Service) LoadSyntaxWithCPUAdmission(
 			return result, errors.New("syntax request content identity is stale")
 		}
 		switch demand.Side {
-		case review.LineOld:
+		case change.LineOld:
 			if seenOld {
 				return result, errors.New("syntax request repeats old-side demand")
 			}
 			seenOld = true
-		case review.LineNew:
+		case change.LineNew:
 			if seenNew {
 				return result, errors.New("syntax request repeats new-side demand")
 			}
@@ -252,53 +316,53 @@ func (service *Service) LoadSyntaxWithCPUAdmission(
 		content := demand.Identity.Content()
 		var blob []byte
 		var err error
-		if document.revision.repository == nil {
+		if revision.state.repository == nil {
 			return result, errors.New("source document has no native repository revision")
 		}
-		blob, err = readNativeRecordSide(ctx, document.revision.repository, &content)
-		if err == nil && int64(len(blob)) > review.MaxBlobBytes {
-			err = &LimitError{Resource: LimitDiffInputBytes, Limit: uint64(review.MaxBlobBytes)}
+		blob, err = readNativeRecordSide(ctx, revision.state.repository, &content)
+		if err == nil && int64(len(blob)) > change.MaxBlobBytes {
+			err = &LimitError{Resource: LimitDiffInputBytes, Limit: uint64(change.MaxBlobBytes)}
 		}
 		if err != nil {
 			switch {
 			case contextCancellation(ctx, err):
-				result.Status = review.SyntaxCancelled
+				result.Status = change.SyntaxCancelled
 			case errors.Is(err, ErrSourceLimited):
-				result.Status = review.SyntaxLimited
+				result.Status = change.SyntaxLimited
 			default:
-				result.Status = review.SyntaxUnavailable
+				result.Status = change.SyntaxUnavailable
 			}
 			result.Detail = boundedOperationDetail(err.Error())
 			return result, nil
 		}
-		acquisition := SyntaxAcquisition{
+		acquisition := SyntaxAcquisition{state: &syntaxAcquisitionState{
 			identity: demand.Identity,
 			lines:    demand.Lines,
 			blob:     blob,
 			valid:    true,
-		}
+		}}
 		prepared, err := acquisition.Finish(ctx, runCPU)
 		acquisition.Close()
 		if err != nil {
 			switch {
 			case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-				result.Status = review.SyntaxCancelled
-			case errors.Is(err, review.ErrSyntaxLimited):
-				result.Status = review.SyntaxLimited
+				result.Status = change.SyntaxCancelled
+			case errors.Is(err, change.ErrSyntaxLimited):
+				result.Status = change.SyntaxLimited
 			default:
-				result.Status = review.SyntaxFailed
+				result.Status = change.SyntaxFailed
 			}
 			result.Detail = boundedOperationDetail(err.Error())
 			return result, nil
 		}
 		switch demand.Side {
-		case review.LineOld:
+		case change.LineOld:
 			result.Old = prepared
-		case review.LineNew:
+		case change.LineNew:
 			result.New = prepared
 		}
 	}
-	result.Status = review.SyntaxReady
+	result.Status = change.SyntaxReady
 	return result, nil
 }
 
@@ -316,13 +380,13 @@ func contextCancellation(ctx context.Context, err error) bool {
 // Reload performs the reload operation.
 func (service *Service) Reload(
 	ctx context.Context,
-	document *Document,
+	opened Opened,
+	revision *Revision,
 	options OpenOptions,
 	runCPU CPUAdmission,
-) (*Document, error) {
-	if document == nil {
-		return nil, errors.New("source document is nil")
+) (Opened, *Revision, error) {
+	if revision == nil || revision.retired {
+		return Opened{}, nil, errors.New("source revision is unavailable")
 	}
-	target := document.target
-	return service.openWithCPU(ctx, target, options, runCPU)
+	return service.openWithCPU(ctx, OpenRequest{Target: opened.target, Options: options}, runCPU)
 }

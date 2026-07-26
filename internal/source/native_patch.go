@@ -7,21 +7,21 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 type nativePatchInput struct { //nolint:govet // Field order follows old/new side ownership.
 	repository *repositorySession
 	oldPath    string
 	newPath    string
-	oldMode    review.FileMode
-	newMode    review.FileMode
-	oldOID     review.ObjectID
-	newOID     review.ObjectID
+	oldMode    change.FileMode
+	newMode    change.FileMode
+	oldOID     change.ObjectID
+	newOID     change.ObjectID
 	hasOldOID  bool
 	hasNewOID  bool
-	context    review.PatchContext
-	kind       review.ChangeKind
+	context    change.PatchContext
+	kind       change.ChangeKind
 	similarity uint16
 	binary     bool
 }
@@ -36,9 +36,9 @@ type nativePatchRow struct {
 
 func acquireNativePatch(
 	ctx context.Context,
-	document *Document,
-	file review.File,
-	patchContext review.PatchContext,
+	revision *Revision,
+	file change.File,
+	patchContext change.PatchContext,
 ) (*nativePatchInput, error) {
 	oldPath := ""
 	if path, ok := file.OldPath(); ok {
@@ -48,29 +48,29 @@ func acquireNativePatch(
 	if path, ok := file.NewPath(); ok {
 		newPath = string(path.Raw())
 	}
-	if _, conflict := document.revision.unmerged[primaryAvailablePath(oldPath, newPath)]; conflict {
+	if _, conflict := revision.state.unmerged[primaryAvailablePath(oldPath, newPath)]; conflict {
 		return nil, errors.New("unmerged index path has no single prepared patch")
 	}
-	change := file.Change()
-	if change.Kind() == review.ChangeSubmodule {
+	fileChange := file.Change()
+	if fileChange.Kind() == change.ChangeSubmodule {
 		return nil, errors.New("submodule changes do not have a text patch")
 	}
 	input := &nativePatchInput{
-		repository: document.revision.repository,
+		repository: revision.state.repository,
 		oldPath:    oldPath,
 		newPath:    newPath,
 		context:    patchContext,
-		kind:       change.Kind(),
-		binary:     change.Kind() == review.ChangeBinary,
+		kind:       fileChange.Kind(),
+		binary:     fileChange.Kind() == change.ChangeBinary,
 	}
-	if mode, ok := change.Mode(); ok {
+	if mode, ok := fileChange.Mode(); ok {
 		input.oldMode, input.newMode = mode.Old(), mode.New()
 	} else {
-		zeroMode, err := review.NewFileMode("000000")
+		zeroMode, err := change.NewFileMode("000000")
 		if err != nil {
 			return nil, err
 		}
-		regularMode, err := review.NewFileMode("100644")
+		regularMode, err := change.NewFileMode("100644")
 		if err != nil {
 			return nil, err
 		}
@@ -83,20 +83,20 @@ func acquireNativePatch(
 			input.newMode = regularMode
 		}
 	}
-	if oid, ok := file.Content(review.LineOld); ok {
+	if oid, ok := file.Content(change.LineOld); ok {
 		input.oldOID, input.hasOldOID = oid, true
-		if err := document.revision.repository.pinObjectContent(ctx, reviewHash(oid)); err != nil {
+		if err := revision.state.repository.pinObjectContent(ctx, reviewHash(oid)); err != nil {
 			return nil, err
 		}
 	}
-	if oid, ok := file.Content(review.LineNew); ok {
+	if oid, ok := file.Content(change.LineNew); ok {
 		input.newOID, input.hasNewOID = oid, true
-		if err := document.revision.repository.pinObjectContent(ctx, reviewHash(oid)); err != nil {
+		if err := revision.state.repository.pinObjectContent(ctx, reviewHash(oid)); err != nil {
 			return nil, err
 		}
 	}
 	if input.hasOldOID && input.hasNewOID {
-		input.similarity = document.revision.similarities[nativeSimilarityPair{
+		input.similarity = revision.state.similarities[nativeSimilarityPair{
 			old: input.oldOID,
 			new: input.newOID,
 		}]
@@ -110,7 +110,7 @@ func acquireNativePatch(
 func prepareNativePatch(
 	ctx context.Context,
 	input *nativePatchInput,
-) (*review.PreparedPatch, error) {
+) (*change.PreparedPatch, error) {
 	if input == nil {
 		return nil, errors.New("native patch input is nil")
 	}
@@ -121,7 +121,7 @@ func prepareNativePatch(
 		lines = append(lines, structuredMetadata(
 			[]byte("Binary files "+oldName+" and "+newName+" differ"),
 		))
-		return review.PrepareStructuredPatchCancellable(
+		return change.PrepareStructuredPatchCancellable(
 			func() error { return context.Cause(ctx) }, lines,
 		)
 	}
@@ -132,11 +132,11 @@ func prepareNativePatch(
 	if !nativeDiffFitsMemory(oldSize, newSize) {
 		return prepareNativeDiskPatch(ctx, input, lines, oldSize, newSize)
 	}
-	oldContents, err := readNativePatchSide(ctx, input, review.LineOld)
+	oldContents, err := readNativePatchSide(ctx, input, change.LineOld)
 	if err != nil {
 		return nil, err
 	}
-	newContents, err := readNativePatchSide(ctx, input, review.LineNew)
+	newContents, err := readNativePatchSide(ctx, input, change.LineNew)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +162,7 @@ func prepareNativePatch(
 		return nil, err
 	}
 	if len(changed) == 0 {
-		return review.PrepareStructuredPatchCancellable(
+		return change.PrepareStructuredPatchCancellable(
 			func() error { return context.Cause(ctx) }, lines,
 		)
 	}
@@ -199,8 +199,8 @@ func prepareNativePatch(
 		}
 		header := []byte("@@ -" + patchRange(oldStart, oldCount) +
 			" +" + patchRange(newStart, newCount) + " @@")
-		lines = append(lines, review.StructuredPatchLine{
-			Text: header, Kind: review.PatchLineHunkHeader,
+		lines = append(lines, change.StructuredPatchLine{
+			Text: header, Kind: change.PatchLineHunkHeader,
 			Hunk: uint32(hunkIndex), HasHunk: true,
 		})
 		for _, row := range rows[window[0]:window[1]] {
@@ -213,7 +213,7 @@ func prepareNativePatch(
 			}
 		}
 	}
-	return review.PrepareStructuredPatchCancellable(
+	return change.PrepareStructuredPatchCancellable(
 		func() error { return context.Cause(ctx) }, lines,
 	)
 }
@@ -222,7 +222,7 @@ func nativePatchContentSizes(input *nativePatchInput) (uint64, uint64, error) {
 	if input == nil || input.repository == nil {
 		return 0, 0, errors.New("native patch repository is unavailable")
 	}
-	size := func(oid review.ObjectID, present bool) (uint64, error) {
+	size := func(oid change.ObjectID, present bool) (uint64, error) {
 		if !present {
 			return 0, nil
 		}
@@ -243,15 +243,15 @@ func nativePatchContentSizes(input *nativePatchInput) (uint64, uint64, error) {
 func readNativePatchSide(
 	ctx context.Context,
 	input *nativePatchInput,
-	side review.LineSide,
+	side change.LineSide,
 ) ([]byte, error) {
 	switch side {
-	case review.LineOld:
+	case change.LineOld:
 		if !input.hasOldOID {
 			return nil, nil
 		}
 		return readNativeRecordSide(ctx, input.repository, &input.oldOID)
-	case review.LineNew:
+	case change.LineNew:
 		if !input.hasNewOID {
 			return nil, nil
 		}
@@ -274,9 +274,9 @@ type diskPatchWindow struct {
 func prepareNativeDiskPatch(
 	ctx context.Context,
 	input *nativePatchInput,
-	metadata []review.StructuredPatchLine,
+	metadata []change.StructuredPatchLine,
 	oldSize, newSize uint64,
-) (_ *review.PreparedPatch, returnErr error) {
+) (_ *change.PreparedPatch, returnErr error) {
 	oldOID, newOID := nativePatchOIDs(input)
 	oldContent, err := openPinnedDiskContent(ctx, input.repository, oldOID)
 	if err != nil {
@@ -300,7 +300,7 @@ func prepareNativeDiskPatch(
 		return nil, err
 	}
 	if len(windows) == 0 {
-		return review.PrepareStructuredPatchCancellable(
+		return change.PrepareStructuredPatchCancellable(
 			func() error { return context.Cause(ctx) }, metadata,
 		)
 	}
@@ -308,16 +308,16 @@ func prepareNativeDiskPatch(
 		structuredMetadata([]byte("--- "+nativePatchSideName("a", input.oldPath))),
 		structuredMetadata([]byte("+++ "+nativePatchSideName("b", input.newPath))),
 	)
-	return review.PrepareGeneratedPatchCancellable(
+	return change.PrepareGeneratedPatchCancellable(
 		func() error { return context.Cause(ctx) },
-		func(yield func(review.StructuredPatchLine) error) error {
+		func(yield func(change.StructuredPatchLine) error) error {
 			return generateDiskPatch(ctx, analysis, windows, metadata, yield)
 		},
 	)
 }
 
-func nativePatchOIDs(input *nativePatchInput) (*review.ObjectID, *review.ObjectID) {
-	var oldOID, newOID *review.ObjectID
+func nativePatchOIDs(input *nativePatchInput) (*change.ObjectID, *change.ObjectID) {
+	var oldOID, newOID *change.ObjectID
 	if input.hasOldOID {
 		oldOID = &input.oldOID
 	}
@@ -330,13 +330,13 @@ func nativePatchOIDs(input *nativePatchInput) (*review.ObjectID, *review.ObjectI
 func diskPatchWindows(
 	ctx context.Context,
 	analysis *diskDiffAnalysis,
-	patchContext review.PatchContext,
+	patchContext change.PatchContext,
 ) ([]diskPatchWindow, error) {
 	if analysis == nil || analysis.edits == nil || analysis.additions+analysis.deletions == 0 {
 		return nil, nil
 	}
 	contextLines := uint64(patchContext.UnifiedLines())
-	windows := make([]diskPatchWindow, 0, min(analysis.editCount, uint64(review.MaxHunks)))
+	windows := make([]diskPatchWindow, 0, min(analysis.editCount, uint64(change.MaxHunks)))
 	row := uint64(0)
 	for index := range analysis.editCount {
 		if index%4_096 == 0 {
@@ -359,8 +359,8 @@ func diskPatchWindows(
 			if len(windows) != 0 && start <= windows[len(windows)-1].rowEnd {
 				windows[len(windows)-1].rowEnd = max(windows[len(windows)-1].rowEnd, end)
 			} else {
-				if len(windows) == review.MaxHunks {
-					return nil, fmt.Errorf("patch hunks exceed %d", review.MaxHunks)
+				if len(windows) == change.MaxHunks {
+					return nil, fmt.Errorf("patch hunks exceed %d", change.MaxHunks)
 				}
 				windows = append(windows, diskPatchWindow{rowStart: start, rowEnd: end})
 			}
@@ -445,8 +445,8 @@ func generateDiskPatch(
 	ctx context.Context,
 	analysis *diskDiffAnalysis,
 	windows []diskPatchWindow,
-	metadata []review.StructuredPatchLine,
-	yield func(review.StructuredPatchLine) error,
+	metadata []change.StructuredPatchLine,
+	yield func(change.StructuredPatchLine) error,
 ) error {
 	for _, line := range metadata {
 		if err := yield(line); err != nil {
@@ -470,8 +470,8 @@ func generateDiskPatch(
 			window := windows[windowIndex]
 			if row <= window.rowStart {
 				header := diskPatchHunkHeader(window)
-				if err := yield(review.StructuredPatchLine{
-					Text: header, Kind: review.PatchLineHunkHeader,
+				if err := yield(change.StructuredPatchLine{
+					Text: header, Kind: change.PatchLineHunkHeader,
 					Hunk: uint32(windowIndex), HasHunk: true,
 				}); err != nil {
 					return err
@@ -537,34 +537,34 @@ func diskStructuredPatchLine(
 	delta uint64,
 	hunk uint32,
 	buffer []byte,
-) (review.StructuredPatchLine, *review.StructuredPatchLine, []byte, error) {
+) (change.StructuredPatchLine, *change.StructuredPatchLine, []byte, error) {
 	var side *diskDiffSide
 	var index uint64
-	line := review.StructuredPatchLine{Hunk: hunk, HasHunk: true}
+	line := change.StructuredPatchLine{Hunk: hunk, HasHunk: true}
 	switch edit.kind {
 	case nativeEditEqual:
 		side, index = kernel.old, edit.oldStart+delta
-		line.Kind = review.PatchLineContext
+		line.Kind = change.PatchLineContext
 		line.OldLine = uint32(index + 1)                 //nolint:gosec // Disk token admission is below uint32.
 		line.NewLine = uint32(edit.newStart + delta + 1) //nolint:gosec // Disk token admission is below uint32.
 	case nativeEditDelete:
 		side, index = kernel.old, edit.oldStart+delta
-		line.Kind = review.PatchLineDeletion
+		line.Kind = change.PatchLineDeletion
 		line.OldLine = uint32(index + 1) //nolint:gosec // Disk token admission is below uint32.
 	case nativeEditAdd:
 		side, index = kernel.new, edit.newStart+delta
-		line.Kind = review.PatchLineAddition
+		line.Kind = change.PatchLineAddition
 		line.NewLine = uint32(index + 1) //nolint:gosec // Disk token admission is below uint32.
 	default:
-		return review.StructuredPatchLine{}, nil, buffer, errors.New("disk patch edit kind is invalid")
+		return change.StructuredPatchLine{}, nil, buffer, errors.New("disk patch edit kind is invalid")
 	}
 	record, err := side.line(index)
 	if err != nil {
-		return review.StructuredPatchLine{}, nil, buffer, err
+		return change.StructuredPatchLine{}, nil, buffer, err
 	}
-	if record.length >= uint64(review.MaxPatchBytes) {
-		return review.StructuredPatchLine{}, nil, buffer,
-			fmt.Errorf("patch exceeds %d bytes", review.MaxPatchBytes)
+	if record.length >= uint64(change.MaxPatchBytes) {
+		return change.StructuredPatchLine{}, nil, buffer,
+			fmt.Errorf("patch exceeds %d bytes", change.MaxPatchBytes)
 	}
 	required := int(record.length) + 1
 	if cap(buffer) < required {
@@ -582,47 +582,47 @@ func diskStructuredPatchLine(
 	}
 	if record.length != 0 {
 		if _, err := side.content.ReadAt(buffer[1:], int64(record.offset)); err != nil { //nolint:gosec // Content limits bound the offset.
-			return review.StructuredPatchLine{}, nil, buffer, err
+			return change.StructuredPatchLine{}, nil, buffer, err
 		}
 	}
 	line.Text = buffer
 	if record.terminated {
 		return line, nil, buffer, nil
 	}
-	marker := &review.StructuredPatchLine{
+	marker := &change.StructuredPatchLine{
 		Text: []byte(`\ No newline at end of file`),
-		Kind: review.PatchLineNoNewline, Hunk: hunk, HasHunk: true,
+		Kind: change.PatchLineNoNewline, Hunk: hunk, HasHunk: true,
 		OldMarker: edit.kind != nativeEditAdd,
 		NewMarker: edit.kind != nativeEditDelete,
 	}
 	return line, marker, buffer, nil
 }
 
-func nativePatchMetadata(input *nativePatchInput) []review.StructuredPatchLine {
+func nativePatchMetadata(input *nativePatchInput) []change.StructuredPatchLine {
 	oldName := nativePatchDiffName("a", input.oldPath, input.newPath)
 	newName := nativePatchDiffName("b", input.newPath, input.oldPath)
-	lines := []review.StructuredPatchLine{structuredMetadata(
+	lines := []change.StructuredPatchLine{structuredMetadata(
 		[]byte("diff --git " + oldName + " " + newName),
 	)}
 	switch input.kind {
-	case review.ChangeAdded:
+	case change.ChangeAdded:
 		lines = append(lines, structuredMetadata([]byte("new file mode "+input.newMode.String())))
-	case review.ChangeDeleted:
+	case change.ChangeDeleted:
 		lines = append(lines, structuredMetadata([]byte("deleted file mode "+input.oldMode.String())))
-	case review.ChangeRenamed, review.ChangeRenameOnly:
+	case change.ChangeRenamed, change.ChangeRenameOnly:
 		lines = appendSimilarityMetadata(lines, input.similarity)
 		lines = append(lines,
 			structuredMetadata([]byte("rename from "+quoteGitPath(input.oldPath))),
 			structuredMetadata([]byte("rename to "+quoteGitPath(input.newPath))),
 		)
-	case review.ChangeCopied:
+	case change.ChangeCopied:
 		lines = appendSimilarityMetadata(lines, input.similarity)
 		lines = append(lines,
 			structuredMetadata([]byte("copy from "+quoteGitPath(input.oldPath))),
 			structuredMetadata([]byte("copy to "+quoteGitPath(input.newPath))),
 		)
-	case review.ChangeModified, review.ChangeBinary, review.ChangeModeOnly,
-		review.ChangeSubmodule, review.ChangeObjectTypeChanged:
+	case change.ChangeModified, change.ChangeBinary, change.ChangeModeOnly,
+		change.ChangeSubmodule, change.ChangeObjectTypeChanged:
 	}
 	if input.oldPath != "" && input.newPath != "" && input.oldMode != input.newMode {
 		lines = append(lines,
@@ -648,9 +648,9 @@ func nativePatchMetadata(input *nativePatchInput) []review.StructuredPatchLine {
 }
 
 func appendSimilarityMetadata(
-	lines []review.StructuredPatchLine,
+	lines []change.StructuredPatchLine,
 	score uint16,
-) []review.StructuredPatchLine {
+) []change.StructuredPatchLine {
 	if score == 0 {
 		return lines
 	}
@@ -660,8 +660,8 @@ func appendSimilarityMetadata(
 	)))
 }
 
-func structuredMetadata(text []byte) review.StructuredPatchLine {
-	return review.StructuredPatchLine{Text: text, Kind: review.PatchLineMetadata}
+func structuredMetadata(text []byte) change.StructuredPatchLine {
+	return change.StructuredPatchLine{Text: text, Kind: change.PatchLineMetadata}
 }
 
 func expandNativePatchRows(
@@ -678,8 +678,8 @@ func expandNativePatchRows(
 			}
 		}
 		for range edit.count {
-			if len(rows) == review.MaxPatchLines {
-				return nil, nil, &LimitError{Resource: LimitDiffLineTokens, Limit: review.MaxPatchLines}
+			if len(rows) == change.MaxPatchLines {
+				return nil, nil, &LimitError{Resource: LimitDiffLineTokens, Limit: change.MaxPatchLines}
 			}
 			row := nativePatchRow{
 				kind: edit.kind, oldIndex: -1, newIndex: -1,
@@ -726,18 +726,18 @@ func nativeStructuredRow(
 	oldLines, newLines []nativeLine,
 	row nativePatchRow,
 	hunk uint32,
-) (review.StructuredPatchLine, *review.StructuredPatchLine) {
-	structured := review.StructuredPatchLine{Hunk: hunk, HasHunk: true}
+) (change.StructuredPatchLine, *change.StructuredPatchLine) {
+	structured := change.StructuredPatchLine{Hunk: hunk, HasHunk: true}
 	var contents []byte
-	marker := review.StructuredPatchLine{
+	marker := change.StructuredPatchLine{
 		Text: []byte(`\ No newline at end of file`),
-		Kind: review.PatchLineNoNewline, Hunk: hunk, HasHunk: true,
+		Kind: change.PatchLineNoNewline, Hunk: hunk, HasHunk: true,
 	}
 	switch row.kind {
 	case nativeEditEqual:
 		line := oldLines[row.oldIndex]
 		contents = oldContents[line.start:line.end]
-		structured.Kind = review.PatchLineContext
+		structured.Kind = change.PatchLineContext
 		structured.OldLine = uint32(row.oldIndex + 1) //nolint:gosec // patch admission bounds rows below uint32.
 		structured.NewLine = uint32(row.newIndex + 1) //nolint:gosec // patch admission bounds rows below uint32.
 		if !line.terminated {
@@ -746,7 +746,7 @@ func nativeStructuredRow(
 	case nativeEditDelete:
 		line := oldLines[row.oldIndex]
 		contents = oldContents[line.start:line.end]
-		structured.Kind = review.PatchLineDeletion
+		structured.Kind = change.PatchLineDeletion
 		structured.OldLine = uint32(row.oldIndex + 1) //nolint:gosec // patch admission bounds rows below uint32.
 		if !line.terminated {
 			marker.OldMarker = true
@@ -754,7 +754,7 @@ func nativeStructuredRow(
 	case nativeEditAdd:
 		line := newLines[row.newIndex]
 		contents = newContents[line.start:line.end]
-		structured.Kind = review.PatchLineAddition
+		structured.Kind = change.PatchLineAddition
 		structured.NewLine = uint32(row.newIndex + 1) //nolint:gosec // patch admission bounds rows below uint32.
 		if !line.terminated {
 			marker.NewMarker = true

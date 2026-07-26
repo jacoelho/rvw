@@ -9,7 +9,7 @@ import (
 	"os"
 
 	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 type nativeLine struct {
@@ -85,7 +85,7 @@ func populateNativeDiff(
 	}
 	oldKind := objectKind(record.oldMode)
 	newKind := objectKind(record.newMode)
-	if oldKind == review.ObjectGitlink || newKind == review.ObjectGitlink {
+	if oldKind == change.ObjectGitlink || newKind == change.ObjectGitlink {
 		return nil
 	}
 	if err := pinNativeRecordSides(ctx, session, record); err != nil {
@@ -139,8 +139,8 @@ func populateNativeDiff(
 		case nativeEditEqual:
 		}
 	}
-	if additions > uint64(review.MaxAdditions) || deletions > uint64(review.MaxAdditions) {
-		return &LimitError{Resource: LimitDiffLineTokens, Limit: uint64(review.MaxAdditions)}
+	if additions > uint64(change.MaxAdditions) || deletions > uint64(change.MaxAdditions) {
+		return &LimitError{Resource: LimitDiffLineTokens, Limit: uint64(change.MaxAdditions)}
 	}
 	record.additions = uint32(additions)
 	record.deletions = uint32(deletions)
@@ -153,10 +153,10 @@ func pinNativeRecordSides(
 	record *diffRecord,
 ) error {
 	for _, side := range []struct {
-		oid  *review.ObjectID
-		mode review.FileMode
+		oid  *change.ObjectID
+		mode change.FileMode
 	}{{record.oldOID, record.oldMode}, {record.newOID, record.newMode}} {
-		if side.oid == nil || objectKind(side.mode) != review.ObjectBlob {
+		if side.oid == nil || objectKind(side.mode) != change.ObjectBlob {
 			continue
 		}
 		if err := session.pinObjectContent(ctx, plumbing.NewHash(side.oid.String())); err != nil {
@@ -170,7 +170,7 @@ func nativeRecordContentSizes(
 	session *repositorySession,
 	record *diffRecord,
 ) (uint64, uint64, error) {
-	size := func(oid *review.ObjectID) (uint64, error) {
+	size := func(oid *change.ObjectID) (uint64, error) {
 		if oid == nil {
 			return 0, nil
 		}
@@ -291,7 +291,7 @@ func nativeBinaryAttribute(
 func readNativeRecordSide(
 	ctx context.Context,
 	session *repositorySession,
-	oid *review.ObjectID,
+	oid *change.ObjectID,
 ) ([]byte, error) {
 	if oid == nil {
 		return nil, nil

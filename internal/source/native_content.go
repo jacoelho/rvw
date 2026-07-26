@@ -12,7 +12,7 @@ import (
 	"strconv"
 
 	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 type spooledContent struct {
@@ -90,8 +90,8 @@ func (session *repositorySession) pinObjectContent(
 func (session *repositorySession) captureWorktreeContent(
 	ctx context.Context,
 	path string,
-	indexMode review.FileMode,
-) (plumbing.Hash, review.FileMode, bool, error) {
+	indexMode change.FileMode,
+) (plumbing.Hash, change.FileMode, bool, error) {
 	if err := context.Cause(ctx); err != nil {
 		return plumbing.ZeroHash, "", false, err
 	}

@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"unicode/utf8"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 func encodePendingMutationBatch(
@@ -22,7 +22,7 @@ func encodePendingMutationBatchCancellable(
 	cancelled func() error,
 	effects []pendingWireEffect,
 ) ([]pendingMutationAlias, string, error) {
-	if len(effects) == 0 || len(effects) > review.MaxPendingMutationBatch {
+	if len(effects) == 0 || len(effects) > change.MaxPendingMutationBatch {
 		return nil, "", errors.New("pending mutation batch size is invalid")
 	}
 	aliases := make([]pendingMutationAlias, len(effects))
@@ -42,7 +42,7 @@ func encodePendingPayloadCancellable(
 	writeVariables func(*sourceJSONBuilder) error,
 ) (string, error) {
 	builder, builderErr := newCancellableSourceJSONBuilder(
-		review.MaxPendingMutationBatchBytes,
+		change.MaxPendingMutationBatchBytes,
 		cancelled,
 	)
 	if builderErr != nil {
@@ -75,7 +75,7 @@ func pendingMutationQuery(
 		return "", errors.New("pending mutation query inputs are incomplete")
 	}
 	builder, err := newCancellableSourceJSONBuilder(
-		review.MaxPendingMutationBatchBytes,
+		change.MaxPendingMutationBatchBytes,
 		cancelled,
 	)
 	if err != nil {
@@ -146,25 +146,25 @@ type pendingMutationOperationDescriptor struct {
 }
 
 func pendingMutationOperationFor(
-	kind review.PendingMutationKind,
+	kind change.PendingMutationKind,
 ) (pendingMutationOperationDescriptor, error) {
 	switch kind {
-	case review.PendingMutationReviewBody:
+	case change.PendingMutationReviewBody:
 		return pendingMutationOperationDescriptor{
 			typeName: updatePullRequestReviewInput,
 			field:    updatePullRequestReviewField,
 		}, nil
-	case review.PendingMutationUpdateComment:
+	case change.PendingMutationUpdateComment:
 		return pendingMutationOperationDescriptor{
 			typeName: "UpdatePullRequestReviewCommentInput",
 			field:    "updatePullRequestReviewComment",
 		}, nil
-	case review.PendingMutationDeleteComment:
+	case change.PendingMutationDeleteComment:
 		return pendingMutationOperationDescriptor{
 			typeName: "DeletePullRequestReviewCommentInput",
 			field:    "deletePullRequestReviewComment",
 		}, nil
-	case review.PendingMutationAddComment:
+	case change.PendingMutationAddComment:
 		return pendingMutationOperationDescriptor{
 			typeName: "AddPullRequestReviewThreadInput",
 			field:    "addPullRequestReviewThread",
@@ -204,24 +204,24 @@ func writePendingMutationVariables(
 func writePendingMutationInput(fields *pendingObjectWriter, effect pendingWireEffect) error {
 	mutation := effect.mutation
 	switch mutation.Kind() {
-	case review.PendingMutationReviewBody:
+	case change.PendingMutationReviewBody:
 		return fields.Strings(
 			graphqlReviewID, effect.reviewID,
 			graphqlBody, effect.after,
 			graphqlClientID, effect.clientMutationID,
 		)
-	case review.PendingMutationUpdateComment:
+	case change.PendingMutationUpdateComment:
 		return fields.Strings(
 			"pullRequestReviewCommentId", mutation.NodeID().String(),
 			graphqlBody, effect.after,
 			graphqlClientID, effect.clientMutationID,
 		)
-	case review.PendingMutationDeleteComment:
+	case change.PendingMutationDeleteComment:
 		return fields.Strings(
 			"id", mutation.NodeID().String(),
 			graphqlClientID, effect.clientMutationID,
 		)
-	case review.PendingMutationAddComment:
+	case change.PendingMutationAddComment:
 		return writePendingAddThreadInput(fields, effect)
 	default:
 		return errors.New("pending review mutation kind is invalid")
@@ -243,9 +243,9 @@ func writePendingAddThreadInput(fields *pendingObjectWriter, effect pendingWireE
 		return err
 	}
 	switch target.Subject() {
-	case review.PendingSubjectFile:
+	case change.PendingSubjectFile:
 		return fields.String("subjectType", "FILE")
-	case review.PendingSubjectLine:
+	case change.PendingSubjectLine:
 		startSide, start, side, line := target.Lines()
 		if line == nil {
 			return errors.New("pending review line addition has no line")
@@ -373,10 +373,10 @@ func pendingJSONStringBytesCancellable(
 				bytes += int64(utf8.RuneLen(character))
 			}
 		}
-		if bytes > review.MaxPendingMutationBatchBytes {
+		if bytes > change.MaxPendingMutationBatchBytes {
 			return bytes, fmt.Errorf(
 				"pending mutation string exceeds %d encoded bytes",
-				review.MaxPendingMutationBatchBytes,
+				change.MaxPendingMutationBatchBytes,
 			)
 		}
 		offset += size
@@ -494,22 +494,22 @@ func encodePendingSubmissionCancellable(
 
 func committedPendingSubmissionID(databaseID uint64) PublicationCommit {
 	return PublicationCommit{
-		Disposition:  review.PublicationDispositionCommitted,
+		Disposition:  change.PublicationDispositionCommitted,
 		RemoteReview: databaseID,
 	}
 }
 
 func unknownPendingSubmission(err error) PublicationCommit {
 	return PublicationCommit{
-		Disposition:  review.PublicationDispositionUnknown,
-		PendingPhase: review.PendingPublicationSubmitting,
+		Disposition:  change.PublicationDispositionUnknown,
+		PendingPhase: change.PendingPublicationSubmitting,
 		Detail:       boundedOperationDetail(err.Error()),
 	}
 }
 
 func (service *Service) acquirePendingSubmission(
 	ctx context.Context,
-	target review.PublicationTarget,
+	target change.PublicationTarget,
 	databaseID uint64,
 ) ([]byte, error) {
 	endpoint := "/repos/" + target.Repository() + "/pulls/" +
@@ -568,7 +568,7 @@ type pendingSubmissionResponseCollector struct {
 func classifyPendingSubmissionResponse(
 	ctx context.Context,
 	encoded []byte,
-	reviewID review.ReviewNodeID,
+	reviewID change.ReviewNodeID,
 	databaseID uint64,
 	expectedBody string,
 	expectedState string,

@@ -4,24 +4,24 @@ import (
 	"context"
 	"errors"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 // PendingPublicationReconciliationAcquisition owns bounded remote state until
 // CPU-only continuation classification completes.
 type PendingPublicationReconciliationAcquisition struct {
-	checked  *review.CheckedPublication
+	checked  *change.CheckedPublication
 	response []byte
-	fresh    review.PendingReview
-	request  review.ReconciliationRequest
-	phase    review.PendingPublicationPhase
+	fresh    change.PendingReview
+	request  change.ReconciliationRequest
+	phase    change.PendingPublicationPhase
 	valid    bool
 }
 
 // AcquirePendingPublicationReconciliation performs only remote acquisition.
 func (service *Service) AcquirePendingPublicationReconciliation(
 	ctx context.Context,
-	request review.ReconciliationRequest,
+	request change.ReconciliationRequest,
 	runCPU CPUAdmission,
 ) (*PendingPublicationReconciliationAcquisition, error) {
 	if runCPU == nil {
@@ -42,7 +42,7 @@ func (service *Service) AcquirePendingPublicationReconciliation(
 		valid:   true,
 	}
 	switch phase {
-	case review.PendingPublicationSubmitting:
+	case change.PendingPublicationSubmitting:
 		response, err := service.acquirePendingSubmission(
 			ctx,
 			checked.Target(),
@@ -52,7 +52,7 @@ func (service *Service) AcquirePendingPublicationReconciliation(
 			return nil, err
 		}
 		acquisition.response = response
-	case review.PendingPublicationSynchronizing, review.PendingPublicationIndeterminate:
+	case change.PendingPublicationSynchronizing, change.PendingPublicationIndeterminate:
 		fresh, err := service.acquirePendingReview(
 			ctx,
 			checked.Target(),
@@ -89,13 +89,13 @@ func (acquisition *PendingPublicationReconciliationAcquisition) ConstructionByte
 // TakePendingCapture transfers a synchronizing acquisition to the review
 // domain for one-pass classification, validation, and rebase preparation.
 func (acquisition *PendingPublicationReconciliationAcquisition) TakePendingCapture() (
-	review.PendingReview,
+	change.PendingReview,
 	bool,
 ) {
 	if acquisition == nil || !acquisition.valid || acquisition.checked == nil ||
-		acquisition.phase == review.PendingPublicationSubmitting ||
+		acquisition.phase == change.PendingPublicationSubmitting ||
 		acquisition.fresh.NodeID() == "" {
-		return review.PendingReview{}, false
+		return change.PendingReview{}, false
 	}
 	fresh := acquisition.fresh
 	acquisition.Close()
@@ -114,10 +114,10 @@ func (acquisition *PendingPublicationReconciliationAcquisition) Close() {
 // network I/O.
 func (acquisition *PendingPublicationReconciliationAcquisition) Finish(
 	ctx context.Context,
-) review.ReconciliationResult {
+) change.ReconciliationResult {
 	if acquisition == nil || !acquisition.valid || acquisition.checked == nil {
-		return review.ReconciliationResult{
-			Disposition: review.ReconciliationStillUnknown,
+		return change.ReconciliationResult{
+			Disposition: change.ReconciliationStillUnknown,
 			Detail:      boundedOperationDetail("pending reconciliation acquisition is unavailable"),
 		}
 	}
@@ -127,20 +127,20 @@ func (acquisition *PendingPublicationReconciliationAcquisition) Finish(
 	response := acquisition.response
 	phase := acquisition.phase
 	acquisition.Close()
-	result := review.ReconciliationResult{
+	result := change.ReconciliationResult{
 		Operation:   request.Operation,
 		Workspace:   request.Workspace,
 		Source:      request.Source,
-		Disposition: review.ReconciliationStillUnknown,
+		Disposition: change.ReconciliationStillUnknown,
 	}
 	view, ok := checked.Prepared().BorrowPendingPublication()
 	if !ok {
 		result.Detail = boundedOperationDetail("pending publication continuation is unavailable")
 		return result
 	}
-	if phase == review.PendingPublicationSubmitting {
+	if phase == change.PendingPublicationSubmitting {
 		mutation, exists := view.MutationAt(0)
-		if !exists || mutation.Kind() != review.PendingMutationReviewBody {
+		if !exists || mutation.Kind() != change.PendingMutationReviewBody {
 			result.Detail = boundedOperationDetail("pending review submission has no body effect")
 			return result
 		}
@@ -168,7 +168,7 @@ func (acquisition *PendingPublicationReconciliationAcquisition) Finish(
 		}
 		switch state {
 		case pendingSubmissionCommitted:
-			result.Disposition = review.ReconciliationCommitted
+			result.Disposition = change.ReconciliationCommitted
 			result.RemoteReview = view.BaselineDatabaseID().Uint64()
 			result.Detail = boundedOperationDetail("pending review submission confirmed")
 		case pendingSubmissionAbsent:
@@ -180,7 +180,7 @@ func (acquisition *PendingPublicationReconciliationAcquisition) Finish(
 		}
 		return result
 	}
-	classified, err := review.ClassifyPendingReconciliationCaptureCancellable(
+	classified, err := change.ClassifyPendingReconciliationCaptureCancellable(
 		func() error { return context.Cause(ctx) },
 		request,
 		fresh,
@@ -194,46 +194,46 @@ func (acquisition *PendingPublicationReconciliationAcquisition) Finish(
 
 func (service *Service) acquirePendingReview(
 	ctx context.Context,
-	target review.PublicationTarget,
-	nodeID review.ReviewNodeID,
+	target change.PublicationTarget,
+	nodeID change.ReviewNodeID,
 	databaseID uint64,
 	runCPU CPUAdmission,
-) (review.PendingReview, error) {
+) (change.PendingReview, error) {
 	details, err := publicationTargetDetails(target)
 	if err != nil {
-		return review.PendingReview{}, err
+		return change.PendingReview{}, err
 	}
 	metadata, err := service.pullRequestMetadata(ctx, details.Repository, details.Number, runCPU)
 	if err != nil {
-		return review.PendingReview{}, err
+		return change.PendingReview{}, err
 	}
 	details, err = validatePullRequestPayload(details.Repository, details.Number, metadata)
 	if err != nil {
-		return review.PendingReview{}, err
+		return change.PendingReview{}, err
 	}
 	fresh, status, detail := service.loadPendingReview(ctx, details, runCPU)
 	if cancellationErr := context.Cause(ctx); cancellationErr != nil {
-		return review.PendingReview{}, cancellationErr
+		return change.PendingReview{}, cancellationErr
 	}
-	if status != review.PendingReviewReady {
+	if status != change.PendingReviewReady {
 		message := "pending review reconciliation is " + status.String()
 		if !detail.IsEmpty() {
 			message += ": " + detail.String()
 		}
-		return review.PendingReview{}, errors.New(message)
+		return change.PendingReview{}, errors.New(message)
 	}
 	if fresh.NodeID() != nodeID || fresh.DatabaseID().Uint64() != databaseID {
-		return review.PendingReview{}, errors.New("pending review identity changed during reconciliation")
+		return change.PendingReview{}, errors.New("pending review identity changed during reconciliation")
 	}
 	return fresh, nil
 }
 
 func classifyPendingEffects(
 	ctx context.Context,
-	fresh review.PendingReview,
+	fresh change.PendingReview,
 	effects []pendingEffect,
 ) ([]pendingEffectState, error) {
-	comments := make(map[review.CommentNodeID]review.PendingComment, fresh.CommentCount())
+	comments := make(map[change.CommentNodeID]change.PendingComment, fresh.CommentCount())
 	markers := make(map[string]pendingMarkerMatch, fresh.CommentCount())
 	for start := 0; start < fresh.CommentCount(); start += 256 {
 		if err := context.Cause(ctx); err != nil {
@@ -262,16 +262,16 @@ func classifyPendingEffects(
 		}
 		mutation := effect.mutation
 		switch mutation.Kind() {
-		case review.PendingMutationReviewBody:
+		case change.PendingMutationReviewBody:
 			states[index] = classifyPendingBody(fresh.Body(), effect.after, effect.before)
-		case review.PendingMutationUpdateComment:
+		case change.PendingMutationUpdateComment:
 			comment, exists := comments[mutation.NodeID()]
 			if !exists {
 				states[index] = pendingEffectUnknown
 			} else {
 				states[index] = classifyPendingBody(comment.Body(), effect.after, effect.before)
 			}
-		case review.PendingMutationDeleteComment:
+		case change.PendingMutationDeleteComment:
 			comment, exists := comments[mutation.NodeID()]
 			switch {
 			case !exists:
@@ -281,7 +281,7 @@ func classifyPendingEffects(
 			default:
 				states[index] = pendingEffectUnknown
 			}
-		case review.PendingMutationAddComment:
+		case change.PendingMutationAddComment:
 			states[index] = classifyPendingAddition(
 				markers[effect.marker],
 				effect.after,
@@ -293,14 +293,14 @@ func classifyPendingEffects(
 }
 
 type pendingMarkerMatch struct {
-	comment review.PendingComment
+	comment change.PendingComment
 	count   int
 }
 
 func classifyPendingAddition(
 	match pendingMarkerMatch,
 	desired string,
-	target review.PendingCommentTarget,
+	target change.PendingCommentTarget,
 ) pendingEffectState {
 	if match.count == 0 {
 		return pendingEffectAbsent
@@ -322,7 +322,7 @@ func classifyPendingBody(raw, desired, baseline string) pendingEffectState {
 	return pendingEffectUnknown
 }
 
-func publicationTargetDetails(target review.PublicationTarget) (PullRequestDetails, error) {
+func publicationTargetDetails(target change.PublicationTarget) (PullRequestDetails, error) {
 	repository, err := NewOwnerRepository(target.Repository())
 	if err != nil {
 		return PullRequestDetails{}, err

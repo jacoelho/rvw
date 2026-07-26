@@ -1,7 +1,7 @@
 package source
 
-import "github.com/jacoelho/rvw/internal/review"
+import "github.com/jacoelho/rvw/internal/change"
 
-func testReviewRequest(snapshot review.Snapshot) review.ReviewRequest {
-	return review.ReviewRequest{Snapshot: snapshot}
+func testReviewRequest(snapshot change.Snapshot) change.ReviewRequest {
+	return change.ReviewRequest{Snapshot: snapshot}
 }

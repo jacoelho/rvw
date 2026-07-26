@@ -12,7 +12,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 const (
@@ -20,8 +20,8 @@ const (
 	MaxSourceErrorConstructionBytes int64 = 64 << 10
 	// MaxPatchResultConstructionBytes bounds a native prepared patch result.
 	MaxPatchResultConstructionBytes int64 = max(
-		review.MaxPreparedPatchConstructionBytes,
-		review.MaxPreparedPatchRetainedBytes,
+		change.MaxPreparedPatchConstructionBytes,
+		change.MaxPreparedPatchRetainedBytes,
 	)
 )
 
@@ -99,25 +99,25 @@ func (service *Service) Close(context.Context) error {
 // Open performs the open operation.
 func (service *Service) Open(
 	ctx context.Context,
-	target Target,
-	options OpenOptions,
-) (*Document, error) {
-	return service.openWithCPU(ctx, target, options, directCPUAdmission)
+	request OpenRequest,
+) (Opened, *Revision, error) {
+	return service.openWithCPU(ctx, request, directCPUAdmission)
 }
 
 func (service *Service) openWithCPU(
 	ctx context.Context,
-	target Target,
-	options OpenOptions,
+	request OpenRequest,
 	runCPU CPUAdmission,
-) (document *Document, returnErr error) {
+) (opened Opened, revision *Revision, returnErr error) {
 	defer func() { returnErr = sourceFailure(OperationOpenSource, returnErr) }()
 	if runCPU == nil {
-		return nil, errors.New("source CPU admission is nil")
+		return Opened{}, nil, errors.New("source CPU admission is nil")
 	}
+	target := request.Target
+	options := request.Options
 	options = options.clone()
 	if err := validateOpenOptions(options); err != nil {
-		return nil, err
+		return Opened{}, nil, err
 	}
 	switch target.Kind() {
 	case TargetWorktree, TargetStaged, TargetRange:
@@ -125,7 +125,7 @@ func (service *Service) openWithCPU(
 	case TargetPullRequest:
 		return service.openPullRequest(ctx, target, options, runCPU)
 	default:
-		return nil, fmt.Errorf("%w: unknown target kind %d", ErrInvalidTarget, target.Kind())
+		return Opened{}, nil, fmt.Errorf("%w: unknown target kind %d", ErrInvalidTarget, target.Kind())
 	}
 }
 
@@ -196,24 +196,24 @@ func (service *Service) openLocal(
 	target Target,
 	options OpenOptions,
 	runCPU CPUAdmission,
-) (_ *Document, returnErr error) {
+) (_ Opened, _ *Revision, returnErr error) {
 	root, err := service.RepositoryRoot(ctx)
 	if err != nil {
-		return nil, err
+		return Opened{}, nil, err
 	}
 	repository, err := openRepositorySession(root, service.options)
 	if err != nil {
-		return nil, err
+		return Opened{}, nil, err
 	}
 	service.mu.Lock()
 	pinned := service.repositoryDescriptor
 	service.mu.Unlock()
 	if pinned == nil {
-		return nil, errors.New("source service is closed")
+		return Opened{}, nil, errors.New("source service is closed")
 	}
 	same, identityErr := sameDirectory(pinned, repository.directory)
 	if identityErr != nil || !same {
-		return nil, errors.Join(
+		return Opened{}, nil, errors.Join(
 			fmt.Errorf("%w: repository root identity changed while opening", ErrSourceStale),
 			identityErr,
 		)
@@ -225,7 +225,7 @@ func (service *Service) openLocal(
 	}()
 	base, _, files, unmerged, err := nativeLocalRecords(ctx, repository, target, options)
 	if err != nil {
-		return nil, err
+		return Opened{}, nil, err
 	}
 	details := LocalDetails{}
 	if utf8.ValidString(root.String()) {
@@ -247,35 +247,35 @@ func (service *Service) openLocal(
 	case TargetRange:
 		baseRef, headRef, ok := target.Range()
 		if !ok {
-			return nil, fmt.Errorf("%w: missing range", ErrInvalidTarget)
+			return Opened{}, nil, fmt.Errorf("%w: missing range", ErrInvalidTarget)
 		}
 		details.Kind, details.Base, details.Head = SourceLocalRange, new(baseRef), new(headRef)
 	default:
-		return nil, fmt.Errorf("%w: target is not local", ErrInvalidTarget)
+		return Opened{}, nil, fmt.Errorf("%w: target is not local", ErrInvalidTarget)
 	}
 	sourceID, err := service.newSourceID()
 	if err != nil {
-		return nil, err
+		return Opened{}, nil, err
 	}
 	snapshot, err := service.snapshot(ctx, runCPU, sourceID, repository, files, options)
 	if err != nil {
-		return nil, err
+		return Opened{}, nil, err
 	}
-	document := newLocalDocument(snapshot, target, options, details, revision{
+	opened, resource := newLocalOpened(snapshot, target, options, details, revision{
 		repository: repository, unmerged: unmerged, similarities: nativeSimilarityScores(files),
 	})
 	repository = nil
-	return document, nil
+	return opened, resource, nil
 }
 
-func (service *Service) newSourceID() (review.SourceID, error) {
+func (service *Service) newSourceID() (change.SourceID, error) {
 	service.mu.Lock()
 	defer service.mu.Unlock()
 	if service.nextSource == ^uint64(0) {
 		return 0, errors.New("source identity exhausted")
 	}
 	service.nextSource++
-	return review.NewSourceID(service.nextSource)
+	return change.NewSourceID(service.nextSource)
 }
 
 func validateOpenOptions(options OpenOptions) error {

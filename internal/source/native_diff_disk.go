@@ -13,7 +13,7 @@ import (
 	"os"
 	"sort"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 const (
@@ -358,7 +358,7 @@ func (analysis *diskDiffAnalysis) Close() error {
 func openPinnedDiskContent(
 	ctx context.Context,
 	session *repositorySession,
-	oid *review.ObjectID,
+	oid *change.ObjectID,
 ) (*os.File, error) {
 	if oid == nil {
 		return nil, nil //nolint:nilnil // An absent diff side intentionally has no content descriptor.
@@ -767,13 +767,13 @@ func (writer *diskEditWriter) append(edit diskEdit) error {
 	}
 	switch edit.kind {
 	case nativeEditAdd:
-		if edit.count > uint64(review.MaxAdditions)-writer.additions {
-			return &LimitError{Resource: LimitDiffLineTokens, Limit: uint64(review.MaxAdditions)}
+		if edit.count > uint64(change.MaxAdditions)-writer.additions {
+			return &LimitError{Resource: LimitDiffLineTokens, Limit: uint64(change.MaxAdditions)}
 		}
 		writer.additions += edit.count
 	case nativeEditDelete:
-		if edit.count > uint64(review.MaxDeletions)-writer.deletions {
-			return &LimitError{Resource: LimitDiffLineTokens, Limit: uint64(review.MaxDeletions)}
+		if edit.count > uint64(change.MaxDeletions)-writer.deletions {
+			return &LimitError{Resource: LimitDiffLineTokens, Limit: uint64(change.MaxDeletions)}
 		}
 		writer.deletions += edit.count
 	case nativeEditEqual:

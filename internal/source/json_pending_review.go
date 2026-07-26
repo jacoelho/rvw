@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 type pendingReviewScalarRoute uint8
@@ -81,7 +81,7 @@ func validatePendingReviewPages(encoded []byte) error {
 	if err != nil {
 		return err
 	}
-	limits, err := newJSONFramingLimits(review.MaxComments, maxGitHubPageCollectionElements)
+	limits, err := newJSONFramingLimits(change.MaxComments, maxGitHubPageCollectionElements)
 	if err != nil {
 		return err
 	}

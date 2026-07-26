@@ -7,11 +7,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 func TestPreparePendingPublicationExecutionEncodesEachBatchOnce(t *testing.T) {
-	checked := pendingExecutionTestChecked(t, review.PublicationEventComment)
+	checked := pendingExecutionTestChecked(t, change.PublicationEventComment)
 	construction, err := PendingPublicationExecutionConstructionBytes(
 		context.Background(),
 		checked,
@@ -60,7 +60,7 @@ func TestPreparePendingPublicationExecutionEncodesEachBatchOnce(t *testing.T) {
 }
 
 func TestPendingPublicationExecutionPreparationIsCancellable(t *testing.T) {
-	checked := pendingExecutionTestChecked(t, review.PublicationEventDraft)
+	checked := pendingExecutionTestChecked(t, change.PublicationEventDraft)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := PendingPublicationExecutionConstructionBytes(ctx, checked); !errors.Is(err, context.Canceled) {
@@ -83,18 +83,18 @@ func TestPendingPublicationExecutionPreparationIsCancellable(t *testing.T) {
 
 func pendingExecutionTestChecked(
 	t *testing.T,
-	event review.PublicationEvent,
-) *review.CheckedPublication {
+	event change.PublicationEvent,
+) *change.CheckedPublication {
 	t.Helper()
-	sourceID, _ := review.NewSourceID(1)
-	snapshot, err := review.NewSnapshot(sourceID, nil)
+	sourceID, _ := change.NewSourceID(1)
+	snapshot, err := change.NewSnapshot(sourceID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	commit, _ := review.NewObjectID(strings.Repeat("a", 40))
-	nodeID, _ := review.NewReviewNodeID("pending-review")
-	databaseID, _ := review.NewReviewDatabaseID(7)
-	pending, err := review.NewPendingReview(review.PendingReviewDescriptor{
+	commit, _ := change.NewObjectID(strings.Repeat("a", 40))
+	nodeID, _ := change.NewReviewNodeID("pending-review")
+	databaseID, _ := change.NewReviewDatabaseID(7)
+	pending, err := change.NewPendingReview(change.PendingReviewDescriptor{
 		NodeID:       nodeID,
 		DatabaseID:   databaseID,
 		Commit:       commit,
@@ -108,12 +108,12 @@ func pendingExecutionTestChecked(
 	if err != nil {
 		t.Fatal(err)
 	}
-	current, err := review.NewReview(testReviewRequest(snapshot))
+	current, err := change.NewReview(testReviewRequest(snapshot))
 	if err != nil {
 		t.Fatal(err)
 	}
-	policies, _ := review.NewPublicationPolicies()
-	options, err := review.NewPublicationOptions(event, policies)
+	policies, _ := change.NewPublicationPolicies()
+	options, err := change.NewPublicationOptions(event, policies)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,19 +121,19 @@ func pendingExecutionTestChecked(
 	if err != nil {
 		t.Fatal(err)
 	}
-	base, _ := review.NewObjectID(strings.Repeat("1", 40))
-	head, _ := review.NewObjectID(strings.Repeat("2", 40))
-	target, err := review.NewPublicationTarget(review.PublicationTargetDescriptor{
+	base, _ := change.NewObjectID(strings.Repeat("1", 40))
+	head, _ := change.NewObjectID(strings.Repeat("2", 40))
+	target, err := change.NewPublicationTarget(change.PublicationTargetDescriptor{
 		Repository: "owner/repository", PullRequest: 7, Base: base, Head: head,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	marker, _ := review.NewPublicationMarker(
+	marker, _ := change.NewPublicationMarker(
 		"<!-- rvw-publication:v1:0123456789abcdef0123456789abcdef -->",
 	)
-	checked, err := review.TakeCheckedPublication(
-		review.CheckedPublicationDescriptor{Target: target, Marker: marker},
+	checked, err := change.TakeCheckedPublication(
+		change.CheckedPublicationDescriptor{Target: target, Marker: marker},
 		prepared,
 	)
 	if err != nil {
@@ -157,13 +157,13 @@ func TestPendingSubmissionEnforcesExactByteBoundary(t *testing.T) {
 	if encoded != want {
 		t.Fatalf("submission wire payload = %s", encoded)
 	}
-	padding := review.MaxPendingMutationBatchBytes - len(encoded)
+	padding := change.MaxPendingMutationBatchBytes - len(encoded)
 	input.reviewID += strings.Repeat("x", padding)
 	_, encoded, err = encodePendingSubmission(input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(encoded) != review.MaxPendingMutationBatchBytes {
+	if len(encoded) != change.MaxPendingMutationBatchBytes {
 		t.Fatalf("encoded bytes=%d", len(encoded))
 	}
 	input.reviewID += "x"
@@ -171,7 +171,7 @@ func TestPendingSubmissionEnforcesExactByteBoundary(t *testing.T) {
 		t.Fatal("boundary+1 submission unexpectedly encoded")
 	}
 
-	effects := make([]pendingWireEffect, review.MaxPendingMutationBatch+1)
+	effects := make([]pendingWireEffect, change.MaxPendingMutationBatch+1)
 	if _, _, err := encodePendingMutationBatch(effects); err == nil {
 		t.Fatal("oversized mutation count unexpectedly encoded")
 	}
@@ -179,14 +179,14 @@ func TestPendingSubmissionEnforcesExactByteBoundary(t *testing.T) {
 
 func TestPendingMutationKindsHaveClosedWireOperations(t *testing.T) {
 	tests := []struct {
-		kind      review.PendingMutationKind
+		kind      change.PendingMutationKind
 		typeName  string
 		fieldName string
 	}{
-		{review.PendingMutationReviewBody, updatePullRequestReviewInput, updatePullRequestReviewField},
-		{review.PendingMutationUpdateComment, "UpdatePullRequestReviewCommentInput", "updatePullRequestReviewComment"},
-		{review.PendingMutationDeleteComment, "DeletePullRequestReviewCommentInput", "deletePullRequestReviewComment"},
-		{review.PendingMutationAddComment, "AddPullRequestReviewThreadInput", "addPullRequestReviewThread"},
+		{change.PendingMutationReviewBody, updatePullRequestReviewInput, updatePullRequestReviewField},
+		{change.PendingMutationUpdateComment, "UpdatePullRequestReviewCommentInput", "updatePullRequestReviewComment"},
+		{change.PendingMutationDeleteComment, "DeletePullRequestReviewCommentInput", "deletePullRequestReviewComment"},
+		{change.PendingMutationAddComment, "AddPullRequestReviewThreadInput", "addPullRequestReviewThread"},
 	}
 	for _, test := range tests {
 		operation, err := pendingMutationOperationFor(test.kind)
@@ -347,12 +347,12 @@ func TestClassifyPendingBodyIgnoresOnlyExactTerminalMarkers(t *testing.T) {
 }
 
 func TestPendingAdditionTargetMatchIncludesPlacement(t *testing.T) {
-	path, _ := review.NewPath([]byte("reviewed.go"))
-	commit, _ := review.NewObjectID(strings.Repeat("a", 40))
-	line, _ := review.NewLineNumber(12)
-	target, err := review.NewPendingCommentTarget(review.PendingCommentTargetDescriptor{
+	path, _ := change.NewPath([]byte("reviewed.go"))
+	commit, _ := change.NewObjectID(strings.Repeat("a", 40))
+	line, _ := change.NewLineNumber(12)
+	target, err := change.NewPendingCommentTarget(change.PendingCommentTargetDescriptor{
 		Path: path, Commit: commit, OriginalCommit: commit,
-		Line: new(line), Subject: review.PendingSubjectLine, Side: review.LineNew,
+		Line: new(line), Subject: change.PendingSubjectLine, Side: change.LineNew,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -360,10 +360,10 @@ func TestPendingAdditionTargetMatchIncludesPlacement(t *testing.T) {
 	if !target.MatchesPendingAddition(target) {
 		t.Fatal("identical addition targets did not match")
 	}
-	otherLine, _ := review.NewLineNumber(13)
-	other, err := review.NewPendingCommentTarget(review.PendingCommentTargetDescriptor{
+	otherLine, _ := change.NewLineNumber(13)
+	other, err := change.NewPendingCommentTarget(change.PendingCommentTargetDescriptor{
 		Path: path, Commit: commit, OriginalCommit: commit,
-		Line: new(otherLine), Subject: review.PendingSubjectLine, Side: review.LineNew,
+		Line: new(otherLine), Subject: change.PendingSubjectLine, Side: change.LineNew,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -372,10 +372,10 @@ func TestPendingAdditionTargetMatchIncludesPlacement(t *testing.T) {
 		t.Fatal("different line targets unexpectedly matched")
 	}
 
-	node, _ := review.NewCommentNodeID("comment")
-	databaseID, _ := review.NewCommentDatabaseID(1)
+	node, _ := change.NewCommentNodeID("comment")
+	databaseID, _ := change.NewCommentDatabaseID(1)
 	desired := "new comment\n\n<!-- rvw-draft-comment:v1:0123456789abcdef0123456789abcdef -->"
-	comment, err := review.NewPendingComment(review.PendingCommentDescriptor{
+	comment, err := change.NewPendingComment(change.PendingCommentDescriptor{
 		NodeID: node, DatabaseID: databaseID, Body: desired, Target: target,
 	})
 	if err != nil {

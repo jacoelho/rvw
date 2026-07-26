@@ -8,7 +8,7 @@ import (
 
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 const maxRetainedPullRequestRecords = 3_000
@@ -19,32 +19,32 @@ func (service *Service) prepareNativePullRequest(
 	repository *repositorySession,
 	details PullRequestDetails,
 	options OpenOptions,
-) (review.Snapshot, revision, error) {
+) (change.Snapshot, revision, error) {
 	acquisition, err := newSmartGitAcquisition(ctx, service.github, details.Repository, repository)
 	if err != nil {
-		return review.Snapshot{}, revision{}, fmt.Errorf("advertise pull-request repository: %w", err)
+		return change.Snapshot{}, revision{}, fmt.Errorf("advertise pull-request repository: %w", err)
 	}
 	baseCommitHash := reviewHash(details.BaseOID)
 	headCommitHash := reviewHash(details.HeadOID)
 	if fetchErr := acquisition.fetchCommitAncestry(
 		ctx, baseCommitHash, headCommitHash, details.BaseRef, details.Number,
 	); fetchErr != nil {
-		return review.Snapshot{}, revision{}, fmt.Errorf("fetch pull-request ancestry: %w", fetchErr)
+		return change.Snapshot{}, revision{}, fmt.Errorf("fetch pull-request ancestry: %w", fetchErr)
 	}
 	mergeBase, err := nativeMergeBase(ctx, repository, baseCommitHash, headCommitHash)
 	if err != nil {
-		return review.Snapshot{}, revision{}, fmt.Errorf("resolve pull-request merge base: %w", err)
+		return change.Snapshot{}, revision{}, fmt.Errorf("resolve pull-request merge base: %w", err)
 	}
 	baseCommit, err := object.GetCommit(repository.objects, mergeBase)
 	if err != nil {
-		return review.Snapshot{}, revision{}, fmt.Errorf("read pull-request merge-base commit: %w", err)
+		return change.Snapshot{}, revision{}, fmt.Errorf("read pull-request merge-base commit: %w", err)
 	}
 	headCommit, err := object.GetCommit(repository.objects, headCommitHash)
 	if err != nil {
-		return review.Snapshot{}, revision{}, fmt.Errorf("read pull-request head commit: %w", err)
+		return change.Snapshot{}, revision{}, fmt.Errorf("read pull-request head commit: %w", err)
 	}
 	if fetchErr := acquisition.fetchTrees(ctx, baseCommit.TreeHash, headCommit.TreeHash); fetchErr != nil {
-		return review.Snapshot{}, revision{}, fmt.Errorf("fetch pull-request trees: %w", fetchErr)
+		return change.Snapshot{}, revision{}, fmt.Errorf("fetch pull-request trees: %w", fetchErr)
 	}
 	options.Gitignore = false
 	options.RVWIgnore = false
@@ -56,10 +56,10 @@ func (service *Service) prepareNativePullRequest(
 		options,
 	)
 	if err != nil {
-		return review.Snapshot{}, revision{}, err
+		return change.Snapshot{}, revision{}, err
 	}
 	if minimumPullRequestRecords(records) > maxRetainedPullRequestRecords {
-		return review.Snapshot{}, revision{}, &LimitError{
+		return change.Snapshot{}, revision{}, &LimitError{
 			Resource: LimitPullRequestRecords,
 			Limit:    maxRetainedPullRequestRecords,
 		}
@@ -67,48 +67,48 @@ func (service *Service) prepareNativePullRequest(
 	records = enrichExactNativeRenames(records)
 	if nativeSimilarityCandidateCount(records) <= 1_000 {
 		if fetchErr := acquisition.fetchBlobs(ctx, nativeSimilarityBlobHashes(records)); fetchErr != nil {
-			return review.Snapshot{}, revision{}, fmt.Errorf("fetch rename-candidate blobs: %w", fetchErr)
+			return change.Snapshot{}, revision{}, fmt.Errorf("fetch rename-candidate blobs: %w", fetchErr)
 		}
 		records, err = enrichInexactNativeRenames(ctx, repository, records)
 		if err != nil {
-			return review.Snapshot{}, revision{}, fmt.Errorf("analyze rename candidates: %w", err)
+			return change.Snapshot{}, revision{}, fmt.Errorf("analyze rename candidates: %w", err)
 		}
 	}
 	if len(records) > maxRetainedPullRequestRecords {
-		return review.Snapshot{}, revision{}, &LimitError{
+		return change.Snapshot{}, revision{}, &LimitError{
 			Resource: LimitPullRequestRecords,
 			Limit:    maxRetainedPullRequestRecords,
 		}
 	}
 	if fetchErr := acquisition.fetchBlobs(ctx, nativeRecordBlobHashes(records)); fetchErr != nil {
-		return review.Snapshot{}, revision{}, fmt.Errorf("fetch selected pull-request blobs: %w", fetchErr)
+		return change.Snapshot{}, revision{}, fmt.Errorf("fetch selected pull-request blobs: %w", fetchErr)
 	}
 	if analysisErr := populateNativeRecords(ctx, repository, records); analysisErr != nil {
-		return review.Snapshot{}, revision{}, fmt.Errorf("analyze pull-request changes: %w", analysisErr)
+		return change.Snapshot{}, revision{}, fmt.Errorf("analyze pull-request changes: %w", analysisErr)
 	}
 	fresh, err := service.github.pullRequest(ctx, details.Repository, details.Number)
 	if err != nil {
-		return review.Snapshot{}, revision{}, fmt.Errorf("refresh pull-request metadata: %w", err)
+		return change.Snapshot{}, revision{}, fmt.Errorf("refresh pull-request metadata: %w", err)
 	}
 	freshDetails, err := validatePullRequestPayload(details.Repository, details.Number, fresh)
 	if err != nil {
-		return review.Snapshot{}, revision{}, err
+		return change.Snapshot{}, revision{}, err
 	}
 	if freshDetails.BaseOID != details.BaseOID || freshDetails.HeadOID != details.HeadOID {
-		return review.Snapshot{}, revision{}, fmt.Errorf(
+		return change.Snapshot{}, revision{}, fmt.Errorf(
 			"%w: pull-request base or head changed while opening; retry explicitly",
 			ErrSourceStale,
 		)
 	}
 	sourceID, err := service.newSourceID()
 	if err != nil {
-		return review.Snapshot{}, revision{}, err
+		return change.Snapshot{}, revision{}, err
 	}
 	snapshot, err := service.snapshot(
 		ctx, runCPU, sourceID, repository, records, options,
 	)
 	if err != nil {
-		return review.Snapshot{}, revision{}, err
+		return change.Snapshot{}, revision{}, err
 	}
 	return snapshot, revision{
 		similarities: nativeSimilarityScores(records),
@@ -130,7 +130,7 @@ func nativeFilteredPullRequestRecords(
 		return nil, err
 	}
 	defer matcher.Close()
-	zeroMode, err := review.NewFileMode("000000")
+	zeroMode, err := change.NewFileMode("000000")
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +141,7 @@ func nativeFilteredPullRequestRecords(
 		repository,
 		oldTree,
 		newTree,
-		review.MaxFiles,
+		change.MaxFiles,
 		func(record diffRecord) error {
 			filtered, keep, filterErr := filterNativePullRequestRecord(
 				record,
@@ -177,7 +177,7 @@ func filterNativePullRequestRecord(
 	record diffRecord,
 	options OpenOptions,
 	matcher *compiledFilterSet,
-	zeroMode review.FileMode,
+	zeroMode change.FileMode,
 ) (diffRecord, bool, error) {
 	oldRetained, err := nativePullRequestPathRetained(record.oldPath, options, matcher)
 	if err != nil {
@@ -252,10 +252,10 @@ func nativeRecordBlobHashes(records []diffRecord) []plumbing.Hash {
 	seen := make(map[plumbing.Hash]struct{}, len(records)*2)
 	for _, record := range records {
 		for _, side := range []struct {
-			oid  *review.ObjectID
-			mode review.FileMode
+			oid  *change.ObjectID
+			mode change.FileMode
 		}{{record.oldOID, record.oldMode}, {record.newOID, record.newMode}} {
-			if side.oid == nil || objectKind(side.mode) != review.ObjectBlob {
+			if side.oid == nil || objectKind(side.mode) != change.ObjectBlob {
 				continue
 			}
 			hash := plumbing.NewHash(side.oid.String())

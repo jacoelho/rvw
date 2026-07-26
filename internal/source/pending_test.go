@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 func TestLoadPendingReviewAcquiresViewerDraftWith64BitIdentities(t *testing.T) {
@@ -27,7 +27,7 @@ func TestLoadPendingReviewAcquiresViewerDraftWith64BitIdentities(t *testing.T) {
 	service := newPendingReviewTestService(t, reviewResponse, commentsResponse)
 
 	pending, status, detail := service.loadPendingReview(t.Context(), details, directCPUAdmission)
-	if status != review.PendingReviewReady || !detail.IsEmpty() {
+	if status != change.PendingReviewReady || !detail.IsEmpty() {
 		t.Fatalf("status=%s detail=%q", status, detail.String())
 	}
 	if pending.DatabaseID().Uint64() != 4_294_967_297 || pending.CommentCount() != 1 {
@@ -35,7 +35,7 @@ func TestLoadPendingReviewAcquiresViewerDraftWith64BitIdentities(t *testing.T) {
 	}
 	comment := pending.Comments(0, 1)[0]
 	if comment.DatabaseID().Uint64() != 4_294_967_298 ||
-		comment.Target().Subject() != review.PendingSubjectLine {
+		comment.Target().Subject() != change.PendingSubjectLine {
 		t.Fatalf("comment=%d subject=%d", comment.DatabaseID().Uint64(), comment.Target().Subject())
 	}
 }
@@ -45,15 +45,15 @@ func TestLoadPendingReviewKeepsAbsenceAndAmbiguityDistinct(t *testing.T) {
 	tests := []struct {
 		name   string
 		nodes  string
-		status review.PendingReviewStatus
+		status change.PendingReviewStatus
 	}{
-		{name: "absent", nodes: `[]`, status: review.PendingReviewAbsent},
+		{name: "absent", nodes: `[]`, status: change.PendingReviewAbsent},
 		{
 			name: "other viewer only",
 			nodes: `[{"id":"other","fullDatabaseId":"1","body":"x",` +
 				`"state":"PENDING","viewerDidAuthor":false,"viewerCanUpdate":false,` +
 				`"commit":{"oid":"` + details.HeadOID.String() + `"}}]`,
-			status: review.PendingReviewAbsent,
+			status: change.PendingReviewAbsent,
 		},
 		{
 			name: "ambiguous",
@@ -63,7 +63,7 @@ func TestLoadPendingReviewKeepsAbsenceAndAmbiguityDistinct(t *testing.T) {
 				`{"id":"two","fullDatabaseId":"2","body":"y",` +
 				`"state":"PENDING","viewerDidAuthor":true,"viewerCanUpdate":true,` +
 				`"commit":{"oid":"` + details.HeadOID.String() + `"}}]`,
-			status: review.PendingReviewAmbiguous,
+			status: change.PendingReviewAmbiguous,
 		},
 	}
 	for _, test := range tests {
@@ -77,10 +77,10 @@ func TestLoadPendingReviewKeepsAbsenceAndAmbiguityDistinct(t *testing.T) {
 			if status != test.status {
 				t.Fatalf("status=%s detail=%q", status, detail.String())
 			}
-			if status == review.PendingReviewAbsent && !detail.IsEmpty() {
+			if status == change.PendingReviewAbsent && !detail.IsEmpty() {
 				t.Fatalf("absence detail=%q", detail.String())
 			}
-			if status == review.PendingReviewAmbiguous && detail.IsEmpty() {
+			if status == change.PendingReviewAmbiguous && detail.IsEmpty() {
 				t.Fatal("ambiguity has no detail")
 			}
 		})
@@ -110,7 +110,7 @@ func TestLoadPendingReviewConsumesEveryValidatedPage(t *testing.T) {
 		page(pendingPageFinal, "null", owned) + "]"
 	service := newPendingReviewTestService(t, response, `[[]]`)
 	pending, status, detail := service.loadPendingReview(t.Context(), details, directCPUAdmission)
-	if status != review.PendingReviewReady || !detail.IsEmpty() ||
+	if status != change.PendingReviewReady || !detail.IsEmpty() ||
 		pending.DatabaseID().Uint64() != 2 {
 		t.Fatalf(
 			"status=%s detail=%q review=%d",
@@ -142,7 +142,7 @@ func TestLoadPendingReviewRejectsCapabilityIdentityMismatch(t *testing.T) {
 		details.BaseOID.String(), details.HeadOID.String(),
 	))
 	_, status, detail := service.loadPendingReview(t.Context(), details, directCPUAdmission)
-	if status != review.PendingReviewUnavailable || detail.IsEmpty() {
+	if status != change.PendingReviewUnavailable || detail.IsEmpty() {
 		t.Fatalf("status=%s detail=%q", status, detail.String())
 	}
 }
@@ -159,7 +159,7 @@ func TestPendingCommentRejectsReplyWithInvalidDatabaseIdentity(t *testing.T) {
 		PullRequestReviewID: 1,
 		InReplyToID:         new(githubUint64(0)),
 	}
-	if _, err := validatePendingComment(value, map[githubUint64]review.CommentNodeID{2: "node"}); err == nil {
+	if _, err := validatePendingComment(value, map[githubUint64]change.CommentNodeID{2: "node"}); err == nil {
 		t.Fatal("zero reply database identity unexpectedly accepted")
 	}
 }
@@ -183,7 +183,7 @@ func TestPendingCommentPreservesOutdatedMultilineRange(t *testing.T) {
 	}
 	comment, err := validatePendingComment(
 		value,
-		map[githubUint64]review.CommentNodeID{2: "node"},
+		map[githubUint64]change.CommentNodeID{2: "node"},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -191,7 +191,7 @@ func TestPendingCommentPreservesOutdatedMultilineRange(t *testing.T) {
 	startSide, start, side, line := comment.Target().Lines()
 	if !comment.Target().Outdated() || start == nil || line == nil ||
 		start.Uint32() != 10 || line.Uint32() != 12 ||
-		startSide != review.LineNew || side != review.LineNew {
+		startSide != change.LineNew || side != change.LineNew {
 		t.Fatalf(
 			"outdated=%t start=%v line=%v sides=%d/%d",
 			comment.Target().Outdated(), start, line, startSide, side,
@@ -206,11 +206,11 @@ const (
 	pendingPageContinues
 )
 
-func pendingCapabilities(tb testing.TB) review.PendingCapabilities {
+func pendingCapabilities(tb testing.TB) change.PendingCapabilities {
 	tb.Helper()
-	capabilities, err := review.NewPendingCapabilities(
-		review.PendingCapabilityUpdate,
-		review.PendingCapabilityDelete,
+	capabilities, err := change.NewPendingCapabilities(
+		change.PendingCapabilityUpdate,
+		change.PendingCapabilityDelete,
 	)
 	if err != nil {
 		tb.Fatal(err)
@@ -234,7 +234,7 @@ func TestPendingCommentRejectsExplicitZeroLine(t *testing.T) {
 	}
 	if _, err := validatePendingComment(
 		value,
-		map[githubUint64]review.CommentNodeID{2: "node"},
+		map[githubUint64]change.CommentNodeID{2: "node"},
 	); err == nil {
 		t.Fatal("zero line unexpectedly accepted")
 	}

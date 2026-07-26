@@ -6,8 +6,15 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
+
+func closeTestRevision(tb testing.TB, revision *Revision) {
+	tb.Helper()
+	if err := revision.Retire().Close(); err != nil {
+		tb.Error(err)
+	}
+}
 
 func initializeCommittedRepositoryAt(t *testing.T, path, contents string) {
 	t.Helper()
@@ -22,14 +29,16 @@ func initializeCommittedRepositoryAt(t *testing.T, path, contents string) {
 	runGitTest(t, path, "commit", "--quiet", "-m", "commit")
 }
 
-func TestDocumentDetachCleanupReleasesGraphAndTransfersWorkspace(t *testing.T) {
-	document := &Document{
-		local: new(LocalDetails),
-	}
+func TestRevisionRetireTransfersResourcesWithoutInvalidatingOpened(t *testing.T) {
+	opened := Opened{local: new(LocalDetails)}
+	revision := &Revision{}
 
-	cleanup := document.DetachCleanup()
-	if cleanup == nil || document.local != nil || document.revision.repository != nil || !document.closed {
-		t.Fatalf("detached document retained source ownership: %+v", document)
+	cleanup := revision.Retire()
+	if cleanup == nil || !revision.retired {
+		t.Fatalf("revision did not transfer resource ownership: %+v", revision)
+	}
+	if _, ok := opened.Local(); !ok {
+		t.Fatal("retiring revision invalidated opened facts")
 	}
 	if err := cleanup.Close(); err != nil {
 		t.Fatal(err)
@@ -46,18 +55,18 @@ func TestDocumentMaterializationUsesPinnedRepositoryAfterPathReplacement(t *test
 	writeFile(t, filepath.Join(root, "file"), "one\ntwo\n")
 	service := newTestService(t, root)
 	defer closeTestService(t, service)
-	document, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{})
+	document, documentRevision, err := service.Open(t.Context(), OpenRequest{Target: WorktreeTarget(), Options: OpenOptions{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer document.Close()
+	defer closeTestRevision(t, documentRevision)
 
-	current, err := review.NewReview(testReviewRequest(document.Snapshot()))
+	current, err := change.NewReview(testReviewRequest(document.Snapshot()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	contextLines, _ := review.NewContextLines(3)
-	patchContext, _ := review.ContextAround(contextLines)
+	contextLines, _ := change.NewContextLines(3)
+	patchContext, _ := change.ContextAround(contextLines)
 	current, patchRequest, err := current.RequestPatch(0, patchContext)
 	if err != nil {
 		t.Fatal(err)
@@ -70,11 +79,11 @@ func TestDocumentMaterializationUsesPinnedRepositoryAfterPathReplacement(t *test
 	initializeCommittedRepositoryAt(t, root, "replacement")
 	writeFile(t, filepath.Join(root, "file"), "replacement\n")
 
-	patch, err := service.LoadPatch(t.Context(), document, patchRequest)
+	patch, err := service.LoadPatch(t.Context(), document, documentRevision, patchRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if patch.Status != review.PatchReady {
+	if patch.Status != change.PatchReady {
 		t.Fatalf("patch after replacement = %+v", patch)
 	}
 	current, err = current.ApplyPatch(patch)
@@ -86,24 +95,24 @@ func TestDocumentMaterializationUsesPinnedRepositoryAfterPathReplacement(t *test
 		t.Fatalf("patch followed replacement repository:\n%s", text)
 	}
 
-	line, _ := review.NewLineNumber(1)
-	selector, _ := review.NewSyntaxSelector("text")
-	operation, _ := review.NewOperationID(2)
+	line, _ := change.NewLineNumber(1)
+	selector, _ := change.NewSyntaxSelector("text")
+	operation, _ := change.NewOperationID(2)
 	_, syntaxRequest, err := current.RequestSyntax(
 		operation,
 		0,
 		selector,
-		[]review.LineNumber{line},
-		[]review.LineNumber{line},
+		[]change.LineNumber{line},
+		[]change.LineNumber{line},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	syntax, err := service.LoadSyntax(t.Context(), document, syntaxRequest)
+	syntax, err := service.LoadSyntax(t.Context(), document, documentRevision, syntaxRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if syntax.Status != review.SyntaxReady {
+	if syntax.Status != change.SyntaxReady {
 		t.Fatalf("syntax after replacement = %+v", syntax)
 	}
 }
@@ -117,11 +126,11 @@ func TestLinkedWorktreeMaterializationUsesPinnedCommonObjects(t *testing.T) {
 	writeFile(t, filepath.Join(linked, "file"), "one\ntwo\n")
 	service := newTestService(t, linked)
 	defer closeTestService(t, service)
-	document, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{})
+	document, documentRevision, err := service.Open(t.Context(), OpenRequest{Target: WorktreeTarget(), Options: OpenOptions{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer document.Close()
+	defer closeTestRevision(t, documentRevision)
 
 	objects := filepath.Join(main, ".git", "objects")
 	moved := filepath.Join(main, ".git", "objects-pinned")
@@ -132,28 +141,28 @@ func TestLinkedWorktreeMaterializationUsesPinnedCommonObjects(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	current, err := review.NewReview(testReviewRequest(document.Snapshot()))
+	current, err := change.NewReview(testReviewRequest(document.Snapshot()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	line, _ := review.NewLineNumber(1)
-	selector, _ := review.NewSyntaxSelector("text")
-	operation, _ := review.NewOperationID(1)
+	line, _ := change.NewLineNumber(1)
+	selector, _ := change.NewSyntaxSelector("text")
+	operation, _ := change.NewOperationID(1)
 	_, request, err := current.RequestSyntax(
 		operation,
 		0,
 		selector,
-		[]review.LineNumber{line},
-		[]review.LineNumber{line},
+		[]change.LineNumber{line},
+		[]change.LineNumber{line},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := service.LoadSyntax(t.Context(), document, request)
+	result, err := service.LoadSyntax(t.Context(), document, documentRevision, request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != review.SyntaxReady {
+	if result.Status != change.SyntaxReady {
 		t.Fatalf("linked-worktree syntax after object replacement = %+v", result)
 	}
 }

@@ -12,13 +12,13 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/jacoelho/rvw/internal/app"
+	"github.com/jacoelho/rvw/internal/change"
 	"github.com/jacoelho/rvw/internal/config"
 	"github.com/jacoelho/rvw/internal/delivery"
 	"github.com/jacoelho/rvw/internal/keymap"
 	"github.com/jacoelho/rvw/internal/output"
-	"github.com/jacoelho/rvw/internal/review"
 	"github.com/jacoelho/rvw/internal/source"
+	"github.com/jacoelho/rvw/internal/tui"
 )
 
 const (
@@ -31,23 +31,27 @@ type interactiveRequest struct {
 	input       io.Reader
 	output      io.Writer
 	service     *source.Service
-	document    *source.Document
+	opened      *source.Opened
+	revision    *source.Revision
 	termination *terminationOwner
+	resolved    *config.Config
 	environment []string
-	resolved    config.Config
 }
 
 func runInteractive(request interactiveRequest) (returnErr error) {
 	if request.input == nil || request.output == nil {
 		return errors.New("interactive mode requires input and output")
 	}
-	ownsDocument := false
+	ownsRevision := false
 	defer func() {
-		if !ownsDocument && request.document != nil {
-			returnErr = errors.Join(returnErr, request.document.Close())
+		if !ownsRevision && request.revision != nil {
+			returnErr = errors.Join(returnErr, request.revision.Retire().Close())
 		}
 	}()
-	settings, err := interactiveSettings(request.resolved)
+	if request.opened == nil || request.resolved == nil {
+		return errors.New("interactive mode requires opened source and configuration")
+	}
+	settings, err := interactiveSettings(*request.resolved)
 	if err != nil {
 		return err
 	}
@@ -68,7 +72,7 @@ func runInteractive(request interactiveRequest) (returnErr error) {
 		defer cancel()
 		returnErr = errors.Join(returnErr, deliveryManager.Close(closeContext))
 	}()
-	coordinator, err := app.NewCoordinator(workContext, request.service, deliveryManager)
+	coordinator, err := tui.NewCoordinator(workContext, request.service, deliveryManager)
 	if err != nil {
 		return err
 	}
@@ -77,7 +81,7 @@ func runInteractive(request interactiveRequest) (returnErr error) {
 		unregisterEscalator = request.termination.RegisterEscalator(coordinator.Escalate)
 	}
 	defer unregisterEscalator()
-	receiver, err := app.NewReadyReceiver(receiverContext)
+	receiver, err := tui.NewReadyReceiver(receiverContext)
 	if err != nil {
 		shutdownContext, cancel := context.WithTimeout(
 			context.WithoutCancel(request.ctx),
@@ -86,9 +90,10 @@ func runInteractive(request interactiveRequest) (returnErr error) {
 		defer cancel()
 		return errors.Join(err, coordinator.Shutdown(shutdownContext))
 	}
-	model, err := app.NewModel(
+	model, err := tui.NewModel(
 		workContext,
-		request.document,
+		*request.opened,
+		request.revision,
 		settings,
 		coordinator,
 		receiver,
@@ -101,7 +106,7 @@ func runInteractive(request interactiveRequest) (returnErr error) {
 		defer cancel()
 		return errors.Join(err, coordinator.Shutdown(shutdownContext))
 	}
-	ownsDocument = true
+	ownsRevision = true
 
 	program := tea.NewProgram(
 		model,
@@ -135,9 +140,9 @@ func interactiveProgramEnvironment(environment []string, explicitTheme bool) []s
 
 func finishInteractive(
 	request interactiveRequest,
-	model *app.Model,
-	coordinator *app.Coordinator,
-	receiver *app.ReadyReceiver,
+	model *tui.Model,
+	coordinator *tui.Coordinator,
+	receiver *tui.ReadyReceiver,
 	cancelReceiver context.CancelFunc,
 	runErr error,
 ) error {
@@ -153,19 +158,19 @@ func finishInteractive(
 		context.WithoutCancel(request.ctx),
 		coordinatorJoinTimeout,
 	)
-	modelSettlement := model.PublicationShutdownSettlement()
 	settlement, shutdownErr := coordinator.ShutdownWithSettlement(shutdownContext)
 	cancelShutdown()
+	result := model.Result(settlement)
 
 	var documentErr error
 	if shutdownErr == nil {
 		documentErr = model.CloseSourceDocument()
 	}
 	var stdoutErr error
-	if pending, ok := model.PendingStdout(); ok {
+	if result.HasStdout() {
 		stdoutErr = output.WritePreparedExport(
 			request.output,
-			pending,
+			result.Stdout,
 			output.Options{Terminal: true},
 		)
 	}
@@ -178,144 +183,76 @@ func finishInteractive(
 		runErr,
 		barrierErr,
 		shutdownErr,
-		publicationShutdownError(
-			mergePublicationSettlements(modelSettlement, settlement),
-		),
+		result.Err,
 		documentErr,
 		stdoutErr,
 	)
 }
 
-func mergePublicationSettlements(
-	settlements ...app.ShutdownSettlement,
-) app.ShutdownSettlement {
-	merged := app.ShutdownSettlement{}
-	indexes := make(map[string]int)
-	for _, settlement := range settlements {
-		for _, fact := range settlement.Publications {
-			key := fmt.Sprintf(
-				"%s#%d/%s",
-				fact.Target.Repository(),
-				fact.Target.PullRequest(),
-				fact.Marker,
-			)
-			if index, exists := indexes[key]; exists {
-				if publicationFactRank(fact) >
-					publicationFactRank(merged.Publications[index]) {
-					merged.Publications[index] = fact
-				}
-				continue
-			}
-			indexes[key] = len(merged.Publications)
-			merged.Publications = append(merged.Publications, fact)
-		}
-	}
-	return merged
-}
-
-func publicationFactRank(fact app.PublicationShutdownFact) int {
-	if fact.Disposition == review.PublicationDispositionCommitted ||
-		fact.Disposition == review.PublicationDispositionFailedBeforeCommit ||
-		fact.Disposition == review.PublicationDispositionCancelledBeforeCommit ||
-		fact.Reconciliation == review.ReconciliationCommitted ||
-		fact.Reconciliation == review.ReconciliationNotCommitted {
-		return 2
-	}
-	return 1
-}
-
-func publicationShutdownError(settlement app.ShutdownSettlement) error {
-	var facts []error
-	for _, fact := range settlement.Publications {
-		target := fmt.Sprintf(
-			"%s#%d",
-			fact.Target.Repository(),
-			fact.Target.PullRequest(),
-		)
-		switch {
-		case fact.Disposition == review.PublicationDispositionUnknown ||
-			fact.Reconciliation == review.ReconciliationStillUnknown:
-			facts = append(facts, fmt.Errorf(
-				"GitHub publication outcome is unknown for %s marker %s; retry risks a duplicate review",
-				target,
-				fact.Marker,
-			))
-		case fact.Disposition == review.PublicationDispositionCommitted ||
-			fact.Reconciliation == review.ReconciliationCommitted:
-			facts = append(facts, fmt.Errorf(
-				"GitHub publication committed during shutdown for %s marker %s",
-				target,
-				fact.Marker,
-			))
-		}
-	}
-	return errors.Join(facts...)
-}
-
-func interactiveSettings(resolved config.Config) (app.Settings, error) {
+func interactiveSettings(resolved config.Config) (tui.Settings, error) {
 	diff := resolved.Diff()
 	if diff.ContextLines < 0 || diff.ContextLines > math.MaxUint16 {
-		return app.Settings{}, errors.New("diff context lines cannot be represented as uint16")
+		return tui.Settings{}, errors.New("diff context lines cannot be represented as uint16")
 	}
-	contextLines, err := review.NewContextLines(uint16(diff.ContextLines))
+	contextLines, err := change.NewContextLines(uint16(diff.ContextLines))
 	if err != nil {
-		return app.Settings{}, err
+		return tui.Settings{}, err
 	}
-	diffView := app.DiffViewUnified
+	diffView := tui.DiffViewUnified
 	if diff.View == config.DiffSideBySide {
-		diffView = app.DiffViewSideBySide
+		diffView = tui.DiffViewSideBySide
 	}
 	activeTheme := resolved.ActiveTheme()
 	syntaxSelectorValue := activeTheme.String()
 	if theme, ok := resolved.Theme(activeTheme); ok && theme.SyntaxTheme != "" {
 		syntaxSelectorValue = theme.SyntaxTheme.String()
 	}
-	syntaxSelector, err := review.NewSyntaxSelector(syntaxSelectorValue)
+	syntaxSelector, err := change.NewSyntaxSelector(syntaxSelectorValue)
 	if err != nil {
-		return app.Settings{}, err
+		return tui.Settings{}, err
 	}
 
 	ui := resolved.UI()
-	var settingFeatureValues []app.SettingFeature
+	var settingFeatureValues []tui.SettingFeature
 	if ui.Mouse {
-		settingFeatureValues = append(settingFeatureValues, app.FeatureMouse)
+		settingFeatureValues = append(settingFeatureValues, tui.FeatureMouse)
 	}
 	if ui.ColorEnabled {
-		settingFeatureValues = append(settingFeatureValues, app.FeatureColor)
+		settingFeatureValues = append(settingFeatureValues, tui.FeatureColor)
 	}
 	if diff.Wrap {
-		settingFeatureValues = append(settingFeatureValues, app.FeatureWrap)
+		settingFeatureValues = append(settingFeatureValues, tui.FeatureWrap)
 	}
-	settingFeatures, err := app.NewSettingFeatures(settingFeatureValues...)
+	settingFeatures, err := tui.NewSettingFeatures(settingFeatureValues...)
 	if err != nil {
-		return app.Settings{}, err
+		return tui.Settings{}, err
 	}
 	exportConfig := resolved.Export()
-	exportTemplates, err := review.CompileExportTemplates(
+	exportTemplates, err := change.CompileExportTemplates(
 		exportConfig.MarkdownTemplate.String(),
 		exportConfig.CommentTemplate.String(),
 	)
 	if err != nil {
-		return app.Settings{}, err
+		return tui.Settings{}, err
 	}
 	githubConfig := resolved.GitHub()
-	publicationEvent := review.PublicationEventComment
+	publicationEvent := change.PublicationEventComment
 	switch githubConfig.SubmitDefault {
 	case config.SubmitComment:
 	case config.SubmitApprove:
-		publicationEvent = review.PublicationEventApprove
+		publicationEvent = change.PublicationEventApprove
 	case config.SubmitRequestChanges:
-		publicationEvent = review.PublicationEventRequestChanges
+		publicationEvent = change.PublicationEventRequestChanges
 	}
 	keybindings, err := interactiveKeybindings(ui.Keybindings)
 	if err != nil {
-		return app.Settings{}, err
+		return tui.Settings{}, err
 	}
 	palette, err := interactivePalette(resolved, activeTheme)
 	if err != nil {
-		return app.Settings{}, err
+		return tui.Settings{}, err
 	}
-	return app.NewSettings(app.SettingsRequest{
+	return tui.NewSettings(tui.SettingsRequest{
 		Features:         settingFeatures,
 		DiffView:         diffView,
 		ContextLines:     contextLines,
@@ -327,49 +264,49 @@ func interactiveSettings(resolved config.Config) (app.Settings, error) {
 	})
 }
 
-func interactivePalette(resolved config.Config, activeTheme config.ThemeName) (app.Palette, error) {
+func interactivePalette(resolved config.Config, activeTheme config.ThemeName) (tui.Palette, error) {
 	theme, ok := resolved.Theme(activeTheme)
 	if !ok {
-		return app.NewPalette(nil)
+		return tui.NewPalette(nil)
 	}
-	return app.NewPalette(interactivePaletteValues(theme))
+	return tui.NewPalette(interactivePaletteValues(theme))
 }
 
-func interactivePaletteValues(theme config.Theme) map[app.PaletteRole]string {
-	paletteValues := make(map[app.PaletteRole]string)
-	roles := map[config.ThemeColor]app.PaletteRole{
-		"panel_bg":           app.PalettePanelBackground,
-		"fg_primary":         app.PalettePrimary,
-		"fg_secondary":       app.PaletteSecondary,
-		"fg_dim":             app.PaletteDim,
-		"diff_add":           app.PaletteDiffAdd,
-		"diff_del":           app.PaletteDiffDelete,
-		"diff_context":       app.PaletteDiffContext,
-		"pending":            app.PalettePending,
-		"border_focused":     app.PaletteFocused,
-		"status_bar_bg":      app.PaletteStatusBackground,
-		"cursor_line_bg":     app.PaletteCursorBackground,
-		"cursor_line_fg":     app.PaletteCursorForeground,
-		"diff_add_bg":        app.PaletteDiffAddBackground,
-		"diff_del_bg":        app.PaletteDiffDeleteBackground,
-		"diff_hunk_header":   app.PaletteDiffHunk,
-		"message_warning_fg": app.PaletteWarningForeground,
-		"message_warning_bg": app.PaletteWarningBackground,
-		"message_error_fg":   app.PaletteErrorForeground,
-		"message_error_bg":   app.PaletteErrorBackground,
-		"message_success_fg": app.PaletteSuccessForeground,
-		"message_success_bg": app.PaletteSuccessBackground,
+func interactivePaletteValues(theme config.Theme) map[tui.PaletteRole]string {
+	paletteValues := make(map[tui.PaletteRole]string)
+	roles := map[config.ThemeColor]tui.PaletteRole{
+		"panel_bg":           tui.PalettePanelBackground,
+		"fg_primary":         tui.PalettePrimary,
+		"fg_secondary":       tui.PaletteSecondary,
+		"fg_dim":             tui.PaletteDim,
+		"diff_add":           tui.PaletteDiffAdd,
+		"diff_del":           tui.PaletteDiffDelete,
+		"diff_context":       tui.PaletteDiffContext,
+		"pending":            tui.PalettePending,
+		"border_focused":     tui.PaletteFocused,
+		"status_bar_bg":      tui.PaletteStatusBackground,
+		"cursor_line_bg":     tui.PaletteCursorBackground,
+		"cursor_line_fg":     tui.PaletteCursorForeground,
+		"diff_add_bg":        tui.PaletteDiffAddBackground,
+		"diff_del_bg":        tui.PaletteDiffDeleteBackground,
+		"diff_hunk_header":   tui.PaletteDiffHunk,
+		"message_warning_fg": tui.PaletteWarningForeground,
+		"message_warning_bg": tui.PaletteWarningBackground,
+		"message_error_fg":   tui.PaletteErrorForeground,
+		"message_error_bg":   tui.PaletteErrorBackground,
+		"message_success_fg": tui.PaletteSuccessForeground,
+		"message_success_bg": tui.PaletteSuccessBackground,
 	}
 	for name, role := range roles {
 		if color := theme.Colors[name].String(); color != "" {
 			paletteValues[role] = color
 		}
 	}
-	syntaxRoles := map[config.SyntaxColor]app.PaletteRole{
-		config.SyntaxKeyword: app.PaletteSyntaxKeyword,
-		config.SyntaxString:  app.PaletteSyntaxString,
-		config.SyntaxComment: app.PaletteSyntaxComment,
-		config.SyntaxNumber:  app.PaletteSyntaxNumber,
+	syntaxRoles := map[config.SyntaxColor]tui.PaletteRole{
+		config.SyntaxKeyword: tui.PaletteSyntaxKeyword,
+		config.SyntaxString:  tui.PaletteSyntaxString,
+		config.SyntaxComment: tui.PaletteSyntaxComment,
+		config.SyntaxNumber:  tui.PaletteSyntaxNumber,
 	}
 	for name, role := range syntaxRoles {
 		if color := theme.SyntaxColors[name].String(); color != "" {

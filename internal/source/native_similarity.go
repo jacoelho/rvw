@@ -9,7 +9,7 @@ import (
 	"sort"
 
 	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 const (
@@ -21,17 +21,17 @@ const (
 
 type nativeSimilaritySource struct { //nolint:govet // Field order mirrors source-side scoring data.
 	record   int
-	oid      review.ObjectID
+	oid      change.ObjectID
 	path     string
-	mode     review.FileMode
+	mode     change.FileMode
 	deletion bool
 }
 
 type nativeSimilarityTarget struct { //nolint:govet // Field order mirrors target-side scoring data.
 	record int
-	oid    review.ObjectID
+	oid    change.ObjectID
 	path   string
-	mode   review.FileMode
+	mode   change.FileMode
 }
 
 type nativeSpanCounts struct {
@@ -42,8 +42,8 @@ type nativeSpanCounts struct {
 }
 
 type nativeSimilarityPair struct {
-	old review.ObjectID
-	new review.ObjectID
+	old change.ObjectID
+	new change.ObjectID
 }
 
 func nativeSimilarityCandidates(
@@ -56,7 +56,7 @@ func nativeSimilarityCandidates(
 			continue
 		}
 		if record.status != 'R' && record.status != 'C' && record.oldOID != nil &&
-			objectKind(record.oldMode) == review.ObjectBlob &&
+			objectKind(record.oldMode) == change.ObjectBlob &&
 			record.oldMode.String() != "120000" {
 			sources = append(sources, nativeSimilaritySource{
 				record: index, oid: *record.oldOID, path: record.oldPath,
@@ -64,7 +64,7 @@ func nativeSimilarityCandidates(
 			})
 		}
 		if record.status == 'A' && record.newOID != nil &&
-			objectKind(record.newMode) == review.ObjectBlob && record.newMode.String() != "120000" {
+			objectKind(record.newMode) == change.ObjectBlob && record.newMode.String() != "120000" {
 			targets = append(targets, nativeSimilarityTarget{
 				record: index, oid: *record.newOID, path: record.newPath, mode: record.newMode,
 			})
@@ -99,8 +99,8 @@ func nativeSimilarityBlobHashes(records []diffRecord) []plumbing.Hash {
 func appendSimilarityOIDs(
 	sources []nativeSimilaritySource,
 	targets []nativeSimilarityTarget,
-) []review.ObjectID {
-	values := make([]review.ObjectID, 0, len(sources)+len(targets))
+) []change.ObjectID {
+	values := make([]change.ObjectID, 0, len(sources)+len(targets))
 	for _, source := range sources {
 		values = append(values, source.oid)
 	}
@@ -122,9 +122,9 @@ func enrichInexactNativeRenames(
 	}
 	removed := make([]bool, len(records))
 	consumed := make([]bool, len(sources))
-	cache := make(map[review.ObjectID]nativeSpanCounts)
+	cache := make(map[change.ObjectID]nativeSpanCounts)
 	var spans, cacheBytes, mergeSteps uint64
-	loadCounts := func(oid review.ObjectID) (nativeSpanCounts, bool) {
+	loadCounts := func(oid change.ObjectID) (nativeSpanCounts, bool) {
 		if counts, ok := cache[oid]; ok {
 			return counts, true
 		}
@@ -224,7 +224,7 @@ func nativeSimilarityScores(records []diffRecord) map[nativeSimilarityPair]uint1
 func nativeContentSpanCounts(
 	ctx context.Context,
 	session *repositorySession,
-	oid review.ObjectID,
+	oid change.ObjectID,
 ) (nativeSpanCounts, error) {
 	reader, size, err := session.openContent(plumbing.NewHash(oid.String()))
 	if err != nil {

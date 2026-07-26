@@ -1,0 +1,288 @@
+package tui
+
+import (
+	"fmt"
+	"strings"
+
+	"charm.land/bubbles/v2/help"
+
+	"github.com/jacoelho/rvw/internal/change"
+	"github.com/jacoelho/rvw/internal/keymap"
+	"github.com/jacoelho/rvw/internal/tui/render"
+)
+
+const (
+	helpDialogWidth  = 72
+	helpDialogHeight = 22
+)
+
+func (model *Model) minimumView(width, height int) string {
+	styles := newSemanticStyles(model.settings)
+	lines := make([]string, 0, 4)
+	if model.overlay == OverlayConfirm {
+		controls := model.modalBindingRows(
+			keymap.ContextConfirm,
+			[]keymap.Action{keymap.ActionCancel, keymap.ActionConfirmNo, keymap.ActionInterrupt},
+			width,
+			styles,
+		)
+		return blockingSurface([]string{
+			modalTitle(styles, "Decision pending"),
+			"Disabled: resize to decide.",
+			fmt.Sprintf("Resize to %d×%d", minimumWidth, minimumHeight),
+			fmt.Sprintf("Current %d×%d", model.size.Width, model.size.Height),
+		}, controls, width, height, styles)
+	}
+	lines = append(lines,
+		fmt.Sprintf("Resize to %d×%d", minimumWidth, minimumHeight),
+		fmt.Sprintf("Current %d×%d", model.size.Width, model.size.Height),
+	)
+	bindings := keymap.SelectBindings(
+		model.effectiveBindings(keymap.ContextMinimumSize),
+		[]keymap.Action{keymap.ActionQuit, keymap.ActionInterrupt},
+	)
+	lines = append(lines, bindingBar{bindings: bindings}.Render(width, styles))
+	return constrainedStyledLines(lines, width, height)
+}
+
+func (model *Model) helpView(width, height int) string {
+	styles := newSemanticStyles(model.settings)
+	layout := newHelpDialogLayout(width, height)
+	controls := model.helpControlRows(layout.inner.width, styles)
+	helpModel := model.help
+	helpModel.SetWidth(layout.inner.width)
+	helpModel.Styles = help.Styles{
+		Ellipsis:       styles.muted,
+		ShortKey:       styles.heading,
+		ShortDesc:      styles.muted,
+		ShortSeparator: styles.muted,
+		FullKey:        styles.heading,
+		FullDesc:       styles.muted,
+		FullSeparator:  styles.muted,
+	}
+	bindings := model.effectiveBindings(keymap.ContextNormal)
+	pageSize := helpPageCapacity(layout, len(controls))
+	offset := min(max(model.helpTop, 0), max(len(bindings)-pageSize, 0))
+	rendered := helpModel.View(effectiveHelpKeyMap{
+		bindings: bindings,
+		maxItems: pageSize,
+		offset:   offset,
+	})
+	lines := append(
+		[]string{modalTitle(styles, "Keybindings · "+model.configFocus().String()), ""},
+		strings.Split(rendered, "\n")...,
+	)
+	workspace, _ := model.workspaceView(width, height, model.workspaceLayout(width, height))
+	return standardDialogOverlay(
+		workspace,
+		lines,
+		controls,
+		width,
+		height,
+		dialogSpec{
+			preferredInner: dialogSize{width: helpDialogWidth, height: helpDialogHeight},
+			borderMinimum:  dialogSize{width: 24, height: 10},
+		},
+		styles,
+	)
+}
+
+func (model *Model) helpPageSize(width, height int) int {
+	styles := newSemanticStyles(model.settings)
+	layout := newHelpDialogLayout(width, height)
+	return helpPageCapacity(layout, len(model.helpControlRows(layout.inner.width, styles)))
+}
+
+func newHelpDialogLayout(width, height int) dialogLayout {
+	return newDialogLayout(width, height, dialogSpec{
+		preferredInner: dialogSize{width: helpDialogWidth, height: helpDialogHeight},
+		borderMinimum:  dialogSize{width: 24, height: 10},
+	})
+}
+
+func (model *Model) helpControlRows(width int, styles semanticStyles) []string {
+	return model.modalBindingRows(
+		keymap.ContextHelp,
+		[]keymap.Action{keymap.ActionCancel, keymap.ActionNextHelpPage, keymap.ActionPreviousHelpPage},
+		width,
+		styles,
+	)
+}
+
+func helpPageCapacity(layout dialogLayout, controlRows int) int {
+	return max(layout.inner.height-controlRows-2, 1)
+}
+
+func (model *Model) statusView(width, height int) string {
+	styles := newSemanticStyles(model.settings)
+	controls := model.modalBindingRows(
+		keymap.ContextStatusDetails,
+		[]keymap.Action{keymap.ActionCancel, keymap.ActionMoveDown, keymap.ActionPageDown},
+		width,
+		styles,
+	)
+	lines := model.statusFactLines()
+	if len(lines) != 0 {
+		lines[0] = modalTitle(styles, lines[0])
+	}
+	operationCount := model.review.OperationCount()
+	if operationCount != 0 {
+		lines = append(lines, "", styles.heading.Render("Operations (newest first)"))
+		available := model.statusOperationRows(max(height-len(controls), 0))
+		offset := min(model.statusTop, max(operationCount-available, 0))
+		operations := model.review.NewestOperations(offset, available)
+		for _, operation := range operations {
+			line := fmt.Sprintf(
+				"#%d %-14s %s",
+				operation.ID.Uint64(),
+				operation.Kind.String(),
+				operation.Status.String(),
+			)
+			if !operation.Detail.IsEmpty() {
+				line += " — " + operation.Detail.String()
+			} else if progress, ok := model.operationProgress[operation.ID]; ok {
+				if progress.Total != 0 {
+					line += fmt.Sprintf(
+						" — %d/%d",
+						progress.Completed,
+						progress.Total,
+					)
+				}
+				if !progress.Detail.IsEmpty() {
+					line += " " + progress.Detail.String()
+				}
+			}
+			lines = append(lines, render.SafeText(line))
+		}
+		remaining := operationCount - offset - len(operations)
+		if remaining != 0 && len(lines) < height-1 {
+			lines = append(lines, fmt.Sprintf("%d older records retained", remaining))
+		}
+	}
+	return blockingSurface(lines, controls, width, height, styles)
+}
+
+func modalTitle(styles semanticStyles, title string) string {
+	return styles.focused.Render("▌ " + render.SafeText(title))
+}
+
+func (model *Model) modalBindingRows(
+	contextName keymap.Context,
+	actions []keymap.Action,
+	width int,
+	styles semanticStyles,
+) []string {
+	return bindingBar{
+		bindings: keymap.SelectBindings(model.effectiveBindings(contextName), actions),
+	}.RenderRows(width, 2, styles, styles.panel)
+}
+
+func (model *Model) statusFactLines() []string {
+	stats := model.coordinatorStats
+	lines := []string{
+		"Status details",
+		"",
+		fmt.Sprintf("source revision      %d", model.review.Snapshot().SourceID().Uint64()),
+		fmt.Sprintf("workspace revision   %d", model.review.WorkspaceRevision().Uint64()),
+		fmt.Sprintf("accepted operations  %d/%d", stats.Accepted, MaxAcceptedOperations),
+		fmt.Sprintf("request bytes        %d/%d", stats.RequestBytes, MaxQueuedRequestBytes),
+		fmt.Sprintf("reserved results     %d/%d", stats.ReservedResult, MaxRetainedResultBytes),
+		fmt.Sprintf("I/O workers          %d/%d", stats.IOWorkers, MaxIOWorkers),
+		fmt.Sprintf("CPU workers          %d/%d", stats.CPUWorkers, MaxCPUWorkers),
+	}
+	latest := model.notice
+	if latest == nil {
+		latest = model.lastNotice
+	}
+	if latest != nil {
+		label := "latest"
+		switch latest.Kind {
+		case NoticeSuccess:
+			label = "latest success"
+		case NoticeWarning:
+			label = "latest warning"
+		case NoticeError:
+			label = "latest error"
+		case NoticeInformation:
+		}
+		lines = append(lines, "", label+": "+string(latest.Text))
+	}
+	switch model.fileProjection.workspace {
+	case projectionInitial, projectionLoading:
+		lines = append(lines, "", "file workspace       loading")
+	case projectionFailed:
+		lines = append(lines,
+			"",
+			"file workspace       error",
+			"workspace detail     "+string(model.fileProjection.workspaceDetail),
+		)
+	case projectionReady:
+	}
+	if model.fileProjection.requestedQuery != "" ||
+		model.fileProjection.appliedQuery != "" ||
+		model.fileProjection.filter == projectionFailed {
+		lines = append(lines, "", "file filter requested "+model.fileProjection.requestedQuery)
+		lines = append(lines, "file filter applied   "+model.fileProjection.appliedQuery)
+		switch model.fileProjection.filter {
+		case projectionLoading:
+			lines = append(lines, "file filter state     loading; prior results retained")
+		case projectionFailed:
+			lines = append(lines,
+				"file filter state     error; prior results retained",
+				"file filter detail    "+string(model.fileProjection.filterDetail),
+			)
+		case projectionInitial, projectionReady:
+		}
+	}
+	publication := model.review.PublicationSummary()
+	if publication.Status != change.PublicationIdle {
+		lines = append(lines, "", "publication          "+publication.Status.String())
+		if !publication.Detail.IsEmpty() {
+			lines = append(lines, "publication detail   "+publication.Detail.String())
+		}
+	}
+	remoteThreads := model.review.Snapshot().RemoteThreadSummary()
+	if remoteThreads.Status != change.RemoteThreadsNotRequested {
+		status := remoteThreads.Status.String()
+		if model.foreground.reloadActive() {
+			status = "loading"
+		}
+		if remoteThreads.Count != 0 &&
+			(model.foreground.reloadActive() ||
+				remoteThreads.Status == change.RemoteThreadsUnavailable ||
+				remoteThreads.Status == change.RemoteThreadsLimited) {
+			status += "; prior results retained"
+		}
+		lines = append(
+			lines,
+			"",
+			fmt.Sprintf(
+				"remote threads       %s (%d)",
+				status,
+				remoteThreads.Count,
+			),
+		)
+		if !remoteThreads.Detail.IsEmpty() {
+			lines = append(lines, "remote thread detail "+remoteThreads.Detail.String())
+		}
+	}
+	pending := model.review.PendingReviewSummary()
+	switch pending.Status {
+	case change.PendingReviewUnavailable, change.PendingReviewLimited,
+		change.PendingReviewAmbiguous:
+		lines = append(lines, "", "pending review       "+pending.Status.String())
+		if !pending.Detail.IsEmpty() {
+			lines = append(lines, "pending review detail "+pending.Detail.String())
+		}
+	case change.PendingReviewNotRequested, change.PendingReviewAbsent,
+		change.PendingReviewReady:
+	}
+	for index := range lines {
+		lines[index] = render.SafeText(lines[index])
+	}
+	return lines
+}
+
+func (model *Model) statusOperationRows(height int) int {
+	return max(height-len(model.statusFactLines())-5, 0)
+}
