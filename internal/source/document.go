@@ -8,7 +8,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 // SourceKind describes source kind.
@@ -51,7 +51,7 @@ type GitReference string
 
 // NewGitReference constructs and validates git reference.
 func NewGitReference(value string) (GitReference, error) {
-	if value == "" || int64(len(value)) > review.MaxPathBytes || !utf8.ValidString(value) ||
+	if value == "" || int64(len(value)) > change.MaxPathBytes || !utf8.ValidString(value) ||
 		strings.IndexByte(value, 0) >= 0 {
 		return "", fmt.Errorf("invalid Git reference %q", value)
 	}
@@ -119,8 +119,8 @@ type PullRequestDetails struct {
 	Author     *GitHubAuthor
 	Repository OwnerRepository
 	Title      Title
-	BaseOID    review.ObjectID
-	HeadOID    review.ObjectID
+	BaseOID    change.ObjectID
+	HeadOID    change.ObjectID
 	BaseRef    GitReference
 	HeadRef    GitReference
 	URL        GitHubURL
@@ -131,20 +131,26 @@ type PullRequestDetails struct {
 
 type revision struct {
 	repository   *repositorySession
-	unmerged     map[string]review.FileSemanticIdentity
+	unmerged     map[string]change.FileSemanticIdentity
 	similarities map[nativeSimilarityPair]uint16
 }
 
-// Document represents document.
-type Document struct {
-	closeErr error
+// Opened is the immutable result of opening one source revision. Its facts
+// remain valid after the corresponding Revision is retired and cleaned up.
+type Opened struct {
 	local    *LocalDetails
 	pull     *PullRequestDetails
-	revision revision
 	target   Target
 	options  OpenOptions
-	snapshot review.Snapshot
-	closed   bool
+	snapshot change.Snapshot
+}
+
+// Revision exclusively owns the resources used to lazily materialize an
+// opened source revision.
+type Revision struct {
+	state    revision
+	closeErr error
+	retired  bool
 }
 
 // Cleanup owns the lightweight filesystem cleanup detached from a source document.
@@ -154,65 +160,63 @@ type Cleanup struct {
 	closed     bool
 }
 
-func newLocalDocument(
-	snapshot review.Snapshot,
+func newLocalOpened(
+	snapshot change.Snapshot,
 	target Target,
 	options OpenOptions,
 	details LocalDetails,
 	revision revision,
-) *Document {
-	return &Document{
+) (Opened, *Revision) {
+	return Opened{
 		snapshot: snapshot,
 		local:    new(details),
-		revision: revision,
 		target:   target,
 		options:  options.clone(),
-	}
+	}, &Revision{state: revision}
 }
 
-func newPullRequestDocument(
-	snapshot review.Snapshot,
+func newPullRequestOpened(
+	snapshot change.Snapshot,
 	target Target,
 	options OpenOptions,
 	details PullRequestDetails,
 	revision revision,
-) *Document {
-	return &Document{
+) (Opened, *Revision) {
+	return Opened{
 		snapshot: snapshot,
 		pull:     new(details),
-		revision: revision,
 		target:   target,
 		options:  options.clone(),
-	}
+	}, &Revision{state: revision}
 }
 
 // Snapshot returns the receiver's snapshot value.
-func (document *Document) Snapshot() review.Snapshot {
-	return document.snapshot
+func (opened Opened) Snapshot() change.Snapshot {
+	return opened.snapshot
 }
 
 // Kind returns the receiver's kind value.
-func (document *Document) Kind() SourceKind {
-	if document.pull != nil {
+func (opened Opened) Kind() SourceKind {
+	if opened.pull != nil {
 		return SourceGitHubPR
 	}
-	return document.local.Kind
+	return opened.local.Kind
 }
 
 // Local returns the receiver's local value.
-func (document *Document) Local() (LocalDetails, bool) {
-	if document.local == nil {
+func (opened Opened) Local() (LocalDetails, bool) {
+	if opened.local == nil {
 		return LocalDetails{}, false
 	}
-	return cloneLocalDetails(*document.local), true
+	return cloneLocalDetails(*opened.local), true
 }
 
 // PullRequest returns the receiver's pull request value.
-func (document *Document) PullRequest() (PullRequestDetails, bool) {
-	if document.pull == nil {
+func (opened Opened) PullRequest() (PullRequestDetails, bool) {
+	if opened.pull == nil {
 		return PullRequestDetails{}, false
 	}
-	details := *document.pull
+	details := *opened.pull
 	if details.Author != nil {
 		details.Author = new(*details.Author)
 	}
@@ -223,28 +227,28 @@ func (document *Document) PullRequest() (PullRequestDetails, bool) {
 // publication preflight. It cannot reach snapshot or repository resources.
 type PublicationTarget struct {
 	repository OwnerRepository
-	base       review.ObjectID
-	head       review.ObjectID
+	base       change.ObjectID
+	head       change.ObjectID
 	number     PullRequestNumber
-	source     review.SourceID
+	source     change.SourceID
 }
 
 // PublicationTarget returns the source-bound pull-request publication target.
-func (document *Document) PublicationTarget() (PublicationTarget, bool) {
-	if document == nil || document.pull == nil || document.snapshot.SourceID() == 0 {
+func (opened Opened) PublicationTarget() (PublicationTarget, bool) {
+	if opened.pull == nil || opened.snapshot.SourceID() == 0 {
 		return PublicationTarget{}, false
 	}
 	return PublicationTarget{
-		repository: document.pull.Repository,
-		number:     document.pull.Number,
-		base:       document.pull.BaseOID,
-		head:       document.pull.HeadOID,
-		source:     document.snapshot.SourceID(),
+		repository: opened.pull.Repository,
+		number:     opened.pull.Number,
+		base:       opened.pull.BaseOID,
+		head:       opened.pull.HeadOID,
+		source:     opened.snapshot.SourceID(),
 	}, true
 }
 
 // SourceID returns the target source identity.
-func (target PublicationTarget) SourceID() review.SourceID { return target.source }
+func (target PublicationTarget) SourceID() change.SourceID { return target.source }
 
 // RetainedBytes returns target-owned immutable string bytes and metadata.
 func (target PublicationTarget) RetainedBytes() int64 {
@@ -255,37 +259,23 @@ func (target PublicationTarget) RetainedBytes() int64 {
 }
 
 // Options returns the receiver's options value.
-func (document *Document) Options() OpenOptions {
-	return document.options.clone()
+func (opened Opened) Options() OpenOptions {
+	return opened.options.clone()
 }
 
-// Close returns the receiver's close value.
-func (document *Document) Close() error {
-	if document.closed {
-		return document.closeErr
-	}
-	cleanup := document.DetachCleanup()
-	document.closeErr = cleanup.Close()
-	return document.closeErr
-}
-
-// DetachCleanup transfers cleanup ownership and releases the document's retained graph.
-func (document *Document) DetachCleanup() *Cleanup {
-	if document == nil {
+// Retire transfers resource ownership exactly once. It does not mutate the
+// separately returned Opened value.
+func (resource *Revision) Retire() *Cleanup {
+	if resource == nil {
 		return nil
 	}
 	cleanup := &Cleanup{
-		repository: document.revision.repository,
-		closeErr:   document.closeErr,
-		closed:     document.closed,
+		repository: resource.state.repository,
+		closeErr:   resource.closeErr,
+		closed:     resource.retired,
 	}
-	document.local = nil
-	document.pull = nil
-	document.revision = revision{}
-	document.target = Target{}
-	document.options = OpenOptions{}
-	document.snapshot = review.Snapshot{}
-	document.closed = true
+	resource.state = revision{}
+	resource.retired = true
 	return cleanup
 }
 
@@ -351,6 +341,12 @@ type OpenOptions struct {
 	BuiltinDefaults  bool
 	Gitignore        bool
 	RVWIgnore        bool
+}
+
+// OpenRequest identifies one source and its bounded acquisition options.
+type OpenRequest struct {
+	Target  Target
+	Options OpenOptions
 }
 
 func (options OpenOptions) clone() OpenOptions {

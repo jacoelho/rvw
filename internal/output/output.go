@@ -12,7 +12,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 	"github.com/jacoelho/rvw/internal/source"
 )
 
@@ -24,16 +24,16 @@ type Options struct {
 // WritePreparedExport writes a completed interactive export.
 func WritePreparedExport(
 	writer io.Writer,
-	prepared review.PreparedExport,
+	prepared change.PreparedExport,
 	options Options,
 ) error {
 	if writer == nil {
 		return errors.New("write prepared export: writer is nil")
 	}
-	if prepared.Bytes() > review.MaxPreparedExportBytes {
+	if prepared.Bytes() > change.MaxPreparedExportBytes {
 		return fmt.Errorf(
 			"write prepared export: prepared body exceeds %d bytes",
-			review.MaxPreparedExportBytes,
+			change.MaxPreparedExportBytes,
 		)
 	}
 
@@ -43,15 +43,15 @@ func WritePreparedExport(
 		err     error
 	)
 	switch prepared.Format() {
-	case review.ExportMarkdown:
+	case change.ExportMarkdown:
 		if options.Terminal {
-			encoded, err = terminalSafeMarkdown(body, review.MaxPreparedExportBytes)
+			encoded, err = terminalSafeMarkdown(body, change.MaxPreparedExportBytes)
 		} else {
 			encoded = body
 		}
-	case review.ExportJSON:
+	case change.ExportJSON:
 		if options.Terminal {
-			encoded, err = terminalSafeJSONDocument(body, review.MaxPreparedExportBytes)
+			encoded, err = terminalSafeJSONDocument(body, change.MaxPreparedExportBytes)
 		} else {
 			if !json.Valid(body) {
 				return errors.New("write prepared export: JSON body is invalid")
@@ -75,8 +75,11 @@ func WritePreparedExport(
 }
 
 // WriteHuman writes human.
-func WriteHuman(writer io.Writer, document *source.Document, _ Options) error {
-	if document == nil {
+func WriteHuman(writer io.Writer, document source.Opened, _ Options) error {
+	if writer == nil {
+		return errors.New("write human output: writer is nil")
+	}
+	if document.Snapshot().SourceID() == 0 {
 		return errors.New("write human output: document is nil")
 	}
 	buffer := bufio.NewWriter(writer)
@@ -106,8 +109,11 @@ func WriteHuman(writer io.Writer, document *source.Document, _ Options) error {
 }
 
 // WriteJSON writes json.
-func WriteJSON(writer io.Writer, document *source.Document, options Options) error {
-	if document == nil {
+func WriteJSON(writer io.Writer, document source.Opened, options Options) error {
+	if writer == nil {
+		return errors.New("write JSON output: writer is nil")
+	}
+	if document.Snapshot().SourceID() == 0 {
 		return errors.New("write JSON output: document is nil")
 	}
 	buffer := bufio.NewWriter(writer)
@@ -197,8 +203,8 @@ type pullDetailsJSON struct {
 	Owner   source.GitHubOwner      `json:"owner"`
 	Repo    source.GitHubRepository `json:"repo"`
 	Title   source.Title            `json:"title"`
-	Base    review.ObjectID         `json:"base"`
-	Head    review.ObjectID         `json:"head"`
+	Base    change.ObjectID         `json:"base"`
+	Head    change.ObjectID         `json:"head"`
 	BaseRef source.GitReference     `json:"base_ref"`
 	HeadRef source.GitReference     `json:"head_ref"`
 	Number  uint64                  `json:"number"`
@@ -211,9 +217,9 @@ type githubJSON struct {
 	URL       source.GitHubURL    `json:"url"`
 	State     source.GitHubState  `json:"state"`
 	BaseRef   source.GitReference `json:"base_ref"`
-	BaseOID   review.ObjectID     `json:"base_oid"`
+	BaseOID   change.ObjectID     `json:"base_oid"`
 	HeadRef   source.GitReference `json:"head_ref"`
-	HeadOID   review.ObjectID     `json:"head_oid"`
+	HeadOID   change.ObjectID     `json:"head_oid"`
 	Number    uint64              `json:"number"`
 	IsDraft   bool                `json:"is_draft"`
 }
@@ -232,7 +238,7 @@ type fileJSON struct {
 }
 
 type flagsJSON struct {
-	HiddenReasons []review.HiddenReason `json:"hidden_reasons"`
+	HiddenReasons []change.HiddenReason `json:"hidden_reasons"`
 	Generated     bool                  `json:"generated"`
 	Vendored      bool                  `json:"vendored"`
 	LockFile      bool                  `json:"lock_file"`
@@ -247,15 +253,15 @@ type patchHandleJSON struct {
 }
 
 type unclassifiedChangeJSON struct {
-	Kind           review.ChangeKind     `json:"kind"`
-	Classification review.Classification `json:"classification"`
+	Kind           change.ChangeKind     `json:"kind"`
+	Classification change.Classification `json:"classification"`
 	Additions      uint32                `json:"additions"`
 	Deletions      uint32                `json:"deletions"`
 }
 
 type classifiedChangeJSON struct {
 	Mode      *modeJSON         `json:"mode"`
-	Kind      review.ChangeKind `json:"kind"`
+	Kind      change.ChangeKind `json:"kind"`
 	Additions uint32            `json:"additions"`
 	Deletions uint32            `json:"deletions"`
 	Hunks     uint32            `json:"hunks"`
@@ -263,19 +269,19 @@ type classifiedChangeJSON struct {
 
 type simpleChangeJSON struct {
 	Mode *modeJSON         `json:"mode"`
-	Kind review.ChangeKind `json:"kind"`
+	Kind change.ChangeKind `json:"kind"`
 }
 
 type submoduleChangeJSON struct {
 	OldCommit *string           `json:"old_commit"`
 	NewCommit *string           `json:"new_commit"`
-	Kind      review.ChangeKind `json:"kind"`
+	Kind      change.ChangeKind `json:"kind"`
 }
 
 type objectTypeChangeJSON struct {
 	Old       objectJSON        `json:"old"`
 	New       objectJSON        `json:"new"`
-	Kind      review.ChangeKind `json:"kind"`
+	Kind      change.ChangeKind `json:"kind"`
 	Additions uint32            `json:"additions"`
 	Deletions uint32            `json:"deletions"`
 	Hunks     uint32            `json:"hunks"`
@@ -287,7 +293,7 @@ type modeJSON struct {
 }
 
 type objectJSON struct {
-	Kind review.ObjectKind `json:"kind"`
+	Kind change.ObjectKind `json:"kind"`
 	OID  string            `json:"oid"`
 	Mode string            `json:"mode"`
 }
@@ -336,7 +342,7 @@ func githubValue(details source.PullRequestDetails) githubJSON {
 	}
 }
 
-func fileValue(file review.File) fileJSON {
+func fileValue(file change.File) fileJSON {
 	oldPath, hasOld := file.OldPath()
 	newPath, hasNew := file.NewPath()
 	flags := file.Flags()
@@ -354,11 +360,11 @@ func fileValue(file review.File) fileJSON {
 		NewPathBytesBase64: pathBase64(current),
 		Change:             changeValue(file.Change()),
 		Flags: flagsJSON{
-			Generated:     traits.Has(review.TraitGenerated),
-			Vendored:      traits.Has(review.TraitVendored),
-			LockFile:      traits.Has(review.TraitLockFile),
-			Minified:      traits.Has(review.TraitMinified),
-			TooLarge:      traits.Has(review.TraitTooLarge),
+			Generated:     traits.Has(change.TraitGenerated),
+			Vendored:      traits.Has(change.TraitVendored),
+			LockFile:      traits.Has(change.TraitLockFile),
+			Minified:      traits.Has(change.TraitMinified),
+			TooLarge:      traits.Has(change.TraitTooLarge),
 			HiddenReasons: nonnilReasons(flags.HiddenReasons()),
 		},
 		PatchHandle: patchHandleJSON{
@@ -369,55 +375,55 @@ func fileValue(file review.File) fileJSON {
 	}
 }
 
-func changeValue(change review.Change) any {
-	if classification, ok := change.Classification(); ok {
+func changeValue(fileChange change.Change) any {
+	if classification, ok := fileChange.Classification(); ok {
 		return unclassifiedChangeJSON{
-			Kind:           change.Kind(),
+			Kind:           fileChange.Kind(),
 			Classification: classification,
-			Additions:      change.Additions(),
-			Deletions:      change.Deletions(),
+			Additions:      fileChange.Additions(),
+			Deletions:      fileChange.Deletions(),
 		}
 	}
-	switch change.Kind() {
-	case review.ChangeBinary, review.ChangeRenameOnly, review.ChangeModeOnly:
-		return simpleChangeJSON{Kind: change.Kind(), Mode: changeMode(change)}
-	case review.ChangeSubmodule:
-		oldCommit, newCommit := change.SubmoduleCommits()
+	switch fileChange.Kind() {
+	case change.ChangeBinary, change.ChangeRenameOnly, change.ChangeModeOnly:
+		return simpleChangeJSON{Kind: fileChange.Kind(), Mode: changeMode(fileChange)}
+	case change.ChangeSubmodule:
+		oldCommit, newCommit := fileChange.SubmoduleCommits()
 		return submoduleChangeJSON{
-			Kind:      change.Kind(),
+			Kind:      fileChange.Kind(),
 			OldCommit: objectIDString(oldCommit),
 			NewCommit: objectIDString(newCommit),
 		}
-	case review.ChangeObjectTypeChanged:
-		oldObject, newObject, _ := change.Objects()
+	case change.ChangeObjectTypeChanged:
+		oldObject, newObject, _ := fileChange.Objects()
 		return objectTypeChangeJSON{
-			Kind:      change.Kind(),
-			Additions: change.Additions(),
-			Deletions: change.Deletions(),
-			Hunks:     change.Hunks(),
+			Kind:      fileChange.Kind(),
+			Additions: fileChange.Additions(),
+			Deletions: fileChange.Deletions(),
+			Hunks:     fileChange.Hunks(),
 			Old:       objectValue(oldObject),
 			New:       objectValue(newObject),
 		}
 	default:
 		return classifiedChangeJSON{
-			Kind:      change.Kind(),
-			Additions: change.Additions(),
-			Deletions: change.Deletions(),
-			Hunks:     change.Hunks(),
-			Mode:      changeMode(change),
+			Kind:      fileChange.Kind(),
+			Additions: fileChange.Additions(),
+			Deletions: fileChange.Deletions(),
+			Hunks:     fileChange.Hunks(),
+			Mode:      changeMode(fileChange),
 		}
 	}
 }
 
-func changeMode(change review.Change) *modeJSON {
-	mode, ok := change.Mode()
+func changeMode(fileChange change.Change) *modeJSON {
+	mode, ok := fileChange.Mode()
 	if !ok {
 		return nil
 	}
 	return &modeJSON{Old: mode.Old().String(), New: mode.New().String()}
 }
 
-func objectValue(object review.GitObject) objectJSON {
+func objectValue(object change.GitObject) objectJSON {
 	return objectJSON{
 		Kind: object.Kind(),
 		OID:  object.OID().String(),
@@ -425,7 +431,7 @@ func objectValue(object review.GitObject) objectJSON {
 	}
 }
 
-func objectIDString(value *review.ObjectID) *string {
+func objectIDString(value *change.ObjectID) *string {
 	if value == nil {
 		return nil
 	}
@@ -434,7 +440,7 @@ func objectIDString(value *review.ObjectID) *string {
 }
 
 type optionalReviewPath struct {
-	path    review.Path
+	path    change.Path
 	present bool
 }
 
@@ -481,9 +487,9 @@ func revisionRefString(ref *source.RevisionRef) *string {
 	return new(value)
 }
 
-func nonnilReasons(reasons []review.HiddenReason) []review.HiddenReason {
+func nonnilReasons(reasons []change.HiddenReason) []change.HiddenReason {
 	if reasons == nil {
-		return []review.HiddenReason{}
+		return []change.HiddenReason{}
 	}
 	return reasons
 }

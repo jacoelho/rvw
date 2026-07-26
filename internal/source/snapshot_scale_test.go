@@ -5,14 +5,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 func TestSnapshotAcceptsMaximumFilesAndPathOwnership(t *testing.T) {
-	records := make([]diffRecord, review.MaxFiles)
-	basePathBytes := int(review.MaxSourcePaths) / len(records)
-	extraPathBytes := int(review.MaxSourcePaths) % len(records)
-	mode := review.FileMode("100644")
+	records := make([]diffRecord, change.MaxFiles)
+	basePathBytes := int(change.MaxSourcePaths) / len(records)
+	extraPathBytes := int(change.MaxSourcePaths) % len(records)
+	mode := change.FileMode("100644")
 	for index := range records {
 		pairBytes := basePathBytes
 		if index < extraPathBytes {
@@ -36,14 +36,14 @@ func TestSnapshotAcceptsMaximumFilesAndPathOwnership(t *testing.T) {
 	}
 	const wantBuilderPeak int64 = 131_508_928
 	peak := sourceSnapshotRecordBytes(records) + (OpenOptions{}).RetainedBytes() +
-		int64(len(records))*4 + review.SnapshotBuilderConstructionBytes(len(records))
+		int64(len(records))*4 + change.SnapshotBuilderConstructionBytes(len(records))
 	if peak != wantBuilderPeak || peak > maxSourceConstructionBytes {
 		t.Fatalf("builder peak = %d, want %d under %d", peak, wantBuilderPeak, maxSourceConstructionBytes)
 	}
 	snapshot, err := (&Service{}).snapshot(
 		t.Context(),
 		directCPUAdmission,
-		review.SourceID(1),
+		change.SourceID(1),
 		nil,
 		records,
 		OpenOptions{},
@@ -55,13 +55,13 @@ func TestSnapshotAcceptsMaximumFilesAndPathOwnership(t *testing.T) {
 	if got := snapshot.RetainedBytes(); got != wantRetained {
 		t.Fatalf("snapshot retained = %d, want %d", got, wantRetained)
 	}
-	if wantRetained != review.MaxBaseSnapshotRetainedBytes ||
-		review.MaxBaseSnapshotRetainedBytes > review.MaxSnapshotRetainedBytes {
+	if wantRetained != change.MaxBaseSnapshotRetainedBytes ||
+		change.MaxBaseSnapshotRetainedBytes > change.MaxSnapshotRetainedBytes {
 		t.Fatalf(
 			"snapshot bounds = retained %d base %d complete %d",
 			wantRetained,
-			review.MaxBaseSnapshotRetainedBytes,
-			review.MaxSnapshotRetainedBytes,
+			change.MaxBaseSnapshotRetainedBytes,
+			change.MaxSnapshotRetainedBytes,
 		)
 	}
 }

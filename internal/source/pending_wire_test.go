@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 func TestPendingJSONStringSizingIsCancellable(t *testing.T) {
@@ -42,7 +42,7 @@ func TestPendingSubmissionResponseHasClosedClassification(t *testing.T) {
 			got, err := classifyPendingSubmissionResponse(
 				t.Context(),
 				encoded,
-				review.ReviewNodeID("review"),
+				change.ReviewNodeID("review"),
 				7,
 				"expected",
 				"COMMENTED",
@@ -65,7 +65,7 @@ func TestPendingSubmissionResponseFramerRejectsAmbiguousFields(t *testing.T) {
 		if _, err := classifyPendingSubmissionResponse(
 			t.Context(),
 			[]byte(encoded),
-			review.ReviewNodeID("review"),
+			change.ReviewNodeID("review"),
 			7,
 			"expected",
 			"COMMENTED",
@@ -82,7 +82,7 @@ func TestPendingSubmissionResponseFramerPropagatesCancellation(t *testing.T) {
 	_, err := classifyPendingSubmissionResponse(
 		ctx,
 		[]byte(`{"body":"expected","node_id":"review","state":"COMMENTED","id":7}`),
-		review.ReviewNodeID("review"),
+		change.ReviewNodeID("review"),
 		7,
 		"expected",
 		"COMMENTED",

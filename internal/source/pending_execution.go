@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 type pendingPublicationProgress uint8
@@ -71,11 +71,11 @@ type pendingPublicationExecutionState struct {
 	submission     pendingMutationBatch
 	expectedState  string
 	expectedBody   string
-	marker         review.PublicationMarker
-	reviewID       review.ReviewNodeID
+	marker         change.PublicationMarker
+	reviewID       change.ReviewNodeID
 	batches        []pendingMutationBatch
 	outstanding    *pendingPublicationStepCell
-	target         review.PublicationTarget
+	target         change.PublicationTarget
 	databaseID     uint64
 	retainedBytes  int64
 	nextBatch      int
@@ -99,7 +99,7 @@ type pendingPublicationStepCell struct {
 	failure     error
 	response    []byte
 	commit      PublicationCommit
-	fresh       review.PendingReview
+	fresh       change.PendingReview
 	kind        PendingPublicationStepKind
 	acquisition pendingPublicationAcquisitionKind
 }
@@ -190,7 +190,7 @@ func (step *PendingPublicationStep) ConstructionBytes() int64 {
 		step.cell.fresh.RetainedBytes() +
 		int64(step.cell.fresh.CommentCount())*(pendingEffectMetadataBytes+pendingAliasMetadataBytes) +
 		int64(len(batch.effects))*pendingEffectMetadataBytes +
-		review.MaxPendingMutationBatchBytes + pendingMutationResponseBytes + 4_096
+		change.MaxPendingMutationBatchBytes + pendingMutationResponseBytes + 4_096
 }
 
 // Advance consumes a continuation result so its execution can acquire the next
@@ -290,7 +290,7 @@ func (state *pendingPublicationExecutionState) newStep(
 func (state *pendingPublicationExecutionState) acquiredStep(
 	kind pendingPublicationAcquisitionKind,
 	response []byte,
-	fresh review.PendingReview,
+	fresh change.PendingReview,
 	failure error,
 ) PendingPublicationStep {
 	return state.newStep(pendingPublicationStepCell{
@@ -326,8 +326,8 @@ func (state *pendingPublicationExecutionState) terminalFailure(
 		return state.terminalStep(unknownPendingSubmission(failure))
 	default:
 		return state.terminalStep(PublicationCommit{
-			Disposition:  review.PublicationDispositionUnknown,
-			PendingPhase: review.PendingPublicationIndeterminate,
+			Disposition:  change.PublicationDispositionUnknown,
+			PendingPhase: change.PendingPublicationIndeterminate,
 			Detail: boundedOperationDetail(errors.Join(
 				failure,
 				errors.New("pending publication uncertainty state is invalid"),
@@ -424,7 +424,7 @@ func (service *Service) AcquirePendingPublication(
 		return state.acquiredStep(
 			pendingSubmissionReconciliation,
 			response,
-			review.PendingReview{},
+			change.PendingReview{},
 			state.pendingFailure,
 		)
 	case pendingPublicationNoReconciliation:
@@ -452,21 +452,21 @@ func (service *Service) AcquirePendingPublication(
 			state.reconciliation = pendingPublicationReconcileMutation
 			return service.AcquirePendingPublication(ctx, execution, runCPU)
 		}
-		return state.acquiredStep(pendingMutationResponse, command.body, review.PendingReview{}, nil)
+		return state.acquiredStep(pendingMutationResponse, command.body, change.PendingReview{}, nil)
 	}
 	if state.submission.payload == "" {
 		fresh, err := service.acquirePendingReview(
 			ctx, state.target, state.reviewID, state.databaseID, runCPU,
 		)
 		commit := PublicationCommit{
-			Disposition:  review.PublicationDispositionCommitted,
+			Disposition:  change.PublicationDispositionCommitted,
 			RemoteReview: state.databaseID,
 		}
 		if err == nil {
 			commit.Pending = new(fresh)
-			commit.PendingRefresh = review.PendingRefreshAcquired
+			commit.PendingRefresh = change.PendingRefreshAcquired
 		} else {
-			commit.PendingRefresh = review.PendingRefreshUnavailable
+			commit.PendingRefresh = change.PendingRefreshUnavailable
 			commit.Detail = boundedOperationDetail(
 				"draft synchronized; refresh pending review: " + err.Error(),
 			)
@@ -483,7 +483,7 @@ func (service *Service) AcquirePendingPublication(
 		state.reconciliation = pendingPublicationReconcileSubmission
 		return service.AcquirePendingPublication(ctx, execution, runCPU)
 	}
-	return state.acquiredStep(pendingSubmissionResponse, command.body, review.PendingReview{}, nil)
+	return state.acquiredStep(pendingSubmissionResponse, command.body, change.PendingReview{}, nil)
 }
 
 // Finish consumes acquired remote state and returns either an explicit
@@ -559,7 +559,7 @@ func (step *PendingPublicationStep) Finish(ctx context.Context) PendingPublicati
 func finishPendingMutationReconciliation(
 	ctx context.Context,
 	state *pendingPublicationExecutionState,
-	fresh review.PendingReview,
+	fresh change.PendingReview,
 ) PendingPublicationStep {
 	batch := state.currentBatch()
 	planned := make([]pendingEffect, len(batch.effects))
@@ -616,16 +616,16 @@ func failedPendingCommit(err error, progress pendingPublicationProgress) Publica
 	if err != nil {
 		detail = err.Error()
 	}
-	disposition := review.PublicationDispositionFailedBeforeCommit
-	phase := review.PendingPublicationPhase(0)
+	disposition := change.PublicationDispositionFailedBeforeCommit
+	phase := change.PendingPublicationPhase(0)
 	switch progress {
 	case pendingPublicationUncommitted:
 	case pendingPublicationPartiallyCommitted:
-		disposition = review.PublicationDispositionUnknown
-		phase = review.PendingPublicationSynchronizing
+		disposition = change.PublicationDispositionUnknown
+		phase = change.PendingPublicationSynchronizing
 	default:
-		disposition = review.PublicationDispositionUnknown
-		phase = review.PendingPublicationIndeterminate
+		disposition = change.PublicationDispositionUnknown
+		phase = change.PendingPublicationIndeterminate
 		detail = "pending publication progress is invalid: " + detail
 	}
 	return PublicationCommit{
@@ -641,8 +641,8 @@ func unknownPendingMutation(err error) PublicationCommit {
 		detail = err.Error()
 	}
 	return PublicationCommit{
-		Disposition:  review.PublicationDispositionUnknown,
-		PendingPhase: review.PendingPublicationSynchronizing,
+		Disposition:  change.PublicationDispositionUnknown,
+		PendingPhase: change.PendingPublicationSynchronizing,
 		Detail:       boundedOperationDetail(detail),
 	}
 }

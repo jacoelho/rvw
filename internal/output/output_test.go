@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 	"github.com/jacoelho/rvw/internal/source"
 )
 
@@ -21,7 +21,6 @@ func TestHumanCountsHiddenFilesButListsOnlyVisible(t *testing.T) {
 		"a.go":   "package a\n",
 		"go.sum": "hidden\n",
 	})
-	defer document.Close()
 	var output bytes.Buffer
 	if err := WriteHuman(&output, document, Options{}); err != nil {
 		t.Fatal(err)
@@ -36,7 +35,6 @@ func TestJSONIncludesHiddenFilesAndCrossConsistentHandles(t *testing.T) {
 		"a.go":   "package a\n",
 		"go.sum": "hidden\n",
 	})
-	defer document.Close()
 	var output bytes.Buffer
 	if err := WriteJSON(&output, document, Options{}); err != nil {
 		t.Fatal(err)
@@ -80,7 +78,6 @@ func TestJSONIncludesHiddenFilesAndCrossConsistentHandles(t *testing.T) {
 
 func TestTerminalJSONEscapesBidirectionalControls(t *testing.T) {
 	document := localDocument(t, map[string]string{"safe\u202e\u007f\u009b.go": "unsafe name\n"})
-	defer document.Close()
 	var output bytes.Buffer
 	if err := WriteJSON(&output, document, Options{Terminal: true}); err != nil {
 		t.Fatal(err)
@@ -187,7 +184,7 @@ func TestTerminalSafePreparedBodiesDoNotAllocatePerControl(t *testing.T) {
 
 func TestWritePreparedExportRejectsInvalidValueBeforeWriting(t *testing.T) {
 	var output bytes.Buffer
-	if err := WritePreparedExport(&output, review.PreparedExport{}, Options{Terminal: true}); err == nil {
+	if err := WritePreparedExport(&output, change.PreparedExport{}, Options{Terminal: true}); err == nil {
 		t.Fatal("zero prepared export was accepted")
 	}
 	if output.Len() != 0 {
@@ -205,15 +202,14 @@ func TestWritePreparedExportPropagatesWriterFailures(t *testing.T) {
 	}
 }
 
-func preparedJSONWithReviewComment(t *testing.T, body string) review.PreparedExport {
+func preparedJSONWithReviewComment(t *testing.T, body string) change.PreparedExport {
 	t.Helper()
 	document := localDocument(t, map[string]string{"a.go": "package a\n"})
-	defer document.Close()
-	current, err := review.NewReview(testReviewRequest(document.Snapshot()))
+	current, err := change.NewReview(testReviewRequest(document.Snapshot()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	current, err = current.BeginDraft(review.ReviewCommentTarget())
+	current, err = current.BeginDraft(change.ReviewCommentTarget())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +221,7 @@ func preparedJSONWithReviewComment(t *testing.T, body string) review.PreparedExp
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := current.PrepareJSON(review.DefaultExportOptions())
+	prepared, err := current.PrepareJSON(change.DefaultExportOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +233,6 @@ func TestOutputsPreserveNonUTF8PathIdentityWithoutRawTerminalBytes(t *testing.T)
 		t,
 		[]byte{'o', 'd', 'd', '-', 0xff, '.', 'g', 'o'},
 	)
-	defer document.Close()
 
 	var human bytes.Buffer
 	if err := WriteHuman(&human, document, Options{}); err != nil {
@@ -271,7 +266,7 @@ func TestOutputsPreserveNonUTF8PathIdentityWithoutRawTerminalBytes(t *testing.T)
 	}
 }
 
-func nonUTF8StagedDocument(t *testing.T, path []byte) *source.Document {
+func nonUTF8StagedDocument(t *testing.T, path []byte) source.Opened {
 	t.Helper()
 	root := t.TempDir()
 	runGit(t, root, "init")
@@ -307,20 +302,25 @@ func nonUTF8StagedDocument(t *testing.T, path []byte) *source.Document {
 			t.Error(err)
 		}
 	})
-	document, err := service.Open(
-		t.Context(),
-		source.StagedTarget(),
-		source.OpenOptions{BuiltinDefaults: true},
+	document, revision, err := service.Open(
+		t.Context(), source.OpenRequest{
+			Target:  source.StagedTarget(),
+			Options: source.OpenOptions{BuiltinDefaults: true},
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := revision.Retire().Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	return document
 }
 
 func TestWriterFailurePropagates(t *testing.T) {
 	document := localDocument(t, map[string]string{"a.go": "package a\n"})
-	defer document.Close()
 	writer := failingWriter{}
 	if err := WriteHuman(writer, document, Options{}); !errors.Is(err, errWriterFailed) {
 		t.Fatalf("WriteHuman() error = %v", err)
@@ -330,7 +330,21 @@ func TestWriterFailurePropagates(t *testing.T) {
 	}
 }
 
-func localDocument(t *testing.T, files map[string]string) *source.Document {
+func TestOutputWritersRejectNilWriter(t *testing.T) {
+	document := localDocument(t, map[string]string{"a.go": "package a\n"})
+	for name, write := range map[string]func() error{
+		"human": func() error { return WriteHuman(nil, document, Options{}) },
+		"JSON":  func() error { return WriteJSON(nil, document, Options{}) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := write(); err == nil {
+				t.Fatal("nil writer was accepted")
+			}
+		})
+	}
+}
+
+func localDocument(t *testing.T, files map[string]string) source.Opened {
 	t.Helper()
 	root := t.TempDir()
 	runGit(t, root, "init")
@@ -356,13 +370,21 @@ func localDocument(t *testing.T, files map[string]string) *source.Document {
 			t.Error(err)
 		}
 	})
-	document, err := service.Open(t.Context(), source.WorktreeTarget(), source.OpenOptions{
-		IncludeUntracked: true,
-		BuiltinDefaults:  true,
+	document, revision, err := service.Open(t.Context(), source.OpenRequest{
+		Target: source.WorktreeTarget(),
+		Options: source.OpenOptions{
+			IncludeUntracked: true,
+			BuiltinDefaults:  true,
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := revision.Retire().Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	return document
 }
 

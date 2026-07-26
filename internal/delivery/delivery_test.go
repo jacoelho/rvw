@@ -38,7 +38,7 @@ func TestClipboardDeliveryCommitsTypedPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	outcome, err := manager.Deliver(t.Context(), DestinationClipboard, payload)
+	outcome, err := manager.Deliver(t.Context(), payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestPreCancelledClipboardDeliveryDoesNotFenceDestination(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	outcome, err := manager.Deliver(ctx, DestinationClipboard, payload)
+	outcome, err := manager.Deliver(ctx, payload)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Deliver() error = %v, want context cancellation", err)
 	}
@@ -81,18 +81,17 @@ func TestPreCancelledClipboardDeliveryDoesNotFenceDestination(t *testing.T) {
 
 func TestFencedClipboardRetryReturnsTypedFailureOutcome(t *testing.T) {
 	manager := newTestManager(t)
-	manager.finishWrite(DestinationClipboard, CommitUnknown)
+	manager.finishWrite(CommitUnknown)
 	payload, err := NewPayload("review body")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	outcome, err := manager.Deliver(t.Context(), DestinationClipboard, payload)
+	outcome, err := manager.Deliver(t.Context(), payload)
 	if !errors.Is(err, ErrUnknown) {
 		t.Fatalf("Deliver() error = %v, want %v", err, ErrUnknown)
 	}
-	if outcome.Destination != DestinationClipboard ||
-		outcome.State != CommitFailedBeforeWrite || outcome.Bytes != payload.Bytes() {
+	if outcome.State != CommitFailedBeforeWrite || outcome.Bytes != payload.Bytes() {
 		t.Fatalf("fenced retry outcome = %+v", outcome)
 	}
 }
@@ -186,7 +185,7 @@ func configureDisplay(t *testing.T) {
 func assertClipboardState(t *testing.T, manager *Manager, want destinationState) {
 	t.Helper()
 	manager.mu.Lock()
-	got := manager.destinations[DestinationClipboard]
+	got := manager.clipboard
 	manager.mu.Unlock()
 	if got != want {
 		t.Fatalf("clipboard state = %+v, want %+v", got, want)

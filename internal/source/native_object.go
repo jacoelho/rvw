@@ -12,7 +12,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/object"
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 const maxRevisionPeelDepth = 64
@@ -22,7 +22,7 @@ var emptyTreeHash = plumbing.NewHash("4b825dc642cb6eb9a060e54bf8d69288fbee4904")
 type nativeTreeEntry struct { //nolint:govet // Field order follows Git tree entry semantics.
 	path string
 	oid  plumbing.Hash
-	mode review.FileMode
+	mode change.FileMode
 }
 
 type nativeTreeFrame struct {
@@ -309,7 +309,7 @@ func (iterator *nativeTreeIterator) next(ctx context.Context) (nativeTreeEntry, 
 			continue
 		}
 		modeText := strings.TrimPrefix(entry.Mode.String(), "0")
-		mode, err := review.NewFileMode(modeText)
+		mode, err := change.NewFileMode(modeText)
 		if err != nil {
 			return nativeTreeEntry{}, fmt.Errorf("git tree path %q: %w", path, err)
 		}
@@ -322,9 +322,9 @@ func (iterator *nativeTreeIterator) next(ctx context.Context) (nativeTreeEntry, 
 	return nativeTreeEntry{}, io.EOF
 }
 
-func hashObjectID(hash plumbing.Hash) (review.ObjectID, error) {
+func hashObjectID(hash plumbing.Hash) (change.ObjectID, error) {
 	if hash.IsZero() {
 		return "", errors.New("git object ID is zero")
 	}
-	return review.NewObjectID(hash.String())
+	return change.NewObjectID(hash.String())
 }

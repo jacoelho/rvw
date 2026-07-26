@@ -172,11 +172,11 @@ func TestPullRequestUsesNativeGitHubAndFilteredSmartGit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	document, err := service.Open(t.Context(), target, OpenOptions{BuiltinDefaults: true})
+	document, documentRevision, err := service.Open(t.Context(), OpenRequest{Target: target, Options: OpenOptions{BuiltinDefaults: true}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer document.Close()
+	defer closeTestRevision(t, documentRevision)
 	file, ok := document.Snapshot().File(0)
 	if !ok || document.Snapshot().FileCount() != 1 || file.DisplayPath() != "reviewed.go" {
 		t.Fatalf("pull-request snapshot = %+v, present=%v", document.Snapshot(), ok)

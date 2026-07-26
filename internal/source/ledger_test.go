@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 func TestSourceLedgerRejectsBeforeOneByteOverLimit(t *testing.T) {
@@ -33,10 +33,10 @@ func TestSourceLedgerRejectsBeforeOneByteOverLimit(t *testing.T) {
 
 func TestConstructionLimitClassificationRemainsLimited(t *testing.T) {
 	limitErr := fmt.Errorf("construction: %w", errSourceConstructionLimited)
-	if status := pendingFailureStatus(limitErr); status != review.PendingReviewLimited {
+	if status := pendingFailureStatus(limitErr); status != change.PendingReviewLimited {
 		t.Fatalf("pending status = %s", status)
 	}
-	if status := remoteThreadFailureStatus(limitErr); status != review.RemoteThreadsLimited {
+	if status := remoteThreadFailureStatus(limitErr); status != change.RemoteThreadsLimited {
 		t.Fatalf("remote thread status = %s", status)
 	}
 	failure := sourceFailure(OperationOpenSource, limitErr)

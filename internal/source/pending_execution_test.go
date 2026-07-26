@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 func TestPendingPublicationDocumentedGraphQLFailuresArePreCommit(t *testing.T) {
@@ -59,7 +59,7 @@ func TestPendingPublicationDocumentedGraphQLFailuresArePreCommit(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if commit.Disposition != review.PublicationDispositionFailedBeforeCommit {
+				if commit.Disposition != change.PublicationDispositionFailedBeforeCommit {
 					t.Fatalf("disposition = %v, want failed-before-commit", commit.Disposition)
 				}
 				if requests != 1 {
@@ -114,7 +114,7 @@ func TestPendingPublicationStepAllowsOneOutstandingCell(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rejection.Disposition != review.PublicationDispositionUnknown {
+	if rejection.Disposition != change.PublicationDispositionUnknown {
 		t.Fatalf("second outstanding step disposition = %d", rejection.Disposition)
 	}
 	if err := continuation.Advance(); err != nil {
@@ -173,7 +173,7 @@ func TestPendingPublicationStepCloseForcesReadBeforeWriteRetry(t *testing.T) {
 			step := state.acquiredStep(
 				test.kind,
 				[]byte("unclassified remote response"),
-				review.PendingReview{},
+				change.PendingReview{},
 				pendingFailure,
 			)
 			copyOfStep := step
@@ -214,7 +214,7 @@ func TestPendingPublicationStepKindsAreConsuming(t *testing.T) {
 		step := state.acquiredStep(
 			pendingMutationResponse,
 			[]byte(`{"data":{"m0":{"clientMutationId":"client"}},"errors":[]}`),
-			review.PendingReview{},
+			change.PendingReview{},
 			nil,
 		)
 		copyOfStep := step
@@ -250,14 +250,14 @@ func TestPendingPublicationStepKindsAreConsuming(t *testing.T) {
 			status:         pendingPublicationExecutionOpen,
 		}
 		step := state.terminalStep(PublicationCommit{
-			Disposition: review.PublicationDispositionCommitted,
+			Disposition: change.PublicationDispositionCommitted,
 		})
 		copyOfStep := step
 		commit, err := step.TakeCommit()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if commit.Disposition != review.PublicationDispositionCommitted || state.status != 0 {
+		if commit.Disposition != change.PublicationDispositionCommitted || state.status != 0 {
 			t.Fatalf("terminal take = disposition:%d status:%d", commit.Disposition, state.status)
 		}
 		if copyOfStep.Kind() != 0 {
@@ -283,17 +283,17 @@ func TestPendingPublicationFinishCancellationUsesAcquiredResponseUncertainty(t *
 	tests := []struct {
 		name      string
 		kind      pendingPublicationAcquisitionKind
-		wantPhase review.PendingPublicationPhase
+		wantPhase change.PendingPublicationPhase
 	}{
 		{
 			name:      "mutation response",
 			kind:      pendingMutationResponse,
-			wantPhase: review.PendingPublicationSynchronizing,
+			wantPhase: change.PendingPublicationSynchronizing,
 		},
 		{
 			name:      "submission response",
 			kind:      pendingSubmissionResponse,
-			wantPhase: review.PendingPublicationSubmitting,
+			wantPhase: change.PendingPublicationSubmitting,
 		},
 	}
 	for _, test := range tests {
@@ -306,7 +306,7 @@ func TestPendingPublicationFinishCancellationUsesAcquiredResponseUncertainty(t *
 			step := state.acquiredStep(
 				test.kind,
 				[]byte(`{"data":{}}`),
-				review.PendingReview{},
+				change.PendingReview{},
 				nil,
 			)
 			cause := errors.New("cancel before response classification")
@@ -318,7 +318,7 @@ func TestPendingPublicationFinishCancellationUsesAcquiredResponseUncertainty(t *
 			if err != nil {
 				t.Fatal(err)
 			}
-			if commit.Disposition != review.PublicationDispositionUnknown ||
+			if commit.Disposition != change.PublicationDispositionUnknown ||
 				commit.PendingPhase != test.wantPhase ||
 				!strings.Contains(commit.Detail.String(), cause.Error()) {
 				t.Fatalf("cancelled response classification = %+v", commit)
@@ -331,17 +331,17 @@ func TestPendingPublicationAcquireCancellationPreservesStartedFailure(t *testing
 	tests := []struct {
 		name           string
 		reconciliation pendingPublicationReconciliation
-		wantPhase      review.PendingPublicationPhase
+		wantPhase      change.PendingPublicationPhase
 	}{
 		{
 			name:           "mutation reconciliation",
 			reconciliation: pendingPublicationReconcileMutation,
-			wantPhase:      review.PendingPublicationSynchronizing,
+			wantPhase:      change.PendingPublicationSynchronizing,
 		},
 		{
 			name:           "submission reconciliation",
 			reconciliation: pendingPublicationReconcileSubmission,
-			wantPhase:      review.PendingPublicationSubmitting,
+			wantPhase:      change.PendingPublicationSubmitting,
 		},
 	}
 	for _, test := range tests {
@@ -367,7 +367,7 @@ func TestPendingPublicationAcquireCancellationPreservesStartedFailure(t *testing
 				t.Fatal(err)
 			}
 			detail := commit.Detail.String()
-			if commit.Disposition != review.PublicationDispositionUnknown ||
+			if commit.Disposition != change.PublicationDispositionUnknown ||
 				commit.PendingPhase != test.wantPhase ||
 				!strings.Contains(detail, startedFailure.Error()) ||
 				!strings.Contains(detail, cause.Error()) {
@@ -382,27 +382,27 @@ func TestPendingPublicationNilAdmissionPreservesUncertainty(t *testing.T) {
 		name            string
 		reconciliation  pendingPublicationReconciliation
 		pendingFailure  error
-		wantDisposition review.PublicationDisposition
-		wantPhase       review.PendingPublicationPhase
+		wantDisposition change.PublicationDisposition
+		wantPhase       change.PendingPublicationPhase
 	}{
 		{
 			name:            "no uncertain write",
 			reconciliation:  pendingPublicationNoReconciliation,
-			wantDisposition: review.PublicationDispositionFailedBeforeCommit,
+			wantDisposition: change.PublicationDispositionFailedBeforeCommit,
 		},
 		{
 			name:            "mutation reconciliation",
 			reconciliation:  pendingPublicationReconcileMutation,
 			pendingFailure:  errors.New("mutation write failed after start"),
-			wantDisposition: review.PublicationDispositionUnknown,
-			wantPhase:       review.PendingPublicationSynchronizing,
+			wantDisposition: change.PublicationDispositionUnknown,
+			wantPhase:       change.PendingPublicationSynchronizing,
 		},
 		{
 			name:            "submission reconciliation",
 			reconciliation:  pendingPublicationReconcileSubmission,
 			pendingFailure:  errors.New("submission write failed after start"),
-			wantDisposition: review.PublicationDispositionUnknown,
-			wantPhase:       review.PendingPublicationSubmitting,
+			wantDisposition: change.PublicationDispositionUnknown,
+			wantPhase:       change.PendingPublicationSubmitting,
 		},
 	}
 	for _, test := range tests {
@@ -436,13 +436,13 @@ func TestPendingPublicationNilAdmissionPreservesUncertainty(t *testing.T) {
 func TestFailedPendingCommitDistinguishesRemoteProgress(t *testing.T) {
 	failure := errors.New("mutation failed")
 	uncommitted := failedPendingCommit(failure, pendingPublicationUncommitted)
-	if uncommitted.Disposition != review.PublicationDispositionFailedBeforeCommit ||
+	if uncommitted.Disposition != change.PublicationDispositionFailedBeforeCommit ||
 		uncommitted.PendingPhase != 0 {
 		t.Fatalf("uncommitted failure = %+v", uncommitted)
 	}
 	partial := failedPendingCommit(failure, pendingPublicationPartiallyCommitted)
-	if partial.Disposition != review.PublicationDispositionUnknown ||
-		partial.PendingPhase != review.PendingPublicationSynchronizing {
+	if partial.Disposition != change.PublicationDispositionUnknown ||
+		partial.PendingPhase != change.PendingPublicationSynchronizing {
 		t.Fatalf("partial failure = %+v", partial)
 	}
 }

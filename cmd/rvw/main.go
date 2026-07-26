@@ -164,7 +164,9 @@ func execute(request executeRequest) (returnErr error) {
 		resolved.GitHub().FetchThreads
 	options.FetchPending = request.invocation.Output == OutputInteractive
 
-	document, err := service.Open(request.ctx, request.invocation.Target, options)
+	opened, revision, err := service.Open(request.ctx, source.OpenRequest{
+		Target: request.invocation.Target, Options: options,
+	})
 	if err != nil {
 		return err
 	}
@@ -173,23 +175,24 @@ func execute(request executeRequest) (returnErr error) {
 			ctx:         request.ctx,
 			input:       request.stdin,
 			output:      request.stdout,
-			resolved:    resolved,
+			resolved:    &resolved,
 			service:     service,
-			document:    document,
+			opened:      &opened,
+			revision:    revision,
 			termination: request.termination,
 			environment: request.environment,
 		})
 	}
 	defer func() {
-		returnErr = errors.Join(returnErr, document.Close())
+		returnErr = errors.Join(returnErr, revision.Retire().Close())
 	}()
 
 	outputOptions := output.Options{Terminal: request.terminals.has(terminalOutput)}
 	switch request.invocation.Output {
 	case OutputHuman:
-		err = output.WriteHuman(request.stdout, document, outputOptions)
+		err = output.WriteHuman(request.stdout, opened, outputOptions)
 	case OutputJSON:
-		err = output.WriteJSON(request.stdout, document, outputOptions)
+		err = output.WriteJSON(request.stdout, opened, outputOptions)
 	default:
 		err = errors.New("unknown output mode")
 	}

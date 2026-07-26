@@ -17,17 +17,17 @@ func TestReloadUsesSynchronousCPUAdmission(t *testing.T) {
 
 	service := newTestService(t, root)
 	defer closeTestService(t, service)
-	document, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{})
+	document, documentRevision, err := service.Open(t.Context(), OpenRequest{Target: WorktreeTarget(), Options: OpenOptions{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer document.Close()
+	defer closeTestRevision(t, documentRevision)
 
 	active := false
 	calls := 0
-	reloaded, err := service.Reload(
-		t.Context(),
-		document,
+	_, reloadedRevision, err := service.Reload(
+		t.Context(), document, documentRevision,
+
 		document.Options(),
 		func(ctx context.Context, work func() error) error {
 			if active {
@@ -41,12 +41,12 @@ func TestReloadUsesSynchronousCPUAdmission(t *testing.T) {
 			err := work()
 			active = false
 			return err
-		},
-	)
+		})
+
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reloaded.Close()
+	defer closeTestRevision(t, reloadedRevision)
 	if calls < 3 {
 		t.Fatalf("CPU admissions = %d, want snapshot accounting, filter, and construction", calls)
 	}
@@ -63,25 +63,25 @@ func TestReloadCPUAdmissionFailureCleansPrivateWorkspace(t *testing.T) {
 	t.Setenv("TMPDIR", workspaceRoot)
 	service := newTestService(t, root)
 	defer closeTestService(t, service)
-	document, err := service.Open(t.Context(), WorktreeTarget(), OpenOptions{})
+	document, documentRevision, err := service.Open(t.Context(), OpenRequest{Target: WorktreeTarget(), Options: OpenOptions{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer document.Close()
+	defer closeTestRevision(t, documentRevision)
 	before := directoryNames(t, workspaceRoot)
 
 	cause := errors.New("reject reload CPU admission")
 	calls := 0
-	reloaded, err := service.Reload(
-		t.Context(),
-		document,
+	reloaded, _, err := service.Reload(
+		t.Context(), document, documentRevision,
+
 		document.Options(),
 		func(context.Context, func() error) error {
 			calls++
 			return cause
-		},
-	)
-	if reloaded != nil || !errors.Is(err, cause) {
+		})
+
+	if reloaded.Snapshot().SourceID() != 0 || !errors.Is(err, cause) {
 		t.Fatalf("document=%v error=%v", reloaded, err)
 	}
 	if calls != 1 {

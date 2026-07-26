@@ -15,7 +15,7 @@ import (
 
 	"github.com/go-git/go-git/v5/plumbing"
 	gitbinary "github.com/go-git/go-git/v5/utils/binary"
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 const (
@@ -328,21 +328,21 @@ func readIndexPath(
 		if strip < 0 || strip > int64(len(previous)) {
 			return "", 0, errors.New("version 4 index path has an invalid prefix strip")
 		}
-		suffix, err := readNULTerminatedIndexPath(reader, review.MaxPathBytes)
+		suffix, err := readNULTerminatedIndexPath(reader, change.MaxPathBytes)
 		if err != nil {
 			return "", 0, err
 		}
 		path := previous[:len(previous)-int(strip)] + suffix
-		if len(path) > int(review.MaxPathBytes) {
+		if len(path) > int(change.MaxPathBytes) {
 			return "", 0, errors.New("version 4 index path exceeds the path limit")
 		}
 		return path, 0, nil
 	}
 	if encodedLength == indexNameMask {
-		path, err := readNULTerminatedIndexPath(reader, review.MaxPathBytes)
+		path, err := readNULTerminatedIndexPath(reader, change.MaxPathBytes)
 		return path, len(path) + 1, err
 	}
-	if encodedLength == 0 || encodedLength > uint16(review.MaxPathBytes) {
+	if encodedLength == 0 || encodedLength > uint16(change.MaxPathBytes) {
 		return "", 0, errors.New("index path length is invalid")
 	}
 	path := make([]byte, encodedLength)

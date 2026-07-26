@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jacoelho/rvw/internal/app"
 	"github.com/jacoelho/rvw/internal/config"
 	"github.com/jacoelho/rvw/internal/keymap"
+	"github.com/jacoelho/rvw/internal/tui"
 )
 
 func TestInteractiveKeybindingBoundaryConvertsAcceptedVocabulary(t *testing.T) {
@@ -107,39 +107,39 @@ func TestInteractivePaletteBridgesEverySemanticThemeRole(t *testing.T) {
 		t.Fatal("active bundled theme is absent")
 	}
 	values := interactivePaletteValues(theme)
-	for themeRole, paletteRole := range map[config.ThemeColor]app.PaletteRole{
-		"panel_bg":           app.PalettePanelBackground,
-		"fg_primary":         app.PalettePrimary,
-		"fg_secondary":       app.PaletteSecondary,
-		"fg_dim":             app.PaletteDim,
-		"diff_add":           app.PaletteDiffAdd,
-		"diff_del":           app.PaletteDiffDelete,
-		"diff_context":       app.PaletteDiffContext,
-		"pending":            app.PalettePending,
-		"border_focused":     app.PaletteFocused,
-		"status_bar_bg":      app.PaletteStatusBackground,
-		"cursor_line_bg":     app.PaletteCursorBackground,
-		"cursor_line_fg":     app.PaletteCursorForeground,
-		"diff_add_bg":        app.PaletteDiffAddBackground,
-		"diff_del_bg":        app.PaletteDiffDeleteBackground,
-		"diff_hunk_header":   app.PaletteDiffHunk,
-		"message_warning_fg": app.PaletteWarningForeground,
-		"message_warning_bg": app.PaletteWarningBackground,
-		"message_error_fg":   app.PaletteErrorForeground,
-		"message_error_bg":   app.PaletteErrorBackground,
-		"message_success_fg": app.PaletteSuccessForeground,
-		"message_success_bg": app.PaletteSuccessBackground,
+	for themeRole, paletteRole := range map[config.ThemeColor]tui.PaletteRole{
+		"panel_bg":           tui.PalettePanelBackground,
+		"fg_primary":         tui.PalettePrimary,
+		"fg_secondary":       tui.PaletteSecondary,
+		"fg_dim":             tui.PaletteDim,
+		"diff_add":           tui.PaletteDiffAdd,
+		"diff_del":           tui.PaletteDiffDelete,
+		"diff_context":       tui.PaletteDiffContext,
+		"pending":            tui.PalettePending,
+		"border_focused":     tui.PaletteFocused,
+		"status_bar_bg":      tui.PaletteStatusBackground,
+		"cursor_line_bg":     tui.PaletteCursorBackground,
+		"cursor_line_fg":     tui.PaletteCursorForeground,
+		"diff_add_bg":        tui.PaletteDiffAddBackground,
+		"diff_del_bg":        tui.PaletteDiffDeleteBackground,
+		"diff_hunk_header":   tui.PaletteDiffHunk,
+		"message_warning_fg": tui.PaletteWarningForeground,
+		"message_warning_bg": tui.PaletteWarningBackground,
+		"message_error_fg":   tui.PaletteErrorForeground,
+		"message_error_bg":   tui.PaletteErrorBackground,
+		"message_success_fg": tui.PaletteSuccessForeground,
+		"message_success_bg": tui.PaletteSuccessBackground,
 	} {
 		want := theme.Colors[themeRole].String()
 		if got := values[paletteRole]; got != want {
 			t.Fatalf("theme %q palette value = %q, want %q", themeRole, got, want)
 		}
 	}
-	for syntaxRole, paletteRole := range map[config.SyntaxColor]app.PaletteRole{
-		config.SyntaxKeyword: app.PaletteSyntaxKeyword,
-		config.SyntaxString:  app.PaletteSyntaxString,
-		config.SyntaxComment: app.PaletteSyntaxComment,
-		config.SyntaxNumber:  app.PaletteSyntaxNumber,
+	for syntaxRole, paletteRole := range map[config.SyntaxColor]tui.PaletteRole{
+		config.SyntaxKeyword: tui.PaletteSyntaxKeyword,
+		config.SyntaxString:  tui.PaletteSyntaxString,
+		config.SyntaxComment: tui.PaletteSyntaxComment,
+		config.SyntaxNumber:  tui.PaletteSyntaxNumber,
 	} {
 		if got, want := values[paletteRole], theme.SyntaxColors[syntaxRole].String(); got == "" || got != want {
 			t.Fatalf("syntax %q palette value = %q, want %q", syntaxRole, got, want)

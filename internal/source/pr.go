@@ -10,7 +10,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 type pullRequestPayload struct {
@@ -39,31 +39,31 @@ func (service *Service) openPullRequest(
 	target Target,
 	options OpenOptions,
 	runCPU CPUAdmission,
-) (_ *Document, returnErr error) {
+) (_ Opened, _ *Revision, returnErr error) {
 	selector, ok := target.PullRequest()
 	if !ok {
-		return nil, fmt.Errorf("%w: missing pull-request selector", ErrInvalidTarget)
+		return Opened{}, nil, fmt.Errorf("%w: missing pull-request selector", ErrInvalidTarget)
 	}
 	repository, ok := selector.Repository()
 	if !ok {
 		var err error
 		repository, err = service.currentGitHubRepository(ctx, runCPU)
 		if err != nil {
-			return nil, err
+			return Opened{}, nil, err
 		}
 	}
 	payload, err := service.pullRequestMetadata(ctx, repository, selector.Number(), runCPU)
 	if err != nil {
-		return nil, err
+		return Opened{}, nil, err
 	}
 
 	details, err := validatePullRequestPayload(repository, selector.Number(), payload)
 	if err != nil {
-		return nil, err
+		return Opened{}, nil, err
 	}
 	workspace, err := os.MkdirTemp("", "rvw-pr-")
 	if err != nil {
-		return nil, fmt.Errorf("create pull-request workspace: %w", err)
+		return Opened{}, nil, fmt.Errorf("create pull-request workspace: %w", err)
 	}
 	var rootOwner *repositorySession
 	defer func() {
@@ -77,7 +77,7 @@ func (service *Service) openPullRequest(
 	}()
 	rootOwner, err = createPullRequestRepository(workspace, service.options)
 	if err != nil {
-		return nil, err
+		return Opened{}, nil, err
 	}
 	snapshot, preparedRevision, err := service.prepareNativePullRequest(
 		ctx,
@@ -87,11 +87,11 @@ func (service *Service) openPullRequest(
 		options,
 	)
 	if err != nil {
-		return nil, err
+		return Opened{}, nil, err
 	}
 	ledger, err := newSourceLedger(snapshot.RetainedBytes())
 	if err != nil {
-		return nil, err
+		return Opened{}, nil, err
 	}
 	snapshot, err = service.acquirePullRequestOptionalData(
 		ctx,
@@ -102,15 +102,15 @@ func (service *Service) openPullRequest(
 		ledger,
 	)
 	if err != nil {
-		return nil, err
+		return Opened{}, nil, err
 	}
 	if cancellationErr := context.Cause(ctx); cancellationErr != nil {
-		return nil, cancellationErr
+		return Opened{}, nil, cancellationErr
 	}
 	preparedRevision.repository = rootOwner
-	document := newPullRequestDocument(snapshot, target, options, details, preparedRevision)
+	opened, revision := newPullRequestOpened(snapshot, target, options, details, preparedRevision)
 	rootOwner = nil
-	return document, nil
+	return opened, revision, nil
 }
 
 func (service *Service) acquirePullRequestOptionalData(
@@ -118,9 +118,9 @@ func (service *Service) acquirePullRequestOptionalData(
 	runCPU CPUAdmission,
 	details PullRequestDetails,
 	options OpenOptions,
-	snapshot review.Snapshot,
+	snapshot change.Snapshot,
 	ledger *sourceLedger,
-) (review.Snapshot, error) {
+) (change.Snapshot, error) {
 	var err error
 	if options.FetchThreads {
 		threads, threadErr := service.loadRemoteThreadsWithLedgerCPU(
@@ -128,7 +128,7 @@ func (service *Service) acquirePullRequestOptionalData(
 		)
 		if threadErr != nil {
 			if cancellationErr := context.Cause(ctx); cancellationErr != nil {
-				return review.Snapshot{}, cancellationErr
+				return change.Snapshot{}, cancellationErr
 			}
 			err = runCPU(ctx, func() error {
 				status := remoteThreadFailureStatus(threadErr)
@@ -166,7 +166,7 @@ func (service *Service) acquirePullRequestOptionalData(
 			})
 		}
 		if err != nil {
-			return review.Snapshot{}, fmt.Errorf("retain GitHub review thread status: %w", err)
+			return change.Snapshot{}, fmt.Errorf("retain GitHub review thread status: %w", err)
 		}
 	}
 	if options.FetchPending {
@@ -174,11 +174,11 @@ func (service *Service) acquirePullRequestOptionalData(
 			ctx, details, ledger, runCPU,
 		)
 		if cancellationErr := context.Cause(ctx); cancellationErr != nil {
-			return review.Snapshot{}, cancellationErr
+			return change.Snapshot{}, cancellationErr
 		}
 		err = runCPU(ctx, func() error {
 			switch status {
-			case review.PendingReviewReady:
+			case change.PendingReviewReady:
 				scratchBytes := snapshot.PendingReviewInstallationBytes(pending)
 				if reserveErr := ledger.reserve(scratchBytes); reserveErr != nil {
 					return reserveErr
@@ -187,8 +187,8 @@ func (service *Service) acquirePullRequestOptionalData(
 				snapshot, installErr = snapshot.TakePendingReview(pending)
 				ledger.release(scratchBytes)
 				return installErr
-			case review.PendingReviewAbsent, review.PendingReviewUnavailable,
-				review.PendingReviewLimited, review.PendingReviewAmbiguous:
+			case change.PendingReviewAbsent, change.PendingReviewUnavailable,
+				change.PendingReviewLimited, change.PendingReviewAmbiguous:
 				if reserveErr := ledger.reserve(detail.Bytes()); reserveErr != nil {
 					return reserveErr
 				}
@@ -200,18 +200,18 @@ func (service *Service) acquirePullRequestOptionalData(
 			}
 		})
 		if err != nil {
-			return review.Snapshot{}, fmt.Errorf("retain GitHub pending review status: %w", err)
+			return change.Snapshot{}, fmt.Errorf("retain GitHub pending review status: %w", err)
 		}
 	}
 	return snapshot, nil
 }
 
-func remoteThreadFailureStatus(err error) review.RemoteThreadStatus {
+func remoteThreadFailureStatus(err error) change.RemoteThreadStatus {
 	var limited *LimitError
 	if errors.As(err, &limited) || errors.Is(err, ErrSourceLimited) {
-		return review.RemoteThreadsLimited
+		return change.RemoteThreadsLimited
 	}
-	return review.RemoteThreadsUnavailable
+	return change.RemoteThreadsUnavailable
 }
 
 func (service *Service) currentGitHubRepository(
@@ -252,11 +252,11 @@ func validatePullRequestPayload(
 	if int64(len(payload.Title)) > 1<<20 || strings.IndexByte(payload.Title, 0) >= 0 {
 		return PullRequestDetails{}, errors.New("GitHub returned an invalid pull-request title")
 	}
-	baseOID, err := review.NewObjectID(payload.Base.SHA)
+	baseOID, err := change.NewObjectID(payload.Base.SHA)
 	if err != nil {
 		return PullRequestDetails{}, fmt.Errorf("validate pull-request base object: %w", err)
 	}
-	headOID, err := review.NewObjectID(payload.Head.SHA)
+	headOID, err := change.NewObjectID(payload.Head.SHA)
 	if err != nil {
 		return PullRequestDetails{}, fmt.Errorf("validate pull-request head object: %w", err)
 	}

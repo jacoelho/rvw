@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 const (
@@ -153,7 +153,7 @@ func inspectRemoteThreadFixture(
 	if err != nil {
 		return nil, jsonCommandMetrics{}, err
 	}
-	limits, err := newJSONFramingLimits(review.MaxRemoteThreads, maxGitHubPageCollectionElements)
+	limits, err := newJSONFramingLimits(change.MaxRemoteThreads, maxGitHubPageCollectionElements)
 	if err != nil {
 		return nil, jsonCommandMetrics{}, err
 	}
@@ -236,7 +236,7 @@ func visitRemoteThreadFixturePage(
 		return fmt.Errorf("threads = %d, want %d", len(*connection.Nodes), expectation.threadsPerPage)
 	}
 	for _, thread := range *connection.Nodes {
-		if thread.ID == "" || thread.Path != "internal/review/review.go" || thread.DiffSide != "RIGHT" ||
+		if thread.ID == "" || thread.Path != "internal/change/change.go" || thread.DiffSide != "RIGHT" ||
 			thread.IsResolved == nil || *thread.IsResolved || thread.IsOutdated == nil || *thread.IsOutdated ||
 			thread.Line == nil || thread.StartLine == nil || thread.Comments == nil {
 			return errorsNewBenchmarkFixture("thread differs")
@@ -308,7 +308,7 @@ func buildRemoteThreadPaginationFixture(pages, threadsPerPage, commentsPerThread
 			}
 			builder.WriteString(`{"id":"thread-`)
 			builder.WriteString(strconv.Itoa(threadID))
-			builder.WriteString(`","path":"internal/review/review.go","diffSide":"RIGHT",`)
+			builder.WriteString(`","path":"internal/change/change.go","diffSide":"RIGHT",`)
 			builder.WriteString(`"isResolved":false,"isOutdated":false,"line":123,"startLine":120,`)
 			builder.WriteString(`"comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[`)
 			for comment := range commentsPerThread {

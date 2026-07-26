@@ -21,7 +21,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	gitstorage "github.com/go-git/go-git/v5/storage/filesystem"
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 const (
@@ -665,6 +665,6 @@ func nativeMergeBase(
 	return best[0], nil
 }
 
-func reviewHash(value review.ObjectID) plumbing.Hash {
+func reviewHash(value change.ObjectID) plumbing.Hash {
 	return plumbing.NewHash(value.String())
 }

@@ -9,13 +9,13 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 // PublicationCheckAcquisition is the validated network phase of preflight.
 type PublicationCheckAcquisition struct {
-	target    review.PublicationTarget
-	fresh     review.PendingReview
+	target    change.PublicationTarget
+	fresh     change.PendingReview
 	staleHead bool
 	hasFresh  bool
 	valid     bool
@@ -26,14 +26,14 @@ type PublicationCheckAcquisition struct {
 type PublicationCheckMode uint8
 
 const (
-	// PublicationCheckNew checks a publication with no captured pending review.
+	// PublicationCheckNew checks a publication with no captured pending change.
 	PublicationCheckNew PublicationCheckMode = iota + 1
-	// PublicationCheckPendingContinuation reacquires the captured pending review.
+	// PublicationCheckPendingContinuation reacquires the captured pending change.
 	PublicationCheckPendingContinuation
 )
 
 // FreshPending returns the immutable pending capture requiring CPU reconciliation.
-func (acquisition PublicationCheckAcquisition) FreshPending() (review.PendingReview, bool) {
+func (acquisition PublicationCheckAcquisition) FreshPending() (change.PendingReview, bool) {
 	return acquisition.fresh, acquisition.valid && acquisition.hasFresh
 }
 
@@ -41,7 +41,7 @@ func (acquisition PublicationCheckAcquisition) FreshPending() (review.PendingRev
 func (service *Service) AcquirePublicationCheck(
 	ctx context.Context,
 	target PublicationTarget,
-	options review.PublicationOptions,
+	options change.PublicationOptions,
 	mode PublicationCheckMode,
 	runCPU CPUAdmission,
 ) (PublicationCheckAcquisition, error) {
@@ -85,7 +85,7 @@ func (service *Service) AcquirePublicationCheck(
 	staleHead := currentDetails.BaseOID != target.base ||
 		currentDetails.HeadOID != target.head
 	if staleHead &&
-		!options.Policies().Has(review.PublicationAllowStaleHead) {
+		!options.Policies().Has(change.PublicationAllowStaleHead) {
 		return PublicationCheckAcquisition{}, sourceFailure(
 			OperationCheckPublication,
 			errors.New("GitHub pull request revision changed before publication"),
@@ -95,7 +95,7 @@ func (service *Service) AcquirePublicationCheck(
 		staleHead: staleHead,
 		valid:     true,
 	}
-	checkedTarget, err := review.NewPublicationTarget(review.PublicationTargetDescriptor{
+	checkedTarget, err := change.NewPublicationTarget(change.PublicationTargetDescriptor{
 		Repository:  target.repository.String(),
 		PullRequest: target.number.Uint64(),
 		Base:        target.base,
@@ -110,7 +110,7 @@ func (service *Service) AcquirePublicationCheck(
 		if cancellationErr := context.Cause(ctx); cancellationErr != nil {
 			return PublicationCheckAcquisition{}, sourceFailure(OperationCheckPublication, cancellationErr)
 		}
-		if status != review.PendingReviewReady {
+		if status != change.PendingReviewReady {
 			message := "GitHub pending review is " + status.String()
 			if !detail.IsEmpty() {
 				message += ": " + detail.String()
@@ -126,8 +126,8 @@ func (service *Service) AcquirePublicationCheck(
 // FinishPublicationCheck binds CPU-reconciled preparation to the acquired target.
 func FinishPublicationCheck(
 	acquisition PublicationCheckAcquisition,
-	prepared review.PreparedPublication,
-) (*review.CheckedPublication, error) {
+	prepared change.PreparedPublication,
+) (*change.CheckedPublication, error) {
 	return FinishPublicationCheckCancellable(nil, acquisition, prepared)
 }
 
@@ -136,8 +136,8 @@ func FinishPublicationCheck(
 func FinishPublicationCheckCancellable(
 	cancelled func() error,
 	acquisition PublicationCheckAcquisition,
-	prepared review.PreparedPublication,
-) (*review.CheckedPublication, error) {
+	prepared change.PreparedPublication,
+) (*change.CheckedPublication, error) {
 	if !acquisition.valid || prepared.Source() == 0 {
 		return nil, sourceFailure(OperationCheckPublication, errors.New("publication preflight is invalid"))
 	}
@@ -145,7 +145,7 @@ func FinishPublicationCheckCancellable(
 	if err != nil {
 		return nil, sourceFailure(OperationCheckPublication, err)
 	}
-	checked, err := review.TakeCheckedPublicationCancellable(cancelled, review.CheckedPublicationDescriptor{
+	checked, err := change.TakeCheckedPublicationCancellable(cancelled, change.CheckedPublicationDescriptor{
 		Target:    acquisition.target,
 		Marker:    marker,
 		StaleHead: acquisition.staleHead,
@@ -160,8 +160,8 @@ func FinishPublicationCheckCancellable(
 func (service *Service) CheckPublication(
 	ctx context.Context,
 	target PublicationTarget,
-	prepared review.PreparedPublication,
-) (*review.CheckedPublication, error) {
+	prepared change.PreparedPublication,
+) (*change.CheckedPublication, error) {
 	mode := PublicationCheckNew
 	if prepared.ContinuesPendingPublication() {
 		mode = PublicationCheckPendingContinuation
@@ -185,32 +185,32 @@ func (service *Service) CheckPublication(
 	return FinishPublicationCheck(acquisition, prepared)
 }
 
-func newPublicationMarker() (review.PublicationMarker, error) {
+func newPublicationMarker() (change.PublicationMarker, error) {
 	var attempt [16]byte
 	if _, err := rand.Read(attempt[:]); err != nil {
 		return "", fmt.Errorf("generate publication identity: %w", err)
 	}
-	return review.NewPublicationMarkerFromAttempt(attempt), nil
+	return change.NewPublicationMarkerFromAttempt(attempt), nil
 }
 
 // PublicationCommit represents publication commit.
 type PublicationCommit struct {
-	Pending        *review.PendingReview
-	Detail         review.OperationDetail
+	Pending        *change.PendingReview
+	Detail         change.OperationDetail
 	RemoteReview   uint64
-	Disposition    review.PublicationDisposition
-	PendingPhase   review.PendingPublicationPhase
-	PendingRefresh review.PendingRefreshAcquisition
+	Disposition    change.PublicationDisposition
+	PendingPhase   change.PendingPublicationPhase
+	PendingRefresh change.PendingRefreshAcquisition
 }
 
 // Publish performs the publish operation.
 func (service *Service) Publish(
 	ctx context.Context,
-	checked *review.CheckedPublication,
+	checked *change.CheckedPublication,
 ) PublicationCommit {
 	if checked == nil || checked.PayloadSize() == 0 {
 		return PublicationCommit{
-			Disposition: review.PublicationDispositionFailedBeforeCommit,
+			Disposition: change.PublicationDispositionFailedBeforeCommit,
 			Detail:      boundedOperationDetail("checked publication is unavailable"),
 		}
 	}
@@ -218,7 +218,7 @@ func (service *Service) Publish(
 		execution, err := PreparePendingPublicationExecution(ctx, checked)
 		if err != nil {
 			return PublicationCommit{
-				Disposition: review.PublicationDispositionFailedBeforeCommit,
+				Disposition: change.PublicationDispositionFailedBeforeCommit,
 				Detail:      boundedOperationDetail(err.Error()),
 			}
 		}
@@ -251,9 +251,9 @@ func (service *Service) Publish(
 		ctx, http.MethodPost, "/"+endpoint, []byte(checked.Payload()), 1<<20,
 	)
 	if err != nil {
-		disposition := review.PublicationDispositionUnknown
+		disposition := change.PublicationDispositionUnknown
 		if githubMutationFailedBeforeCommit(err) {
-			disposition = review.PublicationDispositionFailedBeforeCommit
+			disposition = change.PublicationDispositionFailedBeforeCommit
 		}
 		return PublicationCommit{
 			Disposition: disposition,
@@ -262,7 +262,7 @@ func (service *Service) Publish(
 	}
 	if result.status != http.StatusOK {
 		return PublicationCommit{
-			Disposition: review.PublicationDispositionUnknown,
+			Disposition: change.PublicationDispositionUnknown,
 			Detail: boundedOperationDetail(
 				"GitHub publication returned an undocumented success status",
 			),
@@ -271,15 +271,15 @@ func (service *Service) Publish(
 	reviewID, err := decodePublicationReviewID(ctx, result.body)
 	if err != nil {
 		return PublicationCommit{
-			Disposition: review.PublicationDispositionUnknown,
+			Disposition: change.PublicationDispositionUnknown,
 			Detail:      boundedOperationDetail("decode GitHub publication response: " + err.Error()),
 		}
 	}
 	commit := PublicationCommit{
-		Disposition:  review.PublicationDispositionCommitted,
+		Disposition:  change.PublicationDispositionCommitted,
 		RemoteReview: reviewID,
 	}
-	if checked.Prepared().Options().Event() != review.PublicationEventDraft {
+	if checked.Prepared().Options().Event() != change.PublicationEventDraft {
 		return commit
 	}
 	pending, detail, ok := service.acquireCreatedDraft(
@@ -288,29 +288,29 @@ func (service *Service) Publish(
 		reviewID,
 	)
 	if !ok {
-		commit.PendingRefresh = review.PendingRefreshUnavailable
+		commit.PendingRefresh = change.PendingRefreshUnavailable
 		commit.Detail = detail
 		return commit
 	}
 	commit.Pending = new(pending)
-	commit.PendingRefresh = review.PendingRefreshAcquired
+	commit.PendingRefresh = change.PendingRefreshAcquired
 	return commit
 }
 
 func (service *Service) acquireCreatedDraft(
 	ctx context.Context,
-	checked *review.CheckedPublication,
+	checked *change.CheckedPublication,
 	reviewID uint64,
-) (review.PendingReview, review.OperationDetail, bool) {
+) (change.PendingReview, change.OperationDetail, bool) {
 	if checked == nil || reviewID == 0 {
-		return review.PendingReview{}, boundedOperationDetail(
+		return change.PendingReview{}, boundedOperationDetail(
 			"GitHub draft was created, but its checked identity is unavailable",
 		), false
 	}
 	target := checked.Target()
 	repository, err := NewOwnerRepository(target.Repository())
 	if err != nil {
-		return review.PendingReview{}, boundedOperationDetail(
+		return change.PendingReview{}, boundedOperationDetail(
 			"GitHub draft was created, but its repository identity is invalid",
 		), false
 	}
@@ -321,7 +321,7 @@ func (service *Service) acquireCreatedDraft(
 		directCPUAdmission,
 	)
 	if err != nil {
-		return review.PendingReview{}, boundedOperationDetail(
+		return change.PendingReview{}, boundedOperationDetail(
 			"GitHub draft was created, but its pending state could not be loaded: " + err.Error(),
 		), false
 	}
@@ -331,19 +331,19 @@ func (service *Service) acquireCreatedDraft(
 		payload,
 	)
 	if err != nil || details.BaseOID != target.Base() || details.HeadOID != target.Head() {
-		return review.PendingReview{}, boundedOperationDetail(
+		return change.PendingReview{}, boundedOperationDetail(
 			"GitHub draft was created, but the pull request changed before it could be loaded",
 		), false
 	}
 	pending, status, detail := service.loadPendingReview(ctx, details, directCPUAdmission)
-	if status != review.PendingReviewReady || pending.DatabaseID().Uint64() != reviewID {
+	if status != change.PendingReviewReady || pending.DatabaseID().Uint64() != reviewID {
 		message := "GitHub draft was created, but its pending state is " + status.String()
-		if status == review.PendingReviewReady {
+		if status == change.PendingReviewReady {
 			message = "GitHub draft was created, but GitHub returned a different pending review"
 		} else if !detail.IsEmpty() {
 			message += ": " + detail.String()
 		}
-		return review.PendingReview{}, boundedOperationDetail(message), false
+		return change.PendingReview{}, boundedOperationDetail(message), false
 	}
 	matches, matchErr := checked.CreatedDraftMatchesCancellable(
 		func() error { return context.Cause(ctx) },
@@ -354,9 +354,9 @@ func (service *Service) acquireCreatedDraft(
 		if matchErr != nil {
 			message += ": " + matchErr.Error()
 		}
-		return review.PendingReview{}, boundedOperationDetail(message), false
+		return change.PendingReview{}, boundedOperationDetail(message), false
 	}
-	return pending, review.EmptyOperationDetail(), true
+	return pending, change.EmptyOperationDetail(), true
 }
 
 type publicationReviewResponseCollector struct {
@@ -471,8 +471,8 @@ func (collector *publicationReviewResponseCollector) close() {
 // ReconcilePublication performs the reconcile publication operation.
 func (service *Service) ReconcilePublication(
 	ctx context.Context,
-	request review.ReconciliationRequest,
-) review.ReconciliationResult {
+	request change.ReconciliationRequest,
+) change.ReconciliationResult {
 	if _, _, ok := request.PendingContinuation(); ok {
 		acquisition, err := service.AcquirePendingPublicationReconciliation(
 			ctx,
@@ -496,14 +496,14 @@ func (service *Service) ReconcilePublication(
 // awaiting cancellable CPU validation.
 type PublicationReconciliationAcquisition struct {
 	spool   *githubSpool
-	request review.ReconciliationRequest
+	request change.ReconciliationRequest
 }
 
 // AcquirePublicationReconciliation performs only the non-pending network
 // acquisition phase.
 func (service *Service) AcquirePublicationReconciliation(
 	ctx context.Context,
-	request review.ReconciliationRequest,
+	request change.ReconciliationRequest,
 ) (*PublicationReconciliationAcquisition, error) {
 	if _, _, pending := request.PendingContinuation(); pending || request.Operation == 0 ||
 		request.Workspace == 0 || request.Source == 0 || request.Marker == "" {
@@ -512,7 +512,7 @@ func (service *Service) AcquirePublicationReconciliation(
 	target := request.Target
 	endpoint := "/repos/" + target.Repository() + "/pulls/" +
 		strconv.FormatUint(target.PullRequest(), 10) + "/reviews"
-	spool, err := service.restSpool(ctx, endpoint, review.MaxPublicationBytes)
+	spool, err := service.restSpool(ctx, endpoint, change.MaxPublicationBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -530,18 +530,18 @@ func (acquisition *PublicationReconciliationAcquisition) Close() error {
 }
 
 func failedReconciliation(
-	request review.ReconciliationRequest,
+	request change.ReconciliationRequest,
 	err error,
-) review.ReconciliationResult {
-	return review.ReconciliationResult{
+) change.ReconciliationResult {
+	return change.ReconciliationResult{
 		Operation:   request.Operation,
 		Workspace:   request.Workspace,
 		Source:      request.Source,
-		Disposition: review.ReconciliationStillUnknown,
+		Disposition: change.ReconciliationStillUnknown,
 		Detail:      boundedOperationDetail(err.Error()),
 	}
 }
 
-func boundedOperationDetail(value string) review.OperationDetail {
-	return review.NewBoundedOperationDetail(value)
+func boundedOperationDetail(value string) change.OperationDetail {
+	return change.NewBoundedOperationDetail(value)
 }

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 const (
@@ -23,7 +23,7 @@ type pendingEffect struct {
 	before   string
 	after    string
 	marker   string
-	mutation review.PendingMutation
+	mutation change.PendingMutation
 }
 
 type pendingWireEffect struct {
@@ -46,7 +46,7 @@ type pendingMutationAlias struct {
 type pendingMutationAliasPresence uint64
 
 func (presence *pendingMutationAliasPresence) add(index int) error {
-	if presence == nil || index < 0 || index >= review.MaxPendingMutationBatch {
+	if presence == nil || index < 0 || index >= change.MaxPendingMutationBatch {
 		return errors.New("pending mutation response alias index is invalid")
 	}
 	bit := pendingMutationAliasPresence(1) << index
@@ -58,7 +58,7 @@ func (presence *pendingMutationAliasPresence) add(index int) error {
 }
 
 func (presence *pendingMutationAliasPresence) has(index int) bool {
-	if presence == nil || index < 0 || index >= review.MaxPendingMutationBatch {
+	if presence == nil || index < 0 || index >= change.MaxPendingMutationBatch {
 		return false
 	}
 	return *presence&(pendingMutationAliasPresence(1)<<index) != 0
@@ -79,7 +79,7 @@ type pendingMutationResponseCollector struct {
 func newPendingMutationResponseCollector(
 	aliases []pendingMutationAlias,
 ) (pendingMutationResponseCollector, error) {
-	if len(aliases) == 0 || len(aliases) > review.MaxPendingMutationBatch {
+	if len(aliases) == 0 || len(aliases) > change.MaxPendingMutationBatch {
 		return pendingMutationResponseCollector{}, errors.New(
 			"pending mutation response aliases are unavailable",
 		)
@@ -342,7 +342,7 @@ func (sizer pendingBatchSizer) payloadBytes() int64 {
 // for prepared wire ownership and the largest one-batch encoding scratch.
 func PendingPublicationExecutionConstructionBytes(
 	ctx context.Context,
-	checked *review.CheckedPublication,
+	checked *change.CheckedPublication,
 ) (int64, error) {
 	prepared, ok := pendingPublicationInputs(checked)
 	if !ok {
@@ -372,25 +372,25 @@ func PendingPublicationExecutionConstructionBytes(
 		if err != nil {
 			return 0, err
 		}
-		if candidate.count > review.MaxPendingMutationBatch ||
-			candidate.payloadBytes() > review.MaxPendingMutationBatchBytes {
+		if candidate.count > change.MaxPendingMutationBatch ||
+			candidate.payloadBytes() > change.MaxPendingMutationBatchBytes {
 			if sizer.count == 0 {
 				return 0, fmt.Errorf(
 					"pending review mutation exceeds %d bytes",
-					review.MaxPendingMutationBatchBytes,
+					change.MaxPendingMutationBatchBytes,
 				)
 			}
 			retained += sizer.payloadBytes() + pendingBatchMetadataBytes
 			batches++
 			sizer = newPendingBatchSizer()
 			candidate, err = sizer.add(effect)
-			if err != nil || candidate.payloadBytes() > review.MaxPendingMutationBatchBytes {
+			if err != nil || candidate.payloadBytes() > change.MaxPendingMutationBatchBytes {
 				if err != nil {
 					return 0, err
 				}
 				return 0, fmt.Errorf(
 					"pending review mutation exceeds %d bytes",
-					review.MaxPendingMutationBatchBytes,
+					change.MaxPendingMutationBatchBytes,
 				)
 			}
 		}
@@ -407,10 +407,10 @@ func PendingPublicationExecutionConstructionBytes(
 	if prepared.Submit() {
 		// Submission input is small, but reserve the protocol maximum so its
 		// construction never precedes admission.
-		retained += review.MaxPendingMutationBatchBytes + pendingBatchMetadataBytes +
+		retained += change.MaxPendingMutationBatchBytes + pendingBatchMetadataBytes +
 			pendingAliasMetadataBytes
 	}
-	return retained + 3*review.MaxPendingMutationBatchBytes +
+	return retained + 3*change.MaxPendingMutationBatchBytes +
 		2*pendingMutationResponseBytes + 4_096, nil
 }
 
@@ -419,14 +419,14 @@ func PendingPublicationExecutionConstructionBytes(
 // and hold a CPU permit while this runs.
 func PreparePendingPublicationExecution(
 	ctx context.Context,
-	checked *review.CheckedPublication,
+	checked *change.CheckedPublication,
 ) (PendingPublicationExecution, error) {
 	return preparePendingPublicationExecution(ctx, checked, encodePendingMutationBatchCancellable)
 }
 
 func preparePendingPublicationExecution(
 	ctx context.Context,
-	checked *review.CheckedPublication,
+	checked *change.CheckedPublication,
 	encode func(func() error, []pendingWireEffect) ([]pendingMutationAlias, string, error),
 ) (PendingPublicationExecution, error) {
 	prepared, ok := pendingPublicationInputs(checked)
@@ -443,7 +443,7 @@ func preparePendingPublicationExecution(
 		status:         pendingPublicationExecutionOpen,
 	}
 	execution := PendingPublicationExecution{state: state}
-	current := make([]pendingWireEffect, 0, review.MaxPendingMutationBatch)
+	current := make([]pendingWireEffect, 0, change.MaxPendingMutationBatch)
 	sizer := newPendingBatchSizer()
 	flush := func() error {
 		if len(current) == 0 {
@@ -458,7 +458,7 @@ func preparePendingPublicationExecution(
 			aliases: aliases,
 			payload: payload,
 		})
-		current = make([]pendingWireEffect, 0, review.MaxPendingMutationBatch)
+		current = make([]pendingWireEffect, 0, change.MaxPendingMutationBatch)
 		sizer = newPendingBatchSizer()
 		return nil
 	}
@@ -483,13 +483,13 @@ func preparePendingPublicationExecution(
 		if err != nil {
 			return PendingPublicationExecution{}, err
 		}
-		if candidate.count > review.MaxPendingMutationBatch ||
-			candidate.payloadBytes() > review.MaxPendingMutationBatchBytes {
+		if candidate.count > change.MaxPendingMutationBatch ||
+			candidate.payloadBytes() > change.MaxPendingMutationBatchBytes {
 			if flushErr := flush(); flushErr != nil {
 				return PendingPublicationExecution{}, flushErr
 			}
 			candidate, err = sizer.add(effect)
-			if err != nil || candidate.payloadBytes() > review.MaxPendingMutationBatchBytes {
+			if err != nil || candidate.payloadBytes() > change.MaxPendingMutationBatchBytes {
 				return PendingPublicationExecution{}, errors.Join(
 					err,
 					errors.New("pending review mutation exceeds its byte limit"),
@@ -504,7 +504,7 @@ func preparePendingPublicationExecution(
 	}
 	if prepared.Submit() {
 		if len(state.batches) == 0 || len(state.batches[0].effects) == 0 ||
-			state.batches[0].effects[0].mutation.Kind() != review.PendingMutationReviewBody {
+			state.batches[0].effects[0].mutation.Kind() != change.PendingMutationReviewBody {
 			return PendingPublicationExecution{}, errors.New("pending review submission has no body effect")
 		}
 		state.expectedBody = state.batches[0].effects[0].after
@@ -526,11 +526,11 @@ func preparePendingPublicationExecution(
 	return execution, nil
 }
 
-func pendingSubmissionState(event review.PublicationEvent) string {
+func pendingSubmissionState(event change.PublicationEvent) string {
 	switch event {
-	case review.PublicationEventApprove:
+	case change.PublicationEventApprove:
 		return "APPROVED"
-	case review.PublicationEventRequestChanges:
+	case change.PublicationEventRequestChanges:
 		return "CHANGES_REQUESTED"
 	default:
 		return "COMMENTED"
@@ -538,17 +538,17 @@ func pendingSubmissionState(event review.PublicationEvent) string {
 }
 
 func pendingPublicationInputs(
-	checked *review.CheckedPublication,
-) (review.PendingPublicationView, bool) {
+	checked *change.CheckedPublication,
+) (change.PendingPublicationView, bool) {
 	if checked == nil || !checked.Pending() || checked.PayloadSize() == 0 {
-		return review.PendingPublicationView{}, false
+		return change.PendingPublicationView{}, false
 	}
 	prepared, ok := checked.Prepared().BorrowPendingPublication()
 	if !ok || prepared.MutationCount() == 0 {
-		return review.PendingPublicationView{}, false
+		return change.PendingPublicationView{}, false
 	}
 	if prepared.BaselineNodeID() == "" || prepared.BaselineDatabaseID().Uint64() == 0 {
-		return review.PendingPublicationView{}, false
+		return change.PendingPublicationView{}, false
 	}
 	return prepared, true
 }
@@ -583,24 +583,24 @@ func pendingMutationInputBytes(effect pendingWireEffect) (int64, error) {
 	var fields [][2]string
 	var uintFields [][2]uint32
 	switch mutation.Kind() {
-	case review.PendingMutationReviewBody:
+	case change.PendingMutationReviewBody:
 		fields = [][2]string{
 			{graphqlReviewID, effect.reviewID},
 			{graphqlBody, effect.after},
 			{graphqlClientID, effect.clientMutationID},
 		}
-	case review.PendingMutationUpdateComment:
+	case change.PendingMutationUpdateComment:
 		fields = [][2]string{
 			{"pullRequestReviewCommentId", mutation.NodeID().String()},
 			{graphqlBody, effect.after},
 			{graphqlClientID, effect.clientMutationID},
 		}
-	case review.PendingMutationDeleteComment:
+	case change.PendingMutationDeleteComment:
 		fields = [][2]string{
 			{"id", mutation.NodeID().String()},
 			{graphqlClientID, effect.clientMutationID},
 		}
-	case review.PendingMutationAddComment:
+	case change.PendingMutationAddComment:
 		target := mutation.Target()
 		path, ok := target.Path().UTF8()
 		if !ok || path == "" {
@@ -613,9 +613,9 @@ func pendingMutationInputBytes(effect pendingWireEffect) (int64, error) {
 			{graphqlClientID, effect.clientMutationID},
 		}
 		switch target.Subject() {
-		case review.PendingSubjectFile:
+		case change.PendingSubjectFile:
 			fields = append(fields, [2]string{"subjectType", "FILE"})
-		case review.PendingSubjectLine:
+		case change.PendingSubjectLine:
 			startSide, start, side, line := target.Lines()
 			if line == nil {
 				return 0, errors.New("pending review line addition has no line")
@@ -688,10 +688,10 @@ func pendingUintField(fields [][2]string, value uint32) ([2]uint32, error) {
 }
 
 func pendingWireEffectFor(
-	reviewID review.ReviewNodeID,
+	reviewID change.ReviewNodeID,
 	baselineBody string,
-	mutation review.PendingMutation,
-	attempt review.PublicationMarker,
+	mutation change.PendingMutation,
+	attempt change.PublicationMarker,
 ) (pendingWireEffect, error) {
 	effect, err := pendingEffectFor(reviewID, baselineBody, mutation, attempt)
 	if err != nil {
@@ -705,10 +705,10 @@ func pendingWireEffectFor(
 		pendingEffect: effect,
 	}
 	switch mutation.Kind() {
-	case review.PendingMutationReviewBody,
-		review.PendingMutationUpdateComment,
-		review.PendingMutationDeleteComment:
-	case review.PendingMutationAddComment:
+	case change.PendingMutationReviewBody,
+		change.PendingMutationUpdateComment,
+		change.PendingMutationDeleteComment:
+	case change.PendingMutationAddComment:
 		if err := validatePendingAddThread(mutation); err != nil {
 			return pendingWireEffect{}, err
 		}
@@ -719,21 +719,21 @@ func pendingWireEffectFor(
 }
 
 func pendingEffectFor(
-	reviewID review.ReviewNodeID,
+	reviewID change.ReviewNodeID,
 	baselineBody string,
-	mutation review.PendingMutation,
-	attempt review.PublicationMarker,
+	mutation change.PendingMutation,
+	attempt change.PublicationMarker,
 ) (pendingEffect, error) {
 	effect := pendingEffect{
 		mutation: mutation,
 		after:    mutation.RemoteBody(reviewID, attempt),
 	}
 	switch mutation.Kind() {
-	case review.PendingMutationReviewBody:
+	case change.PendingMutationReviewBody:
 		effect.before = baselineBody
-	case review.PendingMutationUpdateComment, review.PendingMutationDeleteComment:
+	case change.PendingMutationUpdateComment, change.PendingMutationDeleteComment:
 		effect.before = mutation.BaselineRemoteBody()
-	case review.PendingMutationAddComment:
+	case change.PendingMutationAddComment:
 		effect.marker = mutation.DraftMarker(reviewID)
 		if effect.marker == "" {
 			return pendingEffect{}, errors.New("pending review addition has no stable marker")
@@ -744,15 +744,15 @@ func pendingEffectFor(
 	return effect, nil
 }
 
-func validatePendingAddThread(mutation review.PendingMutation) error {
+func validatePendingAddThread(mutation change.PendingMutation) error {
 	target := mutation.Target()
 	path, ok := target.Path().UTF8()
 	if !ok || path == "" {
 		return errors.New("pending review addition path is not valid UTF-8")
 	}
 	switch target.Subject() {
-	case review.PendingSubjectFile:
-	case review.PendingSubjectLine:
+	case change.PendingSubjectFile:
+	case change.PendingSubjectLine:
 		_, _, _, line := target.Lines()
 		if line == nil {
 			return errors.New("pending review line addition has no line")
@@ -763,8 +763,8 @@ func validatePendingAddThread(mutation review.PendingMutation) error {
 	return nil
 }
 
-func githubLineSide(side review.LineSide) string {
-	if side == review.LineOld {
+func githubLineSide(side change.LineSide) string {
+	if side == change.LineOld {
 		return githubSideLeft
 	}
 	return githubSideRight

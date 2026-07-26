@@ -35,15 +35,6 @@ var (
 	ErrLimited     = errors.New("delivery command output exceeded its limit")
 )
 
-// Destination describes destination.
-type Destination uint8
-
-// DestinationClipboard identifies a supported destination clipboard value.
-const (
-	DestinationClipboard Destination = iota + 1
-	DestinationStdout
-)
-
 // CommitState describes commit state.
 type CommitState uint8
 
@@ -56,9 +47,8 @@ const (
 
 // Outcome describes outcome.
 type Outcome struct {
-	Destination Destination
-	State       CommitState
-	Bytes       int64
+	State CommitState
+	Bytes int64
 }
 
 // Payload represents payload.
@@ -86,48 +76,40 @@ type destinationState struct {
 
 // Manager represents manager.
 type Manager struct {
-	runner       *clipboardRunner
-	destinations map[Destination]destinationState
-	mu           sync.Mutex
+	runner    *clipboardRunner
+	clipboard destinationState
+	mu        sync.Mutex
 }
 
 // NewManager constructs a manager.
 func NewManager() *Manager {
 	return &Manager{
-		runner:       newClipboardRunner(),
-		destinations: make(map[Destination]destinationState),
+		runner: newClipboardRunner(),
 	}
 }
 
 // Deliver performs the deliver operation.
 func (manager *Manager) Deliver(
 	ctx context.Context,
-	destination Destination,
 	payload Payload,
 ) (Outcome, error) {
 	if ctx == nil || payload.Bytes() > MaxPayloadBytes {
-		return Outcome{Destination: destination, State: CommitFailedBeforeWrite},
+		return Outcome{State: CommitFailedBeforeWrite},
 			errors.New("invalid delivery request")
 	}
-	if destination != DestinationClipboard {
-		return Outcome{Destination: destination, State: CommitFailedBeforeWrite},
-			fmt.Errorf("%w: destination %d is post-program only", ErrUnavailable, destination)
-	}
-	if err := manager.reserveWrite(destination); err != nil {
+	if err := manager.reserveWrite(); err != nil {
 		return Outcome{
-			Destination: destination,
-			State:       CommitFailedBeforeWrite,
-			Bytes:       payload.Bytes(),
+			State: CommitFailedBeforeWrite,
+			Bytes: payload.Bytes(),
 		}, err
 	}
 
 	name, arguments, err := clipboardCommand()
 	if err != nil {
-		manager.finishWrite(destination, CommitFailedBeforeWrite)
+		manager.finishWrite(CommitFailedBeforeWrite)
 		return Outcome{
-			Destination: destination,
-			State:       CommitFailedBeforeWrite,
-			Bytes:       payload.Bytes(),
+			State: CommitFailedBeforeWrite,
+			Bytes: payload.Bytes(),
 		}, err
 	}
 	result, err := manager.runner.run(
@@ -140,18 +122,16 @@ func (manager *Manager) Deliver(
 			state = CommitUnknown
 			err = errors.Join(err, ErrUnknown)
 		}
-		manager.finishWrite(destination, state)
+		manager.finishWrite(state)
 		return Outcome{
-			Destination: destination,
-			State:       state,
-			Bytes:       payload.Bytes(),
+			State: state,
+			Bytes: payload.Bytes(),
 		}, err
 	}
-	manager.finishWrite(destination, CommitSucceeded)
+	manager.finishWrite(CommitSucceeded)
 	return Outcome{
-		Destination: destination,
-		State:       CommitSucceeded,
-		Bytes:       payload.Bytes(),
+		State: CommitSucceeded,
+		Bytes: payload.Bytes(),
 	}, nil
 }
 
@@ -165,10 +145,10 @@ func (manager *Manager) Close(ctx context.Context) error {
 	return manager.runner.close(ctx)
 }
 
-func (manager *Manager) reserveWrite(destination Destination) error {
+func (manager *Manager) reserveWrite() error {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
-	state := manager.destinations[destination]
+	state := manager.clipboard
 	switch {
 	case state.unknown:
 		return ErrUnknown
@@ -176,17 +156,17 @@ func (manager *Manager) reserveWrite(destination Destination) error {
 		return ErrBusy
 	default:
 		state.active = true
-		manager.destinations[destination] = state
+		manager.clipboard = state
 		return nil
 	}
 }
 
-func (manager *Manager) finishWrite(destination Destination, outcome CommitState) {
+func (manager *Manager) finishWrite(outcome CommitState) {
 	manager.mu.Lock()
-	state := manager.destinations[destination]
+	state := manager.clipboard
 	state.active = false
 	state.unknown = state.unknown || outcome == CommitUnknown
-	manager.destinations[destination] = state
+	manager.clipboard = state
 	manager.mu.Unlock()
 }
 

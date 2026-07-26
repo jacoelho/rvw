@@ -11,7 +11,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 const (
@@ -27,7 +27,7 @@ type ignoreRule struct {
 }
 
 type filterProjection struct {
-	flags []review.Flags
+	flags []change.Flags
 }
 
 type filterPathEncoding uint8
@@ -64,7 +64,7 @@ func buildFilterProjection(
 		return filterProjection{}, err
 	}
 	defer matcher.Close()
-	projection := filterProjection{flags: make([]review.Flags, len(records))}
+	projection := filterProjection{flags: make([]change.Flags, len(records))}
 	for index, record := range records {
 		if index%filterCancellationRecords == 0 {
 			if err := context.Cause(ctx); err != nil {
@@ -102,9 +102,9 @@ func filterFlags(
 	facts filterPathFacts,
 	options OpenOptions,
 	match filterMatchFlags,
-) (review.Flags, error) {
+) (change.Flags, error) {
 	if !match.valid() {
-		return review.Flags{}, errors.New("filter match flags are invalid")
+		return change.Flags{}, errors.New("filter match flags are invalid")
 	}
 	generated, vendored, lockFile, minified := false, false, false, false
 	if facts.encoding == filterPathValidUTF8 {
@@ -122,44 +122,44 @@ func filterFlags(
 		minified = strings.HasSuffix(base, ".min.js") || strings.HasSuffix(base, ".min.css")
 	}
 
-	var reasons []review.HiddenReason
+	var reasons []change.HiddenReason
 	if options.BuiltinDefaults && (generated || vendored || lockFile || minified) {
-		reasons = append(reasons, review.HiddenBuiltinDefault)
+		reasons = append(reasons, change.HiddenBuiltinDefault)
 	}
 	if facts.gitignore == filterGitignored {
-		reasons = append(reasons, review.HiddenGitignore)
+		reasons = append(reasons, change.HiddenGitignore)
 	}
 	if match.Has(filterMatchIgnore) {
-		reasons = append(reasons, review.HiddenRVWIgnore)
+		reasons = append(reasons, change.HiddenRVWIgnore)
 	}
 	if len(options.Include) != 0 && !match.Has(filterMatchInclude) {
-		reasons = append(reasons, review.HiddenInclude)
+		reasons = append(reasons, change.HiddenInclude)
 	}
 	if match.Has(filterMatchExclude) {
-		reasons = append(reasons, review.HiddenExclude)
+		reasons = append(reasons, change.HiddenExclude)
 	}
-	traitValues := make([]review.FileTrait, 0, 4)
+	traitValues := make([]change.FileTrait, 0, 4)
 	if generated {
-		traitValues = append(traitValues, review.TraitGenerated)
+		traitValues = append(traitValues, change.TraitGenerated)
 	}
 	if vendored {
-		traitValues = append(traitValues, review.TraitVendored)
+		traitValues = append(traitValues, change.TraitVendored)
 	}
 	if lockFile {
-		traitValues = append(traitValues, review.TraitLockFile)
+		traitValues = append(traitValues, change.TraitLockFile)
 	}
 	if minified {
-		traitValues = append(traitValues, review.TraitMinified)
+		traitValues = append(traitValues, change.TraitMinified)
 	}
-	traits, err := review.NewFileTraits(traitValues...)
+	traits, err := change.NewFileTraits(traitValues...)
 	if err != nil {
-		return review.Flags{}, err
+		return change.Flags{}, err
 	}
-	hidden, err := review.NewHiddenReasons(reasons...)
+	hidden, err := change.NewHiddenReasons(reasons...)
 	if err != nil {
-		return review.Flags{}, err
+		return change.Flags{}, err
 	}
-	return review.NewFlags(traits, hidden)
+	return change.NewFlags(traits, hidden)
 }
 
 func readIgnoreRules(

@@ -11,7 +11,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/change"
 )
 
 const remoteThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$name){nameWithOwner pullRequest(number:$number){number baseRefOid headRefOid reviewThreads(first:100,after:$endCursor){pageInfo{hasNextPage endCursor}nodes{id isResolved isOutdated path line startLine diffSide comments(first:100){pageInfo{hasNextPage endCursor}nodes{id body createdAt url author{login}}}}}}}}`
@@ -100,7 +100,7 @@ const (
 func (service *Service) loadRemoteThreads(
 	ctx context.Context,
 	details PullRequestDetails,
-) ([]review.RemoteThread, error) {
+) ([]change.RemoteThread, error) {
 	ledger, err := newSourceLedger(0)
 	if err != nil {
 		return nil, err
@@ -113,7 +113,7 @@ func (service *Service) loadRemoteThreadsWithLedgerCPU(
 	details PullRequestDetails,
 	ledger *sourceLedger,
 	runCPU CPUAdmission,
-) ([]review.RemoteThread, error) {
+) ([]change.RemoteThread, error) {
 	checkpoint := ledger.checkpoint()
 	defer checkpoint.rollback()
 	owner, repository, ok := strings.Cut(details.Repository.String(), "/")
@@ -128,7 +128,7 @@ func (service *Service) loadRemoteThreadsWithLedgerCPU(
 			githubFieldOwner: owner, githubFieldName: repository,
 			githubFieldNumber: details.Number.Uint64(),
 		},
-		review.MaxRemoteThreadBytes,
+		change.MaxRemoteThreadBytes,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("load GitHub review threads: %w", err)
@@ -138,7 +138,7 @@ func (service *Service) loadRemoteThreadsWithLedgerCPU(
 		return nil, errors.Join(err, spool.Close())
 	}
 	limits, err := newJSONFramingLimits(
-		review.MaxRemoteThreads, maxGitHubPageCollectionElements,
+		change.MaxRemoteThreads, maxGitHubPageCollectionElements,
 	)
 	if err != nil {
 		return nil, err
@@ -201,7 +201,7 @@ type remoteThreadCollector struct {
 	commentIDs         map[string]struct{}
 	service            *Service
 	ledger             *sourceLedger
-	threads            []review.RemoteThread
+	threads            []change.RemoteThread
 	staged             []pendingRemoteThread
 	runCPU             CPUAdmission
 	details            PullRequestDetails
@@ -230,15 +230,15 @@ func (collector *remoteThreadCollector) stagePage(
 	connection := page.Data.Repository.PullRequest.ReviewThreads
 	retained := int64(0)
 	for _, node := range *connection.Nodes {
-		if len(collector.staged) >= review.MaxRemoteThreads {
+		if len(collector.staged) >= change.MaxRemoteThreads {
 			return 0, &LimitError{
 				Resource: LimitRemoteThreads,
-				Limit:    review.MaxRemoteThreads,
+				Limit:    change.MaxRemoteThreads,
 			}
 		}
 		if len(collector.staged) == cap(collector.staged) {
 			capacity := max(16, cap(collector.staged)*2)
-			capacity = min(capacity, review.MaxRemoteThreads)
+			capacity = min(capacity, change.MaxRemoteThreads)
 			bytes := int64(capacity) * jsonDecodedElementBytes
 			if err := collector.ledger.reserve(bytes); err != nil {
 				return 0, err
@@ -269,9 +269,9 @@ func (collector *remoteThreadCollector) addNode(node remoteThreadNode) (returnEr
 	}()
 	if node.Comments != nil && node.Comments.PageInfo != nil &&
 		node.Comments.PageInfo.HasNextPage != nil && *node.Comments.PageInfo.HasNextPage {
-		remaining := review.MaxRemoteThreadBytes - collector.responseBytes
+		remaining := change.MaxRemoteThreadBytes - collector.responseBytes
 		if remaining <= 0 {
-			return &LimitError{Resource: LimitRemoteThreads, Limit: uint64(review.MaxRemoteThreadBytes)}
+			return &LimitError{Resource: LimitRemoteThreads, Limit: uint64(change.MaxRemoteThreadBytes)}
 		}
 		comments, used, err := collector.service.loadRemainingRemoteComments(
 			collector.ctx,
@@ -288,8 +288,8 @@ func (collector *remoteThreadCollector) addNode(node remoteThreadNode) (returnEr
 		collector.responseBytes += used
 		node.Comments = comments
 	}
-	if len(collector.threads) >= review.MaxRemoteThreads {
-		return &LimitError{Resource: LimitRemoteThreads, Limit: review.MaxRemoteThreads}
+	if len(collector.threads) >= change.MaxRemoteThreads {
+		return &LimitError{Resource: LimitRemoteThreads, Limit: change.MaxRemoteThreads}
 	}
 	return collector.runCPU(collector.ctx, func() error {
 		cancelled := func() error { return context.Cause(collector.ctx) }
@@ -318,7 +318,7 @@ func (collector *remoteThreadCollector) addNode(node remoteThreadNode) (returnEr
 
 func (collector *remoteThreadCollector) installIdentities(
 	cancelled func() error,
-	thread review.RemoteThread,
+	thread change.RemoteThread,
 ) error {
 	if _, exists := collector.threadIDs[thread.ID()]; exists {
 		return errors.New("GitHub review threads contain a duplicate identity")
@@ -340,7 +340,7 @@ func (collector *remoteThreadCollector) installIdentities(
 	if err := cancelled(); err != nil {
 		return err
 	}
-	if len(collector.threadIDs)+len(collector.commentIDs) > review.MaxRemoteThreads {
+	if len(collector.threadIDs)+len(collector.commentIDs) > change.MaxRemoteThreads {
 		return errors.New("GitHub review thread identities exceed their bound")
 	}
 	return nil
@@ -419,7 +419,7 @@ func (service *Service) loadRemainingRemoteComments(
 		return nil, 0, errors.Join(err, spool.Close())
 	}
 	limits, err := newJSONFramingLimits(
-		review.MaxRemoteComments, maxGitHubPageCollectionElements,
+		change.MaxRemoteComments, maxGitHubPageCollectionElements,
 	)
 	if err != nil {
 		return nil, 0, errors.Join(err, spool.Close())
@@ -563,8 +563,8 @@ func remoteThreadNodeConstructionBytes(
 
 func remoteThreadInstallationBytes(
 	ctx context.Context,
-	snapshot review.Snapshot,
-	threads []review.RemoteThread,
+	snapshot change.Snapshot,
+	threads []change.RemoteThread,
 ) (int64, int64, error) {
 	return remoteThreadInstallationBytesCancellable(
 		func() error { return context.Cause(ctx) },
@@ -575,8 +575,8 @@ func remoteThreadInstallationBytes(
 
 func remoteThreadInstallationBytesCancellable(
 	cancelled func() error,
-	snapshot review.Snapshot,
-	threads []review.RemoteThread,
+	snapshot change.Snapshot,
+	threads []change.RemoteThread,
 ) (int64, int64, error) {
 	if err := cancelled(); err != nil {
 		return 0, 0, err
@@ -594,7 +594,7 @@ func remoteThreadInstallationBytesCancellable(
 		return 0, 0, err
 	}
 	scratch := int64(snapshot.FileCount()*2*48 + identities*48)
-	retained := int64(min(len(threads), review.MaxRemoteThreads) * 32)
+	retained := int64(min(len(threads), change.MaxRemoteThreads) * 32)
 	return scratch, retained, nil
 }
 
@@ -625,15 +625,15 @@ func collectRemoteCommentPage(
 		position == remotePageIntermediate && connection.PageInfo.EndCursor == nil {
 		return 0, errors.New("GitHub review comment pagination is incomplete")
 	}
-	if len(*connection.Nodes) > review.MaxRemoteComments-len(*comments) {
-		return 0, &LimitError{Resource: LimitRemoteThreads, Limit: review.MaxRemoteComments}
+	if len(*connection.Nodes) > change.MaxRemoteComments-len(*comments) {
+		return 0, &LimitError{Resource: LimitRemoteThreads, Limit: change.MaxRemoteComments}
 	}
 	charge := remoteCommentPayloadBytes(*connection.Nodes)
 	needed := len(*comments) + len(*connection.Nodes)
 	if needed > cap(*comments) {
 		capacity := max(16, cap(*comments)*2)
 		capacity = max(capacity, needed)
-		capacity = min(capacity, review.MaxRemoteComments)
+		capacity = min(capacity, change.MaxRemoteComments)
 		bytes := int64(capacity) * remoteCommentPayloadMetadataBytes
 		if err := ledger.reserve(bytes); err != nil {
 			return 0, err
@@ -731,7 +731,7 @@ func decodeRemoteThreadPages(value []byte) ([]remoteThreadPage, error) {
 		return nil, err
 	}
 	limits, err := newJSONFramingLimits(
-		review.MaxRemoteThreads, maxGitHubPageCollectionElements,
+		change.MaxRemoteThreads, maxGitHubPageCollectionElements,
 	)
 	if err != nil {
 		return nil, err
@@ -757,81 +757,81 @@ func decodeRemoteThreadPages(value []byte) ([]remoteThreadPage, error) {
 	return pages, err
 }
 
-func validateRemoteThread(node remoteThreadNode) (review.RemoteThread, error) {
+func validateRemoteThread(node remoteThreadNode) (change.RemoteThread, error) {
 	return validateRemoteThreadCancellable(nil, node)
 }
 
 func validateRemoteThreadCancellable(
 	cancelled func() error,
 	node remoteThreadNode,
-) (review.RemoteThread, error) {
+) (change.RemoteThread, error) {
 	if node.IsResolved == nil || node.IsOutdated == nil ||
 		node.Comments == nil || node.Comments.PageInfo == nil ||
 		node.Comments.PageInfo.HasNextPage == nil || node.Comments.Nodes == nil {
-		return review.RemoteThread{}, errors.New("GitHub review thread is incomplete")
+		return change.RemoteThread{}, errors.New("GitHub review thread is incomplete")
 	}
-	if err := validateRemoteField(node.ID, review.MaxPathBytes); err != nil {
-		return review.RemoteThread{}, fmt.Errorf("invalid GitHub review thread ID: %w", err)
+	if err := validateRemoteField(node.ID, change.MaxPathBytes); err != nil {
+		return change.RemoteThread{}, fmt.Errorf("invalid GitHub review thread ID: %w", err)
 	}
-	path, err := review.NewPath([]byte(node.Path))
+	path, err := change.NewPath([]byte(node.Path))
 	if err != nil || strings.HasPrefix(node.Path, "/") {
-		return review.RemoteThread{}, errors.New("invalid GitHub review thread path")
+		return change.RemoteThread{}, errors.New("invalid GitHub review thread path")
 	}
 	for component := range strings.SplitSeq(node.Path, "/") {
 		if component == "" || component == "." || component == ".." {
-			return review.RemoteThread{}, errors.New("invalid GitHub review thread path")
+			return change.RemoteThread{}, errors.New("invalid GitHub review thread path")
 		}
 	}
-	side := review.LineNew
+	side := change.LineNew
 	switch node.DiffSide {
 	case githubSideLeft:
-		side = review.LineOld
+		side = change.LineOld
 	case githubSideRight:
 	default:
-		return review.RemoteThread{}, errors.New("invalid GitHub review thread side")
+		return change.RemoteThread{}, errors.New("invalid GitHub review thread side")
 	}
 	lineValue := node.Line
 	if lineValue == nil {
 		lineValue = node.StartLine
 	}
-	var line *review.LineNumber
+	var line *change.LineNumber
 	if lineValue != nil {
-		validated, lineErr := review.NewLineNumber(*lineValue)
+		validated, lineErr := change.NewLineNumber(*lineValue)
 		if lineErr != nil {
-			return review.RemoteThread{}, errors.New("invalid GitHub review thread line")
+			return change.RemoteThread{}, errors.New("invalid GitHub review thread line")
 		}
 		line = new(validated)
 	}
 	if *node.Comments.PageInfo.HasNextPage {
-		return review.RemoteThread{}, &LimitError{
+		return change.RemoteThread{}, &LimitError{
 			Resource: LimitRemoteThreads,
-			Limit:    review.MaxRemoteThreads,
+			Limit:    change.MaxRemoteThreads,
 		}
 	}
 	if cancelled != nil {
 		if err := cancelled(); err != nil {
-			return review.RemoteThread{}, err
+			return change.RemoteThread{}, err
 		}
 	}
-	comments := make([]review.RemoteComment, 0, len(*node.Comments.Nodes))
+	comments := make([]change.RemoteComment, 0, len(*node.Comments.Nodes))
 	for _, raw := range *node.Comments.Nodes {
 		if cancelled != nil {
 			if err := cancelled(); err != nil {
-				return review.RemoteThread{}, err
+				return change.RemoteThread{}, err
 			}
 		}
 		comment, commentErr := validateRemoteComment(raw)
 		if commentErr != nil {
-			return review.RemoteThread{}, commentErr
+			return change.RemoteThread{}, commentErr
 		}
 		comments = append(comments, comment)
 	}
 	if cancelled != nil {
 		if err := cancelled(); err != nil {
-			return review.RemoteThread{}, err
+			return change.RemoteThread{}, err
 		}
 	}
-	return review.TakeRemoteThreadCancellable(cancelled, review.RemoteThreadDescriptor{
+	return change.TakeRemoteThreadCancellable(cancelled, change.RemoteThreadDescriptor{
 		ID:       node.ID,
 		Resolved: *node.IsResolved,
 		Outdated: *node.IsOutdated,
@@ -842,36 +842,36 @@ func validateRemoteThreadCancellable(
 	})
 }
 
-func validateRemoteComment(node remoteCommentNode) (review.RemoteComment, error) {
-	if err := validateRemoteField(node.ID, review.MaxPathBytes); err != nil {
-		return review.RemoteComment{}, fmt.Errorf("invalid GitHub review comment ID: %w", err)
+func validateRemoteComment(node remoteCommentNode) (change.RemoteComment, error) {
+	if err := validateRemoteField(node.ID, change.MaxPathBytes); err != nil {
+		return change.RemoteComment{}, fmt.Errorf("invalid GitHub review comment ID: %w", err)
 	}
 	if node.Body == nil ||
-		int64(len(*node.Body)) > review.MaxCommentBodyBytes ||
+		int64(len(*node.Body)) > change.MaxCommentBodyBytes ||
 		!utf8.ValidString(*node.Body) {
-		return review.RemoteComment{}, errors.New("invalid GitHub review comment body")
+		return change.RemoteComment{}, errors.New("invalid GitHub review comment body")
 	}
-	if err := validateRemoteField(node.CreatedAt, review.MaxPathBytes); err != nil {
-		return review.RemoteComment{}, errors.New("invalid GitHub review comment timestamp")
+	if err := validateRemoteField(node.CreatedAt, change.MaxPathBytes); err != nil {
+		return change.RemoteComment{}, errors.New("invalid GitHub review comment timestamp")
 	}
 	if _, err := time.Parse(time.RFC3339, node.CreatedAt); err != nil {
-		return review.RemoteComment{}, errors.New("invalid GitHub review comment timestamp")
+		return change.RemoteComment{}, errors.New("invalid GitHub review comment timestamp")
 	}
 	if err := validateRemoteField(node.URL, 16<<10); err != nil {
-		return review.RemoteComment{}, errors.New("invalid GitHub review comment URL")
+		return change.RemoteComment{}, errors.New("invalid GitHub review comment URL")
 	}
 	parsedURL, err := url.ParseRequestURI(node.URL)
 	if err != nil || parsedURL.Scheme != "https" || parsedURL.Host != githubHost {
-		return review.RemoteComment{}, errors.New("invalid GitHub review comment URL")
+		return change.RemoteComment{}, errors.New("invalid GitHub review comment URL")
 	}
 	author := ""
 	if node.Author != nil {
 		author = node.Author.Login
 		if err := validateRemoteField(author, 256); err != nil {
-			return review.RemoteComment{}, errors.New("invalid GitHub review comment author")
+			return change.RemoteComment{}, errors.New("invalid GitHub review comment author")
 		}
 	}
-	return review.TakeRemoteComment(review.RemoteCommentDescriptor{
+	return change.TakeRemoteComment(change.RemoteCommentDescriptor{
 		ID:        node.ID,
 		Author:    author,
 		Body:      *node.Body,
