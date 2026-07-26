@@ -1,43 +1,38 @@
 # AGENTS.md
 
-The best architecture has the fewest entangled concepts, clear boundaries, complete functionality,
-and no way to represent invalid states.
+## Product and authorities
 
-## Product
-
-`rvw` is being built as a terminal application for reviewing a local worktree, staged changes, an
-explicit Git range, or a GitHub pull request. Its required outputs are an interactive TUI,
-`--stdout`, and `--json`.
+`rvw` reviews exactly four sources: a local worktree, staged changes, an explicit two-dot Git
+range, or a GitHub pull request. It has exactly three outputs: an interactive TUI, `--stdout`, and
+`--json`.
 
 Do not introduce new review sources or output modes unless explicitly requested. Avoid unrelated
 feature expansion.
 
-`docs/tui-design.md` is the sole normative presentation authority. Keep visual hierarchy, focus,
-cursor, glyph, responsive, dialog, pointer, contrast, and evidence changes consistent with it.
+[The product specification](docs/rvw-specification.md) is the detailed product and runtime
+reference. [Its acceptance record](docs/rvw-specification.acceptance.md) identifies the exact
+accepted revision. Do not describe a later revision as accepted without a matching acceptance
+record.
 
-## Constraints
+[The TUI design](docs/tui-design.md) is the sole normative presentation authority. Keep visual
+hierarchy, focus, cursor, glyph, responsive, dialog, pointer, contrast, and evidence changes
+consistent with it.
+
+## Non-functional requirements
 
 - Support Linux and macOS only. Do not add project-owned or direct/runtime Windows code,
   dependencies, tests, fallbacks, or CI, and do not add WebAssembly support. The accepted pinned
   dependency graph's unreachable transitive Windows module metadata is the sole exception.
 - Design for at least 1,000 changed files of at least 10,000 lines each, plus hundreds of comments,
-  while keeping memory and CPU usage bounded through lazy materialization.
+  while keeping memory, CPU, concurrent work, retained data, queues, and per-tick work bounded
+  through lazy materialization.
 - Keep frame construction and rendering proportional to the viewport plus overscan. Bound retained
-  data, queues, concurrent tasks, and per-tick work.
+  presentation data and caches.
 - Keep filesystem, network, subprocess, blocking waits, and unbounded CPU work off the terminal
   event loop.
 - Validate external data at boundaries. Keep unavailable, stale, cancelled, limited, failed, and
   ambiguous outcomes explicit; reconcile an unknown GitHub write before retrying.
-- Prefer cohesive Go packages and files. Line count is not a conformance limit and does not justify
-  shallow splits.
-- Do not use positional Boolean parameters. Use named domain values or an options value so every
-  call site states what each choice means.
-- For a closed set of independent flags, prefer an opaque validated bitset with named members and
-  membership queries. Do not expose raw bitwise construction or permit unknown bits.
 
-## Defect repair
-
-For a non-trivial defect, identify the violated invariant, entry point, broader failure class, and
-owning boundary. Repair that boundary so the failure class is less likely to recur; do not choose a
-symptom patch merely to minimize the diff. Remove containment made obsolete by the owner-level
-repair, without expanding product behavior.
+Consult the specification's [non-functional conformance
+sections](docs/rvw-specification.md#nonfunctional-conformance) for detailed resource limits,
+security and integrity invariants, and verification routes.
