@@ -134,6 +134,7 @@ linters:
             - github.com/jacoelho/rvw/internal/keymap$
             - github.com/jacoelho/rvw/internal/output$
             - github.com/jacoelho/rvw/internal/change$
+            - github.com/jacoelho/rvw/internal/commentseed$
             - github.com/jacoelho/rvw/internal/source$
             - golang.org/x/sys/unix$
 
@@ -249,6 +250,16 @@ linters:
             - github.com/go-git/go-git/v5
             - github.com/jacoelho/rvw/internal/change$
             - golang.org/x/sys/unix$
+
+        commentseed-production:
+          list-mode: strict
+          files:
+            - "**/internal/commentseed/*.go"
+            - "!**/*_test.go"
+          allow:
+            - $gostd
+            - github.com/jacoelho/rvw/internal/change$
+            - github.com/jacoelho/rvw/internal/source$
 
     revive:
       enable-default-rules: true

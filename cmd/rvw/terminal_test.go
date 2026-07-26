@@ -31,11 +31,11 @@ func TestTerminalAdmissionRequiresInputAndOutputCapabilities(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			capabilities := testTerminalCapabilities(t, test.members...)
-			err := validateTerminalAdmission(interactive, capabilities, nil)
+			err := validateTerminalAdmission(interactive, capabilities, nil, false)
 			if (err != nil) != test.wantErr {
 				t.Fatalf("interactive admission error = %v", err)
 			}
-			if err := validateTerminalAdmission(noninteractive, capabilities, nil); err != nil {
+			if err := validateTerminalAdmission(noninteractive, capabilities, nil, false); err != nil {
 				t.Fatalf("noninteractive admission error = %v", err)
 			}
 		})
@@ -52,6 +52,7 @@ func TestTerminalAdmissionRejectsDumbOnlyForInteractiveOutput(t *testing.T) {
 		interactive,
 		capabilities,
 		[]string{"TERM=xterm-256color", "TERM=dumb"},
+		false,
 	); err == nil || err.Error() != dumbTerminalDiagnostic {
 		t.Fatalf("interactive TERM=dumb error = %v", err)
 	}
@@ -64,9 +65,24 @@ func TestTerminalAdmissionRejectsDumbOnlyForInteractiveOutput(t *testing.T) {
 			noninteractive,
 			terminalCapabilities{},
 			[]string{"TERM=dumb"},
+			false,
 		); err != nil {
 			t.Fatalf("%s TERM=dumb admission error = %v", option, err)
 		}
+	}
+}
+
+func TestTerminalAdmissionAllowsSeededInteractiveInputFromControllingTerminal(t *testing.T) {
+	interactive, err := parseArgs([]string{"diff"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputOnly := testTerminalCapabilities(t, terminalOutput)
+	if err := validateTerminalAdmission(interactive, outputOnly, []string{"TERM=xterm-256color"}, true); err != nil {
+		t.Fatalf("seeded admission error = %v", err)
+	}
+	if err := validateTerminalAdmission(interactive, terminalCapabilities{}, []string{"TERM=xterm-256color"}, true); err == nil {
+		t.Fatal("seeded admission accepted nonterminal stdout")
 	}
 }
 
@@ -82,7 +98,7 @@ func TestRunRejectsInteractiveBeforeRepositoryDiscovery(t *testing.T) {
 		ctx:    t.Context(),
 		args:   []string{"diff"},
 		cwd:    t.TempDir(),
-		stdin:  strings.NewReader("q"),
+		stdin:  strings.NewReader(""),
 		stdout: &stdout,
 		stderr: &stderr,
 	})
@@ -98,7 +114,7 @@ func TestRunRejectsNonterminalPullRequestBeforeSourceAcquisition(t *testing.T) {
 		ctx:    t.Context(),
 		args:   []string{"pr", "1", "--repo", "owner/repo"},
 		cwd:    t.TempDir(),
-		stdin:  strings.NewReader("q"),
+		stdin:  strings.NewReader(""),
 		stdout: &stdout,
 		stderr: &stderr,
 	})

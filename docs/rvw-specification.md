@@ -112,6 +112,48 @@ repositories, missing values, unknown options, and invalid configuration MUST fa
 or terminal composition. Help exits successfully. Other startup failures write terminal-safe text
 prefixed by `rvw:` to stderr and exit with status 1.
 
+#### 3.3 Comment initialization from stdin
+
+When stdin is not a terminal, `rvw diff` and `rvw pr` inspect it before source acquisition. Zero
+bytes mean no comment initialization and preserve ordinary terminal admission. Any nonempty input
+MUST be one UTF-8 JSON document of at most 16 MiB with this exact top-level shape:
+
+```json
+{"comments":[{"target":{"type":"review"},"binding":"active","comment":"Review body"}]}
+```
+
+Objects reject duplicate, unknown, missing, and target-inapplicable fields. Trailing JSON documents
+are rejected; trailing JSON whitespace and object-field order are insignificant. `binding` MUST be
+`active`; `stale` and `orphaned` exports are not valid initialization state. Comment bodies use the
+ordinary non-whitespace, UTF-8, per-body, aggregate-body, and count limits.
+
+Accepted targets are:
+
+- `{"type":"review"}`;
+- `{"type":"file","path":<path>}`;
+- `{"type":"line","path":<path>,"side":"old|new","line":<positive-u32>}`;
+- `{"type":"range","path":<path>,"side":"old|new","start":<positive-u32>,"end":<positive-u32>}`,
+  where `start < end`.
+
+Exported path strings decode with the inverse of the JSON export's raw-byte-preserving encoding.
+Paths MUST exactly match raw `File.IdentityPath` bytes and MUST identify an active file after
+filtering. A line or range endpoint MUST be present on the stated side of the patch materialized
+with configured diff context. Each referenced patch is materialized at most once during
+initialization. Missing, filtered, unavailable, limited, cancelled, or otherwise inapplicable
+targets fail atomically before output or TUI startup.
+
+Initial comments append after imported pending-review comments and are ordinary dirty local
+comments with local IDs and no GitHub binding. They are editable, deletable, reloadable, exportable,
+and eligible as additions in an explicit pull-request publication. Initialization itself performs
+no local persistence and no GitHub write.
+
+`--stdout` and `--json` perform the same parsing and applicability validation but retain their
+existing bytes and schema. For default interactive output with a nonempty seed document, terminal
+stdout and `TERM` admission still apply and the program MUST open the controlling terminal for TUI
+input before source work. Failure to open it fails startup. Help never consumes stdin. Every invalid
+or inapplicable nonempty input writes a descriptive stderr diagnostic, produces no review output,
+and exits with status 1.
+
 ### 4. Configuration and themes
 
 #### 4.1 Precedence and schema
@@ -605,6 +647,12 @@ Comments require non-whitespace bodies. Line comments preserve old/new side and 
 Comments that cannot map to a GitHub review position remain valid local comments but are explicitly
 unmappable for publication.
 
+Comment initialization is one cancellable, source-bound atomic review transition. It allocates one
+combined comment state, preserves pending-first ordering, enforces pending-plus-initial count and
+body limits, assigns ordinary local IDs and canonical paths, rebuilds anchor and retained-byte
+accounting, and marks every unbound initial comment dirty. Failure leaves the original review
+unchanged.
+
 Local filtering hides files without deleting them from local identity. Pull-request filtering is
 an acquisition projection: omitted paths are absent from identity, comments, marks, counts, TUI,
 stdout, JSON, export, reload, inline-comment mapping, and publication.
@@ -988,6 +1036,7 @@ Default externally relevant limits are:
 | Total comment body bytes | 4 MiB |
 | One export template | 256 KiB |
 | One prepared export body | 16 MiB |
+| One stdin comment-export document | 16 MiB |
 | One terminal-safe error detail | 16 KiB |
 | Clipboard-helper stdout | 64 KiB |
 | Clipboard-helper stderr | 1 MiB |

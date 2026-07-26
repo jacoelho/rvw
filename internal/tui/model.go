@@ -282,6 +282,7 @@ func NewModel(
 	ctx context.Context,
 	opened source.Opened,
 	revision *source.Revision,
+	current change.Review,
 	settings Settings,
 	coordinator *Coordinator,
 	receiver *ReadyReceiver,
@@ -290,13 +291,11 @@ func NewModel(
 	if ctx == nil || document == nil || coordinator == nil || receiver == nil {
 		return nil, errors.New("interactive model requires context, source revision, coordinator, and receiver")
 	}
-	settings = settings.clone()
-	current, err := change.NewReview(change.ReviewRequest{
-		Snapshot: document.Snapshot(),
-	})
-	if err != nil {
-		return nil, err
+	if current.Snapshot().SourceID() == 0 ||
+		current.Snapshot().SourceID() != document.Snapshot().SourceID() {
+		return nil, errors.New("interactive model requires a review for its source revision")
 	}
+	settings = settings.clone()
 	helpModel := help.New()
 	helpModel.ShowAll = true
 	editor := newCommentEditor(change.MaxCommentBodyBytes)

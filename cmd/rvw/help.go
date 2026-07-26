@@ -19,6 +19,15 @@ Output:
   --json               Write the complete machine-readable review to standard output.
   Repeated --stdout and --json options use the last occurrence.
 
+Comment initialization:
+  Nonterminal stdin may contain one exact JSON comment export. Only active
+  review, file, line, and range comments are accepted. Paths and displayed
+  old/new lines must exist in the acquired, filtered review under configured
+  diff context. Zero bytes mean no seeds; other invalid input exits 1 before
+  output. Seeds are ordinary local comments and are not persisted or published
+  automatically. A seeded TUI reads interactive input from the controlling
+  terminal.
+
 Filtering:
   --include PATTERN    Add a path include rule; repeatable.
   --exclude PATTERN    Add a path exclude rule; repeatable.
@@ -47,7 +56,9 @@ Configuration precedence and defaults:
 
 Examples:
   rvw diff
+  cat comments.json | rvw diff
   rvw diff --staged --stdout
+  cat comments.json | rvw diff --stdout
   rvw diff --range main..feature --json
   rvw pr 42 --repo owner/repository
   rvw pr https://github.com/owner/repository/pull/42 --exclude 'vendor/**'
@@ -63,8 +74,13 @@ Common options:
   --stdout, --json, --no-mouse, --theme NAME,
   --appearance dark|light|system, --include PATTERN, --exclude PATTERN
 
+Nonterminal stdin accepts one JSON comment export containing only active
+review, file, line, and range comments. Invalid or inapplicable seeds exit 1;
+seeds are not persisted automatically.
+
 Examples:
   rvw diff
+  cat comments.json | rvw diff
   rvw diff --staged --stdout
   rvw diff --range HEAD~3..HEAD --json
 `
@@ -83,7 +99,12 @@ Common options:
   --stdout, --json, --no-mouse, --theme NAME,
   --appearance dark|light|system, --include PATTERN, --exclude PATTERN
 
+Nonterminal stdin accepts one JSON comment export containing only active
+review, file, line, and range comments. Invalid or inapplicable seeds exit 1;
+seeds remain local until explicitly submitted.
+
 Examples:
   rvw pr 42 --repo owner/repository
+  cat comments.json | rvw pr 42 --repo owner/repository
   rvw pr https://github.com/owner/repository/pull/42 --json
 `
