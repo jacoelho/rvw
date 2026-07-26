@@ -226,16 +226,6 @@ func TestFailedAndLimitedExpansionIntentSurvivesForRetry(t *testing.T) {
 	}
 }
 
-func TestSuccessfulReloadInstallationClearsFullFileOverrides(t *testing.T) {
-	model := &Model{}
-	file, _ := change.NewFileID(4)
-	model.fullFileOverrides.toggle(file)
-	model.installReloadState(ReloadPreparedOutcome{}, change.Review{}, nil)
-	if model.fullFileOverrides.has(file) || len(model.fullFileOverrides.words) != 0 {
-		t.Fatal("successful reload installation retained per-file context")
-	}
-}
-
 func TestCursorSourceTargetPrefersNewSideAndMetadataFallsBack(t *testing.T) {
 	model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	settleModelWork(t, model, coordinator)

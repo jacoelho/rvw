@@ -45,6 +45,106 @@ func TestForegroundDiffTargetFollowsTheLatestTrackedPatch(t *testing.T) {
 	assertForegroundValid(t, &state)
 }
 
+func TestForegroundDiffTargetOwnershipAcrossPatchRetries(t *testing.T) {
+	t.Run("same-file retry retains and rebinds completed target", func(t *testing.T) {
+		state := newForegroundState()
+		target := testSourceLineTarget(t, 0, change.LineNew, 3)
+		if !state.setPendingDiffTarget(target) {
+			t.Fatal("target was rejected")
+		}
+		start, _, ready := state.requestPatch(0)
+		if !ready || !state.admitted(start, 1) {
+			t.Fatal("initial patch admission failed")
+		}
+		_, cancellations, ready := state.requestPatch(0)
+		if ready || len(cancellations) != 1 || cancellations[0] != 1 {
+			t.Fatalf("retry cancellation = %v, ready %v", cancellations, ready)
+		}
+		_, completed, tracked, effect := state.completePatch(1)
+		if !tracked || completed == nil || effect.kind != foregroundEffectRequestPatch ||
+			state.patch.target == nil || state.patch.target.operation != 0 {
+			t.Fatalf(
+				"first completion = target %+v retained %+v tracked %v effect %+v",
+				completed,
+				state.patch.target,
+				tracked,
+				effect,
+			)
+		}
+		retry, ok := state.preparePatch(effect.file)
+		if !ok || !state.admitted(retry, 2) || state.patch.target.operation != 2 {
+			t.Fatalf("retry admission = %+v, ready %v, target %+v", retry, ok, state.patch.target)
+		}
+		_, completed, tracked, effect = state.completePatch(2)
+		if !tracked || completed == nil || effect.kind != foregroundEffectNone ||
+			state.patch.target != nil {
+			t.Fatalf(
+				"retry completion = target %+v retained %+v tracked %v effect %+v",
+				completed,
+				state.patch.target,
+				tracked,
+				effect,
+			)
+		}
+		assertForegroundValid(t, &state)
+	})
+
+	t.Run("different-file retry discards completed target", func(t *testing.T) {
+		state := newForegroundState()
+		target := testSourceLineTarget(t, 0, change.LineOld, 8)
+		if !state.setPendingDiffTarget(target) {
+			t.Fatal("target was rejected")
+		}
+		start, _, ready := state.requestPatch(0)
+		if !ready || !state.admitted(start, 1) {
+			t.Fatal("initial patch admission failed")
+		}
+		_, _, _ = state.requestPatch(1)
+		_, completed, tracked, effect := state.completePatch(1)
+		if !tracked || completed == nil || effect.kind != foregroundEffectRequestPatch ||
+			effect.file != 1 || state.patch.target != nil {
+			t.Fatalf(
+				"completion = target %+v retained %+v tracked %v effect %+v",
+				completed,
+				state.patch.target,
+				tracked,
+				effect,
+			)
+		}
+		assertForegroundValid(t, &state)
+	})
+
+	t.Run("newer queued target is not overwritten", func(t *testing.T) {
+		state := newForegroundState()
+		first := testSourceLineTarget(t, 0, change.LineNew, 3)
+		if !state.setPendingDiffTarget(first) {
+			t.Fatal("first target was rejected")
+		}
+		start, _, ready := state.requestPatch(0)
+		if !ready || !state.admitted(start, 1) {
+			t.Fatal("initial patch admission failed")
+		}
+		newer := testSourceLineTarget(t, 0, change.LineNew, 9)
+		if !state.setPendingDiffTarget(newer) {
+			t.Fatal("newer target was rejected")
+		}
+		_, _, _ = state.requestPatch(0)
+		_, completed, tracked, effect := state.completePatch(1)
+		if !tracked || completed != nil || effect.kind != foregroundEffectRequestPatch ||
+			state.patch.target == nil || state.patch.target.line != newer.line ||
+			state.patch.target.operation != 0 {
+			t.Fatalf(
+				"completion = target %+v retained %+v tracked %v effect %+v",
+				completed,
+				state.patch.target,
+				tracked,
+				effect,
+			)
+		}
+		assertForegroundValid(t, &state)
+	})
+}
+
 func TestForegroundDiffTargetSurvivesFailedReloadAndNotSuccessfulReload(t *testing.T) {
 	for _, testCase := range []struct {
 		name    string

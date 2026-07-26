@@ -3,6 +3,7 @@ package change
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"unsafe"
@@ -266,7 +267,85 @@ func TestPreparedPatchCarriesValidatedSemanticLineIdentity(t *testing.T) {
 	}
 }
 
-func TestNearestPatchLineForSourceUsesBinarySourceOrderAndPrecedingTies(t *testing.T) {
+func TestPatchPreparationRejectsNonIncreasingSourceLines(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		text string
+	}{
+		{
+			name: "equal old line",
+			text: "@@ -2 +2 @@\n-old\n+new\n@@ -2 +3 @@\n-old again\n+newer\n",
+		},
+		{
+			name: "decreasing old line",
+			text: "@@ -3 +2 @@\n-old\n+new\n@@ -2 +3 @@\n-earlier\n+newer\n",
+		},
+		{
+			name: "equal new line",
+			text: "@@ -2 +2 @@\n-old\n+new\n@@ -3 +2 @@\n-older\n+new again\n",
+		},
+		{
+			name: "decreasing new line",
+			text: "@@ -2 +3 @@\n-old\n+new\n@@ -3 +2 @@\n-older\n+earlier\n",
+		},
+	} {
+		t.Run("textual "+testCase.name, func(t *testing.T) {
+			if _, err := TakePatch([]byte(testCase.text)); err == nil ||
+				!strings.Contains(err.Error(), "source line") {
+				t.Fatalf("ordering error = %v", err)
+			}
+		})
+
+		t.Run("structured "+testCase.name, func(t *testing.T) {
+			oldLines := [2]uint32{2, 3}
+			newLines := [2]uint32{2, 3}
+			switch testCase.name {
+			case "equal old line":
+				oldLines = [2]uint32{2, 2}
+			case "decreasing old line":
+				oldLines = [2]uint32{3, 2}
+			case "equal new line":
+				newLines = [2]uint32{2, 2}
+			case "decreasing new line":
+				newLines = [2]uint32{3, 2}
+			}
+			lines := []StructuredPatchLine{
+				{Text: []byte("@@ first"), Hunk: 0, Kind: PatchLineHunkHeader, HasHunk: true},
+				{Text: []byte(" first"), OldLine: oldLines[0], NewLine: newLines[0], Hunk: 0, Kind: PatchLineContext, HasHunk: true},
+				{Text: []byte("@@ second"), Hunk: 1, Kind: PatchLineHunkHeader, HasHunk: true},
+				{Text: []byte(" second"), OldLine: oldLines[1], NewLine: newLines[1], Hunk: 1, Kind: PatchLineContext, HasHunk: true},
+			}
+			if _, err := PrepareStructuredPatchCancellable(nil, lines); err == nil ||
+				!strings.Contains(err.Error(), "source line") {
+				t.Fatalf("ordering error = %v", err)
+			}
+		})
+	}
+}
+
+func TestTakePatchAcceptsAdjacentAndZeroCountHunks(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		text string
+	}{
+		{
+			name: "adjacent non-overlapping hunks",
+			text: "@@ -1 +1 @@\n first\n@@ -2 +2 @@\n second\n",
+		},
+		{
+			name: "zero-count sides",
+			text: "@@ -1,0 +1 @@\n+added\n@@ -1 +2,0 @@\n-removed\n",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if _, err := TakePatch([]byte(testCase.text)); err != nil {
+				t.Fatalf("valid patch was rejected: %v", err)
+			}
+		})
+	}
+}
+
+func TestPatchSourceLineLookupsUseBothOrderedSides(t *testing.T) {
 	prepared, err := TakePatch([]byte(
 		"@@ -10 +10 @@\n" +
 			"-old ten\n" +
@@ -293,25 +372,61 @@ func TestNearestPatchLineForSourceUsesBinarySourceOrderAndPrecedingTies(t *testi
 		t.Fatal(err)
 	}
 
-	for _, testCase := range []struct {
-		name string
-		line uint32
-		row  uint32
-	}{
-		{name: "before first", line: 1, row: 2},
-		{name: "exact", line: 20, row: 5},
-		{name: "preceding nearer", line: 12, row: 2},
-		{name: "following nearer", line: 19, row: 5},
-		{name: "tie chooses preceding", line: 15, row: 2},
-		{name: "after last", line: 30, row: 5},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			line, _ := NewLineNumber(testCase.line)
-			row, ok := current.NearestPatchLineForSource(0, LineNew, line)
-			if !ok || row != testCase.row {
-				t.Fatalf("nearest row = %d, %v; want %d, true", row, ok, testCase.row)
+	for _, side := range []LineSide{LineOld, LineNew} {
+		t.Run(fmt.Sprintf("side %d", side), func(t *testing.T) {
+			exact, _ := NewLineNumber(20)
+			row, ok := current.PatchLineForSource(0, side, exact)
+			wantExact := uint32(4)
+			if side == LineNew {
+				wantExact = 5
+			}
+			if !ok || row != wantExact {
+				t.Fatalf("exact row = %d, %v; want %d, true", row, ok, wantExact)
+			}
+			missing, _ := NewLineNumber(15)
+			if row, ok := current.PatchLineForSource(0, side, missing); ok || row != 0 {
+				t.Fatalf("missing exact row = %d, %v", row, ok)
+			}
+
+			for _, testCase := range []struct {
+				name string
+				line uint32
+				old  uint32
+				new  uint32
+			}{
+				{name: "before first", line: 1, old: 1, new: 2},
+				{name: "exact", line: 20, old: 4, new: 5},
+				{name: "preceding nearer", line: 12, old: 1, new: 2},
+				{name: "following nearer", line: 19, old: 4, new: 5},
+				{name: "tie chooses preceding", line: 15, old: 1, new: 2},
+				{name: "after last", line: 30, old: 4, new: 5},
+			} {
+				t.Run(testCase.name, func(t *testing.T) {
+					line, _ := NewLineNumber(testCase.line)
+					row, ok := current.NearestPatchLineForSource(0, side, line)
+					want := testCase.old
+					if side == LineNew {
+						want = testCase.new
+					}
+					if !ok || row != want {
+						t.Fatalf("nearest row = %d, %v; want %d, true", row, ok, want)
+					}
+				})
 			}
 		})
+	}
+
+	additionOnly, err := TakePatch([]byte("@@ -0,0 +7 @@\n+only new\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutOld := patchReviewFromPrepared(t, additionOnly)
+	line, _ := NewLineNumber(7)
+	if row, ok := withoutOld.PatchLineForSource(0, LineOld, line); ok || row != 0 {
+		t.Fatalf("empty-side exact row = %d, %v", row, ok)
+	}
+	if row, ok := withoutOld.NearestPatchLineForSource(0, LineOld, line); ok || row != 0 {
+		t.Fatalf("empty-side nearest row = %d, %v", row, ok)
 	}
 }
 
@@ -437,6 +552,11 @@ func TestTakePatchDelegatesToCancellablePreparation(t *testing.T) {
 
 func patchLinesFromPrepared(t *testing.T, prepared *PreparedPatch) []PatchLine {
 	t.Helper()
+	return patchReviewFromPrepared(t, prepared).PatchLines(0, 0, prepared.Lines(), MaxPatchBytes)
+}
+
+func patchReviewFromPrepared(t *testing.T, prepared *PreparedPatch) Review {
+	t.Helper()
 	current := testReview(t, testSnapshot(t, 1, "one.go"))
 	pending, request, err := current.RequestPatch(0, WholeFileContext())
 	if err != nil {
@@ -451,5 +571,5 @@ func patchLinesFromPrepared(t *testing.T, prepared *PreparedPatch) []PatchLine {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return ready.PatchLines(0, 0, prepared.Lines(), MaxPatchBytes)
+	return ready
 }

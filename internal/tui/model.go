@@ -725,6 +725,7 @@ func (model *Model) applyPatchOutcome(patch PatchOutcome) {
 	if target != nil && (!fileExists || target.workspace != model.review.WorkspaceRevision() ||
 		target.handle != file.PatchHandle()) {
 		target = nil
+		model.foreground.clearPendingDiffTarget()
 	}
 	patchReady := model.review.Patch(fileID).Status == change.PatchReady
 	if active, exists := model.review.ActiveFile(); exists && active == fileID && patchReady {
@@ -754,10 +755,6 @@ func (model *Model) applyPatchOutcome(patch PatchOutcome) {
 	if effect.kind == foregroundEffectRequestPatch &&
 		result.Status == change.PatchReady {
 		model.review = model.review.DropPatch(fileID)
-	}
-	if effect.kind == foregroundEffectRequestPatch && target != nil {
-		target.operation = 0
-		model.foreground.setPendingDiffTarget(*target)
 	}
 	model.applyForegroundEffect(effect)
 }

@@ -674,7 +674,12 @@ func (state *foregroundState) completePatch(
 	if state.patch.target != nil && state.patch.target.operation == id {
 		value := *state.patch.target
 		target = &value
-		state.patch.target = nil
+		if state.patch.continuation.kind == patchContinuationRetry &&
+			state.patch.continuation.file == file {
+			state.patch.target.operation = 0
+		} else {
+			state.patch.target = nil
+		}
 	}
 	state.patch.active = nil
 	if state.reload.phase == reloadWaitingForPatch {

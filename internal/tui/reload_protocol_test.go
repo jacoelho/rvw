@@ -22,6 +22,10 @@ func TestReloadAcquisitionAndPreparationCommitAtomicallyOffUpdate(t *testing.T) 
 		t.Fatalf("patch ready state = %d", state)
 	}
 	_, _ = model.Update(outcomeReadyMsg{state: ReadyAvailable})
+	active, ok := model.review.ActiveFile()
+	if !ok || !model.fullFileOverrides.toggle(active) {
+		t.Fatal("full-file override setup failed")
+	}
 
 	local, ok := model.document.Local()
 	if !ok || local.Repo == nil {
@@ -44,6 +48,9 @@ func TestReloadAcquisitionAndPreparationCommitAtomicallyOffUpdate(t *testing.T) 
 			model.foreground.reloadIsPreparing(),
 		)
 	}
+	if !model.fullFileOverrides.has(active) {
+		t.Fatal("reload acquisition cleared the full-file override")
+	}
 
 	for attempts := 0; !model.foreground.reloadIsPreparing() && attempts < 8; attempts++ {
 		if state := coordinator.WaitReady(waitContext); state != ReadyAvailable {
@@ -58,6 +65,9 @@ func TestReloadAcquisitionAndPreparationCommitAtomicallyOffUpdate(t *testing.T) 
 	if !model.foreground.reloadIsPreparing() {
 		t.Fatal("reload did not enter off-loop reconciliation")
 	}
+	if !model.fullFileOverrides.has(active) {
+		t.Fatal("reload preparation cleared the full-file override")
+	}
 	if model.review.Snapshot().SourceID() != oldSource {
 		t.Fatal("source became observable before prepared replacement committed")
 	}
@@ -67,6 +77,7 @@ func TestReloadAcquisitionAndPreparationCommitAtomicallyOffUpdate(t *testing.T) 
 		t.Fatal(err)
 	}
 
+	sawPreparationRetry := false
 	for attempts := 0; model.foreground.reloadOperation() != 0 && attempts < 8; attempts++ {
 		if state := coordinator.WaitReady(waitContext); state != ReadyAvailable {
 			t.Fatalf("reload preparation ready state = %d", state)
@@ -76,6 +87,12 @@ func TestReloadAcquisitionAndPreparationCommitAtomicallyOffUpdate(t *testing.T) 
 			t.Fatal("reload preparation outcome was not claimable")
 		}
 		runCollapseCaptureCommands(t, model, model.applyOutcome(outcome))
+		if model.foreground.reloadPreparationAttempts() > 1 {
+			sawPreparationRetry = true
+		}
+		if model.foreground.reloadOperation() != 0 && !model.fullFileOverrides.has(active) {
+			t.Fatal("reload preparation retry cleared the full-file override")
+		}
 	}
 	if model.foreground.reloadOperation() != 0 || model.foreground.reloadIsPreparing() {
 		t.Fatalf(
@@ -93,6 +110,12 @@ func TestReloadAcquisitionAndPreparationCommitAtomicallyOffUpdate(t *testing.T) 
 			model.review.WorkspaceRevision(),
 			model.review.Snapshot().FileCount(),
 		)
+	}
+	if !sawPreparationRetry {
+		t.Fatal("reload fixture did not exercise a preparation retry")
+	}
+	if model.fullFileOverrides.has(active) || len(model.fullFileOverrides.words) != 0 {
+		t.Fatal("successful reload commit retained full-file overrides")
 	}
 	if len(model.index.AllFiles()) != 2 {
 		t.Fatalf("prepared file order length = %d", len(model.index.AllFiles()))
@@ -135,6 +158,10 @@ func TestPatchAndReloadAdmissionFailureLeaveNoPhantomOperations(t *testing.T) {
 	t.Run("reload", func(t *testing.T) {
 		model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 		settleModelWork(t, model, coordinator)
+		active, ok := model.review.ActiveFile()
+		if !ok || !model.fullFileOverrides.toggle(active) {
+			t.Fatal("full-file override setup failed")
+		}
 		oldSource := model.review.Snapshot().SourceID()
 		id, _ := change.NewOperationID(model.nextOperation)
 		coordinator.StopAdmissionAndCancel()
@@ -147,6 +174,9 @@ func TestPatchAndReloadAdmissionFailureLeaveNoPhantomOperations(t *testing.T) {
 		}
 		if operation := model.review.Operations()[id]; operation.Status != change.OperationFailed {
 			t.Fatalf("failed reload operation = %+v", operation)
+		}
+		if !model.fullFileOverrides.has(active) {
+			t.Fatal("reload admission failure cleared the full-file override")
 		}
 	})
 }
@@ -240,6 +270,10 @@ func TestReloadFailureRestoresSearchThenPatchAdmission(t *testing.T) {
 	t.Run("acquisition failure", func(t *testing.T) {
 		model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 		settleModelWork(t, model, coordinator)
+		active, ok := model.review.ActiveFile()
+		if !ok || !model.fullFileOverrides.toggle(active) {
+			t.Fatal("full-file override setup failed")
+		}
 		pending, reloadStart := prepareDeferredReloadState(t, model, "after reload failure")
 		reloadID, err := model.nextOperationID()
 		if err != nil {
@@ -255,6 +289,9 @@ func TestReloadFailureRestoresSearchThenPatchAdmission(t *testing.T) {
 		model.review = next
 
 		model.failReload(reloadID, nil, errors.New("reload acquisition failed"))
+		if !model.fullFileOverrides.has(active) {
+			t.Fatal("reload acquisition failure cleared the full-file override")
+		}
 		assertSerializedRestoredSearchAndPatch(t, model, coordinator, pending)
 		settleModelWork(t, model, coordinator)
 	})
@@ -262,6 +299,10 @@ func TestReloadFailureRestoresSearchThenPatchAdmission(t *testing.T) {
 	t.Run("deferred admission rejection", func(t *testing.T) {
 		model, coordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 		settleModelWork(t, model, coordinator)
+		active, ok := model.review.ActiveFile()
+		if !ok || !model.fullFileOverrides.toggle(active) {
+			t.Fatal("full-file override setup failed")
+		}
 		pending, reloadStart := prepareDeferredReloadState(t, model, "after rejected reload")
 		fillerID, _ := change.NewOperationID(20_000)
 		if err := coordinator.submit(fillerID, 1, 1, func(context.Context) bool {
@@ -271,6 +312,9 @@ func TestReloadFailureRestoresSearchThenPatchAdmission(t *testing.T) {
 		}
 
 		model.beginReload(reloadStart)
+		if !model.fullFileOverrides.has(active) {
+			t.Fatal("deferred reload admission failure cleared the full-file override")
+		}
 		assertSerializedRestoredSearchAndPatch(t, model, coordinator, pending)
 		coordinator.complete(SearchOutcome{ID: fillerID})
 		settleModelWork(t, model, coordinator)
