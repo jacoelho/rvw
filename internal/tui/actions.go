@@ -200,6 +200,8 @@ func (model *Model) applyReviewAction(action keymap.Action) (tea.Cmd, bool) {
 		model.requestCommentDelete()
 	case keymap.ActionExpandContext:
 		model.expandPatchContext()
+	case keymap.ActionToggleFullFile:
+		model.toggleFullFileContext()
 	case keymap.ActionVisualLine, keymap.ActionVisualLines:
 		if !model.beginVisualSelection() {
 			return nil, true
@@ -224,6 +226,7 @@ func (model *Model) reviewActionFocusAllowed(action keymap.Action) bool {
 	switch action {
 	case keymap.ActionCommentAtCursor,
 		keymap.ActionExpandContext,
+		keymap.ActionToggleFullFile,
 		keymap.ActionVisualLine,
 		keymap.ActionVisualLines,
 		keymap.ActionVisualHunk,
@@ -477,7 +480,7 @@ func (model *Model) alignDiff(alignment diffAlignment) {
 
 func (model *Model) expandPatchContext() {
 	if model.settings.patchContext.WholeFile() {
-		model.notice = &Notice{Kind: NoticeInformation, Text: "whole-file context is already active"}
+		model.notice = &Notice{Kind: NoticeInformation, Text: wholeFileContextActiveText}
 		return
 	}
 	lines, ok := model.settings.patchContext.Lines()
@@ -501,6 +504,31 @@ func (model *Model) expandPatchContext() {
 		return
 	}
 	model.setPatchContext(context)
+}
+
+func (model *Model) toggleFullFileContext() {
+	if model.settings.patchContext.WholeFile() {
+		model.notice = &Notice{Kind: NoticeInformation, Text: wholeFileContextActiveText}
+		return
+	}
+	fileID, ok := model.review.ActiveFile()
+	if !ok {
+		return
+	}
+	target := model.cursorSourceTarget(fileID)
+	if target != nil || model.review.Patch(fileID).Status == change.PatchReady {
+		model.foreground.clearPendingDiffTarget()
+	}
+	expanded := model.fullFileOverrides.toggle(fileID)
+	if target != nil {
+		model.foreground.setPendingDiffTarget(*target)
+	}
+	model.requestActivePatch()
+	if expanded {
+		model.notice = &Notice{Kind: NoticeInformation, Text: "loading whole-file patch context"}
+		return
+	}
+	model.notice = &Notice{Kind: NoticeInformation, Text: "loading configured patch context"}
 }
 
 func (model *Model) applyHelpAction(action keymap.Action, repeat int) {

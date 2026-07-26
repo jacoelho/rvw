@@ -62,6 +62,33 @@ func TestDefaultBindingsAreCanonicalCompleteAndUserFacing(t *testing.T) {
 	}
 }
 
+func TestDefaultToggleFullFileBindingIsDiffScopedAndSharesZPrefix(t *testing.T) {
+	resolved, err := Resolve(nil)
+	if err != nil {
+		t.Fatalf("Resolve defaults: %v", err)
+	}
+	want := map[Chord]Action{
+		"z e": ActionToggleFullFile,
+		"z f": ActionToggleFilePanel,
+		"z c": ActionToggleComments,
+	}
+	for chord, action := range want {
+		found := false
+		for _, binding := range resolved {
+			if binding.Context == ContextNormal && binding.Chord == chord && binding.Action == action {
+				if chord == "z e" && binding.Focus != FocusDiff {
+					t.Fatalf("%q focus = %q, want %q", chord, binding.Focus, FocusDiff)
+				}
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing default %q -> %q", chord, action)
+		}
+	}
+}
+
 func TestActionVocabularyIsReachableFromAContext(t *testing.T) {
 	reachable := make(map[Action]struct{})
 	for _, context := range Contexts() {

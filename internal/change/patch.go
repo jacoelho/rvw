@@ -960,6 +960,47 @@ func (review Review) PatchLineForSource(
 	return rows[position], true
 }
 
+// NearestPatchLineForSource returns the nearest represented source row.
+// Equal-distance ties resolve to the preceding source line.
+func (review Review) NearestPatchLineForSource(
+	fileID FileID,
+	side LineSide,
+	line LineNumber,
+) (uint32, bool) {
+	state := review.patchState(fileID)
+	if state.Status != PatchReady || state.prepared == nil || line == 0 {
+		return 0, false
+	}
+	patch := state.prepared
+	rows := patch.newLineRows
+	lines := patch.newLines
+	if side == LineOld {
+		rows = patch.oldLineRows
+		lines = patch.oldLines
+	} else if side != LineNew {
+		return 0, false
+	}
+	if len(rows) == 0 {
+		return 0, false
+	}
+	target := line.Uint32()
+	position := sort.Search(len(rows), func(index int) bool {
+		return lines[rows[index]] >= target
+	})
+	if position == 0 {
+		return rows[0], true
+	}
+	if position == len(rows) {
+		return rows[len(rows)-1], true
+	}
+	preceding := rows[position-1]
+	following := rows[position]
+	if target-lines[preceding] <= lines[following]-target {
+		return preceding, true
+	}
+	return following, true
+}
+
 // RequestPatch performs the request patch operation.
 func (review Review) RequestPatch(fileID FileID, context PatchContext) (Review, PatchRequest, error) {
 	if !context.valid() {

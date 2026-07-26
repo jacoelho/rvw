@@ -70,31 +70,17 @@ type searchFlow struct {
 type diffTargetKind uint8
 
 const (
-	diffTargetPatchRow diffTargetKind = iota + 1
-	diffTargetSourceLine
+	diffTargetSourceLine diffTargetKind = iota + 1
+	diffTargetNearestSourceLine
 )
 
 type pendingDiffTarget struct {
 	handle    change.PatchHandle
 	workspace change.WorkspaceRevision
 	operation change.OperationID
-	patchRow  uint32
 	line      change.LineNumber
 	kind      diffTargetKind
 	side      change.LineSide
-}
-
-func newPatchRowTarget(
-	workspace change.WorkspaceRevision,
-	handle change.PatchHandle,
-	row uint32,
-) pendingDiffTarget {
-	return pendingDiffTarget{
-		kind:      diffTargetPatchRow,
-		workspace: workspace,
-		handle:    handle,
-		patchRow:  row,
-	}
 }
 
 func newSourceLineTarget(
@@ -112,6 +98,21 @@ func newSourceLineTarget(
 	}
 }
 
+func newNearestSourceLineTarget(
+	workspace change.WorkspaceRevision,
+	handle change.PatchHandle,
+	side change.LineSide,
+	line change.LineNumber,
+) pendingDiffTarget {
+	return pendingDiffTarget{
+		kind:      diffTargetNearestSourceLine,
+		workspace: workspace,
+		handle:    handle,
+		side:      side,
+		line:      line,
+	}
+}
+
 func (target pendingDiffTarget) valid() bool {
 	if target.workspace.Uint64() == 0 || target.handle.ID().Uint64() == 0 ||
 		target.handle.SourceID().Uint64() == 0 ||
@@ -119,9 +120,7 @@ func (target pendingDiffTarget) valid() bool {
 		return false
 	}
 	switch target.kind {
-	case diffTargetPatchRow:
-		return target.side == 0 && target.line == 0
-	case diffTargetSourceLine:
+	case diffTargetSourceLine, diffTargetNearestSourceLine:
 		return (target.side == change.LineOld || target.side == change.LineNew) &&
 			target.line != 0
 	default:

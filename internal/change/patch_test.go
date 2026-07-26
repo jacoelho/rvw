@@ -266,6 +266,55 @@ func TestPreparedPatchCarriesValidatedSemanticLineIdentity(t *testing.T) {
 	}
 }
 
+func TestNearestPatchLineForSourceUsesBinarySourceOrderAndPrecedingTies(t *testing.T) {
+	prepared, err := TakePatch([]byte(
+		"@@ -10 +10 @@\n" +
+			"-old ten\n" +
+			"+new ten\n" +
+			"@@ -20 +20 @@\n" +
+			"-old twenty\n" +
+			"+new twenty\n",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := testReview(t, testSnapshot(t, 1, "one.go"))
+	pending, request, err := current.RequestPatch(0, WholeFileContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err = pending.ApplyPatch(PatchResult{
+		Workspace: request.Workspace,
+		Handle:    request.Handle,
+		Status:    PatchReady,
+		Prepared:  prepared,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, testCase := range []struct {
+		name string
+		line uint32
+		row  uint32
+	}{
+		{name: "before first", line: 1, row: 2},
+		{name: "exact", line: 20, row: 5},
+		{name: "preceding nearer", line: 12, row: 2},
+		{name: "following nearer", line: 19, row: 5},
+		{name: "tie chooses preceding", line: 15, row: 2},
+		{name: "after last", line: 30, row: 5},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			line, _ := NewLineNumber(testCase.line)
+			row, ok := current.NearestPatchLineForSource(0, LineNew, line)
+			if !ok || row != testCase.row {
+				t.Fatalf("nearest row = %d, %v; want %d, true", row, ok, testCase.row)
+			}
+		})
+	}
+}
+
 func TestPreparedPatchNoNewlineMarkersOwnPrecedingSides(t *testing.T) {
 	prepared, err := TakePatch([]byte(
 		"@@ -1 +1 @@\n" +
