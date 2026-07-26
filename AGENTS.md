@@ -41,18 +41,3 @@ For a non-trivial defect, identify the violated invariant, entry point, broader 
 owning boundary. Repair that boundary so the failure class is less likely to recur; do not choose a
 symptom patch merely to minimize the diff. Remove containment made obsolete by the owner-level
 repair, without expanding product behavior.
-
-## Go tooling
-
-- At the start of a Go code task, discover the `gopls` MCP tools if they are not already visible and
-  use `go_workspace` before semantic exploration.
-- Use `go_search` for symbol discovery, `go_file_context` for cross-file dependencies,
-  `go_package_api` for package contracts, `go_symbol_references` for references,
-  `go_rename_symbol` for renames, and `go_diagnostics` for focused diagnostics.
-- Do not use `rg`, `grep`, or manual multi-file inspection to approximate Go symbol search,
-  references, semantic renames, package APIs, or diagnostics while `gopls` is available and
-  succeeds.
-- Use `rg` for literal text, filenames, comments, documentation, generated content, non-Go files,
-  or when `gopls` cannot answer the query. State the reason when falling back.
-- Treat `gopls` diagnostics as focused validation, not as a replacement for the required project
-  checks.
