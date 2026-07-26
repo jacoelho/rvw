@@ -8,7 +8,12 @@ Common options:
   --stdout, --json, --no-mouse, --theme NAME,
   --appearance dark|light|system, --include PATTERN, --exclude PATTERN
 
+Nonterminal stdin accepts one JSON comment export containing only active
+review, file, line, and range comments. Invalid or inapplicable seeds exit 1;
+seeds are not persisted automatically.
+
 Examples:
   rvw diff
+  cat comments.json | rvw diff
   rvw diff --staged --stdout
   rvw diff --range HEAD~3..HEAD --json

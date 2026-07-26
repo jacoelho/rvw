@@ -89,10 +89,16 @@ func newTestModel(tb testing.TB, changed map[string]string) (*Model, *Coordinato
 		cancelWork()
 		t.Fatal("source fixture revision is unavailable")
 	}
+	review, err := change.NewReview(change.ReviewRequest{Snapshot: opened.Snapshot()})
+	if err != nil {
+		cancelWork()
+		t.Fatal(err)
+	}
 	model, err := NewModel(
 		workContext,
 		opened,
 		revision,
+		review,
 		settings,
 		coordinator,
 		receiver,

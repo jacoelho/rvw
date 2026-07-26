@@ -13,6 +13,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/jacoelho/rvw/internal/change"
+	"github.com/jacoelho/rvw/internal/commentseed"
 	"github.com/jacoelho/rvw/internal/config"
 	"github.com/jacoelho/rvw/internal/output"
 	"github.com/jacoelho/rvw/internal/source"
@@ -41,14 +43,15 @@ func main() {
 }
 
 type runRequest struct {
-	ctx         context.Context
-	stdin       io.Reader
-	stdout      io.Writer
-	stderr      io.Writer
-	cwd         string
-	args        []string
-	environment []string
-	terminals   terminalCapabilities
+	ctx          context.Context
+	stdin        io.Reader
+	stdout       io.Writer
+	stderr       io.Writer
+	openTerminal func() (io.ReadCloser, error)
+	cwd          string
+	args         []string
+	environment  []string
+	terminals    terminalCapabilities
 }
 
 func run(request runRequest) int {
@@ -69,15 +72,45 @@ func run(request runRequest) int {
 		}
 		return 0
 	}
+	seeds := commentseed.Document{}
+	if !request.terminals.has(terminalInput) {
+		seeds, err = commentseed.Read(request.stdin)
+		if err != nil {
+			if writeErr := writeStartupError(request.stderr, err); writeErr != nil {
+				return 1
+			}
+			return 1
+		}
+	}
 	if admissionErr := validateTerminalAdmission(
 		invocation,
 		request.terminals,
 		environment,
+		seeds.Present(),
 	); admissionErr != nil {
 		if writeErr := writeStartupError(request.stderr, admissionErr); writeErr != nil {
 			return 1
 		}
 		return 1
+	}
+	input := request.stdin
+	var controllingTerminal io.ReadCloser
+	if invocation.Output == OutputInteractive && seeds.Present() {
+		opener := request.openTerminal
+		if opener == nil {
+			opener = openControllingTerminal
+		}
+		controllingTerminal, err = opener()
+		if err != nil {
+			if writeErr := writeStartupError(
+				request.stderr,
+				fmt.Errorf("open controlling terminal for seeded interactive review: %w", err),
+			); writeErr != nil {
+				return 1
+			}
+			return 1
+		}
+		input = controllingTerminal
 	}
 
 	executionContext, cancelExecution := context.WithCancel(request.ctx)
@@ -88,11 +121,15 @@ func run(request runRequest) int {
 		invocation:  invocation,
 		environment: environment,
 		cwd:         request.cwd,
-		stdin:       request.stdin,
+		stdin:       input,
 		stdout:      request.stdout,
+		seeds:       seeds,
 		terminals:   request.terminals,
 		termination: termination,
 	})
+	if controllingTerminal != nil {
+		err = errors.Join(err, controllingTerminal.Close())
+	}
 	if err != nil {
 		if writeErr := writeStartupError(request.stderr, err); writeErr != nil {
 			return 1
@@ -110,6 +147,7 @@ type executeRequest struct {
 	cwd         string
 	environment []string
 	invocation  Invocation
+	seeds       commentseed.Document
 	terminals   terminalCapabilities
 }
 
@@ -170,8 +208,35 @@ func execute(request executeRequest) (returnErr error) {
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if revision != nil {
+			returnErr = errors.Join(returnErr, revision.Retire().Close())
+		}
+	}()
+	review, err := change.NewReview(change.ReviewRequest{Snapshot: opened.Snapshot()})
+	if err != nil {
+		return err
+	}
+	if request.seeds.Present() {
+		patchContext, contextErr := configuredPatchContext(resolved)
+		if contextErr != nil {
+			return contextErr
+		}
+		review, err = commentseed.Initialize(
+			request.ctx,
+			service,
+			opened,
+			revision,
+			review,
+			patchContext,
+			request.seeds,
+		)
+		if err != nil {
+			return fmt.Errorf("initialize comment seeds: %w", err)
+		}
+	}
 	if request.invocation.Output == OutputInteractive {
-		return runInteractive(interactiveRequest{
+		interactiveErr := runInteractive(interactiveRequest{
 			ctx:         request.ctx,
 			input:       request.stdin,
 			output:      request.stdout,
@@ -179,13 +244,13 @@ func execute(request executeRequest) (returnErr error) {
 			service:     service,
 			opened:      &opened,
 			revision:    revision,
+			review:      review,
 			termination: request.termination,
 			environment: request.environment,
 		})
+		revision = nil
+		return interactiveErr
 	}
-	defer func() {
-		returnErr = errors.Join(returnErr, revision.Retire().Close())
-	}()
 
 	outputOptions := output.Options{Terminal: request.terminals.has(terminalOutput)}
 	switch request.invocation.Output {

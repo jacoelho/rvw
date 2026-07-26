@@ -54,6 +54,43 @@ modes, paths, line sides, and missing-newline state.
 
 Run `rvw help`, `rvw help diff`, or `rvw help pr` for the complete command-line reference.
 
+### Initialize comments from stdin
+
+Pipe a JSON comment export into `rvw diff` or `rvw pr` to initialize ordinary local review
+comments:
+
+```sh
+cat comments.json | rvw diff
+cat comments.json | rvw diff --stdout
+cat comments.json | rvw pr 123 --repo owner/repo
+```
+
+The document has this active-only shape; `target` may be `review`, `file`, `line`, or `range`:
+
+```json
+{
+  "comments": [
+    {
+      "target": {"type": "line", "path": "internal/app.go", "side": "new", "line": 42},
+      "binding": "active",
+      "comment": "Handle the error here."
+    }
+  ]
+}
+```
+
+File targets require `path`. Line targets require `path`, `side`, and `line`. Range targets require
+`path`, `side`, `start`, and `end`, with `start < end`. Paths must identify an active file after
+filtering, and line/range endpoints must be present on the stated old/new side under configured
+diff context. Unknown or duplicate fields, stale/orphaned bindings, malformed or whitespace-only
+input, over-limit comments, and inapplicable targets fail with stderr and exit status 1 before the
+TUI or noninteractive output starts. Zero-byte piped stdin preserves normal behavior.
+
+The default output still opens the TUI, reading keys from the controlling terminal. `--stdout` and
+`--json` validate seeds but keep their existing output contracts. Seeded comments can be edited,
+deleted, reloaded, and exported like comments created in the TUI; they are not automatically saved
+or published. For a pull request, publication occurs only through the explicit submit flow.
+
 ## Configuration
 
 `rvw` reads UTF-8 TOML configuration in this order, with later values taking precedence:

@@ -109,6 +109,30 @@ func TestCommandLineContract(t *testing.T) {
 			})
 		})
 
+		feature.Scenario("a line comment export initializes a local diff review", func(scenario *bdd.ScenarioSpec[*world]) {
+			scenario.When("an active line seed is piped to noninteractive diff", func(t testing.TB, w *world) {
+				seed := `{"comments":[{"target":{"type":"line","path":"tracked.txt","side":"new","line":2},"binding":"active","comment":"seeded line"}]}`
+				w.runWithInput(t, strings.NewReader(seed), "diff", "--stdout")
+			})
+			scenario.Then("the seed validates without changing stdout output", func(t testing.TB, w *world) {
+				assertProcessSuccess(t, w.last)
+				if !bytes.Contains(w.last.stdout, []byte("tracked.txt")) || len(w.last.stderr) != 0 {
+					t.Fatalf("stdout=%q stderr=%q", w.last.stdout, w.last.stderr)
+				}
+			})
+		})
+
+		feature.Scenario("a file comment export initializes a pull-request review", func(scenario *bdd.ScenarioSpec[*world]) {
+			scenario.When("an active file seed is piped to noninteractive pull-request JSON", func(t testing.TB, w *world) {
+				seed := `{"comments":[{"target":{"type":"file","path":"reviewed.go"},"binding":"active","comment":"seeded file"}]}`
+				w.runWithInput(t, strings.NewReader(seed), "pr", "7", "--repo", "fixture/repository", "--json")
+			})
+			scenario.Then("the seed validates against the filtered pull-request files", func(t testing.TB, w *world) {
+				assertProcessSuccess(t, w.last)
+				assertJSONSource(t, w.last.stdout, "pr")
+			})
+		})
+
 		feature.Scenario("default interactive mode rejects null stdin and piped stdout", func(scenario *bdd.ScenarioSpec[*world]) {
 			scenario.When("rvw is invoked without terminal streams", invoke("diff"))
 			scenario.Then("startup fails before terminal or source composition", func(t testing.TB, w *world) {
@@ -116,12 +140,12 @@ func TestCommandLineContract(t *testing.T) {
 			})
 		})
 
-		feature.Scenario("piped quit input does not start the interactive program", func(scenario *bdd.ScenarioSpec[*world]) {
-			scenario.When("quit is piped to default interactive mode", func(t testing.TB, w *world) {
+		feature.Scenario("non-JSON piped input fails as a comment seed", func(scenario *bdd.ScenarioSpec[*world]) {
+			scenario.When("non-JSON input is piped to default interactive mode", func(t testing.TB, w *world) {
 				w.runWithInput(t, strings.NewReader("q"), "diff")
 			})
-			scenario.Then("startup fails without emitting terminal controls", func(t testing.TB, w *world) {
-				assertInteractiveTerminalFailure(t, w.last)
+			scenario.Then("seed parsing fails without emitting terminal controls", func(t testing.TB, w *world) {
+				assertStartupFailure(t, w.last, "invalid comment seed document")
 			})
 		})
 

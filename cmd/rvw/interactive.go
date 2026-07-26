@@ -36,6 +36,7 @@ type interactiveRequest struct {
 	termination *terminationOwner
 	resolved    *config.Config
 	environment []string
+	review      change.Review
 }
 
 func runInteractive(request interactiveRequest) (returnErr error) {
@@ -94,6 +95,7 @@ func runInteractive(request interactiveRequest) (returnErr error) {
 		workContext,
 		*request.opened,
 		request.revision,
+		request.review,
 		settings,
 		coordinator,
 		receiver,
@@ -191,10 +193,7 @@ func finishInteractive(
 
 func interactiveSettings(resolved config.Config) (tui.Settings, error) {
 	diff := resolved.Diff()
-	if diff.ContextLines < 0 || diff.ContextLines > math.MaxUint16 {
-		return tui.Settings{}, errors.New("diff context lines cannot be represented as uint16")
-	}
-	contextLines, err := change.NewContextLines(uint16(diff.ContextLines))
+	contextLines, err := configuredContextLines(resolved)
 	if err != nil {
 		return tui.Settings{}, err
 	}
@@ -262,6 +261,22 @@ func interactiveSettings(resolved config.Config) (tui.Settings, error) {
 		Keybindings:      keybindings,
 		Palette:          palette,
 	})
+}
+
+func configuredPatchContext(resolved config.Config) (change.PatchContext, error) {
+	lines, err := configuredContextLines(resolved)
+	if err != nil {
+		return change.PatchContext{}, err
+	}
+	return change.ContextAround(lines)
+}
+
+func configuredContextLines(resolved config.Config) (change.ContextLines, error) {
+	diff := resolved.Diff()
+	if diff.ContextLines < 0 || diff.ContextLines > math.MaxUint16 {
+		return 0, errors.New("diff context lines cannot be represented as uint16")
+	}
+	return change.NewContextLines(uint16(diff.ContextLines))
 }
 
 func interactivePalette(resolved config.Config, activeTheme config.ThemeName) (tui.Palette, error) {

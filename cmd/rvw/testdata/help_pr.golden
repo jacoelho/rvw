@@ -12,6 +12,11 @@ Common options:
   --stdout, --json, --no-mouse, --theme NAME,
   --appearance dark|light|system, --include PATTERN, --exclude PATTERN
 
+Nonterminal stdin accepts one JSON comment export containing only active
+review, file, line, and range comments. Invalid or inapplicable seeds exit 1;
+seeds remain local until explicitly submitted.
+
 Examples:
   rvw pr 42 --repo owner/repository
+  cat comments.json | rvw pr 42 --repo owner/repository
   rvw pr https://github.com/owner/repository/pull/42 --json

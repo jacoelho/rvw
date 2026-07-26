@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"fmt"
+	"io"
 	"os"
 )
 
@@ -70,6 +72,7 @@ func validateTerminalAdmission(
 	invocation Invocation,
 	capabilities terminalCapabilities,
 	environment []string,
+	seeded bool,
 ) error {
 	if invocation.Output != OutputInteractive {
 		return nil
@@ -77,8 +80,20 @@ func validateTerminalAdmission(
 	if term, _ := environmentValue(environment, "TERM"); term == "dumb" {
 		return errors.New(dumbTerminalDiagnostic)
 	}
-	if !capabilities.has(terminalInput) || !capabilities.has(terminalOutput) {
+	if !capabilities.has(terminalOutput) || !seeded && !capabilities.has(terminalInput) {
 		return errors.New(interactiveTerminalDiagnostic)
 	}
 	return nil
+}
+
+func openControllingTerminal() (io.ReadCloser, error) {
+	terminal, err := os.OpenFile("/dev/tty", os.O_RDONLY, 0)
+	if err != nil {
+		return nil, err
+	}
+	if !isTerminal(terminal) {
+		closeErr := terminal.Close()
+		return nil, errors.Join(fmt.Errorf("/dev/tty is not a terminal"), closeErr)
+	}
+	return terminal, nil
 }
