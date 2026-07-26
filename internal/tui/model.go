@@ -35,6 +35,7 @@ const (
 	reloadLabel                = "reload"
 	searchLabel                = "search"
 	unknownValue               = "unknown"
+	wholeFileContextActiveText = "whole-file context is already active"
 )
 
 func uint16FromInt(value int) uint16 {
@@ -182,6 +183,40 @@ type pendingSearch struct {
 	query      change.SearchQuery
 }
 
+const fileContextWordBits = 64
+
+// fileContextOverrides is a lazily allocated bitmap bounded by change.MaxFiles.
+type fileContextOverrides struct {
+	words []uint64
+}
+
+func (overrides *fileContextOverrides) has(file change.FileID) bool {
+	if file.Uint32() >= change.MaxFiles {
+		return false
+	}
+	word := int(file.Uint32() / fileContextWordBits)
+	return word < len(overrides.words) && overrides.words[word]&(uint64(1)<<(file.Uint32()%fileContextWordBits)) != 0
+}
+
+func (overrides *fileContextOverrides) toggle(file change.FileID) bool {
+	if file.Uint32() >= change.MaxFiles {
+		return false
+	}
+	word := int(file.Uint32() / fileContextWordBits)
+	if word >= len(overrides.words) {
+		words := make([]uint64, word+1)
+		copy(words, overrides.words)
+		overrides.words = words
+	}
+	mask := uint64(1) << (file.Uint32() % fileContextWordBits)
+	overrides.words[word] ^= mask
+	return overrides.words[word]&mask != 0
+}
+
+func (overrides *fileContextOverrides) clear() {
+	overrides.words = nil
+}
+
 // Model represents model.
 type Model struct {
 	commandContext            context.Context
@@ -217,6 +252,7 @@ type Model struct {
 	commandInput              textinput.Model
 	keys                      keymap.Router
 	foreground                foregroundState
+	fullFileOverrides         fileContextOverrides
 	commentSelection          commentRowIdentity
 	collapsedTree             collapsedTreeState
 	settings                  Settings
@@ -689,6 +725,7 @@ func (model *Model) applyPatchOutcome(patch PatchOutcome) {
 	if target != nil && (!fileExists || target.workspace != model.review.WorkspaceRevision() ||
 		target.handle != file.PatchHandle()) {
 		target = nil
+		model.foreground.clearPendingDiffTarget()
 	}
 	patchReady := model.review.Patch(fileID).Status == change.PatchReady
 	if active, exists := model.review.ActiveFile(); exists && active == fileID && patchReady {
@@ -778,8 +815,40 @@ func (model *Model) requestActivePatch() {
 	model.beginPatch(start)
 }
 
+func (model *Model) effectivePatchContext(file change.FileID) change.PatchContext {
+	if model.fullFileOverrides.has(file) {
+		return change.WholeFileContext()
+	}
+	return model.settings.patchContext
+}
+
+func (model *Model) cursorSourceTarget(fileID change.FileID) *pendingDiffTarget {
+	file, ok := model.review.Snapshot().File(fileID)
+	if !ok {
+		return nil
+	}
+	lines := model.review.PatchLines(fileID, model.diffCursor, 1, 1)
+	if len(lines) != 1 {
+		return nil
+	}
+	line := lines[0]
+	if sourceLine, exists := line.NewLine(); exists {
+		target := newNearestSourceLineTarget(
+			model.review.WorkspaceRevision(), file.PatchHandle(), change.LineNew, sourceLine,
+		)
+		return &target
+	}
+	if sourceLine, exists := line.OldLine(); exists {
+		target := newNearestSourceLineTarget(
+			model.review.WorkspaceRevision(), file.PatchHandle(), change.LineOld, sourceLine,
+		)
+		return &target
+	}
+	return nil
+}
+
 func (model *Model) beginPatch(start foregroundStart) {
-	next, request, err := model.review.RequestPatch(start.file, model.settings.patchContext)
+	next, request, err := model.review.RequestPatch(start.file, model.effectivePatchContext(start.file))
 	if err != nil {
 		model.rejectAndApplyForegroundStart(start)
 		return

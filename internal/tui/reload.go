@@ -352,6 +352,7 @@ func (model *Model) installReloadState(
 	oldDocument := model.document
 	model.document = outcome.Document
 	model.review = committed
+	model.fullFileOverrides.clear()
 	model.resetSyntax()
 	model.index = outcome.Index
 	model.allFileTree = outcome.FileTree

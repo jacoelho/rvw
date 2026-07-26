@@ -125,6 +125,7 @@ const (
 	ActionEditComment         Action = "edit-comment"
 	ActionDeleteComment       Action = "delete-comment"
 	ActionExpandContext       Action = "expand-context"
+	ActionToggleFullFile      Action = "toggle-full-file"
 	ActionVisualLine          Action = "visual-line"
 	ActionVisualLines         Action = "visual-lines"
 	ActionVisualHunk          Action = "visual-hunk"
@@ -211,6 +212,7 @@ var actionDescriptions = map[Action]string{
 	ActionEditComment:         "edit comment",
 	ActionDeleteComment:       "delete comment",
 	ActionExpandContext:       "expand context",
+	ActionToggleFullFile:      "toggle full file",
 	ActionVisualLine:          "select line",
 	ActionVisualLines:         "select lines",
 	ActionVisualHunk:          "select hunk",
@@ -741,7 +743,7 @@ var contextActions = map[Context]map[Action]struct{}{
 		ActionNextComment, ActionPreviousComment, ActionNextSearchHit,
 		ActionPreviousSearchHit, ActionCommentAtCursor, ActionFileComment,
 		ActionSummaryComment, ActionEditComment, ActionDeleteComment,
-		ActionExpandContext, ActionToggleFileReviewed,
+		ActionExpandContext, ActionToggleFullFile, ActionToggleFileReviewed,
 		ActionToggleHunkReviewed, ActionActivate, ActionAccept,
 		ActionToggleWrap, ActionToggleView, ActionAlignTop,
 		ActionAlignCenter, ActionAlignBottom, ActionToggleDirectory,

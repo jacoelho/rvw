@@ -425,7 +425,9 @@ func TakePatchCancellable(cancelled func() error, text []byte) (*PreparedPatch, 
 		if parseErr != nil {
 			return nil, parseErr
 		}
-		patch.appendParsedLine(row, state.activeHunk, parsed)
+		if err := patch.appendParsedLine(row, state.activeHunk, parsed); err != nil {
+			return nil, err
+		}
 	}
 	if err := completeHunk(state.oldRemaining, state.newRemaining); err != nil {
 		return nil, err
@@ -568,11 +570,13 @@ func PrepareGeneratedPatchCancellable(
 		default:
 			return errors.New("structured patch line kind is invalid")
 		}
-		patch.appendParsedLine(uint32(row), activeHunk, parsedPatchLine{ //nolint:gosec // lineCount is admitted below one million.
+		if appendErr := patch.appendParsedLine(uint32(row), activeHunk, parsedPatchLine{ //nolint:gosec // lineCount is admitted below one million.
 			descriptor: descriptor,
 			oldLine:    line.OldLine,
 			newLine:    line.NewLine,
-		})
+		}); appendErr != nil {
+			return appendErr
+		}
 		row++
 		return nil
 	})
@@ -706,7 +710,21 @@ func (patch *PreparedPatch) appendParsedLine(
 	row uint32,
 	activeHunk uint32,
 	parsed parsedPatchLine,
-) {
+) error {
+	if parsed.oldLine != 0 && parsed.oldLine <= patch.maxOldLine {
+		return fmt.Errorf(
+			"patch old source line %d is not greater than previous line %d",
+			parsed.oldLine,
+			patch.maxOldLine,
+		)
+	}
+	if parsed.newLine != 0 && parsed.newLine <= patch.maxNewLine {
+		return fmt.Errorf(
+			"patch new source line %d is not greater than previous line %d",
+			parsed.newLine,
+			patch.maxNewLine,
+		)
+	}
 	kind := parsed.descriptor.kind()
 	if activeHunk != noPatchHunk && noNewlineSidesAfter(kind).valid() {
 		if patch.hunkFirst[activeHunk] == noPatchHunk {
@@ -730,6 +748,7 @@ func (patch *PreparedPatch) appendParsedLine(
 		)
 	}
 	patch.lineHunks = append(patch.lineHunks, activeHunk)
+	return nil
 }
 
 func newPreparedPatch(text []byte, lineCapacity int) *PreparedPatch {
@@ -937,17 +956,11 @@ func (review Review) PatchLineForSource(
 	side LineSide,
 	line LineNumber,
 ) (uint32, bool) {
-	state := review.patchState(fileID)
-	if state.Status != PatchReady || state.prepared == nil || line == 0 {
+	if line == 0 {
 		return 0, false
 	}
-	patch := state.prepared
-	rows := patch.newLineRows
-	lines := patch.newLines
-	if side == LineOld {
-		rows = patch.oldLineRows
-		lines = patch.oldLines
-	} else if side != LineNew {
+	rows, lines, ok := review.patchSourceRows(fileID, side)
+	if !ok {
 		return 0, false
 	}
 	target := line.Uint32()
@@ -958,6 +971,59 @@ func (review Review) PatchLineForSource(
 		return 0, false
 	}
 	return rows[position], true
+}
+
+// NearestPatchLineForSource returns the nearest represented source row.
+// Equal-distance ties resolve to the preceding source line.
+func (review Review) NearestPatchLineForSource(
+	fileID FileID,
+	side LineSide,
+	line LineNumber,
+) (uint32, bool) {
+	if line == 0 {
+		return 0, false
+	}
+	rows, lines, ok := review.patchSourceRows(fileID, side)
+	if !ok {
+		return 0, false
+	}
+	if len(rows) == 0 {
+		return 0, false
+	}
+	target := line.Uint32()
+	position := sort.Search(len(rows), func(index int) bool {
+		return lines[rows[index]] >= target
+	})
+	if position == 0 {
+		return rows[0], true
+	}
+	if position == len(rows) {
+		return rows[len(rows)-1], true
+	}
+	preceding := rows[position-1]
+	following := rows[position]
+	if target-lines[preceding] <= lines[following]-target {
+		return preceding, true
+	}
+	return following, true
+}
+
+func (review Review) patchSourceRows(
+	fileID FileID,
+	side LineSide,
+) ([]uint32, []uint32, bool) {
+	state := review.patchState(fileID)
+	if state.Status != PatchReady || state.prepared == nil {
+		return nil, nil, false
+	}
+	switch side {
+	case LineOld:
+		return state.prepared.oldLineRows, state.prepared.oldLines, true
+	case LineNew:
+		return state.prepared.newLineRows, state.prepared.newLines, true
+	default:
+		return nil, nil, false
+	}
 }
 
 // RequestPatch performs the request patch operation.

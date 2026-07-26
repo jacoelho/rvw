@@ -279,11 +279,18 @@ func (model *Model) activateSearchHit(index int) {
 	if !exists {
 		return
 	}
-	target := newPatchRowTarget(
-		model.review.WorkspaceRevision(),
-		file.PatchHandle(),
-		hit.PatchLine(),
-	)
+	var target pendingDiffTarget
+	if line, exists := hit.NewLine(); exists {
+		target = newSourceLineTarget(
+			model.review.WorkspaceRevision(), file.PatchHandle(), change.LineNew, line,
+		)
+	} else if line, exists := hit.OldLine(); exists {
+		target = newSourceLineTarget(
+			model.review.WorkspaceRevision(), file.PatchHandle(), change.LineOld, line,
+		)
+	} else {
+		return
+	}
 	model.foreground.clearPendingDiffTarget()
 	if active, exists := model.review.ActiveFile(); !exists || active != hit.FileID() {
 		if !model.activateFile(hit.FileID()) {

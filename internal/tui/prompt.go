@@ -384,6 +384,7 @@ func (model *Model) setPatchContext(context change.PatchContext) {
 
 func (model *Model) applyPatchContext(context change.PatchContext) {
 	model.foreground.clearPendingDiffTarget()
+	model.fullFileOverrides.clear()
 	model.settings.patchContext = context
 	model.requestActivePatch()
 	if context.WholeFile() {

@@ -185,6 +185,10 @@ func TestCollapseCaptureUsesBoundedOneShotStepsAndRestartsAtCurrentGeneration(t 
 func TestReloadCaptureOwnsCandidateAcrossInitialAdmissionRetryAndDuplicateOutcomes(t *testing.T) {
 	model, modelCoordinator := newTestModel(t, map[string]string{"alpha.txt": "changed\n"})
 	settleModelWork(t, model, modelCoordinator)
+	active, ok := model.review.ActiveFile()
+	if !ok || !model.fullFileOverrides.toggle(active) {
+		t.Fatal("full-file override setup failed")
+	}
 	fixture := newSourceFixture(t, map[string]string{"beta.txt": "changed\n"})
 	candidate := openCaptureCandidate(t, fixture)
 	coordinator := newCaptureTestCoordinator(t)
@@ -255,6 +259,9 @@ func TestReloadCaptureOwnsCandidateAcrossInitialAdmissionRetryAndDuplicateOutcom
 			candidate.Snapshot().SourceID(),
 			coordinator.Stats(),
 		)
+	}
+	if !model.fullFileOverrides.has(active) {
+		t.Fatal("explicit reload cancellation cleared the full-file override")
 	}
 }
 

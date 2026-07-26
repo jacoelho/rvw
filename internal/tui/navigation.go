@@ -367,12 +367,6 @@ func (model *Model) applyDiffTarget(target pendingDiffTarget) {
 	}
 	var row uint32
 	switch target.kind {
-	case diffTargetPatchRow:
-		if target.patchRow >= model.review.Patch(fileID).Lines {
-			model.notice = &Notice{Kind: NoticeWarning, Text: "search result is not in the active patch"}
-			return
-		}
-		row = target.patchRow
 	case diffTargetSourceLine:
 		var found bool
 		row, found = model.review.PatchLineForSource(fileID, target.side, target.line)
@@ -380,6 +374,8 @@ func (model *Model) applyDiffTarget(target pendingDiffTarget) {
 			model.notice = &Notice{Kind: NoticeWarning, Text: "comment line is not in the active patch"}
 			return
 		}
+	case diffTargetNearestSourceLine:
+		row, _ = model.review.NearestPatchLineForSource(fileID, target.side, target.line)
 	default:
 		return
 	}

@@ -274,7 +274,7 @@ scroll-left, scroll-right, first, last, page-up, page-down,
 half-page-up, half-page-down, next-file, previous-file, next-hunk,
 previous-hunk, next-comment, previous-comment, next-search-hit,
 previous-search-hit, comment-at-cursor, file-comment, summary-comment,
-edit-comment, delete-comment, expand-context, toggle-file-reviewed,
+edit-comment, delete-comment, expand-context, toggle-full-file, toggle-file-reviewed,
 toggle-hunk-reviewed, activate, accept, toggle-wrap, toggle-view,
 align-top, align-center, align-bottom, toggle-directory, expand-directory,
 collapse-directory, visual-line, visual-lines, visual-hunk,
@@ -939,6 +939,7 @@ Main default controls are:
 | `v` / `V` | Select a line range/hunk |
 | `e` / `d d` | Edit/delete focused comment |
 | `w` / `t` | Toggle wrapping/diff layout |
+| `z e` | Toggle the active file's complete textual diff |
 | `Ctrl-r` | Reload source |
 | `y`, `M`, `J` | Copy Markdown/write Markdown/write JSON |
 | `s` | Open GitHub submission |
@@ -954,6 +955,22 @@ presentation is defined in
 [`tui-design.md`](tui-design.md#implementation-basis-and-dependency-decisions). Search and
 command-prompt input are each limited to 64 KiB; reaching the limit is visible and accepts no
 further input until the user deletes content or cancels.
+
+`z e` is available only while the diff pane is focused. It toggles the active file between the
+configured review context and the complete old/new textual diff, including unchanged lines. This
+is a per-file presentation override: it persists while navigating between files, does not change
+the search corpus, and does not preload another file. A second press collapses the file to the
+configured context. If the configured review context is already whole-file, the action reports
+that state and performs no patch request.
+
+Per-file whole-file intent survives a failed, cancelled, or limited patch acquisition so an
+explicit retry uses the same context. `:context` and `expand-context` clear every per-file override
+when they change review-wide context. A successful source reload also clears every override;
+failed and cancelled reloads retain them. Patch replacement restores the cursor by its new-side
+source line when available and otherwise by its old-side source line. When collapse omits that
+exact unchanged line, the nearest represented line is selected, with equal-distance ties choosing
+the preceding line. A cursor on metadata, or a target side with no represented rows, falls back to
+the patch top.
 
 The command prompt accepts:
 

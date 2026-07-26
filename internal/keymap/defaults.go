@@ -52,6 +52,7 @@ var defaultBindings = []Binding{
 	binding(ContextNormal, FocusFileTree, strokeSpace, ActionToggleDirectory),
 	binding(ContextNormal, FocusNone, "z f", ActionToggleFilePanel),
 	binding(ContextNormal, FocusNone, "z c", ActionToggleComments),
+	binding(ContextNormal, FocusDiff, "z e", ActionToggleFullFile),
 	binding(ContextVisual, FocusNone, "ctrl-c", ActionInterrupt),
 	binding(ContextVisual, FocusNone, "esc", ActionCancel),
 	binding(ContextVisual, FocusNone, "j", ActionExtendDown),
