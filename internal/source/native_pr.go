@@ -27,7 +27,12 @@ func (service *Service) prepareNativePullRequest(
 	baseCommitHash := reviewHash(details.BaseOID)
 	headCommitHash := reviewHash(details.HeadOID)
 	if fetchErr := acquisition.fetchCommitAncestry(
-		ctx, baseCommitHash, headCommitHash, details.BaseRef, details.Number,
+		ctx,
+		baseCommitHash,
+		headCommitHash,
+		details.BaseRef,
+		details.Number,
+		details.State,
 	); fetchErr != nil {
 		return change.Snapshot{}, revision{}, fmt.Errorf("fetch pull-request ancestry: %w", fetchErr)
 	}
