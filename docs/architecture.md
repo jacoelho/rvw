@@ -34,7 +34,7 @@ Each fact has one owner. Other modules ask the owner; none recomputes its rules.
 | `internal/review` | The draft and its one writer, `Session`: comment targets and their validation, limits, authorship, the viewed marks, the summary, the draft file and its lock, quoting and the omission note, result order and rendering in Markdown and JSON | Git, HTTP, presentation |
 | `internal/server` | The HTTP boundary: token, Host and cross-origin checks, CSP, request-shape validation, translation between wire JSON and domain types, the file-request slots, the search endpoint and its slot (it only replaces invalid UTF-8 in the match windows), the background reads of line counts and generated files, the end of the session | Business rules: it asks `review` and `source` |
 | `cmd/rvw` | Arguments, defaulting an omitted base ref to origin/HEAD's target, the session's start and end, signals, opening the browser, the stdout write | Everything above |
-| `web` | Layout and interaction. One client (`Api`) decodes every reply at the boundary; one store (`State`) holds every draft and status fact and changes only after the server saved it; one `CommentEditor` owns a comment's save rules. `State` alone says whether a comment is saved; an editor's row placement derives from it; the editor owns only the base its writes assume. The search palette owns query parsing, fuzzy file ranking and its transient query and results | Any rule the server owns: gaps, vendored or generated status, result order, quote limits, the omission note, search-text rules |
+| `web` | Layout and interaction. One client (`Api`) decodes every reply at the boundary; one store (`State`) holds every draft and status fact and changes only after the server saved it; one `CommentEditor` owns a comment's save rules. `State` alone says whether a comment is saved; an editor's row placement derives from it; the editor owns only the base its writes assume. The search palette owns query parsing, fuzzy file ranking and its transient query and results. The review strip (`strip.ts`) draws each file's viewed state from `State` in tree order and holds only which file is shown | Any rule the server owns: gaps, vendored or generated status, result order, quote limits, the omission note, search-text rules |
 
 Consequences that keep ownership single:
 
@@ -204,6 +204,8 @@ Designed for at least 1,000 changed files of 10,000 lines each and up to 4,096 c
 - Word diff gives up after 256 edits, and runs only on lines up to 1,000 characters.
 - A file over 1 MiB or 20,000 lines is large: no context, no highlighting.
 - Comments, bodies, the summary, seeds, drafts and quotes all have fixed limits, owned by `review`.
+- The review strip draws on one fixed-size canvas, so its cost is bounded by its pixels, not by the file count; when
+  files outnumber pixel columns, a column shows the last file drawn into it.
 - The UI renders only visible rows plus 50 rows of overscan, in every list. Replacing a list's rows keeps the
   rows in view in place: each row has an id that outlives content changes, such as a comment becoming its
   editor, and the list scrolls so the first shown row still present stays where it was drawn. Finding it
@@ -245,6 +247,9 @@ Designed for at least 1,000 changed files of 10,000 lines each and up to 4,096 c
   whose Origin host differs from Host when Sec-Fetch-Site is absent
   ([Q-44](decisions.md#q-44--cross-origin-checks-from-the-standard-library)).
 - `web/dist` is committed and embedded, so `go install` needs no Node. `make check` fails when `web/dist` is stale.
+- `web/src/favicon.svg` is the product mark: the favicon, and inlined by the build as the page's
+  brand so the end page shows it after the server has gone. `favicon.png` is the same mark
+  rasterised at 32px for Safari before 26; re-render it when the SVG changes.
 
 ## Trade-offs and known limits
 

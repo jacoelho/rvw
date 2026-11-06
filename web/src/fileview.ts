@@ -850,21 +850,26 @@ export class FileView {
     edit.addEventListener("click", () => this.run(this.openEditor(c, null)));
     const del = h("button", "link quiet danger", "Delete");
     del.addEventListener("click", () => this.run(this.state.deleteComment(c)));
-    head.append(edit, del);
-    el.append(head, h("div", "c-body", c.body));
+    head.append(h("span", "spacer"), edit, del);
+    // The row is measured by its own box, so the card's inset is the row's padding, not a margin.
+    const card = h("div", "c-card");
+    card.append(head, h("div", "c-body", c.body));
+    el.append(card);
     return el;
   }
 
   private renderEditor(ed: CommentEditor): HTMLElement {
     const el = h("div", `d-editor${sideClass(ed.target)}`);
-    el.append(h("div", "c-target", ed.target.target === "file" ? "Comment on this file" : targetLabel(ed.target)), ed.textarea, ed.error);
+    const card = h("div", "c-card");
+    card.append(h("div", "c-target", ed.target.target === "file" ? "Comment on this file" : targetLabel(ed.target)), ed.textarea, ed.error);
     const bar = h("div", "editor-bar");
     const save = h("button", "btn primary", "Save");
     save.addEventListener("click", () => this.run(this.saveEditor()));
     const cancel = h("button", "btn", "Close");
     cancel.addEventListener("click", () => this.run(this.discardEditor()));
     bar.append(save, cancel);
-    el.append(bar);
+    card.append(bar);
+    el.append(card);
     return el;
   }
 

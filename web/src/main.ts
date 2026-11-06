@@ -2,11 +2,13 @@
 // the page shown after the session ends.
 
 import { Api, type Comment, HttpError, isGone, type RenameDetection } from "./api";
-import { h } from "./dom";
+import { count, h } from "./dom";
+import mark from "./favicon.svg";
 import { FileView } from "./fileview";
 import { FinishDialog } from "./finish";
 import { type GoTarget, Palette } from "./palette";
 import { State } from "./state";
+import { ReviewStrip } from "./strip";
 import { FileTree } from "./tree";
 
 const TOKEN_KEY = "rvw.token";
@@ -52,7 +54,10 @@ class Page {
   private readonly banners: HTMLElement;
   private readonly toast: HTMLElement;
   private readonly modeButton: HTMLButtonElement;
+  private readonly filesButton: HTMLButtonElement;
+  private readonly sidebar: HTMLElement;
   private readonly totals: HTMLElement;
+  private readonly strip: ReviewStrip;
   /** The shown file was picked at load, not by the human; the marks may move it off a generated file. */
   private autoSelected = false;
   /** The timer of the next scheduled poll; it only schedules the live run. */
@@ -70,21 +75,39 @@ class Page {
   ) {
     const header = h("header", "top");
     const source = h("div", "top-source", state.sourceLabel);
+    source.title = state.sourceLabel;
     this.totals = h("div", "top-totals");
+    this.strip = new ReviewStrip(state, () => this.tree.fullOrder(), (i) => this.run(this.select(i)));
+    const progress = h("div", "top-progress");
+    progress.append(this.strip.el, this.totals);
+    // Below the narrow breakpoint the sidebar folds away; this button shows it over the diff.
+    const files = h("button", "btn files-btn", "Files");
+    files.setAttribute("aria-expanded", "false");
+    files.setAttribute("aria-controls", "files");
+    files.addEventListener("click", () => this.showFiles(!app.classList.contains("files-open")));
+    this.filesButton = files;
+    const search = h("button", "btn search-btn");
+    search.append(h("span", "search-label", "Search"), h("kbd", "", "⌘K"));
+    search.title = "Search files, lines and text (⌘K)";
+    search.addEventListener("click", () => {
+      if (!this.finish.isOpen && !this.palette.isOpen) this.palette.open();
+    });
     // Both labels share one grid cell, so the button keeps the longer label's width in either mode.
     this.modeButton = h("button", "btn mode-toggle");
     this.modeButton.title = "Toggle unified or split view (s)";
     this.modeButton.addEventListener("click", () => this.toggleMode());
-    const finish = h("button", "btn primary", "Finish…");
+    const finish = h("button", "btn primary finish-btn", "Finish…");
     finish.title = "⌘↵";
     finish.addEventListener("click", () => this.run(this.openFinish()));
-    header.append(source, this.totals, h("span", "spacer"), this.modeButton, finish);
+    header.append(brand(), source, files, progress, h("span", "spacer"), search, this.modeButton, finish);
 
     this.banners = h("div", "banners");
     const renames = renameNotice(state.renameDetection);
     if (renames) this.banners.append(h("div", "banner warn", renames));
 
     const sidebar = h("aside", "sidebar");
+    sidebar.id = "files";
+    this.sidebar = sidebar;
     this.filter = h("input", "filter");
     this.filter.type = "search";
     this.filter.placeholder = "Filter files (/)";
@@ -92,7 +115,9 @@ class Page {
     this.filter.addEventListener("keydown", (e) => {
       if (e.key === "Escape" || e.key === "Enter") {
         e.preventDefault();
-        this.filter.blur();
+        // Esc in the overlay closes it, returning focus to the Files button.
+        if (e.key === "Escape" && app.classList.contains("files-open")) this.showFiles(false);
+        else this.filter.blur();
       }
     });
     const treeEl = h("div", "tree");
@@ -107,6 +132,12 @@ class Page {
 
     const body = h("div", "body");
     body.append(sidebar, content);
+    // The overlay closes on a press outside it, and when the window widens past the breakpoint, so
+    // it does not come back by itself on the next narrowing.
+    content.addEventListener("pointerdown", () => {
+      if (app.classList.contains("files-open")) this.showFiles(false);
+    });
+    matchMedia("(max-width: 900px)").addEventListener("change", () => this.showFiles(false));
     this.toast = h("div", "toast");
     this.toast.hidden = true;
     app.replaceChildren(header, this.banners, body, this.toast);
@@ -114,6 +145,7 @@ class Page {
     const failed = (err: unknown): void => this.failed(err);
     this.view = new FileView(fileHeader, diffEl, state, api, { failed });
     this.tree = new FileTree(treeEl, state, (i) => this.run(this.select(i)));
+    this.strip.draw();
     this.finish = new FinishDialog(state, api, {
       failed,
       ended: (o) => {
@@ -135,6 +167,7 @@ class Page {
     state.onChange((change) => {
       switch (change) {
         case "draft":
+          this.strip.draw();
           this.tree.refresh();
           this.view.refresh();
           this.finish.refresh();
@@ -146,6 +179,7 @@ class Page {
           break;
         case "generated":
           if (this.state.generated.size > 0) this.regroup();
+          this.strip.draw();
           this.renderTotals();
           break;
         case "head":
@@ -203,7 +237,27 @@ class Page {
     // show is refused while the editor cannot be left; the tree follows the shown file, and expands
     // directories only for a file actually shown.
     this.tree.select(this.view.file);
+    this.strip.show(this.view.file);
+    if (shown && !auto) this.showFiles(false);
     return shown;
+  }
+
+  /**
+   * Shows or hides the file list over the diff; it only matters below the narrow breakpoint. A
+   * hidden list cannot scroll, so opening it scrolls the shown file into view and moves focus in.
+   */
+  private showFiles(open: boolean): void {
+    const wasOpen = app.classList.contains("files-open");
+    if (open === wasOpen) return;
+    app.classList.toggle("files-open", open);
+    this.filesButton.setAttribute("aria-expanded", String(open));
+    if (open) {
+      if (this.view.file >= 0) this.tree.select(this.view.file);
+      this.filter.focus();
+    } else if (this.sidebar.contains(document.activeElement) && this.filesButton.offsetParent !== null) {
+      // Above the breakpoint the button is hidden and the sidebar stays in view, so focus stays put.
+      this.filesButton.focus();
+    }
   }
 
   /**
@@ -258,8 +312,8 @@ class Page {
       added += c.added;
       deleted += c.deleted;
     }
-    const parts = [`${n} ${n === 1 ? "file" : "files"}`, `${this.state.viewed.size} viewed`];
-    if (this.state.counts.size > 0) parts.push(`+${added} −${deleted}${this.state.countsDone ? "" : "…"}`);
+    const parts = [`${count(n)} ${n === 1 ? "file" : "files"}`, `${count(this.state.viewed.size)} viewed`];
+    if (this.state.counts.size > 0) parts.push(`+${count(added)} −${count(deleted)}${this.state.countsDone ? "" : "…"}`);
     if (this.state.countsError) parts.push("line counts unavailable");
     if (this.state.generatedError) parts.push("generated files not grouped");
     this.totals.textContent = parts.join(" · ");
@@ -311,10 +365,14 @@ class Page {
       return;
     }
     if (e.key === "Escape") {
-      // The dialog handles its own Esc; the diff's editor closes here.
-      if (!this.finish.isOpen && this.view.hasEditor()) {
+      // The dialog handles its own Esc; the diff's editor closes here, else the file list overlay.
+      if (this.finish.isOpen) return;
+      if (this.view.hasEditor()) {
         e.preventDefault();
         this.run(this.view.discardEditor());
+      } else if (app.classList.contains("files-open")) {
+        e.preventDefault();
+        this.showFiles(false);
       }
       return;
     }
@@ -354,6 +412,8 @@ class Page {
         if (!this.view.scrollSideways(e.key === "ArrowRight" ? 1 : -1)) return;
         break;
       case "/":
+        // Below the breakpoint the filter is in the folded file list.
+        if (this.filter.offsetParent === null) this.showFiles(true);
         this.filter.focus();
         this.filter.select();
         break;
@@ -454,9 +514,22 @@ class Page {
   }
 }
 
+/**
+ * rvw's mark: the favicon itself, inlined so the end page still shows it after the server has
+ * gone. It carries the name, so no text sits beside it.
+ */
+function brand(): HTMLElement {
+  const el = h("div", "brand");
+  el.innerHTML = mark;
+  const svg = el.firstElementChild!;
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", "rvw");
+  return el;
+}
+
 function endPage(title: string, text: string, markdown?: string): void {
   const page = h("div", "end");
-  page.append(h("h1", "", title), h("p", "", text));
+  page.append(brand(), h("h1", "", title), h("p", "", text));
   if (markdown) {
     const area = h("textarea", "end-md");
     area.readOnly = true;

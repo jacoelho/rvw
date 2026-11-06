@@ -2561,6 +2561,7 @@ func (pg *page) shownLine() (string, float64) {
 func TestBrowserDiffKeepsViewAcrossRowsAbove(t *testing.T) {
 	t.Parallel()
 	const editorRow = `document.querySelector(".d-editor")`
+	const savedBody = "edited 1\nedited 2\nedited 3\nedited 4"
 	commentRow := func(body string) string {
 		return `[...document.querySelectorAll(".d-comment")].find((c) => c.querySelector(".c-body")?.textContent === ` + jsString(body) + `) ?? null`
 	}
@@ -2612,12 +2613,14 @@ func TestBrowserDiffKeepsViewAcrossRowsAbove(t *testing.T) {
 				pg.click("Edit on above", commentButton("above", "Edit"), 0)
 				pg.waitFocus("the diff editor", diffEditor)
 				pg.selectAll()
-				pg.insertText("edited")
+				pg.insertText(savedBody)
 				editor := height(pg, editorRow)
 				pg.scrollBelow("the editor", editorRow)
 				return func() {
-					// 90 is the diff list's height estimate for a row not yet measured.
-					c := height(pg, commentRow("edited"))
+					// 90 is the diff list's estimate for a row not yet measured. A one-line comment
+					// is close to it, so the saved body has four lines: far from both the estimate
+					// and the four-row editor.
+					c := height(pg, commentRow(savedBody))
 					if math.Abs(c-editor) < 20 || math.Abs(c-90) < 20 {
 						pg.fatalf("test would be vacuous: editor %vpx, comment %vpx, estimate 90px", editor, c)
 					}
@@ -2625,7 +2628,7 @@ func TestBrowserDiffKeepsViewAcrossRowsAbove(t *testing.T) {
 			},
 			trigger: func(pg *page) {
 				pg.clickEl("Save", button(".d-editor", "Save"))
-				pg.waitTrue("the saved comment", editorRow+` === null && `+hasBody("edited"))
+				pg.waitTrue("the saved comment", editorRow+` === null && `+hasBody(savedBody))
 			},
 		},
 		{
