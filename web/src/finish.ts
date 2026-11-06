@@ -388,6 +388,13 @@ export class FinishDialog {
         if (r.k === "edit") return `e:${r.c?.id ?? ""}:${r.ed.errorRevision}`;
         return "empty";
       },
+      // A comment and its editor are one row; a new review comment's editor is its own.
+      id: (n) => {
+        const r = this.rows[n]!;
+        if (r.k === "comment") return `c:${r.c.id}`;
+        if (r.k === "edit") return r.c ? `c:${r.c.id}` : `e:${r.ed.id}`;
+        return "empty";
+      },
       render: (n) => this.renderRow(this.rows[n]!),
     });
   }

@@ -190,7 +190,10 @@ Designed for at least 1,000 changed files of 10,000 lines each and up to 4,096 c
 - Word diff gives up after 256 edits, and runs only on lines up to 1,000 characters.
 - A file over 1 MiB or 20,000 lines is large: no context, no highlighting.
 - Comments, bodies, the summary, seeds, drafts and quotes all have fixed limits, owned by `review`.
-- The UI renders only visible rows plus 50 rows of overscan, in every list.
+- The UI renders only visible rows plus 50 rows of overscan, in every list. Replacing a list's rows keeps the
+  rows in view in place: each row has an id that outlives content changes, such as a comment becoming its
+  editor, and the list scrolls so the first shown row still present stays where it was drawn. Finding it
+  scans the new rows once, the same order of cost as laying them out.
 - Startup reads content only as `git` needs to list changes. Line counts and generated files are read in the
   background after the UI is served.
 

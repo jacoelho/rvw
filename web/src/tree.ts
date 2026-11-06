@@ -224,6 +224,8 @@ export class FileTree {
       count: () => this.rows.length,
       variable: () => false,
       key: (i) => String(i),
+      // The tree keeps the selected row in place itself (regroup).
+      id: (i) => String(i),
       render: (i) => this.renderRow(i),
     });
   }

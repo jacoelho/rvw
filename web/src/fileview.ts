@@ -54,8 +54,42 @@ type DRow =
   | { k: "gap"; gap: ShownGap }
   | { k: "line"; line: Line }
   | { k: "split"; left: Line | null; right: Line | null }
-  | { k: "comment"; c: Comment; label: boolean }
-  | { k: "editor"; ed: CommentEditor };
+  | { k: "comment"; c: Comment; at: string }
+  | { k: "editor"; ed: CommentEditor; at: string };
+
+/** The key a row's height is cached under: a comment's changes with its body and whether it is labelled. */
+function rowKey(r: DRow): string {
+  if (r.k === "comment") return `c:${r.c.id}:${r.c.body.length}:${r.at === "top"}`;
+  if (r.k === "editor") return r.ed.key;
+  return rowId(r);
+}
+
+/**
+ * A row's identity within one file, which a rebuild keeps in place on screen. A comment and its
+ * editor are one row, identified with where it sits: a comment or draft that moves is a new row, so
+ * the rows around it, not the moved row, stay in place. Lines are identified by their numbers,
+ * which stay with them when context is shown or comments move.
+ */
+function rowId(r: DRow): string {
+  switch (r.k) {
+    case "comment":
+      return `c:${r.c.id}@${r.at}`;
+    case "editor":
+      return `c:${r.ed.id}@${r.at}`;
+    case "line":
+      return `l:${r.line.old ?? ""}:${r.line.new ?? ""}`;
+    case "split":
+      return `s:${r.left?.old ?? ""}:${r.right?.new ?? ""}`;
+    case "gap":
+      return `g:${r.gap.from}:${r.gap.to}`;
+    case "hunk":
+      return `h:${r.text}`;
+    case "note":
+      return `n:${r.text}`;
+    case "info":
+      return "i";
+  }
+}
 
 /** The server calls FileView makes: it only reads diffs. */
 export type DiffApi = Pick<Api, "file" | "context">;
@@ -449,12 +483,8 @@ export class FileView {
         const k = this.rows[n]?.k;
         return k === "comment" || k === "editor" || k === "info";
       },
-      key: (n) => {
-        const r = this.rows[n]!;
-        if (r.k === "comment") return `c:${r.c.id}:${r.c.body.length}:${r.label}`;
-        if (r.k === "editor") return r.ed.key;
-        return `r${n}`;
-      },
+      key: (n) => rowKey(this.rows[n]!),
+      id: (n) => rowId(this.rows[n]!),
       render: (n) => this.renderRow(this.rows[n]!),
     });
   }
@@ -489,20 +519,20 @@ export class FileView {
     // File comments, then line comments whose line is not shown, sit above the diff.
     const top: DRow[] = [];
     for (const c of fileComments) {
-      if (c.target.target === "file") top.push(this.commentRow(c, false));
+      if (c.target.target === "file") top.push(this.commentRow(c, "file"));
     }
-    if (ed && ed.target.target === "file" && !inCommentRow) top.push({ k: "editor", ed });
+    if (ed && ed.target.target === "file" && !inCommentRow) top.push({ k: "editor", ed, at: "file" });
 
     const body: DRow[] = [];
     const emitAnchor = (side: Side, n: number | null): void => {
       if (n === null) return;
       const key = `${side}:${n}`;
       for (const c of anchors.get(key) ?? []) {
-        body.push(this.commentRow(c, false));
+        body.push(this.commentRow(c, key));
         placed.add(c.id);
       }
       if (editorAnchor === key && ed && !inCommentRow) {
-        body.push({ k: "editor", ed });
+        body.push({ k: "editor", ed, at: key });
         placed.add("editor");
       }
     };
@@ -531,9 +561,9 @@ export class FileView {
       }
     }
     for (const c of fileComments) {
-      if (c.target.target !== "file" && !placed.has(c.id)) top.push(this.commentRow(c, true));
+      if (c.target.target !== "file" && !placed.has(c.id)) top.push(this.commentRow(c, "top"));
     }
-    if (ed && !inCommentRow && editorAnchor && !placed.has("editor")) top.push({ k: "editor", ed });
+    if (ed && !inCommentRow && editorAnchor && !placed.has("editor")) top.push({ k: "editor", ed, at: "top" });
     rows.push(...top);
     // A text file without hunks (a pure rename) still has its unchanged lines as one gap.
     if (d.kind === "text" && d.hunks.length === 0) rows.push({ k: "note", text: "No line changes.", cls: "muted" });
@@ -553,10 +583,11 @@ export class FileView {
     this.updateSplitRange();
   }
 
-  private commentRow(c: Comment, label: boolean): DRow {
+  /** A comment's row at `at`: "file", "top" (labelled, its line not shown), or its anchor key. */
+  private commentRow(c: Comment, at: string): DRow {
     const ed = this.editor;
-    if (ed?.id === c.id) return { k: "editor", ed };
-    return { k: "comment", c, label };
+    if (ed?.id === c.id) return { k: "editor", ed, at };
+    return { k: "comment", c, at };
   }
 
   /** The file's shown lines in display order, with hunk headers and gaps. */
@@ -629,7 +660,7 @@ export class FileView {
         return row;
       }
       case "comment":
-        return this.renderComment(r.c, r.label);
+        return this.renderComment(r.c, r.at === "top");
       case "editor":
         return this.renderEditor(r.ed);
     }

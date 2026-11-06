@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"slices"
 	"strings"
@@ -2453,4 +2454,250 @@ func TestBrowserEditorKeepsFocusAcrossRebuild(t *testing.T) {
 			pg.noPageErrors()
 		})
 	}
+}
+
+// longWorld's last commit adds a/long.go, 200 lines in one hunk, and b/short.go.
+func longWorld(t *testing.T) *world {
+	t.Helper()
+	w := newWorld(t)
+	w.write("README", "base\n")
+	w.commit("base")
+	var b strings.Builder
+	for n := 1; n <= 200; n++ {
+		fmt.Fprintf(&b, "var v%d = %d\n", n, n)
+	}
+	w.write("a/long.go", b.String())
+	w.write("b/short.go", "package b\n")
+	w.commit("head")
+	return w
+}
+
+// wideGapWorld's last commit changes line 1 and lines 20 to 100 of a/x.go, leaving a gap of
+// unchanged lines between the first hunk and a hunk long enough to scroll.
+func wideGapWorld(t *testing.T) *world {
+	t.Helper()
+	w := newWorld(t)
+	var base, head strings.Builder
+	for n := 1; n <= 100; n++ {
+		fmt.Fprintf(&base, "line %d\n", n)
+		switch {
+		case n == 1:
+			head.WriteString("first\n")
+		case n >= 20:
+			fmt.Fprintf(&head, "changed %d\n", n)
+		default:
+			fmt.Fprintf(&head, "line %d\n", n)
+		}
+	}
+	w.write("a/x.go", base.String())
+	w.commit("base")
+	w.write("a/x.go", head.String())
+	w.commit("head")
+	return w
+}
+
+const diffScroller = `document.querySelector(".diff")`
+
+// frames waits until the page has drawn a few more frames, so a draw or relayout it scheduled
+// has run.
+func (pg *page) frames() {
+	pg.t.Helper()
+	var n int
+	pg.eval(`window.__frames ??= (() => { let n = 0; const f = () => { n++; requestAnimationFrame(f); }; f(); return () => n; })(), window.__frames()`, &n)
+	pg.waitTrue("three frames", fmt.Sprintf(`window.__frames() >= %d`, n+3))
+}
+
+// scrollBelow scrolls the diff so the row the expression yields ends 12 rows above the view:
+// out of sight, yet still mounted.
+func (pg *page) scrollBelow(what, rowExpr string) {
+	pg.t.Helper()
+	pg.waitTrue(what, `(`+rowExpr+`) !== null`)
+	pg.eval(`(() => { const s = `+diffScroller+`; s.scrollTop += (`+rowExpr+`).getBoundingClientRect().bottom - s.getBoundingClientRect().top + 240; })()`, nil)
+	pg.frames()
+	var above bool
+	pg.eval(`(`+rowExpr+`) !== null && (`+rowExpr+`).getBoundingClientRect().bottom <= `+diffScroller+`.getBoundingClientRect().top`, &above)
+	if !above {
+		pg.fatalf("%s is not above the view after scrolling", what)
+	}
+}
+
+// shownLine is the gutter of the line nearest the top of the diff's view, wholly inside it, and
+// its top.
+func (pg *page) shownLine() (string, float64) {
+	pg.t.Helper()
+	var got struct {
+		Side string  `json:"side"`
+		Line int     `json:"line"`
+		Top  float64 `json:"top"`
+	}
+	pg.eval(`(() => { const v = `+diffScroller+`.getBoundingClientRect(); let best = null;
+		for (const g of document.querySelectorAll(".d-ln[data-side][data-line]")) {
+			const r = g.getBoundingClientRect();
+			if (r.top >= v.top + 40 && r.bottom <= v.bottom - 20 && (!best || r.top < best.top)) best = { side: g.dataset.side, line: Number(g.dataset.line), top: r.top };
+		}
+		return best ?? { side: "", line: 0, top: 0 }; })()`, &got)
+	if got.Line == 0 {
+		pg.fatalf("no line is wholly in view")
+	}
+	return fmt.Sprintf(`document.querySelector('.d-ln[data-side="%s"][data-line="%d"]')`, got.Side, got.Line), got.Top
+}
+
+// TestBrowserDiffKeepsViewAcrossRowsAbove: a change to the rows above the view (a comment deleted,
+// context shown, an editor saved into its shorter comment, a partly hidden draft moved to a line
+// below) leaves the lines in view where they are.
+func TestBrowserDiffKeepsViewAcrossRowsAbove(t *testing.T) {
+	t.Parallel()
+	const editorRow = `document.querySelector(".d-editor")`
+	commentRow := func(body string) string {
+		return `[...document.querySelectorAll(".d-comment")].find((c) => c.querySelector(".c-body")?.textContent === ` + jsString(body) + `) ?? null`
+	}
+	height := func(pg *page, expr string) float64 {
+		var h float64
+		pg.eval(`(`+expr+`).offsetHeight`, &h)
+		return h
+	}
+	cases := []struct {
+		name  string
+		world func(*testing.T) *world
+		// setup leaves the rows to change above the view and returns a check run after the change.
+		setup   func(pg *page) func()
+		trigger func(pg *page)
+	}{
+		{
+			name:  "comment deleted",
+			world: longWorld,
+			setup: func(pg *page) func() {
+				pg.commentOnNewLine(5, "above")
+				if h := height(pg, commentRow("above")); h < 40 {
+					pg.fatalf("test would be vacuous: the comment row is %vpx", h)
+				}
+				pg.scrollBelow("the comment", commentRow("above"))
+				return func() {}
+			},
+			trigger: func(pg *page) {
+				pg.clickEl("Delete on above", commentButton("above", "Delete"))
+				pg.waitBodies([]string{}...)
+			},
+		},
+		{
+			name:  "context shown",
+			world: wideGapWorld,
+			setup: func(pg *page) func() {
+				pg.scrollBelow("the gap", `document.querySelector(".d-gap")`)
+				return func() {}
+			},
+			trigger: func(pg *page) {
+				pg.clickEl("Show", button(".d-gap", "Show"))
+				pg.waitTrue("the gap filled", `document.querySelector(".d-gap") === null`)
+			},
+		},
+		{
+			name:  "editor saved",
+			world: longWorld,
+			setup: func(pg *page) func() {
+				pg.commentOnNewLine(5, "above")
+				pg.click("Edit on above", commentButton("above", "Edit"), 0)
+				pg.waitFocus("the diff editor", diffEditor)
+				pg.selectAll()
+				pg.insertText("edited")
+				editor := height(pg, editorRow)
+				pg.scrollBelow("the editor", editorRow)
+				return func() {
+					// 90 is the diff list's height estimate for a row not yet measured.
+					c := height(pg, commentRow("edited"))
+					if math.Abs(c-editor) < 20 || math.Abs(c-90) < 20 {
+						pg.fatalf("test would be vacuous: editor %vpx, comment %vpx, estimate 90px", editor, c)
+					}
+				}
+			},
+			trigger: func(pg *page) {
+				pg.clickEl("Save", button(".d-editor", "Save"))
+				pg.waitTrue("the saved comment", editorRow+` === null && `+hasBody("edited"))
+			},
+		},
+		{
+			// The draft, partly hidden at the top, moves below the line in view: that line, between
+			// the draft's old and new places, stays where it is rather than following the draft.
+			name:  "editor retargeted",
+			world: longWorld,
+			setup: func(pg *page) func() {
+				pg.clickEl("new line 5", newLine(5))
+				pg.waitFocus("the diff editor", diffEditor)
+				pg.insertText("draft-77")
+				pg.eval(`(() => { const s = `+diffScroller+`; s.scrollTop += (`+editorRow+`).getBoundingClientRect().bottom - s.getBoundingClientRect().top - 60; })()`, nil)
+				pg.frames()
+				var partly bool
+				pg.eval(`(() => { const v = `+diffScroller+`.getBoundingClientRect(), r = (`+editorRow+`).getBoundingClientRect(); return r.top < v.top && r.bottom >= v.top + 40; })()`, &partly)
+				if !partly {
+					pg.fatalf("test would be vacuous: the editor is not partly hidden at the top")
+				}
+				return func() {
+					if v := pg.text(diffEditor + `.value`); v != "draft-77" {
+						pg.fatalf("the retargeted editor holds %q, want the draft", v)
+					}
+				}
+			},
+			trigger: func(pg *page) {
+				var n int
+				pg.eval(`(() => { const v = `+diffScroller+`.getBoundingClientRect(); let best = null;
+					for (const g of document.querySelectorAll('.d-ln[data-side="new"][data-line]')) {
+						const r = g.getBoundingClientRect();
+						if (r.top >= v.top + 40 && r.bottom <= v.bottom - 20 && (!best || r.top < best.top)) best = { line: Number(g.dataset.line), top: r.top };
+					}
+					return best?.line ?? 0; })()`, &n)
+				if n == 0 {
+					pg.fatalf("no new line is wholly in view")
+				}
+				pg.clickEl(fmt.Sprintf("new line %d", n+2), newLine(n+2))
+				pg.waitTrue("the editor below the clicked line", fmt.Sprintf(`(() => { const e = (%s)?.getBoundingClientRect(), a = (%s)?.getBoundingClientRect(), b = (%s)?.getBoundingClientRect();
+					return !!e && !!a && !!b && e.top >= a.bottom - 1 && b.top >= e.bottom - 1; })()`, editorRow, newLine(n+2), newLine(n+3)))
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := tc.world(t).start(procOptions{}, "last")
+			p.waitURL()
+			pg := openPage(t, p)
+			pg.ready()
+			check := tc.setup(pg)
+			gutter, before := pg.shownLine()
+			scrolled := pg.text(`String(` + diffScroller + `.scrollTop)`)
+
+			tc.trigger(pg)
+			pg.waitIdle()
+			pg.frames()
+			check()
+			var after float64
+			pg.eval(`(`+gutter+`)?.getBoundingClientRect().top ?? -1e9`, &after)
+			if math.Abs(after-before) > 1 {
+				t.Errorf("%s moved from %v to %v; scrollTop %s, then %s", gutter, before, after, scrolled, pg.text(`String(`+diffScroller+`.scrollTop)`))
+			}
+			pg.noPageErrors()
+		})
+	}
+}
+
+// TestBrowserNewFileShowsItsTop: moving to another file shows it from its first row, wherever the
+// previous one was scrolled.
+func TestBrowserNewFileShowsItsTop(t *testing.T) {
+	t.Parallel()
+	p := longWorld(t).start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+	pg.waitTrue("long.go shown", shownPath+` === "a/long.go"`)
+	pg.eval(diffScroller+`.scrollTop = 2000`, nil)
+	pg.frames()
+	if pg.text(`String(`+diffScroller+`.scrollTop)`) == "0" {
+		pg.fatalf("long.go did not scroll")
+	}
+	pg.click("short.go", treeRow("short.go"), 0)
+	pg.waitTrue("short.go shown", shownPath+` === "b/short.go" && `+fileLoaded)
+	pg.frames()
+	if got := pg.text(`String(` + diffScroller + `.scrollTop)`); got != "0" {
+		t.Errorf("short.go shown at scrollTop %s, want 0", got)
+	}
+	pg.noPageErrors()
 }
