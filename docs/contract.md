@@ -17,7 +17,8 @@ the viewed mark's key, the snapshot diff command (per-file hunks and counts from
 default base ref (Q-38: REQ-SRC-002, REQ-SRC-004, REQ-SES-009, AC-SRC-001, AC-SRC-003, the Base ref,
 Snapshot and Unresolvable source definitions, and the JSON format), the cross-origin checks (Q-44: REQ-SEC-002,
 AC-SEC-001), the page close (Q-42: new REQ-SES-012, and changes to REQ-SES-003, REQ-AGT-001 and AC-SES-001), and Copy
-and finish (Q-43: new REQ-OUT-008, and a change to AC-CMT-002), relative to revision 1. Revision 2 also raises
+and finish (Q-43: new REQ-OUT-008, and a change to AC-CMT-002), and line selection and a stable view (Q-48: new
+REQ-CMT-008, REQ-DIFF-010, AC-CMT-003 and AC-DIFF-003), relative to revision 1. Revision 2 also raises
 the minimum Git version from 2.44 to 2.50, which the repository owner accepted on 2026-11-05 (Q-33); the rest of
 revision 2 remains proposed.
 Decision owner: repository owner (jacoelho)
@@ -359,7 +360,11 @@ Status: accepted
 Statement: When the human saves an edit that changes the body of an `agent` comment, the rvw command shall set that comment's author to `human`.
 Basis: Proposed (Q-18). The author tells the agent whose words a comment holds (REQ-AGT-001); an edited seed states the human's instruction. Bodies are compared after line endings are normalised to LF ([Formats](#formats)). Seed provenance is not kept in v1.
 
-### Drafts
+#### REQ-CMT-008 — Line selection
+
+Status: proposed
+Statement: When the human clicks a line number, the review UI shall select that line and open a comment editor on the selection; when the human shift-clicks a line number on the same side as the selected lines, it shall extend the selection to include that line and open the editor on the extended selection; while the human drags from a line number with no modifier key held, it shall select the lines from the pressed line to the line under the pointer, on the pressed side only, keeping the last line while the pointer is over a row without a line on that side, and scroll the diff while the pointer is held at its top or bottom edge; on release, inside or outside the diff, it shall open one comment editor on that selection; and a press and release on one line shall act as a click. Opening an editor on a selection while a new comment's editor is open shall move that editor, its text kept, to the selection, or, if the move is refused, say why and keep the editor's own lines; while another comment is being edited, opening one leaves that edit first, and while a save or leave is pending nothing opens (Q-46).
+Basis: The repository owner asked for drag-select for multi-line ranges, 2026-11-06 (Q-48). Click and shift-click predate it and are recorded here with it.
 
 #### REQ-DRF-001 — Draft persistence
 
@@ -446,6 +451,12 @@ Basis: Proposed (Q-06). Executed observation by the critic review on Apple Git 2
 Status: accepted
 Statement: When the human marks a file as viewed, the review UI shall show the mark in the file tree and the diff header until the human clears it.
 Basis: Proposed. The mark is part of the draft (REQ-DRF-001).
+
+#### REQ-DIFF-010 — Stable view
+
+Status: proposed
+Statement: When the diff's rows change while a file stays shown, such as a comment deleted, an editor saved into its comment, a draft moved or context shown, the review UI shall keep the topmost row in view that is still shown at the same place on screen, unless the change itself reveals a row the human asked for: an opened comment editor, a toggled view (REQ-DIFF-002) or a revealed line; when another file is shown, it shall show that file from its first row, unless the navigation targets a line or a comment in it, which is then revealed; and when the open comment editor has the focus, a re-render the human did not start in that editor shall leave its focus, text, caret and selection unchanged.
+Basis: The repository owner asked to fix the scroll jump, 2026-11-06 (Q-48). A shifting view loses the human's place, and an editor losing focus sends the next keys to the page shortcuts.
 
 ### File navigation
 
@@ -695,6 +706,12 @@ Covers: REQ-CMT-006, REQ-OUT-007, REQ-OUT-008
 Expected: For a draft with review, file, line and range comments by both authors, the Finish dialog lists them in the order of AC-OUT-001. Each line or range comment shows the code lines the result quotes for it. Editing or deleting one there changes the same comment in its file, and the draft, and leaves the dialog open at the same scroll position. Copying puts on the clipboard text equal to the stdout that finishing then produces without `--json`. The Agent filter shows only `agent` comments. A summary typed but not yet saved appears in the copied text. Copying writes nothing to stdout and leaves the session open. Copy succeeds in Safari and Chrome, and a refused clipboard write shows a failure with the text selectable. Copy and finish puts on the clipboard text equal to the stdout that finishing produces without `--json` and exits 0; a refused write or a failed save keeps the session open.
 Verification: Planned browser test in Safari and Chrome.
 
+### AC-CMT-003 — Line selection
+
+Covers: REQ-CMT-008
+Expected: Dragging across line numbers highlights the lines from the pressed line to the line under the pointer, on the pressed side only, keeps the last line while the pointer is over a row without one on that side, and opens one editor on that range on release; the click the release produces opens nothing else, and the next click is an ordinary one, also after a release outside the diff. A press and release on one line with the pointer jittering is a click, or with Shift an extension of the selection. Holding a drag at the diff's bottom or top edge scrolls it, and the range extends to the lines scrolled into view without the pointer moving; the scrolling stops on release. Dragging upwards with a draft open moves the draft, its text kept, to the range from the lower line to the higher; a drag that cannot move the editor says why and shows the editor's own lines highlighted again.
+Verification: Browser tests in `cmd/rvw`.
+
 ### AC-SES-003 — Finish acknowledgement
 
 Covers: REQ-SES-011, REQ-SES-007
@@ -718,6 +735,12 @@ Verification: Planned Go test at the HTTP API.
 Covers: REQ-DIFF-002, REQ-DIFF-003, REQ-DIFF-004, REQ-DIFF-007, REQ-NAV-001, REQ-NAV-002, REQ-NAV-003
 Expected: Toggling the view keeps the same line in view. A one-word edit highlights only that word. Expanding context shows lines that match the file contents. Each key in [the README](../README.md#in-the-browser)'s key list performs its action. The filter `TEST` matches `pkg/test_util.go`.
 Verification: Planned browser test on a fixture session.
+
+### AC-DIFF-003 — Stable view
+
+Covers: REQ-DIFF-010
+Expected: With the view scrolled into a file, deleting a comment above the view, showing context above it, saving an editor above it into a shorter comment and moving a partly hidden draft to a line below each leave the topmost line wholly in view at the same place on screen. Moving to another file from the tree shows it from its first row, wherever the previous one was scrolled. More context arriving or another comment being deleted while an editor is open leaves its text, caret and selection, and a bare `j` then types a letter rather than moving to the next file.
+Verification: Browser tests in `cmd/rvw`.
 
 ### AC-NAV-001 — Vendored directories
 

@@ -859,3 +859,34 @@ Done with the acceptance of contract revision 1 (2026-11-05):
 - [AGENTS.md](../AGENTS.md) is rewritten for three sources, one output, and macOS only;
 - the pre-rewrite analysis's sections on Pierre, PR fetching, GitHub publication and MCP are superseded by Q-02,
   Q-04 and Q-05; the analysis is since deleted.
+
+### Q-48 — Line selection and a stable view
+
+Proposed on 2026-11-06 for contract revision 2; not accepted. The repository owner asked for drag-select for
+multi-line ranges and for the scroll jump to be fixed, 2026-11-06. REQ-CMT-008 and REQ-DIFF-010 record the
+behaviour; click and shift-click predate the request and are recorded with it.
+
+Line selection:
+
+- A drag starts only on a line number with no modifier key held, so Shift, ⌘, Ctrl and Alt clicks keep their meaning.
+  A press and release on one line is a click, so a jittering click never becomes a one-line drag.
+- A drag selects on the pressed side only; over a row with no line on that side the last line is kept.
+- A drag, click or shift-click with a new comment's editor open moves that editor to the selection, its text kept,
+  through the same transition as opening any editor (Q-46).
+
+Stable view:
+
+- Each list row has an identity separate from its height key. When the rows change, the list scrolls so the topmost
+  row in view that is still shown stays where it was drawn, the row CSS scroll anchoring would pick. Rows below it may
+  move: a draft moved into the view pushes the lines under it down.
+- Comment and draft ids include where the row sits, so a moved row does not drag the view with it.
+- A re-render restores the focus, text selection and caret of the element that had the focus inside the list, so an
+  open editor keeps typing.
+- Another file opens at its first row, then any line or comment the navigation targets is revealed.
+
+Rejected:
+
+- Keeping the list's scroll offset across a rebuild, the previous behaviour: rows inserted or removed above the view
+  shift every line in view.
+- Refocusing the editor by hand after each failed save, discard or leave: it covered only the rebuilds its callers
+  knew about, and a rebuild the editor did not cause still sent the next keys to the page shortcuts.
