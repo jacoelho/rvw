@@ -1,155 +1,165 @@
 # rvw
 
-`rvw` is a terminal application for reviewing a local Git worktree, staged changes, a two-dot Git
-range, or a GitHub pull request. It opens an interactive TUI by default and also supports
-human-readable `--stdout` output and machine-readable `--json` output. Linux and macOS are
-supported.
+`rvw` is the human checkpoint in an agent loop. An agent runs one blocking command. You review the
+change in your browser and finish the review. `rvw` then prints your review on stdout for the
+agent and exits.
+
+macOS only. Requires `git` 2.50 or newer on `PATH`.
 
 ## Install
-
-Install `rvw` with Go 1.26.5 or newer:
 
 ```sh
 go install github.com/jacoelho/rvw/cmd/rvw@latest
 ```
 
-The binary is written to `GOBIN`, or to `$(go env GOPATH)/bin` when `GOBIN` is unset. Ensure that
-directory is in `PATH`.
-
-`rvw` does not invoke the `git` or `gh` executables. Local repositories are read with a bounded,
-read-only Go implementation, and GitHub data is acquired through authenticated HTTPS and smart
-Git. Local and remote repositories must use SHA-1 object IDs; SHA-256 repositories are rejected.
-
-GitHub pull-request review and publication require `GITHUB_TOKEN`. `GH_TOKEN`, `gh`
-configuration/keychains, and anonymous GitHub access are not used. Repository inference recognizes
-only these remotes, without ports, percent encoding, query strings, or fragments:
-
-```text
-https://github.com/owner/repository[.git]
-git@github.com:owner/repository[.git]
-ssh://git@github.com/owner/repository[.git]
-```
+The web UI is embedded in the binary; no Node.js is needed to install.
 
 ## Usage
 
 ```sh
-rvw diff                       # review the current worktree
-rvw diff --staged              # review staged changes
-rvw diff --range main..HEAD    # review a two-dot Git range
-rvw pr 123                     # review a pull request for the current repository
-rvw pr 123 --repo owner/repo   # review a pull request in another repository
-rvw pr https://github.com/owner/repo/pull/123
+rvw last                                # the last commit
+rvw branch [<base-ref>]                 # the commits on this branch since <base-ref>
+rvw branch [<base-ref>] --uncommitted   # those commits plus uncommitted changes
+rvw uncommitted                         # uncommitted changes, untracked files included
 ```
 
-Use `--repo` with a numeric selector to target another repository. A canonical pull-request URL
-already supplies the repository; if `--repo` is also present, it must match the URL.
+There is no default source. `branch` diffs from the merge base of `<base-ref>` and `HEAD`; without
+a base ref it uses the target of `origin/HEAD`, and fails when that is not set. The base ref goes
+directly after `branch`. Any argument there other than one of rvw's options is the base ref, even
+if it starts with `-`; write a ref named like an option in full (`refs/heads/--json`). Ignored
+files are never shown. Uncommitted changes are snapshotted with `git add -A` into a private index, so a large
+untracked directory that is not ignored makes startup slow: add it to `.gitignore`.
 
-Closed and merged pull requests remain reviewable from their recorded base and head revisions.
-They support local comments and export, but GitHub publication is available only for open pull
-requests.
+Options:
 
-Pull-request filtering uses built-in defaults and explicit include/exclude patterns only;
-`.gitignore` and `.rvwignore` do not apply. At most 3,000 filtered pull-request records are
-retained. Worktree comparison supports Git text/EOL and `ident` clean conversion, but does not run
-filter drivers, process filters, textconv, or external diff commands. Non-UTF-8 working-tree
-encodings are rejected. The built-in deterministic histogram diff can choose different hunk
-boundaries from native Git for ambiguous repeated lines while preserving semantic changes, counts,
-modes, paths, line sides, and missing-newline state.
+| Option | Effect |
+| --- | --- |
+| `--json` | print the result as JSON instead of Markdown |
+| `--seed <file\|->` | add agent comments from a JSON seed document; `-` reads stdin |
+| `-h`, `--help` | show help |
 
-Run `rvw help`, `rvw help diff`, or `rvw help pr` for the complete command-line reference.
+`rvw` listens on a random port of `127.0.0.1`, prints the review URL on stderr and opens it in
+your default browser. If the browser cannot be opened, paste the URL yourself.
 
-### Initialize comments from stdin
+### In the browser
 
-Pipe a JSON comment export into `rvw diff` or `rvw pr` to initialize ordinary local review
-comments:
+- The file tree shows each changed file's status, line counts, comment count and viewed mark.
+- Vendored directories (`node_modules/`, and `vendor/` beside a `go.sum`) start collapsed. Generated Go files
+  (`// Code generated … DO NOT EDIT.`) are grouped per directory, collapsed. Neither gets line counts.
+- A pure rename has no line changes; its whole content can be expanded as context and commented on.
+- The diff is shown unified or side by side, with changed words highlighted and Go, TypeScript,
+  shell and Makefile syntax highlighting.
+- Click a line number to comment on it; shift-click, or drag across line numbers, to select a
+  range. Comment on a whole file from its header, or on the whole review from the Finish dialog.
+- **Finish** opens the Finish dialog: write a summary, curate every comment (including the
+  agent's), each shown with the code it is on and edited in place, copy the review as Markdown,
+  and send it, or copy and send in one step with Copy and finish. Cancel is in the same dialog.
+
+Keys:
+
+| Key | Action |
+| --- | --- |
+| `j` / `k` | next / previous file |
+| `n` / `p` | next / previous hunk |
+| `]` / `[` | next / previous comment |
+| `c` | comment on the current line or selection |
+| `v` | toggle viewed and go to the next unviewed file |
+| `s` | toggle unified / split view |
+| `←` / `→` | scroll the split view sideways |
+| `/` | focus the file filter |
+| `⌘↵` | save the comment; in the Finish dialog, send; elsewhere, open Finish |
+| `Esc` | close the editor, else the dialog |
+
+### Exit status
+
+| Status | Meaning | stdout |
+| --- | --- | --- |
+| 0 | review finished | the review |
+| 1 | error, including a failed write of the result (the draft is kept) | empty |
+| 2 | usage error | empty |
+| 3 | review cancelled (the draft is deleted) | empty |
+| 4 | the review page was closed (saved draft changes are kept) | empty |
+| 130 / 143 | interrupted by SIGINT / SIGTERM (the draft is kept) | empty |
+
+Everything other than the review goes to stderr.
+
+### Drafts
+
+Every change you make is saved before the UI acknowledges it, under
+`~/Library/Application Support/rvw/drafts`. Running the same command on the same change resumes
+the draft; any different content starts a new review. Only one session can review a given change
+at a time. Drafts unused for 30 days are deleted.
+
+### Seeding agent comments
 
 ```sh
-cat comments.json | rvw diff
-cat comments.json | rvw diff --stdout
-cat comments.json | rvw pr 123 --repo owner/repo
+rvw branch main --seed findings.json
 ```
-
-The document has this active-only shape; `target` may be `review`, `file`, `line`, or `range`:
 
 ```json
-{
-  "comments": [
-    {
-      "target": {"type": "line", "path": "internal/app.go", "side": "new", "line": 42},
-      "binding": "active",
-      "comment": "Handle the error here."
-    }
-  ]
-}
+{"comments": [
+  {"target": "review", "body": "..."},
+  {"target": "file", "path": "a.go", "body": "..."},
+  {"target": "line", "path": "a.go", "side": "new", "line": 12, "body": "..."},
+  {"target": "range", "path": "a.go", "side": "old", "start": 3, "end": 9, "body": "..."}
+]}
 ```
 
-File targets require `path`. Line targets require `path`, `side`, and `line`. Range targets require
-`path`, `side`, `start`, and `end`, with `start < end`. Paths must identify an active file after
-filtering, and line/range endpoints must be present on the stated old/new side under configured
-diff context. Unknown or duplicate fields, stale/orphaned bindings, malformed or whitespace-only
-input, over-limit comments, and inapplicable targets fail with stderr and exit status 1 before the
-TUI or noninteractive output starts. Zero-byte piped stdin preserves normal behavior.
+Seeded comments have author `agent`; editing one makes it `human`. An invalid seed fails before
+anything is served. A seed is ignored when a draft is resumed.
 
-The default output still opens the TUI, reading keys from the controlling terminal. `--stdout` and
-`--json` validate seeds but keep their existing output contracts. Seeded comments can be edited,
-deleted, reloaded, and exported like comments created in the TUI; they are not automatically saved
-or published. For a pull request, publication occurs only through the explicit submit flow.
+## Result
 
-## Configuration
+Markdown by default:
 
-`rvw` reads UTF-8 TOML configuration in this order, with later values taking precedence:
+````markdown
+# Review
 
-1. built-in defaults;
-2. `$XDG_CONFIG_HOME/rvw/config.toml`, or `$HOME/.config/rvw/config.toml` when
-   `XDG_CONFIG_HOME` is unset;
-3. the first existing project file among `.rvw.toml` and `rvw.toml`;
-4. command-line overrides.
+Source: branch main..HEAD (base 1a2b3c4, head 5d6e7f8)
 
-Unknown fields and invalid values fail startup. Project configuration cannot define keybindings.
+## Summary
 
-The configuration schema is:
+> Please split the parser change out.
 
-```toml
-[ui]
-mouse = true
-theme = "gruvbox-dark"
-theme_dark = "gruvbox-dark"
-theme_light = "gruvbox-light"
-appearance = "system" # dark, light, or system
+## Comments
 
-[diff]
-wrap = true
-view = "unified" # unified or side-by-side
-context_lines = 3
-include_untracked = true
+### `internal/source/git.go`:40-44 (new)
 
-[filter]
-builtin_defaults = true
-gitignore = true
-use_gitignore = true # alias of gitignore; gitignore wins when both occur
-rvwignore = true
-ignore_file = ".rvwignore"
-include = ["src/**"]
-exclude = ["**/*.generated.rs"]
-
-[github]
-submit_default = "comment" # comment, approve, or request-changes
-fetch_threads = true
-
-[export]
-markdown_template = "# Review ({{comment_count}})\n\n{{comments}}"
-comment_template = "## {{target}}\n\n{{comment}}"
+```
+<the quoted code lines>
 ```
 
-`include` and `exclude` accept either one string or an array of strings. The top-level keys
-`mouse`, `theme`, `theme_dark`, `theme_light`, and `appearance` are aliases for their `[ui]`
-equivalents.
+(agent)
+> This retries without a bound.
+````
 
-Publishing a GitHub review first synchronizes the selected comments as a pending draft. The submit
-dialog then offers Comment, Approve, and Request changes; `submit_default` selects its initial
-choice.
+With `--json`, one JSON document with the source, tree IDs, summary and comments
+(author, target, quoted code lines, body). Line numbers refer to the reviewed snapshot.
 
-See the [full configuration and theme reference](docs/rvw-specification.md#4-configuration-and-themes)
-for keybindings, custom themes, export-template placeholders, defaults, limits, and validation
-rules. See the [TUI design contract](docs/tui-design.md) for focus, cursor, responsive layout,
-dialogs, glyphs, contrast, and presentation evidence.
+## Agent skill
+
+[`skills/rvw-human-review`](skills/rvw-human-review/SKILL.md) tells an agent when to ask for
+review, how to run `rvw` in the background, and how to act on the result.
+
+## Guarantees
+
+- `git` is only run as a subprocess; `rvw` never changes refs, the index, worktree files or
+  configuration. Uncommitted changes are snapshotted through a private copy of the index.
+- The only network connection is the loopback listener. API requests need a random token from the
+  URL fragment; the Host header, cross-origin writes (Sec-Fetch-Site and Origin) and a content
+  security policy are enforced.
+
+## Development
+
+```sh
+make check   # format, lint, web build freshness, tests, race tests, vet, build
+make web     # rebuild web/dist after changing web/src (needs Node.js)
+```
+
+`web/dist` is committed and embedded.
+
+Documentation:
+
+- [docs/contract.md](docs/contract.md): requirements; its header names the accepted revision.
+- [docs/decisions.md](docs/decisions.md): rationale and rejected alternatives.
+- [docs/architecture.md](docs/architecture.md): ownership, boundaries, lifecycle, bounds and trade-offs.

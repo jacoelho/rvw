@@ -1,2 +1,4 @@
 bin/
 .codex/
+node_modules/
+/rvw

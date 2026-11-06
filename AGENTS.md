@@ -2,37 +2,40 @@
 
 ## Product and authorities
 
-`rvw` reviews exactly four sources: a local worktree, staged changes, an explicit two-dot Git
-range, or a GitHub pull request. It has exactly three outputs: an interactive TUI, `--stdout`, and
-`--json`.
+`rvw` is the human checkpoint in an agent loop. An agent runs one blocking command; a human reviews
+the change in a local browser UI and finishes the review; `rvw` prints the review on stdout and
+exits.
 
-Do not introduce new review sources or output modes unless explicitly requested. Avoid unrelated
-feature expansion.
+It reviews exactly three sources: the last commit (`rvw last`), the commits on the current branch
+since a base ref (`rvw branch [<base-ref>]`), and uncommitted changes (`rvw uncommitted`), the last
+two combinable as `rvw branch [<base-ref>] --uncommitted`. It has exactly one output: the review result
+on stdout, as Markdown or, with `--json`, as JSON.
 
-[The product specification](docs/rvw-specification.md) is the detailed product and runtime
-reference. [Its acceptance record](docs/rvw-specification.acceptance.md) identifies the exact
-accepted revision. Do not describe a later revision as accepted without a matching acceptance
-record.
+Do not introduce new review sources or output modes, GitHub access, or an MCP server unless
+explicitly requested. Avoid unrelated feature expansion.
 
-[The TUI design](docs/tui-design.md) is the sole normative presentation authority. Keep visual
-hierarchy, focus, cursor, glyph, responsive, dialog, pointer, contrast, and evidence changes
-consistent with it.
+[The contract](docs/contract.md) is the product and runtime authority. Its header names the accepted
+revision; do not describe a later revision as accepted unless the repository owner explicitly accepts
+it. [The decision record](docs/decisions.md) holds the rationale and rejected alternatives.
+[The architecture](docs/architecture.md) is the architecture entry point; update it when ownership,
+boundaries, lifecycle, bounds or trade-offs change.
 
 ## Non-functional requirements
 
-- Support Linux and macOS only. Do not add project-owned or direct/runtime Windows code,
-  dependencies, tests, fallbacks, or CI, and do not add WebAssembly support. The accepted pinned
-  dependency graph's unreachable transitive Windows module metadata is the sole exception.
-- Design for at least 1,000 changed files of at least 10,000 lines each, plus hundreds of comments,
-  while keeping memory, CPU, concurrent work, retained data, queues, and per-tick work bounded
-  through lazy materialization.
-- Keep frame construction and rendering proportional to the viewport plus overscan. Bound retained
-  presentation data and caches.
-- Keep filesystem, network, subprocess, blocking waits, and unbounded CPU work off the terminal
-  event loop.
-- Validate external data at boundaries. Keep unavailable, stale, cancelled, limited, failed, and
-  ambiguous outcomes explicit; reconcile an unknown GitHub write before retrying.
+- Support macOS only. Do not add Linux, Windows or WebAssembly code, build tags, tests or CI.
+- Obtain every Git fact from the `git` executable through the single runner in `internal/source`.
+  Do not parse Git objects or reimplement Git behaviour.
+- Open no network connection other than the loopback review listener.
+- Leave the repository's refs, index, worktree files and configuration unchanged.
+- Design for at least 1,000 changed files of at least 10,000 lines each, plus hundreds of comments.
+  The server reads a file's patch and contents only when the UI asks for it and retains nothing
+  per file; the UI renders only visible rows plus bounded overscan.
+- Validate external data at boundaries: seed documents, HTTP requests, and `git` output.
+- The web UI is TypeScript without a runtime framework under `web/`. `web/dist` is committed and
+  embedded; rebuild it with `make web` after changing `web/src`.
 
-Consult the specification's [non-functional conformance
-sections](docs/rvw-specification.md#nonfunctional-conformance) for detailed resource limits,
-security and integrity invariants, and verification routes.
+## Checks
+
+`make check` runs formatting, lint, the `web/dist` freshness check, tests, race tests, vet and the
+build; it must pass before a change is done. Browser tests in `cmd/rvw` drive Chrome and skip without
+it, except under `CI=true`.
