@@ -525,8 +525,10 @@ func (pg *page) fatalf(format string, args ...any) {
 
 // Modifier bits for Input.dispatch*Event.
 const (
-	modShift = 8
+	modAlt   = 1
+	modCtrl  = 2
 	modMeta  = 4
+	modShift = 8
 )
 
 // click finds the element a JavaScript expression yields, scrolls it into view, and presses the

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -366,4 +367,107 @@ func TestBrowserDragReleasedOutsideList(t *testing.T) {
 		pg.fatalf("the session holds %+v, want a range comment on new lines 3–5", p.sessionComments())
 	}
 	pg.noPageErrors()
+}
+
+// watchUI records, from now on, every distinct highlighted-lines and editor-target value the page
+// shows, so a highlight or editor that appears and goes again is still seen.
+func (pg *page) watchUI() {
+	pg.t.Helper()
+	pg.eval(`(() => {
+		const rec = () => { window.rvwSeen.sel.add(`+selTexts+`); window.rvwSeen.target.add(`+editorTarget+`); };
+		window.rvwSeen = { sel: new Set(), target: new Set(), rec };
+		rec();
+		new MutationObserver(rec).observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+	})()`, nil)
+}
+
+// resetSeen forgets what watchUI recorded and records the page as it is now.
+func (pg *page) resetSeen() {
+	pg.t.Helper()
+	pg.eval(`(() => { window.rvwSeen.sel.clear(); window.rvwSeen.target.clear(); window.rvwSeen.rec(); })()`, nil)
+}
+
+// seen is what watchUI recorded: the distinct highlighted-lines values, then the editor targets.
+func (pg *page) seen() (sel, target []string) {
+	pg.t.Helper()
+	var r struct {
+		Sel    []string `json:"sel"`
+		Target []string `json:"target"`
+	}
+	pg.eval(`({ sel: [...window.rvwSeen.sel], target: [...window.rvwSeen.target] })`, &r)
+	return r.Sel, r.Target
+}
+
+// TestBrowserModifierDragSelectsNothing: a drag from a line number with a modifier key held selects
+// nothing, opens no editor and leaves an open editor where it is; a plain click and a plain drag
+// over the same lines afterwards work as usual.
+func TestBrowserModifierDragSelectsNothing(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		mod  int
+	}{{"Shift", modShift}, {"Alt", modAlt}, {"Ctrl", modCtrl}, {"Meta", modMeta}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := dragWorld(t).start(procOptions{}, "last")
+			p.waitURL()
+			pg := openPage(t, p)
+			pg.ready()
+			pg.waitTrue("new rows", newLine(6)+` !== null`)
+			pg.watchUI()
+
+			// No editor open: the modified drag highlights nothing and opens nothing.
+			pg.pressAt("new line 3", newLine(3), tc.mod)
+			x, y := pg.locate("new line 5", newLine(5))
+			pg.dragTo(x, y, tc.mod)
+			pg.frames()
+			if got := pg.text(selTexts); got != "[]" {
+				pg.fatalf("mid-drag with %s the highlighted lines are %s", tc.name, got)
+			}
+			x, y = pg.locate("new line 6", newLine(6))
+			pg.dragTo(x, y, tc.mod)
+			pg.frames()
+			pg.releaseAt(x, y, tc.mod)
+			pg.frames()
+			if sel, target := pg.seen(); !slices.Equal(sel, []string{"[]"}) || !slices.Equal(target, []string{""}) {
+				pg.fatalf("a %s drag showed highlights %q and editors %q, want none", tc.name, sel, target)
+			}
+			if got := pg.text(`String(` + diffEditor + ` === null)`); got != "true" {
+				pg.fatalf("a %s drag opened an editor", tc.name)
+			}
+
+			// An editor open on line 2: the modified drag leaves it, its text and its highlight alone.
+			pg.click("new line 2", newLine(2), 0)
+			pg.waitFocus("the diff editor", diffEditor)
+			pg.insertText("keep")
+			pg.waitTrue("the line editor", editorTarget+`.startsWith("line 2")`)
+			pg.resetSeen()
+			pg.pressAt("new line 4", newLine(4), tc.mod)
+			x, y = pg.locate("new line 6", newLine(6))
+			pg.dragTo(x, y, tc.mod)
+			pg.frames()
+			pg.releaseAt(x, y, tc.mod)
+			pg.frames()
+			sel, target := pg.seen()
+			if !slices.Equal(sel, []string{jsonList([]string{"line 2"})}) || len(target) != 1 || !strings.HasPrefix(target[0], "line 2") {
+				pg.fatalf("with an editor on line 2 a %s drag showed highlights %q and editors %q", tc.name, sel, target)
+			}
+			if v := pg.text(diffEditor + `.value`); v != "keep" {
+				pg.fatalf("after a %s drag the editor holds %q", tc.name, v)
+			}
+			if n := pg.text(`String(document.querySelectorAll(".d-editor").length)`); n != "1" {
+				pg.fatalf("after a %s drag %s editors are open", tc.name, n)
+			}
+
+			// No drag or click state leaked: a plain click and a plain drag over the same lines work.
+			pg.click("new line 7", newLine(7), 0)
+			pg.waitTrue("the editor moved to line 7", editorTarget+`.startsWith("line 7") && `+diffEditor+`?.value === "keep"`)
+			pg.pressAt("new line 3", newLine(3), 0)
+			x, y = pg.dragToEl("new line 6", newLine(6))
+			pg.waitSel("line 3", "new 4", "new 5", "new 6")
+			pg.releaseAt(x, y, 0)
+			pg.waitTrue("the editor moved to lines 3–6", editorTarget+`.startsWith("lines 3–6") && `+diffEditor+`?.value === "keep"`)
+			pg.noPageErrors()
+		})
+	}
 }
