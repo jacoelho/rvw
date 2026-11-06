@@ -153,16 +153,13 @@ export class FinishDialog {
   async saveEditor(): Promise<boolean> {
     const ed = this.edit;
     if (!ed) return true;
-    const focused = document.activeElement === ed.textarea;
-    return this.settleEdit(ed, focused, (await ed.save()) !== "kept");
+    return this.settleEdit(ed, (await ed.save()) !== "kept");
   }
 
   /** Closes ed after it was saved or discarded; otherwise shows why it failed, keeping it open. */
-  private settleEdit(ed: CommentEditor, focused: boolean, ok: boolean): boolean {
+  private settleEdit(ed: CommentEditor, ok: boolean): boolean {
     if (!ok) {
-      // Re-rendering detaches the textarea, which drops its focus; the human keeps typing in it.
       this.list.refresh();
-      if (focused) ed.textarea.focus();
       return false;
     }
     if (this.edit === ed) this.closeEdit();
@@ -329,12 +326,8 @@ export class FinishDialog {
       this.leaving = true;
       let ok: boolean;
       try {
-        const focused = document.activeElement === left.textarea;
         ok = await left.leave();
-        if (!ok) {
-          this.list.refresh();
-          if (focused) left.textarea.focus();
-        }
+        if (!ok) this.list.refresh();
       } finally {
         this.leaving = false;
       }
@@ -360,8 +353,7 @@ export class FinishDialog {
   private async discardEdit(): Promise<boolean> {
     const ed = this.edit;
     if (!ed) return true;
-    const focused = document.activeElement === ed.textarea;
-    return this.settleEdit(ed, focused, await ed.discard());
+    return this.settleEdit(ed, await ed.discard());
   }
 
   private closeEdit(): void {

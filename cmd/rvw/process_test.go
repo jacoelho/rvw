@@ -945,6 +945,77 @@ func TestBranchDefaultsToOriginHead(t *testing.T) {
 	}
 }
 
+// TestBranchDefaultsToOriginHeadWithUncommitted checks that rvw branch --uncommitted without a
+// base ref reviews from the merge base with origin/HEAD's target to the uncommitted tree
+// (REQ-SRC-004, Q-38). The seeded comment on a file that exists only in the worktree is the
+// membership probe: a snapshot without the uncommitted changes rejects the seed.
+func TestBranchDefaultsToOriginHeadWithUncommitted(t *testing.T) {
+	t.Parallel()
+	w := originHeadWorld(t)
+	w.write("u.txt", "only uncommitted\n")
+	seed := w.seedFile("seed.json", `{"comments":[{"target":"line","path":"u.txt","side":"new","line":1,"body":"Check this file."}]}`)
+
+	p := w.start(procOptions{}, "branch", "--uncommitted", "--json", "--seed", seed)
+	p.waitURL()
+	p.finish()
+	if code := p.exitCode(); code != 0 {
+		t.Fatalf("exit %d, want 0; stderr:\n%s", code, p.stderr)
+	}
+
+	out := p.stdout.String()
+	if !strings.HasSuffix(out, "\n") {
+		t.Errorf("stdout does not end with a newline: %q", out)
+	}
+	var got struct {
+		Source struct {
+			Kind        string `json:"kind"`
+			Branch      string `json:"branch"`
+			Uncommitted bool   `json:"uncommitted"`
+		} `json:"source"`
+		BaseTree string `json:"base_tree"`
+		HeadTree string `json:"head_tree"`
+		Summary  string `json:"summary"`
+		Comments []struct {
+			Author string   `json:"author"`
+			Target string   `json:"target"`
+			Path   string   `json:"path"`
+			Side   string   `json:"side"`
+			Line   int      `json:"line"`
+			Code   []string `json:"code"`
+			Body   string   `json:"body"`
+		} `json:"comments"`
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, out)
+	}
+	if got.Source.Kind != "branch" || got.Source.Branch != "origin/main" || !got.Source.Uncommitted {
+		t.Errorf("source %+v, want kind branch, branch origin/main, uncommitted", got.Source)
+	}
+	if want := w.git("rev-parse", "main^{tree}"); got.BaseTree != want {
+		t.Errorf("base_tree %s, want main's tree %s", got.BaseTree, want)
+	}
+	if got.HeadTree == w.git("rev-parse", "HEAD^{tree}") {
+		t.Errorf("head_tree %s is HEAD's tree; want the uncommitted tree", got.HeadTree)
+	}
+	if s := w.git("show", got.HeadTree+":u.txt"); s != "only uncommitted" {
+		t.Errorf("head tree u.txt %q, want the uncommitted content", s)
+	}
+	if s := w.git("show", got.HeadTree+":a.go"); s != strings.TrimSpace(featureLines()) {
+		t.Errorf("head tree a.go is not the committed branch content:\n%s", s)
+	}
+	if got.Summary != "" {
+		t.Errorf("summary %q, want empty", got.Summary)
+	}
+	if len(got.Comments) != 1 {
+		t.Fatalf("comments %+v, want the one seeded comment", got.Comments)
+	}
+	c := got.Comments[0]
+	if c.Author != "agent" || c.Target != "line" || c.Path != "u.txt" || c.Side != "new" || c.Line != 1 ||
+		len(c.Code) != 1 || c.Code[0] != "only uncommitted" || c.Body != "Check this file." {
+		t.Errorf("comment %+v, want the seeded agent line comment on u.txt quoting %q", c, "only uncommitted")
+	}
+}
+
 // TestBranchWithoutOriginHead checks that rvw branch without a base ref fails before serving
 // when origin/HEAD is not set, and says to name a base ref.
 func TestBranchWithoutOriginHead(t *testing.T) {

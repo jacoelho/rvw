@@ -299,17 +299,14 @@ export class FileView {
   async saveEditor(): Promise<boolean> {
     const ed = this.editor;
     if (!ed) return true;
-    const focused = document.activeElement === ed.textarea;
-    return this.settleEditor(ed, focused, (await ed.save()) !== "kept");
+    return this.settleEditor(ed, (await ed.save()) !== "kept");
   }
 
   /** Closes ed after a save that succeeded; otherwise shows why it failed, keeping it open. */
-  private settleEditor(ed: CommentEditor, focused: boolean, ok: boolean): boolean {
+  private settleEditor(ed: CommentEditor, ok: boolean): boolean {
     if (!ok) {
       this.list.forget(ed.key);
-      // Re-rendering detaches the textarea, which drops its focus; the human keeps typing in it.
       this.list.refresh();
-      if (focused) ed.textarea.focus();
       return false;
     }
     if (this.editor === ed) this.closeEditor();
@@ -323,8 +320,7 @@ export class FileView {
   async discardEditor(): Promise<boolean> {
     const ed = this.editor;
     if (!ed) return true;
-    const focused = document.activeElement === ed.textarea;
-    return this.settleEditor(ed, focused, await ed.discard());
+    return this.settleEditor(ed, await ed.discard());
   }
 
   private closeEditor(): void {
@@ -344,10 +340,9 @@ export class FileView {
     if (this.leaving) return false;
     const ed = this.editor;
     if (!ed) return true;
-    const focused = document.activeElement === ed.textarea;
     this.leaving = true;
     try {
-      return this.settleEditor(ed, focused, await ed.leave());
+      return this.settleEditor(ed, await ed.leave());
     } finally {
       this.leaving = false;
     }

@@ -2354,3 +2354,103 @@ func TestBrowserCopyKeepsSession(t *testing.T) {
 	requireOpen(t, p)
 	pg.noPageErrors()
 }
+
+// gapWorld's last commit changes lines 1 and 40 of a/x.go, shown first, leaving one gap of
+// unchanged lines between its hunks, and changes c/y.go, so a file move has somewhere to go.
+func gapWorld(t *testing.T) *world {
+	t.Helper()
+	w := newWorld(t)
+	lines := func(first, last string) string {
+		var b strings.Builder
+		b.WriteString(first + "\n")
+		for n := 2; n < 40; n++ {
+			fmt.Fprintf(&b, "line %d\n", n)
+		}
+		b.WriteString(last + "\n")
+		return b.String()
+	}
+	w.write("a/x.go", lines("line 1", "line 40"))
+	w.write("c/y.go", "package c\n")
+	w.commit("base")
+	w.write("a/x.go", lines("first", "last"))
+	w.write("c/y.go", "package c\n\nvar Z = 3\n")
+	w.commit("head")
+	return w
+}
+
+// clickEl clicks the element the expression yields from script. A mouse click would move the
+// focus itself; this stands in for page work that takes no input, such as a reply arriving.
+func (pg *page) clickEl(what, elementExpr string) {
+	pg.t.Helper()
+	pg.waitTrue(what, `(`+elementExpr+`) !== null`)
+	pg.eval(`(`+elementExpr+`).click()`, nil)
+}
+
+// TestBrowserEditorKeepsFocusAcrossRebuild: the diff view re-rendering its rows for a reason other
+// than the editor (more context arriving, another comment deleted) leaves the human typing in the
+// open editor. Its text, caret and selection stay, and a bare j types a letter rather than moving
+// to the next file and saving the half-typed comment.
+func TestBrowserEditorKeepsFocusAcrossRebuild(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		setup   func(pg *page)
+		trigger func(pg *page)
+	}{
+		{
+			name:  "context expansion",
+			setup: func(*page) {},
+			trigger: func(pg *page) {
+				pg.clickEl("Show", button(".d-gap", "Show"))
+				pg.waitTrue("the expanded lines", `[...document.querySelectorAll(".d-line")].some((r) => r.textContent.includes("line 20"))`)
+			},
+		},
+		{
+			name:  "other comment deleted",
+			setup: func(pg *page) { pg.commentOnNewLine(1, "A") },
+			trigger: func(pg *page) {
+				pg.clickEl("Delete on A", commentButton("A", "Delete"))
+				pg.waitBodies([]string{}...)
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := gapWorld(t).start(procOptions{}, "last")
+			p.waitURL()
+			pg := openPage(t, p)
+			pg.ready()
+			pg.waitTrue("x.go shown", shownPath+` === "a/x.go"`)
+			tc.setup(pg)
+
+			pg.click("new line 40", newLine(40), 0)
+			pg.waitFocus("the diff editor", diffEditor)
+			pg.insertText("abcd")
+			const selection = `(() => { const e = ` + diffEditor + `; return e.value + "|" + e.selectionStart + "|" + e.selectionEnd + "|" + e.selectionDirection; })()`
+			pg.eval(diffEditor+`.setSelectionRange(1, 3, "backward")`, nil)
+			if got := pg.text(selection); got != "abcd|1|3|backward" {
+				pg.fatalf("before the rebuild: editor %q, want abcd|1|3|backward", got)
+			}
+
+			tc.trigger(pg)
+			if got := pg.text(`(document.activeElement === ` + diffEditor + `) ? "editor" : document.activeElement?.tagName ?? "none"`); got != "editor" {
+				pg.fatalf("after the rebuild the focus is on %s, want the diff editor", got)
+			}
+			if got := pg.text(selection); got != "abcd|1|3|backward" {
+				t.Errorf("after the rebuild: editor %q, want abcd|1|3|backward", got)
+			}
+
+			pg.typeKey("j")
+			pg.waitTrue("j typed over the selection", diffEditor+`?.value === "ajd"`)
+			pg.waitIdle()
+			if got := pg.text(shownPath); got != "a/x.go" {
+				t.Errorf("shown file %q after typing j, want a/x.go", got)
+			}
+			if got := p.sessionComments(); len(got) != 0 {
+				t.Errorf("server holds %+v, want no comments: the typed comment is unsaved", got)
+			}
+			pg.noPageErrors()
+		})
+	}
+}

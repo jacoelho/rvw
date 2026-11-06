@@ -57,16 +57,30 @@ export class VirtualList {
   /** Replaces the rows. Mounted rows are discarded; heights of rows still present are kept. */
   setSource(source: ListSource): void {
     this.source = source;
-    this.layout();
-    this.clear();
-    this.draw();
+    this.remount();
   }
 
   /** Re-renders every mounted row after the source's data changed in place. */
   refresh(): void {
+    this.remount();
+  }
+
+  /**
+   * Discards and redraws the mounted rows. Detaching an element drops its focus, so a focused
+   * element that a row renders again (an open editor's textarea) gets its focus and selection back:
+   * the human keeps typing, and their keys never reach the page's shortcuts.
+   */
+  private remount(): void {
+    const active = document.activeElement;
+    const focused = active instanceof HTMLElement && this.inner.contains(active) ? active : null;
+    const text = focused instanceof HTMLTextAreaElement || focused instanceof HTMLInputElement ? focused : null;
+    const sel = text ? { start: text.selectionStart, end: text.selectionEnd, dir: text.selectionDirection } : null;
     this.layout();
     this.clear();
     this.draw();
+    if (!focused?.isConnected || document.activeElement === focused) return;
+    focused.focus({ preventScroll: true });
+    if (text && sel && sel.start !== null && sel.end !== null) text.setSelectionRange(sel.start, sel.end, sel.dir ?? undefined);
   }
 
   /** Forgets a variable row's measured height, e.g. after its content changed. */
