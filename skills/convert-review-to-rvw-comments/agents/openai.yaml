@@ -1,4 +1,0 @@
-interface:
-  display_name: "Convert Review to RVW Comments"
-  short_description: "Turn LLM review findings into rvw stdin JSON"
-  default_prompt: "Use $convert-review-to-rvw-comments to convert this LLM code review into rvw stdin comment JSON."

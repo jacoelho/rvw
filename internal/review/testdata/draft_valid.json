@@ -1,0 +1,6 @@
+{"version":2,"comments":[
+{"id":"r1","author":"human","target":{"kind":"review"},"body":"overall","seq":4},
+{"id":"f1","author":"agent","target":{"kind":"file","path":"del.go"},"body":"why delete?","seq":1},
+{"id":"o1","author":"human","target":{"kind":"range","path":"old.go","side":"old","start":2,"end":5},"body":"renamed lines","seq":3},
+{"id":"l1","author":"agent","target":{"kind":"line","path":"a.go","side":"new","start":2,"end":2},"body":"changed\nline","seq":0}
+],"summary":"Needs work.\n","viewed":[{"old_path":"a.go","new_path":"a.go"},{"old_path":"del.go","new_path":""}]}

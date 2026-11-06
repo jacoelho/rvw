@@ -1,0 +1,2356 @@
+//go:build darwin
+
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+)
+
+// Browser tests drive the embedded UI in headless Chrome with real mouse and keyboard input, and
+// check what the human did against the server's session: a check of the page alone would pass
+// even if a save never reached the server.
+
+// Locators: the one place the tests name the page's markup. Each is a JavaScript expression
+// that yields an element or null.
+
+// newLine is the gutter of line n on the new side.
+func newLine(n int) string {
+	return fmt.Sprintf(`document.querySelector('.d-ln[data-side="new"][data-line="%d"]')`, n)
+}
+
+func treeRow(name string) string {
+	return `[...document.querySelectorAll(".tree-row")].find((r) => r.querySelector(".tree-name")?.textContent === ` + jsString(name) + `) ?? null`
+}
+
+// button finds a visible button by its label within the elements selector matches.
+func button(within, label string) string {
+	return `[...document.querySelectorAll(` + jsString(within+" button") + `)].find((b) => b.textContent.trim() === ` +
+		jsString(label) + ` && b.getClientRects().length > 0) ?? null`
+}
+
+// commentButton finds a button on the diff comment whose body is body.
+func commentButton(body, label string) string {
+	return `[...([...document.querySelectorAll(".d-comment")].find((c) => c.querySelector(".c-body")?.textContent === ` +
+		jsString(body) + `)?.querySelectorAll("button") ?? [])].find((b) => b.textContent === ` + jsString(label) + `) ?? null`
+}
+
+const (
+	diffEditor    = `document.querySelector(".d-editor textarea")`
+	dialogEditor  = `document.querySelector("dialog .editor-text")`
+	summaryField  = `document.querySelector(".fin-summary")`
+	generatedRow  = `document.querySelector(".tree-group")`
+	endTitle      = `(document.querySelector(".end h1")?.textContent ?? "")`
+	diffBodies    = `JSON.stringify([...document.querySelectorAll(".d-comment .c-body")].map((e) => e.textContent))`
+	dialogBodies  = `JSON.stringify([...document.querySelectorAll("dialog .c-body")].map((e) => e.textContent))`
+	dialogQuote   = `JSON.stringify([...document.querySelectorAll("dialog .fin-quote-line")].map((e) => e.textContent))`
+	shownPath     = `(document.querySelector(".fh-path:not(.old)")?.textContent ?? "")`
+	selectedName  = `(document.querySelector(".tree-row.selected .tree-name")?.textContent ?? "")`
+	totals        = `(document.querySelector(".top-totals")?.textContent ?? "")`
+	editorTarget  = `(document.querySelector(".d-editor .c-target")?.textContent ?? "")`
+	editorError   = `(document.querySelector(".d-editor .editor-error")?.textContent ?? "")`
+	countsSettled = `(() => { const t = ` + totals + `; return t.includes("+") && !t.includes("…"); })()`
+)
+
+// ready waits until line counts, and so the generated marks before them, have arrived, and the
+// file picked at load is shown and loaded; the tree then no longer regroups or re-renders on its
+// own. It needs a file that gets line counts.
+func (pg *page) ready() {
+	pg.t.Helper()
+	pg.waitTrue("line counts and generated marks", countsSettled)
+	pg.waitTrue("the first file loaded", shownPath+` !== "" && `+fileLoaded)
+}
+
+// fileLoaded holds once the shown file's diff has arrived. The shown path changes when a file is
+// requested, and the tree re-renders its rows when the file arrives; a tree click whose press and
+// release straddle that re-render lands on the tree, not a row, and is not applied. A test clicks
+// the tree again only after this holds.
+const fileLoaded = `![...document.querySelectorAll(".d-note")].some((e) => e.textContent === "Loading…")`
+
+// waitBodies waits until the diff shows exactly the comment bodies want, in order.
+func (pg *page) waitBodies(want ...string) {
+	pg.t.Helper()
+	data, err := json.Marshal(want)
+	if err != nil {
+		pg.t.Fatal(err)
+	}
+	pg.waitTrue(fmt.Sprintf("diff comments %q", want), diffBodies+` === `+jsString(string(data)))
+}
+
+// sessionComment is a comment as the server holds it, target included.
+type sessionComment struct {
+	ID      string `json:"id"`
+	Author  string `json:"author"`
+	Body    string `json:"body"`
+	Version int64  `json:"version"`
+	Target  struct {
+		Target string `json:"target"`
+		Path   string `json:"path"`
+		Side   string `json:"side"`
+		Line   int    `json:"line"`
+		Start  int    `json:"start"`
+		End    int    `json:"end"`
+	} `json:"target"`
+}
+
+func (p *proc) sessionComments() []sessionComment {
+	p.t.Helper()
+	var s struct {
+		Comments []sessionComment `json:"comments"`
+	}
+	if err := json.Unmarshal(p.must(http.MethodGet, "/api/session", "", http.StatusOK), &s); err != nil {
+		p.t.Fatal(err)
+	}
+	return s.Comments
+}
+
+// oneFileWorld's last commit adds b/x.go, three lines.
+func oneFileWorld(t *testing.T) *world {
+	t.Helper()
+	w := newWorld(t)
+	w.write("README", "base\n")
+	w.commit("base")
+	w.write("b/x.go", "package b\n\nvar Y = 2\n")
+	w.commit("head")
+	return w
+}
+
+const generatedGo = "// Code generated by stringer. DO NOT EDIT.\n\npackage a\n\nvar X = 1\n"
+
+// TestBrowserCommentLifecycle covers adding, retargeting, editing and deleting diff comments, and
+// that a reload shows what the server holds.
+func TestBrowserCommentLifecycle(t *testing.T) {
+	t.Parallel()
+	w := oneFileWorld(t)
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+
+	pg.click("new line 1", newLine(1), 0)
+	pg.waitFocus("the diff editor", diffEditor)
+	pg.insertText("first")
+	pg.cmdEnter()
+	pg.waitBodies("first")
+	cs := p.sessionComments()
+	if len(cs) != 1 || cs[0].Body != "first" || cs[0].Author != "human" || cs[0].Target.Target != "line" ||
+		cs[0].Target.Path != "b/x.go" || cs[0].Target.Side != "new" || cs[0].Target.Line != 1 {
+		pg.fatalf("after the line comment, the session holds %+v", cs)
+	}
+	firstID := cs[0].ID
+	pg.waitTrue("the tree's comment count", `document.querySelector(".tree-row.selected .tree-comments")?.textContent === "1"`)
+
+	// Shift-click retargets the open draft to a range; its text stays.
+	pg.click("new line 1", newLine(1), 0)
+	pg.waitFocus("the diff editor", diffEditor)
+	pg.insertText("draft")
+	pg.click("new line 2", newLine(2), modShift)
+	pg.waitTrue("the range target", editorTarget+`.startsWith("lines 1–2")`)
+	if got := pg.text(diffEditor + `.value`); got != "draft" {
+		pg.fatalf("after the retarget the draft reads %q, want %q", got, "draft")
+	}
+	pg.waitFocus("the diff editor", diffEditor)
+	pg.cmdEnter()
+	pg.waitBodies("first", "draft")
+	cs = p.sessionComments()
+	if len(cs) != 2 {
+		pg.fatalf("after the range comment, the session holds %+v", cs)
+	}
+	var rng sessionComment
+	for _, c := range cs {
+		if c.ID != firstID {
+			rng = c
+		}
+	}
+	if rng.Body != "draft" || rng.Target.Target != "range" || rng.Target.Side != "new" || rng.Target.Start != 1 || rng.Target.End != 2 {
+		pg.fatalf("the range comment is %+v", rng)
+	}
+
+	// Editing to blank is refused; the server keeps the old text.
+	pg.click("Edit on the first comment", commentButton("first", "Edit"), 0)
+	pg.waitFocus("the diff editor", diffEditor)
+	pg.selectAll()
+	pg.insertText("  ")
+	pg.cmdEnter()
+	pg.waitTrue("the empty-edit error", editorError+`.includes("cannot be empty")`)
+	if cs := p.sessionComments(); !slices.ContainsFunc(cs, func(c sessionComment) bool { return c.ID == firstID && c.Body == "first" }) {
+		pg.fatalf("a refused edit changed the session: %+v", cs)
+	}
+	pg.selectAll()
+	pg.insertText("edited")
+	pg.cmdEnter()
+	pg.waitBodies("edited", "draft")
+	cs = p.sessionComments()
+	if len(cs) != 2 || !slices.ContainsFunc(cs, func(c sessionComment) bool { return c.ID == firstID && c.Body == "edited" }) {
+		pg.fatalf("the edit did not replace the comment in place: %+v", cs)
+	}
+
+	// A reload shows the server's draft, not anything the page kept.
+	pg.reload()
+	pg.ready()
+	pg.waitBodies("edited", "draft")
+
+	pg.click("Delete on the range comment", commentButton("draft", "Delete"), 0)
+	pg.waitBodies("edited")
+	if cs := p.sessionComments(); len(cs) != 1 || cs[0].ID != firstID {
+		pg.fatalf("after the delete, the session holds %+v", cs)
+	}
+	pg.noPageErrors()
+}
+
+// TestBrowserGeneratedFilesFold checks that a generated file's group starts folded and
+// the first other file is shown; the human can still open the generated file. It also marks a
+// file viewed with the v key.
+func TestBrowserGeneratedFilesFold(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	w.write("README", "base\n")
+	w.commit("base")
+	w.write("a/z_gen.go", generatedGo)
+	w.write("b/x.go", "package b\n\nvar Y = 2\n")
+	w.commit("head")
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+
+	pg.waitTrue("the generated group", generatedRow+` !== null`)
+	pg.waitTrue("b/x.go shown", shownPath+` === "b/x.go" && `+selectedName+` === "x.go"`)
+	if pg.text(`String(`+treeRow("z_gen.go")+` !== null)`) != "false" {
+		pg.fatalf("the generated file is listed while its group is folded")
+	}
+
+	pg.typeKey("v")
+	pg.waitTrue("1 viewed", totals+`.includes("1 viewed")`)
+	if s := p.session(); !slices.Equal(s.Viewed, []int{1}) {
+		pg.fatalf("viewed is %v, want [1] (b/x.go)", s.Viewed)
+	}
+
+	pg.click("the generated group", generatedRow, 0)
+	pg.click("z_gen.go", treeRow("z_gen.go"), 0)
+	pg.waitTrue("a/z_gen.go shown", shownPath+` === "a/z_gen.go" && `+selectedName+` === "z_gen.go"`)
+	pg.noPageErrors()
+}
+
+// TestBrowserRenameWithoutHunks covers context expansion for a pure rename: the file view says
+// there are no line changes and offers the whole file as context, which expands into its lines.
+func TestBrowserRenameWithoutHunks(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	var src strings.Builder
+	for n := 1; n <= 12; n++ {
+		fmt.Fprintf(&src, "renamed line %d\n", n)
+	}
+	w.write("old.txt", src.String())
+	w.commit("base")
+	w.git("mv", "old.txt", "new.txt")
+	w.commit("head")
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+	pg.waitTrue("new.txt shown", shownPath+` === "new.txt"`)
+	const diffText = `document.body.textContent`
+	pg.waitTrue("the no-changes note and the gap", diffText+`.includes("No line changes.") && `+diffText+`.includes("12 unchanged lines")`)
+	pg.click("Show", button(".d-gap", "Show"), 0)
+	pg.waitTrue("the file's lines", `[...document.querySelectorAll(".d-line")].some((r) => r.textContent.includes("renamed line 7"))`)
+	pg.noPageErrors()
+}
+
+// TestBrowserAllGeneratedRevealsShownFile: with every file generated, the shown file's row is
+// revealed and selected rather than hidden in its group.
+func TestBrowserAllGeneratedRevealsShownFile(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	w.write("README", "base\n")
+	w.commit("base")
+	w.write("a/z_gen.go", generatedGo)
+	w.commit("head")
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	// Generated files get no line counts, so the group row is the sign the marks arrived.
+	pg.waitTrue("the generated group", generatedRow+` !== null`)
+	pg.waitTrue("a/z_gen.go shown and selected", shownPath+` === "a/z_gen.go" && `+selectedName+` === "z_gen.go"`)
+	pg.noPageErrors()
+}
+
+// TestBrowserFinishSends covers sending from the Finish dialog: Send needs nothing
+// chosen first, a review comment and the summary are saved and survive closing the dialog, and ⌘↵
+// sends the review rvw prints on stdout.
+func TestBrowserFinishSends(t *testing.T) {
+	t.Parallel()
+	w := oneFileWorld(t)
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+
+	pg.click("Finish…", button("header", "Finish…"), 0)
+	pg.waitTrue("the dialog", `document.querySelector("dialog").open`)
+	pg.waitTrue("Send enabled", `!(`+button("dialog", "Send review")+`).disabled`)
+
+	pg.click("Add review comment", button("dialog", "Add review comment"), 0)
+	pg.waitFocus("the dialog editor", dialogEditor)
+	pg.insertText("overall")
+	pg.cmdEnter()
+	pg.waitTrue("the review comment", dialogBodies+` === '["overall"]'`)
+	if cs := p.sessionComments(); len(cs) != 1 || cs[0].Target.Target != "review" || cs[0].Body != "overall" {
+		pg.fatalf("after the review comment, the session holds %+v", cs)
+	}
+
+	pg.click("the summary", summaryField, 0)
+	pg.waitFocus("the summary", summaryField)
+	pg.insertText("sum text")
+	pg.click("Close", button("dialog .fin-actions", "Close"), 0)
+	pg.waitTrue("the dialog closed", `!document.querySelector("dialog").open`)
+	waitSession(pg, func(s sessionView) bool { return s.Summary == "sum text" }, "the summary saved")
+
+	pg.click("Finish…", button("header", "Finish…"), 0)
+	pg.waitTrue("the dialog", `document.querySelector("dialog").open`)
+	if got := pg.text(summaryField + `.value`); got != "sum text" {
+		pg.fatalf("the reopened summary reads %q", got)
+	}
+
+	pg.cmdEnter()
+	pg.waitTrue("Review sent", endTitle+` === "Review sent"`)
+	if code := p.exitCode(); code != 0 {
+		t.Fatalf("exit %d; stderr:\n%s", code, p.stderr)
+	}
+	shown := pg.text(`document.querySelector(".end-md").value`)
+	out := p.stdout.String()
+	if out != shown {
+		t.Errorf("stdout differs from the Markdown the page shows:\nstdout:\n%s\npage:\n%s", out, shown)
+	}
+	for _, want := range []string{"# Review\n", "sum text", "overall"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout lacks %q:\n%s", want, out)
+		}
+	}
+	if resumed, _ := w.inspectDraft("last"); resumed {
+		t.Error("the draft outlived the sent review")
+	}
+	pg.noPageErrors()
+}
+
+// TestBrowserFinishEditsInPlace checks that the Finish dialog shows a line comment with the code
+// it is on, and clicking the comment's text edits it there; the dialog stays open on the same file.
+func TestBrowserFinishEditsInPlace(t *testing.T) {
+	t.Parallel()
+	w := oneFileWorld(t)
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+
+	pg.click("new line 3", newLine(3), 0)
+	pg.waitFocus("the diff editor", diffEditor)
+	pg.insertText("rename Y")
+	pg.cmdEnter()
+	pg.waitBodies("rename Y")
+
+	pg.click("Finish…", button("header", "Finish…"), 0)
+	pg.waitTrue("the dialog", `document.querySelector("dialog").open`)
+	pg.waitTrue("the quoted line", dialogQuote+` === '["var Y = 2"]'`)
+
+	pg.click("the comment text", `document.querySelector("dialog .c-body")`, 0)
+	pg.waitFocus("the dialog editor", dialogEditor)
+	pg.selectAll()
+	pg.insertText("rename Y to Z")
+	pg.cmdEnter()
+	pg.waitTrue("the edited comment", dialogBodies+` === '["rename Y to Z"]'`)
+	if pg.text(`String(document.querySelector("dialog").open)`) != "true" {
+		pg.fatalf("editing closed the dialog")
+	}
+	if got := pg.text(dialogQuote); got != `["var Y = 2"]` {
+		pg.fatalf("after the edit the quote reads %s", got)
+	}
+	if cs := p.sessionComments(); len(cs) != 1 || cs[0].Body != "rename Y to Z" || cs[0].Target.Line != 3 {
+		pg.fatalf("after the edit, the session holds %+v", cs)
+	}
+	pg.noPageErrors()
+}
+
+// TestBrowserFinishKeepsScroll checks, on a long Finish list, that quotes arriving for rows a
+// scroll mounts, and an edit made in the dialog, leave the list where the human scrolled it.
+func TestBrowserFinishKeepsScroll(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	w.write("README", "base\n")
+	w.commit("base")
+	var src strings.Builder
+	for n := 1; n <= 60; n++ {
+		fmt.Fprintf(&src, "var V%d = %d\n", n, n)
+	}
+	w.write("x.go", "package x\n"+src.String())
+	w.commit("head")
+	// Spans of 1, 3 and 30 lines give rows of different heights.
+	var seed []string
+	for n := 2; n <= 41; n++ {
+		target := fmt.Sprintf(`"target":"line","line":%d`, n)
+		switch n % 3 {
+		case 1:
+			target = fmt.Sprintf(`"target":"range","start":%d,"end":%d`, n, n+2)
+		case 2:
+			if n < 30 {
+				target = fmt.Sprintf(`"target":"range","start":%d,"end":%d`, n, n+29)
+			}
+		}
+		seed = append(seed, fmt.Sprintf(`{%s,"path":"x.go","side":"new","body":"c%d"}`, target, n))
+	}
+	path := w.seedFile("seed.json", `{"comments":[`+strings.Join(seed, ",")+`]}`)
+	p := w.start(procOptions{}, "last", "--seed", path)
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+
+	pg.click("Finish…", button("header", "Finish…"), 0)
+	pg.waitTrue("the dialog", `document.querySelector("dialog").open`)
+	const list = `document.querySelector("dialog .fin-list")`
+	const filled = `[...document.querySelectorAll("dialog .fin-quote")].every((q) => q.childElementCount > 0)`
+	pg.waitTrue("the first quotes", filled+` && document.querySelector("dialog .fin-quote") !== null`)
+	// A 30-line range quotes 20 lines; its note matches the one in the result.
+	pg.waitTrue("the omitted-lines note", `[...document.querySelectorAll("dialog .fin-quote-note")].some((n) => n.textContent === "… 10 more lines not shown")`)
+	pg.text(`String(` + list + `.scrollTop = ` + list + `.scrollHeight / 2)`)
+	pg.waitTrue("quotes for the scrolled-to rows", filled)
+	pg.waitIdle()
+	scrolled := pg.text(`String(` + list + `.scrollTop)`)
+	if scrolled == "0" {
+		pg.fatalf("the list did not scroll")
+	}
+
+	// A body wholly inside the list's viewport, so clicking it does not scroll.
+	visible := `[...document.querySelectorAll("dialog .c-body")].find((b) => { const r = b.getBoundingClientRect(),
+		l = ` + list + `.getBoundingClientRect(); return r.top >= l.top && r.bottom <= l.bottom; }) ?? null`
+	body := pg.text(`(` + visible + `)?.textContent ?? ""`)
+	if body == "" {
+		pg.fatalf("no comment body is visible after scrolling")
+	}
+	pg.click("a visible comment's text", visible, 0)
+	pg.waitFocus("the dialog editor", dialogEditor)
+	pg.selectAll()
+	pg.insertText(body + " edited")
+	pg.cmdEnter()
+	pg.waitTrue("the edited comment", dialogBodies+`.includes(`+jsString(jsString(body+" edited"))+`)`)
+	pg.waitIdle()
+	if got := pg.text(`String(` + list + `.scrollTop)`); got != scrolled {
+		pg.fatalf("the list moved from %s to %s", scrolled, got)
+	}
+	if pg.text(`String(document.querySelector("dialog").open)`) != "true" {
+		pg.fatalf("editing closed the dialog")
+	}
+	pg.noPageErrors()
+}
+
+// TestBrowserCancel covers cancelling from the page: it ends rvw with status 3.
+func TestBrowserCancel(t *testing.T) {
+	t.Parallel()
+	w := oneFileWorld(t)
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+
+	pg.click("Finish…", button("header", "Finish…"), 0)
+	pg.click("Cancel review…", button("dialog", "Cancel review…"), 0)
+	pg.click("Discard the review", button("dialog", "Discard the review"), 0)
+	pg.waitTrue("Review cancelled", endTitle+` === "Review cancelled"`)
+	if code := p.exitCode(); code != 3 {
+		t.Fatalf("exit %d, want 3; stderr:\n%s", code, p.stderr)
+	}
+	pg.noPageErrors()
+}
+
+// TestBrowserRejectedSave covers a save the server refuses: the editor stays open
+// with its text and the reason, the review goes on, and a valid save then succeeds.
+func TestBrowserRejectedSave(t *testing.T) {
+	t.Parallel()
+	w := oneFileWorld(t)
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+
+	pg.click("new line 1", newLine(1), 0)
+	pg.waitFocus("the diff editor", diffEditor)
+	// One byte over the limit; set directly, since typing 64 KiB key by key is slow.
+	pg.eval(`(() => { const t = `+diffEditor+`; t.value = "x".repeat(65537); t.dispatchEvent(new Event("input", { bubbles: true })); })()`, nil)
+	pg.cmdEnter()
+	pg.waitTrue("the save error", editorError+` !== ""`)
+	if n := pg.text(`String(` + diffEditor + `.value.length)`); n != "65537" {
+		pg.fatalf("the refused text was not kept: length %s", n)
+	}
+	if pg.text(`String(document.querySelector(".end") !== null)`) != "false" {
+		pg.fatalf("a refused save ended the page")
+	}
+	if cs := p.sessionComments(); len(cs) != 0 {
+		pg.fatalf("a refused save reached the session: %d comments", len(cs))
+	}
+
+	pg.waitFocus("the diff editor", diffEditor)
+	pg.selectAll()
+	pg.insertText("ok")
+	pg.cmdEnter()
+	pg.waitBodies("ok")
+	if cs := p.sessionComments(); len(cs) != 1 || cs[0].Body != "ok" {
+		pg.fatalf("after the valid save, the session holds %+v", cs)
+	}
+	pg.noPageErrors()
+}
+
+// TestBrowserServerGone: when rvw is killed, the next action ends the page with a notice
+// instead of failing silently.
+func TestBrowserServerGone(t *testing.T) {
+	t.Parallel()
+	w := oneFileWorld(t)
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+	// A request in flight at the kill would end the page before the action does.
+	pg.waitIdle()
+
+	if err := p.cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	p.exitCode()
+	// A key needs no element, so the test holds even if the status poll ends the page first.
+	pg.typeKey("v")
+	pg.waitTrue("the server-gone page", endTitle+` === "rvw is no longer running"`)
+	pg.noPageErrors()
+}
+
+// waitSession polls the server's session until cond holds.
+func waitSession(pg *page, cond func(sessionView) bool, what string) {
+	pg.t.Helper()
+	pg.proc.waitFor(what, func() bool { return cond(pg.proc.session()) })
+}
+
+// rebasedPrefix starts the error of an editor whose write was refused because another writer
+// saved the comment differently: the editor then shows the stored text (Q-41).
+const rebasedPrefix = "This comment was saved differently elsewhere"
+
+// waitRebased waits until the editor whose textarea the locator finds shows the stored body, and
+// its error, which errorText yields, keeps mine, the human's text that was not saved.
+func (pg *page) waitRebased(textarea, errorText, stored, mine string) {
+	pg.t.Helper()
+	pg.waitTrue("the editor showing the stored text", `(() => {
+		const t = `+textarea+`, msg = `+errorText+`;
+		return t?.value === `+jsString(stored)+` && msg.startsWith(`+jsString(rebasedPrefix)+`) &&
+			msg.includes(`+jsString(mine)+`) && !msg.includes("close and reopen");
+	})()`)
+}
+
+// saveAfterRefusal replaces the text of the editor the textarea locator finds, after a refused
+// write, with text and saves it with ⌘↵: exactly one request stores text over the other writer's
+// comment, and the editor closes. It needs wrapCommentPuts.
+func (pg *page) saveAfterRefusal(textarea string, other sessionComment, text string) {
+	pg.t.Helper()
+	puts := pg.commentPuts()
+	pg.click("the refused editor", textarea, 0)
+	pg.selectAll()
+	pg.insertText(text)
+	pg.cmdEnter()
+	pg.waitTrue("the editor closed", textarea+` === null`)
+	if n := pg.commentPuts(); n != puts+1 {
+		pg.fatalf("saving after the refusal sent %d requests; want 1", n-puts)
+	}
+	var got []sessionComment
+	for _, c := range pg.proc.sessionComments() {
+		if c.Body == text {
+			got = append(got, c)
+		}
+	}
+	if len(got) != 1 || got[0].ID != other.ID || got[0].Version <= other.Version {
+		pg.fatalf("after saving %q over %+v, the session holds %+v", text, other, pg.proc.sessionComments())
+	}
+	pg.noPageErrors()
+}
+
+// sendAndCheck sends the review from the open Finish dialog, expects rvw to exit 0, and returns
+// what it printed.
+func (pg *page) sendAndCheck() string {
+	pg.t.Helper()
+	pg.click("Send review", button("dialog", "Send review"), 0)
+	pg.waitTrue("Review sent", endTitle+` === "Review sent"`)
+	if code := pg.proc.exitCode(); code != 0 {
+		pg.t.Fatalf("exit %d; stderr:\n%s", code, pg.proc.stderr)
+	}
+	return pg.proc.stdout.String()
+}
+
+// oldLine is the gutter of line n on the old side.
+func oldLine(n int) string {
+	return fmt.Sprintf(`document.querySelector('.d-ln[data-side="old"][data-line="%d"]')`, n)
+}
+
+// hasBody is true once a comment with body shows anywhere on the page.
+func hasBody(body string) string {
+	return `[...document.querySelectorAll(".c-body")].some((e) => e.textContent === ` + jsString(body) + `)`
+}
+
+// TestBrowserCommentsInResultOrder checks that comments made out of order, on two files and every
+// target kind, are listed in result order, before and after a reload. The page takes the order from
+// the server; it does not sort comments itself.
+func TestBrowserCommentsInResultOrder(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	w.write("a/m.go", "package a\n\nvar X = 1\n")
+	w.write("z/n.txt", "one\ntwo\n")
+	w.commit("base")
+	w.write("a/m.go", "package a\n\nvar X = 2\n")
+	w.write("z/n.txt", "one\nTWO\n")
+	w.commit("head")
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+
+	comment := func(what, at, body string) {
+		pg.t.Helper()
+		pg.click(what, at, 0)
+		pg.waitFocus("the diff editor", diffEditor)
+		pg.insertText(body)
+		pg.cmdEnter()
+		pg.waitTrue("the comment "+body, hasBody(body))
+	}
+	pg.click("n.txt", treeRow("n.txt"), 0)
+	pg.waitTrue("n.txt shown", shownPath+` === "z/n.txt"`)
+	comment("new line 1", newLine(1), "z-new")
+	pg.click("m.go", treeRow("m.go"), 0)
+	pg.waitTrue("m.go shown", shownPath+` === "a/m.go"`)
+	comment("new line 3", newLine(3), "a-new")
+	comment("old line 3", oldLine(3), "a-old")
+	comment("Comment on file", button(".fh-actions", "Comment on file"), "a-file")
+
+	pg.click("n.txt", treeRow("n.txt"), 0)
+	pg.waitTrue("n.txt shown", shownPath+` === "z/n.txt"`)
+	pg.click("Edit on z-new", commentButton("z-new", "Edit"), 0)
+	pg.waitFocus("the diff editor", diffEditor)
+	pg.selectAll()
+	pg.insertText("z-edited")
+	pg.cmdEnter()
+	pg.waitTrue("the edit", hasBody("z-edited"))
+
+	pg.click("Finish…", button("header", "Finish…"), 0)
+	pg.waitTrue("the dialog", `document.querySelector("dialog").open`)
+	pg.click("Add review comment", button("dialog", "Add review comment"), 0)
+	pg.waitFocus("the dialog editor", dialogEditor)
+	pg.insertText("overall")
+	pg.cmdEnter()
+
+	// Review, then files in order; in a file, the file comment, then old side, then new side.
+	const want = `'["overall","a-file","a-old","a-new","z-edited"]'`
+	pg.waitTrue("the dialog in result order", dialogBodies+` === `+want)
+	pg.reload()
+	pg.ready()
+	pg.click("Finish…", button("header", "Finish…"), 0)
+	pg.waitTrue("the dialog", `document.querySelector("dialog").open`)
+	pg.waitTrue("the dialog in result order after a reload", dialogBodies+` === `+want)
+	pg.noPageErrors()
+}
+
+// commentNamed returns the session comment whose body is body.
+func (p *proc) commentNamed(body string) sessionComment {
+	p.t.Helper()
+	for _, c := range p.sessionComments() {
+		if c.Body == body {
+			return c
+		}
+	}
+	p.t.Fatalf("no comment %q in %+v", body, p.sessionComments())
+	return sessionComment{}
+}
+
+// editAs edits comment c's body as another writer would, at the version it holds.
+func (p *proc) editAs(c sessionComment, body string) {
+	p.t.Helper()
+	header := http.Header{"If-Match": {fmt.Sprintf(`"%d"`, c.Version)}}
+	if status, data := p.doWith(http.MethodPut, "/api/comments/"+c.ID, fmt.Sprintf(`{"body":%q}`, body), header); status != http.StatusOK {
+		p.t.Fatalf("the other writer's edit: status %d; body %s", status, data)
+	}
+}
+
+// deleteAs deletes comment c as another writer would, at the version it holds.
+func (p *proc) deleteAs(c sessionComment) {
+	p.t.Helper()
+	header := http.Header{"If-Match": {fmt.Sprintf(`"%d"`, c.Version)}}
+	if status, data := p.doWith(http.MethodDelete, "/api/comments/"+c.ID, "", header); status != http.StatusNoContent {
+		p.t.Fatalf("the other writer's delete: status %d; body %s", status, data)
+	}
+}
+
+// commentOnNewLine adds a comment with body on new line n through the diff view.
+func (pg *page) commentOnNewLine(n int, body string) {
+	pg.t.Helper()
+	pg.click(fmt.Sprintf("new line %d", n), newLine(n), 0)
+	pg.waitFocus("the diff editor", diffEditor)
+	pg.insertText(body)
+	pg.cmdEnter()
+	pg.waitTrue("the comment "+body, hasBody(body))
+}
+
+// editInDiff opens the diff editor on the comment with body and replaces its text with text,
+// leaving it unsaved.
+func (pg *page) editInDiff(body, text string) {
+	pg.t.Helper()
+	pg.click("Edit on "+body, commentButton(body, "Edit"), 0)
+	pg.waitFocus("the diff editor", diffEditor)
+	pg.selectAll()
+	pg.insertText(text)
+}
+
+// TestBrowserFinishLeavesTheDiffEditor: Finish saves the diff view's open editor before the dialog
+// opens, so the dialog's later edit of the same comment is the one sent, not overwritten by the
+// diff editor's older text.
+func TestBrowserFinishLeavesTheDiffEditor(t *testing.T) {
+	t.Parallel()
+	w := oneFileWorld(t)
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+
+	pg.commentOnNewLine(1, "X")
+	pg.editInDiff("X", "A")
+	pg.click("Finish…", button("header", "Finish…"), 0)
+	pg.waitTrue("the dialog", `document.querySelector("dialog").open`)
+	if pg.text(`String(`+diffEditor+` === null)`) != "true" {
+		pg.fatalf("the diff editor is still open behind the dialog")
+	}
+	if c := p.sessionComments(); len(c) != 1 || c[0].Body != "A" {
+		pg.fatalf("opening Finish did not save the diff editor: %+v", c)
+	}
+	pg.click("the comment text", `document.querySelector("dialog .c-body")`, 0)
+	pg.waitFocus("the dialog editor", dialogEditor)
+	pg.selectAll()
+	pg.insertText("B")
+	pg.cmdEnter()
+	pg.waitTrue("the dialog's edit", dialogBodies+` === '["B"]'`)
+	pg.click("Send review", button("dialog", "Send review"), 0)
+	pg.waitTrue("Review sent", endTitle+` === "Review sent"`)
+	if code := p.exitCode(); code != 0 {
+		t.Fatalf("exit %d; stderr:\n%s", code, p.stderr)
+	}
+	if out := p.stdout.String(); !strings.Contains(out, "\n> B\n") || strings.Contains(out, "\n> A\n") {
+		t.Errorf("stdout does not hold the dialog's edit B alone:\n%s", out)
+	}
+	pg.noPageErrors()
+}
+
+// TestBrowserFinishStaysClosedOnARefusedSave: when the diff editor cannot be saved, Finish does not
+// open, the diff editor shows why, and nothing is sent.
+func TestBrowserFinishStaysClosedOnARefusedSave(t *testing.T) {
+	t.Parallel()
+	w := oneFileWorld(t)
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+
+	pg.commentOnNewLine(1, "X")
+	pg.editInDiff("X", "  ")
+	pg.click("Finish…", button("header", "Finish…"), 0)
+	pg.waitTrue("the empty-edit error", editorError+`.includes("cannot be empty")`)
+	pg.waitIdle()
+	if pg.text(`String(document.querySelector("dialog").open)`) != "false" {
+		pg.fatalf("Finish opened over an editor that could not be saved")
+	}
+	if c := p.sessionComments(); len(c) != 1 || c[0].Body != "X" {
+		pg.fatalf("the refused save changed the session: %+v", c)
+	}
+	if out := p.stdout.String(); out != "" {
+		t.Errorf("rvw printed a result:\n%s", out)
+	}
+	pg.noPageErrors()
+}
+
+// TestBrowserDeleteRefusedAsStale: a Delete click names the version the page shows. When another
+// writer has saved the comment since, nothing is deleted and the page shows the newer text (Q-27).
+func TestBrowserDeleteRefusedAsStale(t *testing.T) {
+	t.Parallel()
+	w := oneFileWorld(t)
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+
+	pg.commentOnNewLine(1, "X")
+	pg.waitBodies("X")
+	id := p.commentNamed("X").ID
+	p.editAs(p.commentNamed("X"), "other")
+	pg.click("Delete on X", commentButton("X", "Delete"), 0)
+	// The refused delete reloads the comments, so the page shows the other writer's text.
+	pg.waitBodies("other")
+	if c := p.sessionComments(); len(c) != 1 || c[0].ID != id || c[0].Body != "other" {
+		pg.fatalf("the stale delete changed the comments: %+v", c)
+	}
+	pg.click("Delete on other", commentButton("other", "Delete"), 0)
+	pg.waitBodies([]string{}...)
+	if c := p.sessionComments(); len(c) != 0 {
+		pg.fatalf("comments after deleting the reloaded comment: %+v", c)
+	}
+	pg.noPageErrors()
+}
+
+// TestBrowserSecondWriter: a diff editor saves only over the text it loaded. When another writer
+// changed the comment since, the refused editor shows the stored text and keeps the human's text
+// in its error, and its next save edits the stored version; another writer's save of the same text
+// is no conflict; another writer's delete is reported. A create whose id another writer took at
+// the editor's own target is handled as a change; one taken at another target closes the editor
+// and is reported.
+func TestBrowserSecondWriter(t *testing.T) {
+	t.Parallel()
+	w := oneFileWorld(t)
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+	pg.wrapCommentPuts()
+
+	pg.commentOnNewLine(1, "X")
+	pg.editInDiff("X", "mine")
+	p.editAs(p.commentNamed("X"), "other")
+	other := p.commentNamed("other")
+	pg.cmdEnter()
+	pg.waitRebased(diffEditor, editorError, "other", "mine")
+	if c := p.sessionComments(); len(c) != 1 || c[0] != other {
+		pg.fatalf("the page overwrote the other writer: %+v", c)
+	}
+	pg.saveAfterRefusal(diffEditor, other, "mine again")
+	pg.waitBodies("mine again")
+
+	pg.editInDiff("mine again", "same")
+	p.editAs(p.commentNamed("mine again"), "same")
+	pg.cmdEnter()
+	pg.waitTrue("the editor closed", diffEditor+` === null`)
+	pg.waitBodies("same")
+
+	pg.editInDiff("same", "resurrected")
+	p.deleteAs(p.commentNamed("same"))
+	pg.cmdEnter()
+	// The reload that finds the comment gone closes its editor; the reason shows in the toast.
+	pg.waitTrue("the deleted notice", `document.querySelector(".toast")?.textContent === "This comment was deleted." && `+diffEditor+` === null`)
+	if c := p.sessionComments(); len(c) != 0 {
+		pg.fatalf("the deleted comment came back: %+v", c)
+	}
+
+	// The page names a new comment when its editor opens; the other writer takes that id first,
+	// for a review comment.
+	pg.eval(`crypto.randomUUID = () => "00000000-0000-4000-8000-000000000000"`, nil)
+	pg.click("new line 2", newLine(2), 0)
+	pg.waitFocus("the diff editor", diffEditor)
+	pg.insertText("page text")
+	p.createComment("h-00000000-0000-4000-8000-000000000000", `{"target":{"target":"review"},"body":"taken"}`)
+	taken := p.commentNamed("taken")
+	puts := pg.commentPuts()
+	pg.cmdEnter()
+	pg.waitTrue("the reused-ID notice", `(document.querySelector(".toast")?.textContent ?? "").startsWith("Another comment already uses this comment's ID") && `+diffEditor+` === null`)
+	if n := pg.commentPuts(); n != puts+1 {
+		pg.fatalf("the refused create sent %d requests; want 1", n-puts)
+	}
+	if c := p.sessionComments(); len(c) != 1 || c[0] != taken {
+		pg.fatalf("the page's create replaced the other writer's comment: %+v", c)
+	}
+
+	// The other writer takes the next id at the line the editor is on.
+	pg.eval(`crypto.randomUUID = () => "00000000-0000-4000-8000-000000000001"`, nil)
+	pg.click("new line 2", newLine(2), 0)
+	pg.waitFocus("the diff editor", diffEditor)
+	pg.insertText("page text")
+	p.createComment("h-00000000-0000-4000-8000-000000000001", `{"target":{"target":"line","file":0,"side":"new","line":2},"body":"taken here"}`)
+	here := p.commentNamed("taken here")
+	pg.cmdEnter()
+	pg.waitRebased(diffEditor, editorError, "taken here", "page text")
+	if c := p.sessionComments(); len(c) != 2 || p.commentNamed("taken here") != here {
+		pg.fatalf("the page's create replaced the other writer's comment: %+v", c)
+	}
+	pg.saveAfterRefusal(diffEditor, here, "page text again")
+	pg.noPageErrors()
+}
+
+// TestBrowserRenamedFileOldSide: a comment on a renamed file's old side names the old path, in the
+// Finish dialog and in the result.
+func TestBrowserRenamedFileOldSide(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	w.write("old.txt", "one\ntwo\nthree\n")
+	w.commit("base")
+	w.git("mv", "old.txt", "new.txt")
+	w.write("new.txt", "one\nTWO\nthree\n")
+	w.commit("head")
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+	pg.waitTrue("new.txt shown", shownPath+` === "new.txt"`)
+
+	pg.click("old line 2", oldLine(2), 0)
+	pg.waitFocus("the diff editor", diffEditor)
+	pg.insertText("was two")
+	pg.cmdEnter()
+	pg.waitTrue("the comment", hasBody("was two"))
+	pg.click("Finish…", button("header", "Finish…"), 0)
+	pg.waitTrue("the dialog", `document.querySelector("dialog").open`)
+	pg.waitTrue("the old path in the dialog", `document.querySelector("dialog .c-target")?.textContent === "old.txt · line 2 (old)"`)
+	pg.cmdEnter()
+	pg.waitTrue("Review sent", endTitle+` === "Review sent"`)
+	if code := p.exitCode(); code != 0 {
+		t.Fatalf("exit %d; stderr:\n%s", code, p.stderr)
+	}
+	if out := p.stdout.String(); !strings.Contains(out, "\n### `old.txt`:2 (old)\n") {
+		t.Errorf("stdout lacks the old path heading:\n%s", out)
+	}
+	pg.noPageErrors()
+}
+
+// wrapCommentPuts wraps the page's fetch for PUT /api/comments/: each such request is counted in
+// window.rvwPuts, waits while window.rvwHold is a pending promise, and reaches the server; while
+// window.rvwLose is positive, its reply is then lost, as when a connection drops.
+func (pg *page) wrapCommentPuts() {
+	pg.t.Helper()
+	pg.eval(`(() => {
+		const real = window.fetch;
+		window.rvwPuts = 0;
+		window.rvwLose = 0;
+		window.rvwHold = null;
+		window.fetch = async (input, init) => {
+			if (init?.method !== "PUT" || !String(input).includes("/api/comments/")) return real(input, init);
+			window.rvwPuts++;
+			if (window.rvwHold) await window.rvwHold;
+			const res = await real(input, init);
+			if (window.rvwLose > 0) {
+				window.rvwLose--;
+				throw new TypeError("Failed to fetch");
+			}
+			return res;
+		};
+	})()`, nil)
+}
+
+// loseNextReply makes the next comment PUT's reply get lost.
+func (pg *page) loseNextReply() { pg.eval(`window.rvwLose = 1`, nil) }
+
+func (pg *page) commentPuts() int {
+	pg.t.Helper()
+	var n int
+	pg.eval(`window.rvwPuts`, &n)
+	return n
+}
+
+const lostReplyError = `"rvw did not answer; save again to retry."`
+
+// sendLost saves the diff editor with its reply lost, and waits for the editor to say so.
+func (pg *page) sendLost() {
+	pg.t.Helper()
+	pg.loseNextReply()
+	pg.cmdEnter()
+	pg.waitTrue("the lost-reply notice", editorError+` === `+lostReplyError)
+}
+
+// TestBrowserLostCreateReply: a create that reached the server but whose reply was lost is resent
+// on the next save, and the editor closes on its reply: one comment, with the text at that save.
+// Until then its target stays where the create sent it.
+func TestBrowserLostCreateReply(t *testing.T) {
+	t.Parallel()
+	w := oneFileWorld(t)
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+	pg.wrapCommentPuts()
+
+	// Saved again unchanged.
+	pg.click("new line 1", newLine(1), 0)
+	pg.waitFocus("the diff editor", diffEditor)
+	pg.insertText("first")
+	pg.sendLost()
+	pg.cmdEnter()
+	pg.waitTrue("the editor closed", diffEditor+` === null`)
+	if cs := p.sessionComments(); len(cs) != 1 || cs[0].Body != "first" {
+		pg.fatalf("after resending the lost create, the session holds %+v", cs)
+	}
+
+	// Changed, then saved.
+	pg.click("new line 2", newLine(2), 0)
+	pg.waitFocus("the diff editor", diffEditor)
+	pg.insertText("second draft")
+	pg.sendLost()
+	pg.selectAll()
+	pg.insertText("second")
+	pg.cmdEnter()
+	pg.waitTrue("the editor closed", diffEditor+` === null`)
+	pg.waitBodies("first", "second")
+	cs := p.sessionComments()
+	if len(cs) != 2 || !slices.ContainsFunc(cs, func(c sessionComment) bool { return c.Body == "second" && c.Target.Line == 2 }) {
+		pg.fatalf("after a changed resend, the session holds %+v", cs)
+	}
+
+	// A shift-click does not move the lost create's target; saving stores the new text there.
+	pg.click("new line 3", newLine(3), 0)
+	pg.waitFocus("the diff editor", diffEditor)
+	pg.insertText("here")
+	pg.sendLost()
+	pg.click("new line 2", newLine(2), modShift)
+	pg.waitTrue("the retarget notice", editorError+`.startsWith("This comment may already be saved here")`)
+	if got := pg.text(editorTarget); !strings.HasPrefix(got, "line 3") {
+		pg.fatalf("after the refused retarget the editor targets %q", got)
+	}
+	pg.click("the diff editor", diffEditor, 0)
+	pg.selectAll()
+	pg.insertText("there")
+	pg.cmdEnter()
+	pg.waitTrue("the editor closed", diffEditor+` === null`)
+	cs = p.sessionComments()
+	if len(cs) != 3 || !slices.ContainsFunc(cs, func(c sessionComment) bool {
+		return c.Body == "there" && c.Target.Target == "line" && c.Target.Line == 3
+	}) {
+		pg.fatalf("after saving the lost create, the session holds %+v", cs)
+	}
+	if got := pg.text(editorError); got != "" {
+		pg.fatalf("an error remains: %q", got)
+	}
+	pg.noPageErrors()
+}
+
+// TestBrowserLostEditReply: an edit whose reply was lost is resent at the version it was sent at;
+// the editor adopts the version from that reply and then saves any newer text.
+func TestBrowserLostEditReply(t *testing.T) {
+	t.Parallel()
+	w := oneFileWorld(t)
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+	pg.wrapCommentPuts()
+	pg.commentOnNewLine(1, "X")
+	pg.commentOnNewLine(2, "Y")
+
+	pg.editInDiff("X", "X1")
+	pg.sendLost()
+	pg.cmdEnter()
+	pg.waitTrue("the editor closed", diffEditor+` === null`)
+	pg.waitBodies("X1", "Y")
+
+	pg.editInDiff("Y", "Y draft")
+	pg.sendLost()
+	pg.selectAll()
+	pg.insertText("Y1")
+	pg.cmdEnter()
+	pg.waitTrue("the editor closed", diffEditor+` === null`)
+	pg.waitBodies("X1", "Y1")
+	if cs := p.sessionComments(); len(cs) != 2 || p.commentNamed("Y1").Target.Line != 2 {
+		pg.fatalf("after the lost edits, the session holds %+v", cs)
+	}
+	if got := pg.text(editorError); got != "" {
+		pg.fatalf("an error remains: %q", got)
+	}
+	pg.noPageErrors()
+}
+
+// TestBrowserLostReplyThenSecondWriter: a resent edit is stale like any other: when another
+// writer changed the comment after the lost edit landed, the resend is refused, the editor shows
+// the other writer's text, and its next save edits that.
+func TestBrowserLostReplyThenSecondWriter(t *testing.T) {
+	t.Parallel()
+	w := oneFileWorld(t)
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+	pg.wrapCommentPuts()
+	pg.commentOnNewLine(1, "X")
+
+	pg.editInDiff("X", "mine")
+	pg.sendLost()
+	p.editAs(p.commentNamed("mine"), "other")
+	other := p.commentNamed("other")
+	pg.cmdEnter()
+	pg.waitRebased(diffEditor, editorError, "other", "mine")
+	if c := p.sessionComments(); len(c) != 1 || c[0] != other {
+		pg.fatalf("the resend overwrote the other writer: %+v", c)
+	}
+	pg.saveAfterRefusal(diffEditor, other, "mine again")
+}
+
+// TestBrowserEmptyComments: the server decides what is empty. Clearing a saved comment is refused
+// with its reason and changes nothing; a new comment of other whitespace is refused the same way;
+// a new comment of ASCII spaces only was never typed in and closes without a request.
+func TestBrowserEmptyComments(t *testing.T) {
+	t.Parallel()
+	w := oneFileWorld(t)
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+	pg.wrapCommentPuts()
+	pg.commentOnNewLine(1, "keep")
+	kept := p.commentNamed("keep")
+
+	pg.editInDiff("keep", " \t ")
+	pg.cmdEnter()
+	pg.waitTrue("the server's reason", editorError+` === "a comment cannot be empty or only whitespace"`)
+	if c := p.commentNamed("keep"); c.Version != kept.Version {
+		pg.fatalf("a refused edit changed the comment: %+v, was %+v", c, kept)
+	}
+	pg.press("Escape", "Escape", 27, 0)
+	pg.waitTrue("the editor closed", diffEditor+` === null`)
+
+	pg.click("new line 2", newLine(2), 0)
+	pg.waitFocus("the diff editor", diffEditor)
+	pg.insertText(" ")
+	pg.cmdEnter()
+	pg.waitTrue("the server's reason", editorError+` === "a comment cannot be empty or only whitespace"`)
+	if cs := p.sessionComments(); len(cs) != 1 {
+		pg.fatalf("a no-break space created a comment: %+v", cs)
+	}
+	if got := pg.text(endTitle); got != "" {
+		pg.fatalf("the page ended: %q", got)
+	}
+	pg.press("Escape", "Escape", 27, 0)
+	pg.waitTrue("the editor closed", diffEditor+` === null`)
+
+	puts := pg.commentPuts()
+	pg.click("new line 3", newLine(3), 0)
+	pg.waitFocus("the diff editor", diffEditor)
+	pg.insertText("   ")
+	pg.cmdEnter()
+	pg.waitTrue("the editor closed", diffEditor+` === null`)
+	if n := pg.commentPuts(); n != puts {
+		pg.fatalf("a blank new comment sent %d requests", n-puts)
+	}
+	if cs := p.sessionComments(); len(cs) != 1 {
+		pg.fatalf("a blank new comment was saved: %+v", cs)
+	}
+	pg.noPageErrors()
+}
+
+// dialogEdit finds the Edit button on the Finish dialog's comment whose body is body.
+func dialogEdit(body string) string {
+	return `[...([...document.querySelectorAll("dialog .fin-comment")].find((c) => c.querySelector(".c-body")?.textContent === ` +
+		jsString(body) + `)?.querySelectorAll("button") ?? [])].find((b) => b.textContent === "Edit") ?? null`
+}
+
+// dialogEditorIs holds when the dialog has exactly one comment editor and it holds text.
+func dialogEditorIs(text string) string {
+	return `(() => { const ts = document.querySelectorAll("dialog .editor-text"); return ts.length === 1 && ts[0].value === ` + jsString(text) + `; })()`
+}
+
+// TestBrowserFinishSwitchesEditors: in the Finish dialog, opening another editor first leaves the
+// open one: its text is saved, and when the save is refused the open editor stays with the reason.
+// Clicks made while it is being saved open nothing more.
+func TestBrowserFinishSwitchesEditors(t *testing.T) {
+	t.Parallel()
+	w := oneFileWorld(t)
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+	pg.commentOnNewLine(1, "A")
+	pg.commentOnNewLine(2, "B")
+	pg.commentOnNewLine(3, "C")
+	pg.wrapCommentPuts()
+	pg.click("Finish…", button("header", "Finish…"), 0)
+	pg.waitTrue("the dialog", `document.querySelector("dialog").open`)
+
+	// Unsaved text in A is saved when B opens.
+	pg.click("Edit on A", dialogEdit("A"), 0)
+	pg.waitFocus("the dialog editor", dialogEditor)
+	pg.selectAll()
+	pg.insertText("A1")
+	pg.click("Edit on B", dialogEdit("B"), 0)
+	pg.waitTrue("B's editor alone", dialogEditorIs("B"))
+	a1 := p.commentNamed("A1")
+
+	// A refused save keeps B's editor, with the reason, and C does not open.
+	pg.click("B's editor", dialogEditor, 0)
+	pg.selectAll()
+	pg.insertText("  ")
+	pg.click("Edit on C", dialogEdit("C"), 0)
+	pg.waitTrue("the server's reason", `document.querySelector("dialog .editor-error")?.textContent === "a comment cannot be empty or only whitespace"`)
+	pg.waitIdle()
+	if !pg.bool(dialogEditorIs("  ")) {
+		pg.fatalf("B's editor did not stay open with its text")
+	}
+	p.commentNamed("B")
+	pg.click("B's editor", dialogEditor, 0)
+	pg.selectAll()
+	pg.insertText("B")
+	pg.cmdEnter()
+	pg.waitTrue("B's editor closed", `document.querySelectorAll("dialog .editor-text").length === 0`)
+
+	// While A's save is held, B is clicked and then C: only B opens, and A is saved once.
+	pg.click("Edit on A1", dialogEdit("A1"), 0)
+	pg.waitFocus("the dialog editor", dialogEditor)
+	pg.selectAll()
+	pg.insertText("A2")
+	pg.eval(`window.rvwHold = new Promise((r) => (window.rvwRelease = r))`, nil)
+	puts := pg.commentPuts()
+	pg.click("Edit on B", dialogEdit("B"), 0)
+	pg.waitTrue("A's save sent", `window.rvwPuts === `+fmt.Sprint(puts+1))
+	pg.click("Edit on C", dialogEdit("C"), 0)
+	pg.eval(`window.rvwHold = null, window.rvwRelease()`, nil)
+	pg.waitTrue("B's editor alone", dialogEditorIs("B"))
+	pg.waitIdle()
+	if !pg.bool(dialogEditorIs("B")) {
+		pg.fatalf("the editor open after the held save is not B's alone")
+	}
+	if n := pg.commentPuts(); n != puts+1 {
+		pg.fatalf("A was sent %d times; want once", n-puts)
+	}
+	if a2 := p.commentNamed("A2"); a2.ID != a1.ID || a2.Version <= a1.Version {
+		pg.fatalf("A after the held save: %+v, was %+v", a2, a1)
+	}
+
+	// "Add review comment" leaves the open editor the same way.
+	pg.click("B's editor", dialogEditor, 0)
+	pg.selectAll()
+	pg.insertText("B2")
+	pg.click("Add review comment", button("dialog", "Add review comment"), 0)
+	pg.waitTrue("the new review comment's editor alone", dialogEditorIs(""))
+	p.commentNamed("B2")
+	pg.noPageErrors()
+}
+
+func (pg *page) bool(expr string) bool {
+	pg.t.Helper()
+	var ok bool
+	pg.eval(expr, &ok)
+	return ok
+}
+
+// oneRowView is where TestBrowserOneRowPerComment edits a new comment: its locators, how it opens
+// the editor, and how it leaves the editor without editing it and opens the Finish dialog.
+type oneRowView struct {
+	name                           string
+	editor, editors, error, bodies string
+	agentOnly                      bool
+	open, leave                    func(pg *page)
+}
+
+// TestBrowserOneRowPerComment: once the server holds a comment, the view shows it in one row. A
+// create whose reply was lost, resent by a save that then fails, leaves its editor in the
+// comment's place, not beside a row for the same comment. The resent create lands and the edit
+// after it is refused (put), or the resend finds another writer's text there (reload): the editor
+// then shows that text, and saves over it or is left without a request. The Finish dialog shows
+// its editor while it lists agent comments only.
+func TestBrowserOneRowPerComment(t *testing.T) {
+	t.Parallel()
+	const agent = "agent says"
+	diff := oneRowView{
+		name: "diff", editor: diffEditor, editors: ".d-editor", error: ".d-editor .editor-error", bodies: ".d-comment .c-body",
+		open: func(pg *page) {
+			pg.click("new line 1", newLine(1), 0)
+			pg.waitFocus("the diff editor", diffEditor)
+		},
+		leave: func(pg *page) {
+			pg.click("Finish…", button("header", "Finish…"), 0)
+			pg.waitTrue("the dialog", `document.querySelector("dialog").open`)
+			pg.waitTrue("the diff editor closed", diffEditor+` === null`)
+		},
+	}
+	finish := oneRowView{
+		name: "finish", editor: dialogEditor, editors: "dialog .editor-text", error: "dialog .editor-error", bodies: "dialog .c-body",
+		open: func(pg *page) {
+			pg.click("Finish…", button("header", "Finish…"), 0)
+			pg.waitTrue("the dialog", `document.querySelector("dialog").open`)
+			pg.click("Add review comment", button("dialog", "Add review comment"), 0)
+			pg.waitFocus("the dialog editor", dialogEditor)
+		},
+		leave: func(pg *page) {
+			pg.click("Add review comment", button("dialog", "Add review comment"), 0)
+			pg.waitTrue("the new review comment's editor alone", dialogEditorIs(""))
+		},
+	}
+	agentOnly := finish
+	agentOnly.name, agentOnly.agentOnly = "finish agent only", true
+	agentOnly.open = func(pg *page) {
+		pg.click("Finish…", button("header", "Finish…"), 0)
+		pg.waitTrue("the dialog", `document.querySelector("dialog").open`)
+		pg.click("Agent comments only", `document.querySelector(".fin-filter input")`, 0)
+		pg.waitTrue("the agent comments alone", dialogBodies+` === `+jsString(`["`+agent+`"]`))
+		pg.click("Add review comment", button("dialog", "Add review comment"), 0)
+		pg.waitFocus("the dialog editor", dialogEditor)
+	}
+	// U+00A0 is not blank to the page and is empty to the server.
+	const nbsp = "\u00a0"
+	for _, tc := range []struct {
+		path        string
+		view        oneRowView
+		other, text string
+		// then: "save" saves fixed text after the refusal; "leave" leaves the editor unedited.
+		then string
+	}{
+		{path: "put", view: diff, text: nbsp},
+		{path: "reload", view: diff, other: "other", text: "mine", then: "save"},
+		{path: "reload", view: diff, other: "other", text: "mine", then: "leave"},
+		{path: "put", view: finish, text: nbsp},
+		{path: "reload", view: finish, other: "other", text: "mine", then: "save"},
+		{path: "reload", view: finish, other: "other", text: "mine", then: "leave"},
+		{path: "put", view: agentOnly, text: nbsp, then: "save"},
+		{path: "reload", view: agentOnly, other: "other", text: "mine", then: "save"},
+	} {
+		t.Run(strings.Join([]string{tc.view.name, tc.path, tc.then}, "/"), func(t *testing.T) {
+			t.Parallel()
+			w := oneFileWorld(t)
+			args := []string{"last"}
+			if tc.view.agentOnly {
+				args = append(args, "--seed", w.seedFile("seed.json", `{"comments":[{"target":"line","path":"b/x.go","side":"new","line":1,"body":"`+agent+`"}]}`))
+			}
+			p := w.start(procOptions{}, args...)
+			p.waitURL()
+			pg := openPage(t, p)
+			pg.ready()
+			pg.wrapCommentPuts()
+
+			tc.view.open(pg)
+			pg.insertText("first")
+			pg.loseNextReply()
+			pg.cmdEnter()
+			pg.waitTrue("the lost-reply notice", `document.querySelector(`+jsString(tc.view.error)+`)?.textContent === `+lostReplyError)
+			want := "first"
+			if tc.other != "" {
+				p.editAs(p.commentNamed("first"), tc.other)
+				want = tc.other
+			}
+			stored := p.commentNamed(want)
+			pg.selectAll()
+			pg.insertText(tc.text)
+			pg.cmdEnter()
+			// The rows were rebuilt before the refusal shows. waitIdle would not return: the lost
+			// reply's response is never read.
+			if tc.other == "" {
+				pg.waitTrue("the refusal", `document.querySelector(`+jsString(tc.view.error)+`)?.textContent === "a comment cannot be empty or only whitespace"`)
+			} else {
+				pg.waitRebased(tc.view.editor, `(document.querySelector(`+jsString(tc.view.error)+`)?.textContent ?? "")`, tc.other, tc.text)
+			}
+			if n := pg.text(`String(document.querySelectorAll(` + jsString(tc.view.editors) + `).length)`); n != "1" {
+				pg.fatalf("%s editors are shown; want the one showing the refusal", n)
+			}
+			wantBodies := "[]"
+			if tc.view.agentOnly {
+				wantBodies = `["` + agent + `"]`
+			}
+			if bodies := pg.text(`JSON.stringify([...document.querySelectorAll(` + jsString(tc.view.bodies) + `)].map((e) => e.textContent))`); bodies != wantBodies {
+				pg.fatalf("the rows show bodies %s; want %s", bodies, wantBodies)
+			}
+			wantCount := 1
+			if tc.view.agentOnly {
+				wantCount = 2
+			}
+			if cs := p.sessionComments(); len(cs) != wantCount || p.commentNamed(want) != stored {
+				pg.fatalf("the session holds %+v; want %+v and the seed alone", cs, stored)
+			}
+
+			switch tc.then {
+			case "save":
+				pg.saveAfterRefusal(tc.view.editor, stored, "fixed")
+				if !tc.view.agentOnly {
+					break
+				}
+				if out := pg.sendAndCheck(); strings.Count(out, "fixed") != 1 || !strings.Contains(out, agent) {
+					t.Errorf("stdout does not hold the fixed text once and the agent comment:\n%s", out)
+				}
+			case "leave":
+				puts := pg.commentPuts()
+				tc.view.leave(pg)
+				if n := pg.commentPuts(); n != puts {
+					pg.fatalf("leaving the unedited editor sent %d requests", n-puts)
+				}
+				if cs := p.sessionComments(); len(cs) != 1 || cs[0] != stored {
+					pg.fatalf("after leaving, the session holds %+v; want %+v", cs, stored)
+				}
+				if out := pg.sendAndCheck(); !strings.Contains(out, "> "+tc.other) || strings.Contains(out, tc.text) {
+					t.Errorf("stdout does not hold the other writer's text alone:\n%s", out)
+				}
+			}
+			pg.noPageErrors()
+		})
+	}
+}
+
+// TestBrowserFinishFilterKeepsEditor: the Finish dialog shows its open editor while it lists agent
+// comments only, and the editor saves there.
+func TestBrowserFinishFilterKeepsEditor(t *testing.T) {
+	t.Parallel()
+	w := oneFileWorld(t)
+	seed := w.seedFile("seed.json", `{"comments":[{"target":"line","path":"b/x.go","side":"new","line":1,"body":"agent says"}]}`)
+	p := w.start(procOptions{}, "last", "--seed", seed)
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+	pg.commentOnNewLine(2, "human")
+
+	pg.click("Finish…", button("header", "Finish…"), 0)
+	pg.waitTrue("the dialog", `document.querySelector("dialog").open`)
+	pg.click("Edit on human", dialogEdit("human"), 0)
+	pg.waitFocus("the dialog editor", dialogEditor)
+	pg.selectAll()
+	pg.insertText("human edited")
+	pg.click("Agent comments only", `document.querySelector(".fin-filter input")`, 0)
+	pg.waitTrue("the filter on", `document.querySelector(".fin-filter input").checked`)
+	if !pg.bool(dialogEditorIs("human edited")) {
+		pg.fatalf("the filter hid the open editor")
+	}
+	pg.click("Save", button("dialog .editor-bar", "Save"), 0)
+	pg.waitTrue("the editor closed", `document.querySelectorAll("dialog .editor-text").length === 0`)
+	if c := p.commentNamed("human edited"); c.Author != "human" {
+		pg.fatalf("the saved comment is %+v", c)
+	}
+
+	pg.click("Agent comments only", `document.querySelector(".fin-filter input")`, 0)
+	pg.waitTrue("every comment", dialogBodies+` === '["agent says","human edited"]'`)
+	// With no editor open, Esc closes the dialog.
+	pg.press("Escape", "Escape", 27, 0)
+	pg.waitTrue("the dialog closed", `!document.querySelector("dialog").open`)
+	pg.noPageErrors()
+}
+
+// TestBrowserRefusedWrite: after a refused write, the editor either shows the stored comment or,
+// when the comment was created and deleted by another writer, stays open to create it again.
+// Leaving an editor that shows the stored text sends nothing.
+func TestBrowserRefusedWrite(t *testing.T) {
+	t.Parallel()
+	start := func(t *testing.T) (*proc, *page) {
+		t.Helper()
+		w := oneFileWorld(t)
+		p := w.start(procOptions{}, "last")
+		p.waitURL()
+		pg := openPage(t, p)
+		pg.ready()
+		pg.wrapCommentPuts()
+		return p, pg
+	}
+	// leaveUnedited leaves the diff editor for the Finish dialog without editing it, then sends
+	// the review: nothing is sent for the editor, and the result holds stored and not mine.
+	leaveUnedited := func(p *proc, pg *page, stored sessionComment, mine string) {
+		pg.t.Helper()
+		puts := pg.commentPuts()
+		pg.click("Finish…", button("header", "Finish…"), 0)
+		pg.waitTrue("the dialog", `document.querySelector("dialog").open`)
+		pg.waitTrue("the diff editor closed", diffEditor+` === null`)
+		if n := pg.commentPuts(); n != puts {
+			pg.fatalf("leaving the unedited editor sent %d requests", n-puts)
+		}
+		if c := p.commentNamed(stored.Body); c != stored {
+			pg.fatalf("after leaving, the comment is %+v; want %+v", c, stored)
+		}
+		if out := pg.sendAndCheck(); !strings.Contains(out, "> "+stored.Body) || strings.Contains(out, mine) {
+			pg.t.Errorf("stdout does not hold the stored text alone:\n%s", out)
+		}
+		pg.noPageErrors()
+	}
+
+	t.Run("edit changed, left", func(t *testing.T) {
+		t.Parallel()
+		p, pg := start(t)
+		pg.commentOnNewLine(1, "X")
+		pg.editInDiff("X", "mine")
+		p.editAs(p.commentNamed("X"), "other")
+		other := p.commentNamed("other")
+		pg.cmdEnter()
+		pg.waitRebased(diffEditor, editorError, "other", "mine")
+		leaveUnedited(p, pg, other, "mine")
+	})
+
+	t.Run("create taken, left", func(t *testing.T) {
+		t.Parallel()
+		p, pg := start(t)
+		pg.eval(`crypto.randomUUID = () => "00000000-0000-4000-8000-000000000000"`, nil)
+		pg.click("new line 2", newLine(2), 0)
+		pg.waitFocus("the diff editor", diffEditor)
+		pg.insertText("page text")
+		p.createComment("h-00000000-0000-4000-8000-000000000000", `{"target":{"target":"line","file":0,"side":"new","line":2},"body":"taken"}`)
+		taken := p.commentNamed("taken")
+		pg.cmdEnter()
+		pg.waitRebased(diffEditor, editorError, "taken", "page text")
+		leaveUnedited(p, pg, taken, "page text")
+	})
+
+	// A cleared editor's refusal has no text of the human's to keep.
+	t.Run("blank", func(t *testing.T) {
+		t.Parallel()
+		p, pg := start(t)
+		pg.click("new line 1", newLine(1), 0)
+		pg.waitFocus("the diff editor", diffEditor)
+		pg.insertText("first")
+		pg.sendLost()
+		p.editAs(p.commentNamed("first"), "other")
+		other := p.commentNamed("other")
+		pg.selectAll()
+		pg.press("Backspace", "Backspace", 8, 0)
+		pg.waitTrue("the editor cleared", diffEditor+`?.value === ""`)
+		pg.cmdEnter()
+		pg.waitTrue("the editor showing the stored text", diffEditor+`?.value === "other" && `+editorError+`.startsWith(`+jsString(rebasedPrefix)+`)`)
+		if msg := pg.text(editorError); strings.Contains(msg, "not saved") {
+			pg.fatalf("the error offers empty unsaved text: %q", msg)
+		}
+		leaveUnedited(p, pg, other, "first")
+	})
+
+	t.Run("created then deleted", func(t *testing.T) {
+		t.Parallel()
+		p, pg := start(t)
+		// Another writer deletes the comment between the refusal and the page's reload: the
+		// wrapper sends the delete when a comment PUT is refused, before the page reads the reply.
+		pg.eval(`(() => {
+			const inner = window.fetch;
+			window.fetch = async (input, init) => {
+				const res = await inner(input, init);
+				if (init?.method === "PUT" && String(input).includes("/api/comments/") && res.status === 412) {
+					const headers = new Headers(init.headers);
+					headers.delete("If-None-Match");
+					headers.set("If-Match", '"' + window.otherVersion + '"');
+					const del = await inner(input, { method: "DELETE", headers, cache: "no-store" });
+					if (del.status !== 204) console.error("the other writer's delete: status " + del.status);
+				}
+				return res;
+			};
+		})()`, nil)
+		pg.eval(`crypto.randomUUID = () => "00000000-0000-4000-8000-000000000000"`, nil)
+		pg.click("new line 2", newLine(2), 0)
+		pg.waitFocus("the diff editor", diffEditor)
+		pg.insertText("page text")
+		p.createComment("h-00000000-0000-4000-8000-000000000000", `{"target":{"target":"line","file":0,"side":"new","line":2},"body":"taken"}`)
+		pg.eval(fmt.Sprintf(`window.otherVersion = %d`, p.commentNamed("taken").Version), nil)
+		pg.cmdEnter()
+		pg.waitTrue("the deleted notice", editorError+`.includes("save again to create it") && `+diffEditor+`?.value === "page text"`)
+		if cs := p.sessionComments(); len(cs) != 0 {
+			pg.fatalf("the other writer's comment is still held: %+v", cs)
+		}
+		puts := pg.commentPuts()
+		pg.click("the diff editor", diffEditor, 0)
+		pg.cmdEnter()
+		pg.waitTrue("the editor closed", diffEditor+` === null`)
+		if n := pg.commentPuts(); n != puts+1 {
+			pg.fatalf("saving again sent %d requests; want 1", n-puts)
+		}
+		if cs := p.sessionComments(); len(cs) != 1 || cs[0].Body != "page text" {
+			pg.fatalf("after saving again, the session holds %+v", cs)
+		}
+		pg.noPageErrors()
+	})
+
+	// The textarea shows CRLF as LF; the editor compares with what it shows, so it sends nothing.
+	t.Run("CRLF", func(t *testing.T) {
+		t.Parallel()
+		p, pg := start(t)
+		pg.commentOnNewLine(1, "X")
+		pg.editInDiff("X", "mine")
+		p.editAs(p.commentNamed("X"), "a\r\nb\n")
+		stored := p.sessionComments()[0]
+		pg.cmdEnter()
+		pg.waitTrue("the editor showing the stored text", editorError+`.startsWith(`+jsString(rebasedPrefix)+`)`)
+		puts := pg.commentPuts()
+		pg.cmdEnter()
+		pg.waitTrue("the editor closed", diffEditor+` === null`)
+		if n := pg.commentPuts(); n != puts {
+			pg.fatalf("saving the unedited editor sent %d requests", n-puts)
+		}
+		if cs := p.sessionComments(); len(cs) != 1 || cs[0] != stored {
+			pg.fatalf("the session holds %+v; want %+v", cs, stored)
+		}
+		pg.noPageErrors()
+	})
+}
+
+// TestBrowserUnchangedEditor: an edit editor whose text equals what it loaded closes without a
+// request, so another writer's later edit does not block leaving it; changed text is still sent
+// at the version the editor loaded.
+func TestBrowserUnchangedEditor(t *testing.T) {
+	t.Parallel()
+	// start serves oneFileWorld with comments X on new line 1 and Y on new line 2.
+	start := func(t *testing.T) (*proc, *page) {
+		t.Helper()
+		w := oneFileWorld(t)
+		p := w.start(procOptions{}, "last")
+		p.waitURL()
+		pg := openPage(t, p)
+		pg.ready()
+		pg.wrapCommentPuts()
+		pg.commentOnNewLine(1, "X")
+		pg.commentOnNewLine(2, "Y")
+		return p, pg
+	}
+	// holds fails unless the session holds exactly bodies, in result order.
+	holds := func(p *proc, pg *page, bodies ...string) {
+		pg.t.Helper()
+		var got []string
+		for _, c := range p.sessionComments() {
+			got = append(got, c.Body)
+		}
+		if !slices.Equal(got, bodies) {
+			pg.fatalf("the session holds %q; want %q", got, bodies)
+		}
+	}
+	samePuts := func(pg *page, before int) {
+		pg.t.Helper()
+		pg.waitIdle()
+		if n := pg.commentPuts(); n != before {
+			pg.fatalf("an unchanged editor sent %d requests", n-before)
+		}
+	}
+	const diffEditorIsY = `document.querySelectorAll(".d-editor").length === 1 && ` + diffEditor + `?.value === "Y"`
+
+	t.Run("changed text is sent", func(t *testing.T) {
+		t.Parallel()
+		p, pg := start(t)
+		pg.editInDiff("X", "mine")
+		p.editAs(p.commentNamed("X"), "other")
+		puts := pg.commentPuts()
+		pg.cmdEnter()
+		pg.waitRebased(diffEditor, editorError, "other", "mine")
+		pg.waitIdle()
+		if n := pg.commentPuts(); n != puts+1 {
+			pg.fatalf("a changed editor sent %d requests; want 1", n-puts)
+		}
+		holds(p, pg, "other", "Y")
+		pg.noPageErrors()
+	})
+
+	t.Run("left for another editor", func(t *testing.T) {
+		t.Parallel()
+		p, pg := start(t)
+		pg.click("Edit on X", commentButton("X", "Edit"), 0)
+		pg.waitFocus("the diff editor", diffEditor)
+		p.editAs(p.commentNamed("X"), "other")
+		puts := pg.commentPuts()
+		pg.click("Edit on Y", commentButton("Y", "Edit"), 0)
+		pg.waitTrue("Y's editor alone", diffEditorIsY)
+		samePuts(pg, puts)
+		holds(p, pg, "other", "Y")
+		pg.noPageErrors()
+	})
+
+	t.Run("saved", func(t *testing.T) {
+		t.Parallel()
+		p, pg := start(t)
+		pg.click("Edit on X", commentButton("X", "Edit"), 0)
+		pg.waitFocus("the diff editor", diffEditor)
+		p.editAs(p.commentNamed("X"), "other")
+		puts := pg.commentPuts()
+		pg.cmdEnter()
+		pg.waitTrue("the editor closed", diffEditor+` === null`)
+		samePuts(pg, puts)
+		holds(p, pg, "other", "Y")
+		pg.noPageErrors()
+	})
+
+	t.Run("left in the Finish dialog", func(t *testing.T) {
+		t.Parallel()
+		p, pg := start(t)
+		pg.click("Finish…", button("header", "Finish…"), 0)
+		pg.waitTrue("the dialog", `document.querySelector("dialog").open`)
+		pg.click("Edit on X", dialogEdit("X"), 0)
+		pg.waitFocus("the dialog editor", dialogEditor)
+		p.editAs(p.commentNamed("X"), "other")
+		puts := pg.commentPuts()
+		pg.click("Edit on Y", dialogEdit("Y"), 0)
+		pg.waitTrue("Y's editor alone", dialogEditorIs("Y"))
+		samePuts(pg, puts)
+		holds(p, pg, "other", "Y")
+		pg.noPageErrors()
+	})
+
+	t.Run("typed back", func(t *testing.T) {
+		t.Parallel()
+		p, pg := start(t)
+		pg.editInDiff("X", "changed")
+		pg.selectAll()
+		pg.insertText("X")
+		p.editAs(p.commentNamed("X"), "other")
+		puts := pg.commentPuts()
+		pg.click("Edit on Y", commentButton("Y", "Edit"), 0)
+		pg.waitTrue("Y's editor alone", diffEditorIsY)
+		samePuts(pg, puts)
+		holds(p, pg, "other", "Y")
+		pg.noPageErrors()
+	})
+
+	// The server stores the seed's CRLF as LF; the editor compares with what its textarea holds.
+	t.Run("seeded CRLF", func(t *testing.T) {
+		t.Parallel()
+		w := oneFileWorld(t)
+		seed := w.seedFile("seed.json", `{"comments":[{"target":"line","path":"b/x.go","side":"new","line":1,"body":"one\r\ntwo"}]}`)
+		p := w.start(procOptions{}, "last", "--seed", seed)
+		p.waitURL()
+		pg := openPage(t, p)
+		pg.ready()
+		pg.wrapCommentPuts()
+		pg.click("Edit on the seeded comment", commentButton("one\ntwo", "Edit"), 0)
+		pg.waitFocus("the diff editor", diffEditor)
+		pg.cmdEnter()
+		pg.waitTrue("the editor closed", diffEditor+` === null`)
+		samePuts(pg, 0)
+		holds(p, pg, "one\ntwo")
+		pg.noPageErrors()
+	})
+}
+
+// pageClosedLine starts the stderr line of the page-closed outcome.
+const pageClosedLine = "rvw: the review page was closed; saved draft changes are kept at "
+
+// TestBrowserPageClosed: closing the only review tab ends rvw with status 4 after the close grace,
+// and a rerun resumes the saved comment.
+func TestBrowserPageClosed(t *testing.T) {
+	t.Parallel()
+	w := oneFileWorld(t)
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+	pg.commentOnNewLine(1, "kept after close")
+	pg.waitIdle()
+
+	pg.closeTab()
+	select {
+	case <-p.done:
+	case <-time.After(15 * time.Second):
+		t.Fatalf("rvw did not exit within 15 s of closing the tab; stderr:\n%s", p.stderr)
+	}
+	if code := p.cmd.ProcessState.ExitCode(); code != 4 {
+		t.Fatalf("exit %d, want 4; stderr:\n%s", code, p.stderr)
+	}
+	if out := p.stdout.String(); out != "" {
+		t.Errorf("stdout after closing the tab: %q", out)
+	}
+	if !strings.Contains(p.stderr.String(), pageClosedLine) {
+		t.Errorf("stderr lacks %q:\n%s", pageClosedLine, p.stderr)
+	}
+	resumed, s := w.inspectDraft("last")
+	if !resumed || len(s.Comments) != 1 || s.Comments[0].Body != "kept after close" {
+		t.Errorf("rerun after the close: resumed=%v, comments %+v", resumed, s.Comments)
+	}
+}
+
+// statusPolls counts the page's GET /api/status requests once wrapStatusPolls has run.
+const statusPolls = `window.rvwStatusPolls`
+
+// wrapStatusPolls makes the page count its status requests and record in window.rvwStatusStarts
+// when each started, by performance.now(). A request waits while window.rvwStatusHold is a pending
+// promise.
+func (pg *page) wrapStatusPolls() {
+	pg.t.Helper()
+	pg.eval(`(() => {
+		window.rvwStatusPolls = 0;
+		window.rvwStatusStarts = [];
+		window.rvwStatusHold = null;
+		const real = window.fetch;
+		window.fetch = async (input, init) => {
+			if (String(input).startsWith("/api/status")) {
+				window.rvwStatusPolls++;
+				window.rvwStatusStarts.push(performance.now());
+				if (window.rvwStatusHold) await window.rvwStatusHold;
+			}
+			return real(input, init);
+		};
+	})()`, nil)
+}
+
+func (pg *page) polls() int {
+	pg.t.Helper()
+	var n int
+	pg.eval(statusPolls, &n)
+	return n
+}
+
+// TestBrowserPageSurvivesReloadAndSiblingClose: a reload, and closing one of two tabs, keep the
+// session. When the closing tab's message arrives, the other tab polls within about 3 s although
+// its regular poll has just fired; either way rvw is still running 13 s after the close, and the
+// remaining tab finishes the review.
+func TestBrowserPageSurvivesReloadAndSiblingClose(t *testing.T) {
+	// Not parallel: while it ran beside other tests, their pages intermittently lost focus or
+	// stopped answering for 10 s in the shared Chrome (cause unconfirmed); run alone, none did.
+	w := oneFileWorld(t)
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+	pg.reload()
+
+	other := openTab(pg)
+	other.ready()
+	other.wrapStatusPolls()
+	// Records the closing tab's message, to tell a lost message from a late poll on failure.
+	other.eval(`new BroadcastChannel("rvw").onmessage = () => (window.rvwClosingSeen = true)`, nil)
+	// Close right after a regular poll, so the next regular one is a whole interval away.
+	other.waitTrue("a regular status poll", statusPolls+` > 0`)
+	n := other.polls()
+	other.waitTrue("the next regular status poll", fmt.Sprintf(statusPolls+` > %d`, n))
+	n = other.polls()
+	pg.closeTab()
+	closed := time.Now()
+	// Under load Chrome can tear the closing tab down before its message leaves (Q-42); the regular
+	// poll then keeps the session, so only a delivered message must be followed by a poll.
+	for other.polls() == n {
+		if time.Since(closed) > 3*time.Second {
+			if other.bool(`window.rvwClosingSeen === true`) {
+				other.fatalf("the remaining tab sent no status request within 3 s of the closing message")
+			}
+			t.Log("the closing tab's message was not delivered; relying on the regular poll")
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	select {
+	case <-p.done:
+		t.Fatalf("rvw exited (%d) after one of two tabs closed; stderr:\n%s", p.cmd.ProcessState.ExitCode(), p.stderr)
+	case <-time.After(time.Until(closed.Add(13 * time.Second))):
+	}
+	other.click("Finish…", button("header", "Finish…"), 0)
+	other.sendAndCheck()
+	other.noPageErrors()
+}
+
+// leave navigates the tab away from the review page, which may enter the back/forward cache, and
+// returns the history entry to go back to.
+func (pg *page) leave() int {
+	pg.t.Helper()
+	var hist struct {
+		Entries []struct {
+			ID int `json:"id"`
+		} `json:"entries"`
+		CurrentIndex int `json:"currentIndex"`
+	}
+	if err := pg.b.call(pg.session, "Page.getNavigationHistory", nil, &hist); err != nil {
+		pg.fatalf("navigation history: %v", err)
+	}
+	back := hist.Entries[hist.CurrentIndex].ID
+	pg.send("Page.navigate", map[string]any{"url": "about:blank"})
+	pg.waitTrue("the blank page", `location.href === "about:blank"`)
+	return back
+}
+
+// TestBrowserBackForwardCache: leaving the review page sends the close notice, as the page may
+// never return. A page restored from the back/forward cache polls at once: back after 8 s, past
+// the point where the poll interrupted by leaving would land, rvw is still running 13 s after the
+// leave. Leaving again without returning ends rvw with status 4.
+func TestBrowserBackForwardCache(t *testing.T) {
+	// Not parallel: while it ran beside other tests, their pages intermittently lost focus or
+	// stopped answering for 10 s in the shared Chrome (cause unconfirmed); run alone, none did.
+	w := oneFileWorld(t)
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+	pg.wrapStatusPolls()
+	pg.eval(`addEventListener("pageshow", (e) => { if (e.persisted) window.rvwRestored = true; })`, nil)
+	pg.waitTrue("a regular status poll", statusPolls+` > 0`)
+	n := pg.polls()
+	pg.waitTrue("the next regular status poll", fmt.Sprintf(statusPolls+` > %d`, n))
+
+	back := pg.leave()
+	left := time.Now()
+	time.Sleep(8 * time.Second)
+	pg.send("Page.navigateToHistoryEntry", map[string]any{"entryId": back})
+	pg.waitTrue("the page restored from the back/forward cache", `window.rvwRestored === true`)
+	select {
+	case <-p.done:
+		t.Fatalf("rvw exited (%d) although the page came back within the grace; stderr:\n%s", p.cmd.ProcessState.ExitCode(), p.stderr)
+	case <-time.After(time.Until(left.Add(13 * time.Second))):
+	}
+
+	pg.leave()
+	if code := p.exitCode(); code != 4 {
+		t.Fatalf("exit %d after leaving for good, want 4; stderr:\n%s", code, p.stderr)
+	}
+	pg.noPageErrors()
+}
+
+// TestBrowserPollRestartKeepsOneLoop: a restore from the back/forward cache or a sibling's close,
+// arriving while a status poll is in flight, makes the page poll at once and leaves it one poll
+// loop: after the held poll is released, polls start one interval apart.
+func TestBrowserPollRestartKeepsOneLoop(t *testing.T) {
+	// Not parallel: see TestBrowserPageSurvivesReloadAndSiblingClose.
+	for _, tc := range []struct {
+		name, trigger string
+		within        time.Duration
+	}{
+		{"pageshow", `dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }))`, time.Second},
+		// The page polls 1 s after a sibling's message.
+		{"sibling closing", `new BroadcastChannel("rvw").postMessage("closing")`, 2 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := oneFileWorld(t)
+			p := w.start(procOptions{}, "last")
+			p.waitURL()
+			pg := openPage(t, p)
+			// While counts stream in, the page polls faster than the interval.
+			pg.ready()
+			var s struct {
+				IntervalMs float64 `json:"status_interval_ms"`
+			}
+			if err := json.Unmarshal(p.must(http.MethodGet, "/api/session", "", http.StatusOK), &s); err != nil {
+				t.Fatal(err)
+			}
+			pg.wrapStatusPolls()
+			pg.eval(`window.rvwStatusHold = new Promise((r) => (window.rvwStatusRelease = r))`, nil)
+			pg.waitTrue("a held status poll", statusPolls+` > 0`)
+			n := pg.polls()
+
+			pg.eval(tc.trigger, nil)
+			fired := time.Now()
+			for pg.polls() == n {
+				if time.Since(fired) > tc.within {
+					pg.fatalf("no status request within %v of the %s", tc.within, tc.name)
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+
+			var released float64
+			pg.eval(`window.rvwStatusHold = null, window.rvwStatusRelease(), performance.now()`, &released)
+			// Two intervals outlast pageWait, so this waits on its own deadline.
+			after := fmt.Sprintf(`window.rvwStatusStarts.filter((t) => t > %f).length >= 2`, released)
+			deadline := time.Now().Add(time.Duration(3*s.IntervalMs) * time.Millisecond)
+			for !pg.bool(after) {
+				if time.Now().After(deadline) {
+					pg.fatalf("fewer than two status polls within three intervals of the release")
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+			var starts []float64
+			pg.eval(`window.rvwStatusStarts`, &starts)
+			prev := released
+			for _, at := range starts {
+				if at <= released {
+					continue
+				}
+				if at-prev < s.IntervalMs/2 {
+					pg.fatalf("polls started %.0f ms apart, want about %.0f ms; release at %.0f, starts %.0f", at-prev, s.IntervalMs, released, starts)
+				}
+				prev = at
+			}
+			pg.noPageErrors()
+		})
+	}
+}
+
+// shownTextareas counts the text fields the human can type in: the diff view's editor, and with
+// the Finish dialog open, its summary and its editor. A page with one open editor shows one.
+const shownTextareas = `[...document.querySelectorAll("textarea")].filter((t) => !t.closest("dialog:not([open])")).length`
+
+const dialogOpen = `document.querySelector("dialog").open`
+
+// switchDuringHeldSave edits A in the diff, holds its save, makes the two clicks with the save
+// held, releases it and waits until settled holds. It then checks the invariants of one open
+// editor per page: wantTextareas text fields shown, no page errors, A saved exactly once, and the
+// session holding A's edit.
+func (pg *page) switchDuringHeldSave(first, second func(), settled string, wantTextareas int) {
+	pg.t.Helper()
+	pg.commentOnNewLine(1, "A")
+	pg.commentOnNewLine(2, "B")
+	pg.wrapCommentPuts()
+	pg.editInDiff("A", "A1")
+	pg.eval(`window.rvwHold = new Promise((r) => (window.rvwRelease = r))`, nil)
+	puts := pg.commentPuts()
+	first()
+	pg.waitTrue("A's save sent", `window.rvwPuts === `+fmt.Sprint(puts+1))
+	second()
+	pg.eval(`window.rvwHold = null, window.rvwRelease()`, nil)
+	pg.waitTrue("the page settled", settled)
+	pg.waitIdle()
+	// Any second transition runs right after A's save resolves; give it time to show.
+	time.Sleep(300 * time.Millisecond)
+
+	var n int
+	pg.eval(shownTextareas, &n)
+	if n != wantTextareas {
+		pg.fatalf("%d text fields are shown; want %d", n, wantTextareas)
+	}
+	pg.noPageErrors()
+	if got := pg.commentPuts(); got != puts+1 {
+		pg.fatalf("A was sent %d times; want once", got-puts)
+	}
+	pg.proc.commentNamed("A1")
+}
+
+// dialogOrB is settled for the Finish switch tests: the dialog or B's editor is open.
+const dialogOrB = dialogOpen + ` || ` + diffEditor + `?.value === "B"`
+
+// TestBrowserFinishDuringEditorSwitch: Finish clicked while the diff view is leaving A's editor to
+// open B's leaves one editor open.
+func TestBrowserFinishDuringEditorSwitch(t *testing.T) {
+	t.Parallel()
+	w := oneFileWorld(t)
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+	pg.switchDuringHeldSave(
+		func() { pg.click("Edit on B", commentButton("B", "Edit"), 0) },
+		func() { pg.click("Finish…", button("header", "Finish…"), 0) },
+		dialogOrB, 1,
+	)
+
+	// The rule: while an editor switch is pending, Finish is refused; the switch opens B.
+	if pg.bool(dialogOpen) || !pg.bool(diffEditor+`?.value === "B"`) {
+		pg.fatalf("want B's diff editor open and the dialog closed")
+	}
+}
+
+// TestBrowserEditDuringFinishSwitch: Edit on B clicked while Finish is leaving A's editor leaves
+// either the dialog or B's editor open, not both.
+func TestBrowserEditDuringFinishSwitch(t *testing.T) {
+	t.Parallel()
+	w := oneFileWorld(t)
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+	pg.switchDuringHeldSave(
+		func() { pg.click("Finish…", button("header", "Finish…"), 0) },
+		func() { pg.click("Edit on B", commentButton("B", "Edit"), 0) },
+		dialogOrB, 1,
+	)
+
+	dialog := pg.bool(dialogOpen + ` && ` + diffEditor + ` === null`)
+	editor := pg.bool(`!` + dialogOpen + ` && ` + diffEditor + `?.value === "B"`)
+	if dialog == editor {
+		pg.fatalf("want either the dialog open with no diff editor or B's editor open with no dialog")
+	}
+}
+
+// twoFileWorld's last commit adds b/x.go, three lines and shown first, and c/y.go.
+func twoFileWorld(t *testing.T) *world {
+	t.Helper()
+	w := newWorld(t)
+	w.write("README", "base\n")
+	w.commit("base")
+	w.write("b/x.go", "package b\n\nvar Y = 2\n")
+	w.write("c/y.go", "package c\n\nvar Z = 3\n")
+	w.commit("head")
+	return w
+}
+
+// startTwoFiles starts rvw on twoFileWorld and waits until x.go is shown and y.go's tree row is
+// visible outside any folded group.
+func startTwoFiles(t *testing.T) (*proc, *page) {
+	t.Helper()
+	w := twoFileWorld(t)
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+	pg.waitTrue("x.go shown", shownPath+` === "b/x.go"`)
+	pg.waitTrue("y.go's row visible", `(() => { const r = `+treeRow("y.go")+`; return r !== null && r.getClientRects().length > 0; })()`)
+	if pg.bool(generatedRow + ` !== null`) {
+		pg.fatalf("a group is folded in twoFileWorld")
+	}
+	return p, pg
+}
+
+// fileIndex is the index the session gives path.
+func (p *proc) fileIndex(path string) int {
+	p.t.Helper()
+	var s struct {
+		Files []struct {
+			NewPath string `json:"new_path"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(p.must(http.MethodGet, "/api/session", "", http.StatusOK), &s); err != nil {
+		p.t.Fatal(err)
+	}
+	for i, f := range s.Files {
+		if f.NewPath == path {
+			return i
+		}
+	}
+	p.t.Fatalf("no file %s in the session", path)
+	return -1
+}
+
+// TestBrowserNavigateDuringEditorSwitch: a file navigation while the diff view is leaving A's
+// editor to open B's is refused; the switch decides what is shown, so x.go stays shown with B's
+// editor and y.go is never requested.
+func TestBrowserNavigateDuringEditorSwitch(t *testing.T) {
+	t.Parallel()
+	p, pg := startTwoFiles(t)
+	yURL := fmt.Sprintf("/api/file?i=%d", p.fileIndex("c/y.go"))
+	pg.eval(`(() => {
+		const real = window.fetch;
+		window.rvwYGets = 0;
+		window.fetch = (input, init) => {
+			if (String(input) === `+jsString(yURL)+`) window.rvwYGets++;
+			return real(input, init);
+		};
+	})()`, nil)
+	var before int
+	pg.switchDuringHeldSave(
+		func() { pg.click("Edit on B", commentButton("B", "Edit"), 0) },
+		func() {
+			pg.eval(`window.rvwYGets`, &before)
+			pg.click("y.go", treeRow("y.go"), 0)
+		},
+		diffEditor+`?.value === "B"`, 1,
+	)
+
+	if got := pg.text(shownPath); got != "b/x.go" {
+		pg.fatalf("shown %q, want b/x.go", got)
+	}
+	if got := pg.text(selectedName); got != "x.go" {
+		pg.fatalf("selected %q, want x.go", got)
+	}
+	var after int
+	pg.eval(`window.rvwYGets`, &after)
+	if after != before {
+		pg.fatalf("y.go was requested %d times after the click; want none", after-before)
+	}
+}
+
+// TestBrowserEditDuringNavigation: Edit on B clicked while a file navigation is leaving A's editor
+// is refused; the navigation shows y.go with no editor open.
+func TestBrowserEditDuringNavigation(t *testing.T) {
+	t.Parallel()
+	_, pg := startTwoFiles(t)
+	pg.switchDuringHeldSave(
+		func() { pg.click("y.go", treeRow("y.go"), 0) },
+		func() { pg.click("Edit on B", commentButton("B", "Edit"), 0) },
+		shownPath+` === "c/y.go"`, 0,
+	)
+
+	if got := pg.text(selectedName); got != "y.go" {
+		pg.fatalf("selected %q, want y.go", got)
+	}
+	if pg.bool(diffEditor+` !== null`) || pg.bool(dialogOpen) {
+		pg.fatalf("want no diff editor and no dialog")
+	}
+}
+
+// TestBrowserLeaveGateReleasedAfterRefusedSave: a leave refused because the save failed keeps the
+// editor open and releases the gate, so the next navigation or Finish goes ahead; Finish clicked
+// twice while its leave is pending opens one dialog after one save.
+func TestBrowserLeaveGateReleasedAfterRefusedSave(t *testing.T) {
+	t.Parallel()
+	p, pg := startTwoFiles(t)
+	pg.wrapCommentPuts()
+	pg.commentOnNewLine(1, "X")
+
+	pg.editInDiff("X", "  ")
+	pg.click("y.go", treeRow("y.go"), 0)
+	pg.waitTrue("the empty-edit error", editorError+`.includes("cannot be empty")`)
+	pg.waitIdle()
+	if pg.text(shownPath) != "b/x.go" || pg.text(selectedName) != "x.go" || pg.bool(diffEditor+` === null`) {
+		pg.fatalf("want x.go shown and selected with its editor open")
+	}
+	if c := p.sessionComments(); len(c) != 1 || c[0].Body != "X" {
+		pg.fatalf("the refused save changed the session: %+v", c)
+	}
+	pg.press("Escape", "Escape", 27, 0)
+	pg.waitTrue("the editor closed", diffEditor+` === null`)
+	pg.click("y.go", treeRow("y.go"), 0)
+	pg.waitTrue("y.go shown", shownPath+` === "c/y.go" && `+fileLoaded)
+
+	pg.click("x.go", treeRow("x.go"), 0)
+	pg.waitTrue("x.go shown", shownPath+` === "b/x.go"`)
+	pg.editInDiff("X", "  ")
+	pg.click("Finish…", button("header", "Finish…"), 0)
+	pg.waitTrue("the empty-edit error", editorError+`.includes("cannot be empty")`)
+	pg.waitIdle()
+	pg.click("the diff editor", diffEditor, 0)
+	pg.selectAll()
+	pg.insertText("X2")
+	pg.click("Finish…", button("header", "Finish…"), 0)
+	pg.waitTrue("the dialog", dialogOpen)
+	p.commentNamed("X2")
+
+	pg.press("Escape", "Escape", 27, 0)
+	pg.waitTrue("the dialog closed", `!`+dialogOpen)
+	pg.editInDiff("X2", "X3")
+	pg.eval(`window.rvwHold = new Promise((r) => (window.rvwRelease = r))`, nil)
+	puts := pg.commentPuts()
+	pg.doubleClick("Finish…", button("header", "Finish…"))
+	pg.waitTrue("X3's save sent", `window.rvwPuts === `+fmt.Sprint(puts+1))
+	pg.eval(`window.rvwHold = null, window.rvwRelease()`, nil)
+	pg.waitTrue("the dialog", dialogOpen)
+	pg.waitIdle()
+	time.Sleep(300 * time.Millisecond)
+	if got := pg.commentPuts(); got != puts+1 {
+		pg.fatalf("X3 was sent %d times; want once", got-puts)
+	}
+	if n := pg.text(`String(document.querySelectorAll("dialog[open]").length)`); n != "1" || pg.bool(diffEditor+` !== null`) {
+		pg.fatalf("want one open dialog and no diff editor; %s dialogs open", n)
+	}
+	p.commentNamed("X3")
+	pg.noPageErrors()
+}
+
+// The Copy and finish tests that read the clipboard do not run in parallel: one Chrome serves
+// every test, and its clipboard is shared by all browser contexts.
+
+const (
+	copySeed       = `{"comments":[{"target":"line","path":"b/x.go","side":"new","line":1,"body":"seeded body 41"}]}`
+	copySummary    = "unsaved summary 73"
+	fallbackText   = `(document.querySelector(".fin-fallback")?.value ?? "")`
+	endMarkdown    = `document.querySelector(".end-md").value`
+	staleEndNotice = "The review changed after it was copied; copy it again below."
+)
+
+// startCopyReview starts rvw on oneFileWorld with copySeed, opens the Finish dialog and types
+// copySummary into the summary without saving it.
+func startCopyReview(t *testing.T) (*proc, *page) {
+	t.Helper()
+	w := oneFileWorld(t)
+	p := w.start(procOptions{}, "last", "--seed", w.seedFile("seed.json", copySeed))
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+	pg.click("Finish…", button("header", "Finish…"), 0)
+	pg.waitTrue("the dialog", dialogOpen)
+	pg.click("the summary", summaryField, 0)
+	pg.waitFocus("the summary", summaryField)
+	pg.insertText(copySummary)
+	return p, pg
+}
+
+// requireCopyText fails unless text holds the seeded comment and the typed summary.
+func requireCopyText(t *testing.T, what, text string) {
+	t.Helper()
+	for _, want := range []string{"seeded body 41", copySummary} {
+		if !strings.Contains(text, want) {
+			t.Errorf("%s lacks %q:\n%s", what, want, text)
+		}
+	}
+}
+
+// requireOpen fails unless rvw still serves the session and printed nothing.
+func requireOpen(t *testing.T, p *proc) {
+	t.Helper()
+	p.must(http.MethodGet, "/api/session", "", http.StatusOK)
+	if out := p.stdout.String(); out != "" {
+		t.Errorf("rvw printed a result:\n%s", out)
+	}
+}
+
+// TestBrowserCopyAndFinish: Copy and finish saves the unsaved summary, copies the result and
+// finishes; the clipboard holds what rvw printed.
+func TestBrowserCopyAndFinish(t *testing.T) {
+	p, pg := startCopyReview(t)
+	pg.allowClipboard()
+	pg.click("Copy and finish", button("dialog", "Copy and finish"), 0)
+	pg.waitTrue("Review sent and copied", endTitle+` === "Review sent and copied"`)
+	if code := p.exitCode(); code != 0 {
+		t.Fatalf("exit %d; stderr:\n%s", code, p.stderr)
+	}
+	out := p.stdout.String()
+	if got := pg.clipboardText(); got != out {
+		t.Errorf("the clipboard differs from stdout:\nclipboard:\n%s\nstdout:\n%s", got, out)
+	}
+	requireCopyText(t, "stdout", out)
+	pg.noPageErrors()
+}
+
+// TestBrowserCopyAndFinishRefused: a refused clipboard write shows the text selectable and does not
+// finish; Send then prints that text.
+func TestBrowserCopyAndFinishRefused(t *testing.T) {
+	t.Parallel()
+	p, pg := startCopyReview(t)
+	pg.eval(`navigator.clipboard.write = () => Promise.reject(new DOMException("refused", "NotAllowedError"))`, nil)
+	pg.click("Copy and finish", button("dialog", "Copy and finish"), 0)
+	pg.waitTrue("the selectable text", fallbackText+` !== ""`)
+	pg.waitIdle()
+	requireOpen(t, p)
+	shown := pg.text(fallbackText)
+	requireCopyText(t, "the selectable text", shown)
+	if out := pg.sendAndCheck(); out != shown {
+		t.Errorf("stdout differs from the selectable text:\nstdout:\n%s\nshown:\n%s", out, shown)
+	}
+	pg.noPageErrors()
+}
+
+// TestBrowserCopyAndFinishFailedSave: when the dialog's editor cannot be saved, Copy and finish
+// neither copies nor finishes, and shows the save failure, not the selectable text.
+func TestBrowserCopyAndFinishFailedSave(t *testing.T) {
+	t.Parallel()
+	p, pg := startCopyReview(t)
+	pg.click("Edit on the seeded comment", dialogEdit("seeded body 41"), 0)
+	pg.waitFocus("the dialog editor", dialogEditor)
+	pg.selectAll()
+	pg.insertText("  ")
+	pg.click("Copy and finish", button("dialog", "Copy and finish"), 0)
+	pg.waitTrue("the save failure", `document.querySelector(".fin-status").textContent.includes("Save or close the open comment editor first")`)
+	pg.waitIdle()
+	if pg.text(fallbackText) != "" {
+		pg.fatalf("the unsaved text was shown as the result")
+	}
+	if !pg.bool(dialogOpen) {
+		pg.fatalf("the dialog closed")
+	}
+	requireOpen(t, p)
+	if c := p.commentNamed("seeded body 41"); c.Author != "agent" {
+		pg.fatalf("the refused save changed the comment: %+v", c)
+	}
+}
+
+// TestBrowserCopyAndFinishStale: when the draft changes between the copy and the finish, the end
+// page says so and its Copy holds what rvw printed.
+func TestBrowserCopyAndFinishStale(t *testing.T) {
+	p, pg := startCopyReview(t)
+	pg.allowClipboard()
+	pg.eval(`(() => {
+		const real = window.fetch;
+		window.rvwFinishHold = new Promise((r) => (window.rvwFinishRelease = r));
+		window.fetch = async (input, init) => {
+			if (init?.method === "POST" && String(input) === "/api/finish") {
+				window.rvwFinishHeld = true;
+				await window.rvwFinishHold;
+			}
+			return real(input, init);
+		};
+	})()`, nil)
+	pg.click("Copy and finish", button("dialog", "Copy and finish"), 0)
+	pg.waitTrue("the finish held", `window.rvwFinishHeld === true`)
+	copied := pg.clipboardText()
+	p.must(http.MethodPut, "/api/summary", `{"summary":"changed after the copy"}`, http.StatusNoContent)
+	pg.eval(`window.rvwFinishRelease()`, nil)
+	pg.waitTrue("the stale notice", `document.querySelector(".end p")?.textContent === `+jsString(staleEndNotice))
+	if code := p.exitCode(); code != 0 {
+		t.Fatalf("exit %d; stderr:\n%s", code, p.stderr)
+	}
+	out := p.stdout.String()
+	if copied == out || !strings.Contains(out, "changed after the copy") {
+		t.Fatalf("stdout does not hold the later summary:\n%s", out)
+	}
+	pg.click("Copy as Markdown", button(".end", "Copy as Markdown"), 0)
+	pg.waitTrue("copied", `document.querySelector(".end-note").textContent === "Copied."`)
+	if got := pg.clipboardText(); got != out {
+		t.Errorf("the end page copied text other than stdout:\n%s", got)
+	}
+	if got := pg.text(endMarkdown); got != out {
+		t.Errorf("the end page shows text other than stdout:\n%s", got)
+	}
+	pg.noPageErrors()
+}
+
+// TestBrowserCopyAndFinishOnce: a double click finishes once.
+func TestBrowserCopyAndFinishOnce(t *testing.T) {
+	p, pg := startCopyReview(t)
+	pg.allowClipboard()
+	pg.doubleClick("Copy and finish", button("dialog", "Copy and finish"))
+	pg.waitTrue("Review sent and copied", endTitle+` === "Review sent and copied"`)
+	if code := p.exitCode(); code != 0 {
+		t.Fatalf("exit %d; stderr:\n%s", code, p.stderr)
+	}
+	out := p.stdout.String()
+	if n := strings.Count(out, "# Review\n"); n != 1 {
+		t.Errorf("stdout holds %d results:\n%s", n, out)
+	}
+	pg.noPageErrors()
+}
+
+// TestBrowserCopyKeepsSession: Copy as Markdown copies the saved result and leaves the session
+// open.
+func TestBrowserCopyKeepsSession(t *testing.T) {
+	p, pg := startCopyReview(t)
+	pg.allowClipboard()
+	pg.click("Copy as Markdown", button("dialog", "Copy as Markdown"), 0)
+	pg.waitTrue("copied", `document.querySelector(".fin-status").textContent === "Copied the review as Markdown."`)
+	requireCopyText(t, "the clipboard", pg.clipboardText())
+	requireOpen(t, p)
+	pg.noPageErrors()
+}

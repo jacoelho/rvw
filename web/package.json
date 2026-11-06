@@ -1,0 +1,13 @@
+{
+  "name": "rvw-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit && esbuild src/main.ts src/app.css --bundle --format=esm --target=es2022,safari16 --minify --outdir=dist && cp src/index.html dist/index.html"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2"
+  }
+}

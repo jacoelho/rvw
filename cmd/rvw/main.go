@@ -1,450 +1,373 @@
+//go:build darwin
+
+// Command rvw is the human checkpoint in an agent loop: it serves a review UI for one change and
+// prints the human's review on stdout when they finish.
 package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"net"
 	"os"
+	"os/exec"
 	"os/signal"
-	"slices"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
-	"github.com/jacoelho/rvw/internal/change"
-	"github.com/jacoelho/rvw/internal/commentseed"
-	"github.com/jacoelho/rvw/internal/config"
-	"github.com/jacoelho/rvw/internal/output"
+	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/server"
 	"github.com/jacoelho/rvw/internal/source"
+	"github.com/jacoelho/rvw/web"
 )
 
+// Exit statuses.
 const (
-	maxErrorBytes int64 = 16 << 10
+	exitOK        = 0
+	exitFailure   = 1
+	exitUsage     = 2
+	exitCancelled = 3
+	// exitPageClosed: the review page was closed; the saved draft is kept (REQ-SES-012).
+	exitPageClosed = 4
+	exitSIGINT     = 130
+	exitSIGTERM    = 143
 )
+
+const openTimeout = 10 * time.Second
 
 func main() {
-	cwd, err := os.Getwd()
-	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "rvw: %s\n", terminalSafeError(err))
-		os.Exit(1)
-	}
-	os.Exit(run(runRequest{
-		ctx:         context.Background(),
-		args:        os.Args[1:],
-		environment: os.Environ(),
-		cwd:         cwd,
-		stdin:       os.Stdin,
-		stdout:      os.Stdout,
-		stderr:      os.Stderr,
-		terminals:   detectTerminalCapabilities(os.Stdin, os.Stdout),
-	}))
+	// Without this, a write to a closed stdout pipe kills the process before deliver can report
+	// the failure and keep the draft.
+	signal.Ignore(syscall.SIGPIPE)
+	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
-type runRequest struct {
-	ctx          context.Context
-	stdin        io.Reader
-	stdout       io.Writer
-	stderr       io.Writer
-	openTerminal func() (io.ReadCloser, error)
-	cwd          string
-	args         []string
-	environment  []string
-	terminals    terminalCapabilities
-}
-
-func run(request runRequest) int {
-	environment := slices.Clone(request.environment)
-	invocation, err := parseArgs(request.args)
+func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	// msg writes whole lines to stderr; it appends a newline only when one is missing.
+	msg := log.New(stderr, "", 0)
+	cmd, err := parseArgs(args)
 	if err != nil {
-		if writeErr := writeStartupError(request.stderr, err); writeErr != nil {
-			return 1
-		}
-		return 1
+		msg.Printf("rvw: %v\n\n%s", err, usage)
+		return exitUsage
 	}
-	if invocation.Help {
-		if _, writeErr := io.WriteString(request.stdout, helpText(invocation.HelpTopic)); writeErr != nil {
-			if reportErr := writeStartupError(request.stderr, writeErr); reportErr != nil {
-				return 1
-			}
-			return 1
-		}
-		return 0
-	}
-	seeds := commentseed.Document{}
-	if !request.terminals.has(terminalInput) {
-		seeds, err = commentseed.Read(request.stdin)
-		if err != nil {
-			if writeErr := writeStartupError(request.stderr, err); writeErr != nil {
-				return 1
-			}
-			return 1
-		}
-	}
-	if admissionErr := validateTerminalAdmission(
-		invocation,
-		request.terminals,
-		environment,
-		seeds.Present(),
-	); admissionErr != nil {
-		if writeErr := writeStartupError(request.stderr, admissionErr); writeErr != nil {
-			return 1
-		}
-		return 1
-	}
-	input := request.stdin
-	var controllingTerminal io.ReadCloser
-	if invocation.Output == OutputInteractive && seeds.Present() {
-		opener := request.openTerminal
-		if opener == nil {
-			opener = openControllingTerminal
-		}
-		controllingTerminal, err = opener()
-		if err != nil {
-			if writeErr := writeStartupError(
-				request.stderr,
-				fmt.Errorf("open controlling terminal for seeded interactive review: %w", err),
-			); writeErr != nil {
-				return 1
-			}
-			return 1
-		}
-		input = controllingTerminal
+	if cmd.help {
+		msg.Print(usage)
+		return exitOK
 	}
 
-	executionContext, cancelExecution := context.WithCancel(request.ctx)
-	termination := newTerminationOwner(cancelExecution)
-	defer termination.Close()
-	err = execute(executeRequest{
-		ctx:         executionContext,
-		invocation:  invocation,
-		environment: environment,
-		cwd:         request.cwd,
-		stdin:       input,
-		stdout:      request.stdout,
-		seeds:       seeds,
-		terminals:   request.terminals,
-		termination: termination,
-	})
-	if controllingTerminal != nil {
-		err = errors.Join(err, controllingTerminal.Close())
-	}
-	if err != nil {
-		if writeErr := writeStartupError(request.stderr, err); writeErr != nil {
-			return 1
-		}
-		return 1
-	}
-	return 0
-}
-
-type executeRequest struct {
-	ctx         context.Context
-	stdin       io.Reader
-	stdout      io.Writer
-	termination *terminationOwner
-	cwd         string
-	environment []string
-	invocation  Invocation
-	seeds       commentseed.Document
-	terminals   terminalCapabilities
-}
-
-func execute(request executeRequest) (returnErr error) {
-	if _, err := config.LoadGlobal(config.LoadRequest{
-		CWD:         request.cwd,
-		Environment: request.environment,
-		Overrides:   request.invocation.Overrides,
-	}); err != nil {
-		return err
-	}
-	workingDirectory, err := source.NewWorkingDirectory(request.cwd)
-	if err != nil {
-		return err
-	}
-	serviceOptions, err := sourceServiceOptions(request.cwd, request.environment)
-	if err != nil {
-		return err
-	}
-	service, err := source.NewService(workingDirectory, serviceOptions)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		shutdownContext, cancel := context.WithTimeout(context.WithoutCancel(request.ctx), 10*time.Second)
-		defer cancel()
-		returnErr = errors.Join(returnErr, service.Close(shutdownContext))
-	}()
-
-	projectRoot := request.cwd
-	if request.invocation.Target.Kind() != source.TargetPullRequest {
-		root, rootErr := service.RepositoryRoot(request.ctx)
-		if rootErr != nil {
-			return rootErr
-		}
-		projectRoot = root.String()
-	}
-	resolved, err := config.Load(config.LoadRequest{
-		CWD:         request.cwd,
-		ProjectRoot: projectRoot,
-		Environment: request.environment,
-		Overrides:   request.invocation.Overrides,
-	})
-	if err != nil {
-		return err
-	}
-	options, err := sourceOptions(resolved)
-	if err != nil {
-		return err
-	}
-	options.FetchThreads = request.invocation.Output == OutputInteractive &&
-		resolved.GitHub().FetchThreads
-	options.FetchPending = request.invocation.Output == OutputInteractive
-
-	opened, revision, err := service.Open(request.ctx, source.OpenRequest{
-		Target: request.invocation.Target, Options: options,
-	})
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if revision != nil {
-			returnErr = errors.Join(returnErr, revision.Retire().Close())
-		}
-	}()
-	review, err := change.NewReview(change.ReviewRequest{Snapshot: opened.Snapshot()})
-	if err != nil {
-		return err
-	}
-	if request.seeds.Present() {
-		patchContext, contextErr := configuredPatchContext(resolved)
-		if contextErr != nil {
-			return contextErr
-		}
-		review, err = commentseed.Initialize(
-			request.ctx,
-			service,
-			opened,
-			revision,
-			review,
-			patchContext,
-			request.seeds,
-		)
-		if err != nil {
-			return fmt.Errorf("initialize comment seeds: %w", err)
-		}
-	}
-	if request.invocation.Output == OutputInteractive {
-		interactiveErr := runInteractive(interactiveRequest{
-			ctx:         request.ctx,
-			input:       request.stdin,
-			output:      request.stdout,
-			resolved:    &resolved,
-			service:     service,
-			opened:      &opened,
-			revision:    revision,
-			review:      review,
-			termination: request.termination,
-			environment: request.environment,
-		})
-		revision = nil
-		return interactiveErr
-	}
-
-	outputOptions := output.Options{Terminal: request.terminals.has(terminalOutput)}
-	switch request.invocation.Output {
-	case OutputHuman:
-		err = output.WriteHuman(request.stdout, opened, outputOptions)
-	case OutputJSON:
-		err = output.WriteJSON(request.stdout, opened, outputOptions)
-	default:
-		err = errors.New("unknown output mode")
-	}
-	return err
-}
-
-type terminationOwner struct {
-	cancel context.CancelFunc
-
-	signals       chan os.Signal
-	commands      chan terminationCommand
-	done          chan struct{}
-	stopped       chan struct{}
-	firstReceived chan struct{}
-	next          uint64
-}
-
-type terminationCommand struct {
-	escalate func()
-	ready    chan struct{}
-	id       uint64
-	remove   bool
-}
-
-func newTerminationOwner(cancel context.CancelFunc) *terminationOwner {
-	owner := &terminationOwner{
-		cancel:        cancel,
-		signals:       make(chan os.Signal, 2),
-		commands:      make(chan terminationCommand),
-		done:          make(chan struct{}),
-		stopped:       make(chan struct{}),
-		firstReceived: make(chan struct{}),
-	}
-	signal.Notify(owner.signals, os.Interrupt, syscall.SIGTERM)
-	go owner.run()
-	return owner
-}
-
-func (owner *terminationOwner) run() {
-	defer close(owner.stopped)
-	escalators := make(map[uint64]func())
-	received := false
-	for {
+	// Signals cancel the session context; the received signal decides the exit status. The buffer
+	// holds two, so a second signal that arrives before the first is read is not dropped (Q-45).
+	sigs := make(chan os.Signal, 2)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigs)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stop := make(chan struct{})
+	defer close(stop)
+	// current is the running review, once its server exists. It is never cleared, so a second
+	// signal after a delivered review still reports the delivery.
+	var current atomic.Pointer[live]
+	var received os.Signal
+	sigDone := make(chan struct{})
+	go func() {
 		select {
-		case <-owner.done:
+		case received = <-sigs:
+			cancel()
+			close(sigDone)
+		case <-ctx.Done():
+			close(sigDone)
 			return
-		case command := <-owner.commands:
-			if command.remove {
-				delete(escalators, command.id)
-			} else {
-				escalators[command.id] = command.escalate
-			}
-			close(command.ready)
-		case <-owner.signals:
-			if !received {
-				received = true
-				close(owner.firstReceived)
-				owner.cancel()
-				continue
-			}
-			for _, escalate := range escalators {
-				escalate()
-			}
 		}
+		// The first signal lets a delivery in progress decide the outcome, within the server's
+		// finish wait. A second signal stops rvw at once: it asks the server, which asks the session
+		// (Abandon), so the exit status follows the session's own fate, reported once through live.
+		// Before the server exists no finish or cancel can have run, so the first signal's status
+		// holds.
+		select {
+		case <-sigs:
+			code := signalCode(received)
+			if l := current.Load(); l != nil {
+				o := l.srv.Abandon()
+				cause := ""
+				if o == server.DeliveryFailed {
+					cause = "rvw: a second signal ended the session before the review result was delivered"
+				}
+				if c := l.report(o, cause, msg); c != exitInterrupted {
+					code = c
+				}
+			}
+			os.Exit(code)
+		case <-stop:
+		}
+	}()
+	signalExit := func() int {
+		cancel()
+		<-sigDone
+		return signalCode(received)
 	}
+
+	code := session(ctx, cmd, stdin, stdout, msg, &current)
+	if code == exitInterrupted {
+		return signalExit()
+	}
+	return code
 }
 
-// RegisterEscalator performs the register escalator operation.
-func (owner *terminationOwner) RegisterEscalator(escalate func()) func() {
-	if owner == nil || escalate == nil {
-		return func() {}
+func signalCode(sig os.Signal) int {
+	if sig == syscall.SIGTERM {
+		return exitSIGTERM
 	}
-	owner.next++
-	id := owner.next
-	ready := make(chan struct{})
-	owner.commands <- terminationCommand{id: id, escalate: escalate, ready: ready}
-	<-ready
-	return func() {
-		ready := make(chan struct{})
-		owner.commands <- terminationCommand{id: id, remove: true, ready: ready}
-		<-ready
-	}
+	return exitSIGINT
 }
 
-// Received reports the receiver's received state.
-func (owner *terminationOwner) Received() bool {
-	if owner == nil {
-		return false
-	}
-	select {
-	case <-owner.firstReceived:
-		return true
-	default:
-		return false
-	}
+// exitInterrupted is session's internal marker for an interrupted session.
+const exitInterrupted = -1
+
+// live is the running review a second signal settles. report writes the outcome to stderr once,
+// whether main or the second signal gets there first, and returns the exit status.
+type live struct {
+	srv   *server.Server
+	draft string
+	once  sync.Once
+	code  int
 }
 
-// Close performs the close operation.
-func (owner *terminationOwner) Close() {
-	if owner == nil {
-		return
-	}
-	signal.Stop(owner.signals)
-	close(owner.done)
-	<-owner.stopped
+func (l *live) report(o server.Outcome, cause string, msg *log.Logger) int {
+	l.once.Do(func() {
+		if cause != "" {
+			msg.Println(cause)
+		}
+		l.code = exitFor(o, l.draft, msg)
+	})
+	return l.code
 }
 
-func sourceOptions(resolved config.Config) (source.OpenOptions, error) {
-	diff := resolved.Diff()
-	filter := resolved.Filter()
-	ignoreFile, err := source.NewIgnoreFile(filter.IgnoreFile.String())
+func session(ctx context.Context, cmd command, stdin io.Reader, stdout io.Writer, msg *log.Logger, current *atomic.Pointer[live]) int {
+	// fail ends a startup step. A signal that cut the step short is reported as the signal, not
+	// as the step's failure.
+	fail := func(err error) int {
+		msg.Printf("rvw: %v", err)
+		if ctx.Err() != nil {
+			return exitInterrupted
+		}
+		return exitFailure
+	}
+	wd, err := os.Getwd()
 	if err != nil {
-		return source.OpenOptions{}, err
+		return fail(err)
 	}
-	options := source.OpenOptions{
-		IncludeUntracked: diff.IncludeUntracked,
-		BuiltinDefaults:  filter.BuiltinDefaults,
-		Gitignore:        filter.Gitignore,
-		RVWIgnore:        filter.RVWIgnore,
-		IgnoreFile:       ignoreFile,
-		Include:          make([]source.FilterPattern, len(filter.Include)),
-		Exclude:          make([]source.FilterPattern, len(filter.Exclude)),
+	repo, err := source.Open(ctx, wd)
+	if err != nil {
+		return fail(err)
 	}
-	for index, pattern := range filter.Include {
-		options.Include[index], err = source.NewFilterPattern(pattern.String())
+	defer func() {
+		if closeErr := repo.Close(); closeErr != nil {
+			msg.Printf("rvw: %v", closeErr)
+		}
+	}()
+	src, err := resolveRequest(ctx, repo, cmd.request)
+	if err != nil {
+		return fail(err)
+	}
+	snap, err := repo.Resolve(ctx, src, msg)
+	if err != nil {
+		return fail(err)
+	}
+	msg.Println(review.DescribeSource(snap))
+
+	var seed review.Seed
+	if cmd.seedPath != "" {
+		if seed, err = readSeed(cmd.seedPath, stdin); err != nil {
+			return fail(err)
+		}
+	}
+
+	dir, err := review.DraftDir()
+	if err != nil {
+		return fail(err)
+	}
+	if expireErr := review.ExpireDrafts(dir, time.Now()); expireErr != nil {
+		msg.Printf("rvw: %v", expireErr)
+	}
+	// A held lock fails here too; LockedError carries the other session's URL.
+	store, err := review.OpenStore(dir, review.DraftKey(snap))
+	if err != nil {
+		return fail(err)
+	}
+	defer func() {
+		if closeErr := store.Close(); closeErr != nil {
+			msg.Printf("rvw: %v", closeErr)
+		}
+	}()
+
+	sess, opening, err := review.Start(ctx, store, snap, seed)
+	if err != nil {
+		return fail(err)
+	}
+	if path, moved, reason := opening.MovedAside(); moved {
+		msg.Printf("rvw: the saved draft could not be restored (%v); it was moved to %s", reason, path)
+	} else if opening.Resumed() {
+		msg.Printf("rvw: resuming the saved draft %s", store.Path())
+		if cmd.seedPath != "" {
+			msg.Println("rvw: the seed was ignored because a draft exists")
+		}
+	}
+
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
+	if err != nil {
+		return fail(fmt.Errorf("listen: %w", err))
+	}
+	token := rand.Text()
+	url := server.URL(ln.Addr().String(), token)
+	if err = store.SetURL(url); err != nil {
+		return fail(errors.Join(err, ln.Close()))
+	}
+	srv := server.New(server.Config{
+		Session: sess, Token: token, Assets: web.Assets(), Log: msg,
+		Deliver: func(r review.Result) error { return deliver(stdout, r, cmd.json) },
+	})
+	l := &live{srv: srv, draft: store.Path()}
+	current.Store(l)
+	msg.Printf("rvw: review at %s", url)
+	stopOpener := startOpener(ctx, url, msg)
+	outcome, err := srv.Run(ctx, ln)
+	stopOpener()
+	if err != nil {
+		msg.Printf("rvw: %v", err)
+	}
+	return l.report(outcome, "", msg)
+}
+
+// resolveRequest turns the command line's request into a source. An omitted base ref is
+// origin/HEAD's target; the repository says what that is.
+func resolveRequest(ctx context.Context, repo *source.Repo, req request) (source.Source, error) {
+	if !req.originHead {
+		return req.exact, nil
+	}
+	ref, err := repo.OriginHead(ctx)
+	if errors.Is(err, source.ErrOriginHeadUnset) {
+		return source.Source{}, fmt.Errorf("%w; name a base ref: rvw branch <base-ref>", err)
+	}
+	if err != nil {
+		return source.Source{}, err
+	}
+	return source.Branch(ref, req.uncommitted)
+}
+
+// exitFor reports a session's outcome on stderr and returns rvw's exit status for it.
+func exitFor(outcome server.Outcome, draft string, msg *log.Logger) int {
+	switch outcome {
+	case server.Finished:
+		return exitOK
+	case server.Cancelled:
+		msg.Println("rvw: review cancelled")
+		return exitCancelled
+	case server.DeliveryFailed, server.Failed:
+		msg.Printf("rvw: the draft is kept at %s", draft)
+		return exitFailure
+	case server.Interrupted:
+		msg.Printf("rvw: interrupted; the draft is kept at %s", draft)
+		return exitInterrupted
+	case server.PageClosed:
+		msg.Printf("rvw: the review page was closed; saved draft changes are kept at %s", draft)
+		return exitPageClosed
+	default:
+		msg.Printf("rvw: internal error: unexpected outcome %d; the draft is kept at %s", outcome, draft)
+		return exitFailure
+	}
+}
+
+func readSeed(path string, stdin io.Reader) (seed review.Seed, err error) {
+	if path == "-" {
+		return review.ParseSeed(stdin)
+	}
+	f, err := os.Open(path) //nolint:gosec // G304: the user names the seed file on the command line.
+	if err != nil {
+		return review.Seed{}, fmt.Errorf("seed: %w", err)
+	}
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("seed: %w", closeErr))
+		}
+	}()
+	return review.ParseSeed(f)
+}
+
+// deliver writes the whole result to stdout. A short or failed write is a delivery failure.
+func deliver(stdout io.Writer, r review.Result, asJSON bool) error {
+	var data []byte
+	if asJSON {
+		var err error
+		if data, err = review.RenderJSON(r); err != nil {
+			return err
+		}
+	} else {
+		data = review.RenderMarkdown(r)
+	}
+	if _, err := stdout.Write(data); err != nil {
+		return fmt.Errorf("write stdout: %w", err)
+	}
+	if f, ok := stdout.(*os.File); ok {
+		// Only a regular file can report a deferred write error; Sync on a pipe or terminal fails
+		// (EBADF or EINVAL on darwin).
+		info, err := f.Stat()
 		if err != nil {
-			return source.OpenOptions{}, err
+			return fmt.Errorf("stat stdout: %w", err)
+		}
+		if info.Mode().IsRegular() {
+			if err := f.Sync(); err != nil {
+				return fmt.Errorf("write stdout: %w", err)
+			}
 		}
 	}
-	for index, pattern := range filter.Exclude {
-		options.Exclude[index], err = source.NewFilterPattern(pattern.String())
-		if err != nil {
-			return source.OpenOptions{}, err
-		}
+	return nil
+}
+
+// startOpener opens url in the background. The returned stop cancels the open command if it is
+// still running and waits for it, so no open process outlives the session.
+func startOpener(ctx context.Context, url string, msg *log.Logger) (stop func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		openBrowser(ctx, url, msg)
+	}()
+	return func() {
+		cancel()
+		<-done
 	}
-	return options, nil
 }
 
-func writeStartupError(writer io.Writer, err error) error {
-	_, writeErr := fmt.Fprintf(writer, "rvw: %s\n", terminalSafeError(err))
-	return writeErr
-}
-
-func terminalSafeError(err error) string {
-	if err == nil {
-		return ""
+// openBrowser asks macOS to open url. Failure is reported and the session keeps serving.
+func openBrowser(ctx context.Context, url string, msg *log.Logger) {
+	ctx, cancel := context.WithTimeout(ctx, openTimeout)
+	defer cancel()
+	// G204: the executable is fixed and url is the session URL rvw built.
+	cmd := exec.CommandContext(ctx, "open", url) //nolint:gosec // see above
+	// A killed open's children could hold its output pipe; do not wait on them.
+	cmd.WaitDelay = time.Second
+	out, err := cmd.CombinedOutput()
+	if err != nil && ctx.Err() != context.Canceled {
+		msg.Printf("rvw: could not open the browser (%v): open %s yourself", errWithOutput(err, out), url)
 	}
-	value := err.Error()
-	var safe []byte
-	safe = make([]byte, 0, min(len(value), int(maxErrorBytes)))
-	for value != "" && int64(len(safe)) < maxErrorBytes {
-		character, size := utf8.DecodeRuneInString(value)
-		if character == utf8.RuneError && size == 1 {
-			safe = appendBounded(safe, []byte(`\x`+hexByte(value[0])))
-			value = value[1:]
-			continue
-		}
-		var encoded string
-		switch {
-		case character == '\\':
-			encoded = `\\`
-		case unicode.IsControl(character), isBidiControl(character):
-			encoded = fmt.Sprintf(`\u{%04X}`, character)
-		default:
-			encoded = string(character)
-		}
-		safe = appendBounded(safe, []byte(encoded))
-		value = value[size:]
+}
+
+func errWithOutput(err error, out []byte) error {
+	if len(out) == 0 {
+		return err
 	}
-	return string(safe)
+	return fmt.Errorf("%w: %s", err, trimNL(out))
 }
 
-func appendBounded(destination, value []byte) []byte {
-	remaining := maxErrorBytes - int64(len(destination))
-	if int64(len(value)) > remaining {
-		return destination
+func trimNL(b []byte) string {
+	for len(b) > 0 && (b[len(b)-1] == '\n' || b[len(b)-1] == '\r') {
+		b = b[:len(b)-1]
 	}
-	return append(destination, value...)
-}
-
-func hexByte(value byte) string {
-	const digits = "0123456789ABCDEF"
-	return string([]byte{digits[value>>4], digits[value&0x0f]})
-}
-
-func isBidiControl(character rune) bool {
-	return character == '\u061c' || character == '\u200e' || character == '\u200f' ||
-		character >= '\u202a' && character <= '\u202e' ||
-		character >= '\u2066' && character <= '\u2069'
+	return string(b)
 }

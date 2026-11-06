@@ -1,0 +1,4 @@
+interface:
+  display_name: "Human review with rvw"
+  short_description: "Ask the human to review a change and act on the review"
+  default_prompt: "Use $rvw-human-review to get my review of this change with rvw."
