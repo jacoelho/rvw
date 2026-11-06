@@ -401,7 +401,10 @@ export class FinishDialog {
 
   private renderRow(r: Row): HTMLElement {
     if (r.k === "empty") return h("div", "fin-empty", this.agentOnly.checked ? "No agent comments." : "No comments.");
-    const el = h("div", `fin-comment author-${r.c?.author ?? "human"}`);
+    // The list measures rows by their own box, so the gap between cards is the row's padding.
+    const row = h("div", `fin-comment author-${r.c?.author ?? "human"}`);
+    const el = h("div", "c-card");
+    row.append(el);
     const head = h("div", "c-head");
     head.append(h("span", `badge ${r.c?.author ?? "human"}`, r.c?.author === "agent" ? "Agent" : "You"));
     head.append(h("span", "c-target", r.c ? this.where(r.c) : "review"));
@@ -415,7 +418,7 @@ export class FinishDialog {
       const bar = h("div", "editor-bar");
       bar.append(save, close);
       el.append(r.ed.textarea, r.ed.error, bar);
-      return el;
+      return row;
     }
     const c = r.c;
     const edit = h("button", "link quiet", "Edit");
@@ -430,7 +433,7 @@ export class FinishDialog {
       if (document.getSelection()?.isCollapsed ?? true) this.run(this.openEdit(c));
     });
     el.append(body);
-    return el;
+    return row;
   }
 
   /**

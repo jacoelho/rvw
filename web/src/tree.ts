@@ -1,11 +1,11 @@
 // The changed-file tree with its filter, vendored directories and generated-file groups. Rows
 // are virtual.
 
-import { h } from "./dom";
+import { count as fmt, h } from "./dom";
 import { VirtualList } from "./scroller";
 import type { State } from "./state";
 
-const ROW_HEIGHT = 24;
+const ROW_HEIGHT = 28;
 
 type TreeRow =
   | { kind: "dir"; key: string; name: string; depth: number; collapsed: boolean; vendored: boolean; count: number }
@@ -284,8 +284,8 @@ export class FileTree {
       add.textContent = count.binary ? "bin" : "0";
       add.classList.add("plain");
     } else if (count) {
-      if (count.added > 0) add.textContent = `+${count.added}`;
-      if (count.deleted > 0) del.textContent = `−${count.deleted}`;
+      if (count.added > 0) add.textContent = `+${fmt(count.added)}`;
+      if (count.deleted > 0) del.textContent = `−${fmt(count.deleted)}`;
     }
     meta.append(add, del, commentSlot(this.comments.get(r.i) ?? 0));
     meta.append(h("span", "tree-viewed", this.state.viewed.has(r.i) ? "✓" : ""));
