@@ -49,8 +49,8 @@ your default browser. If the browser cannot be opened, paste the URL yourself.
 - A pure rename has no line changes; its whole content can be expanded as context and commented on.
 - The diff is shown unified or side by side, with changed words highlighted and Go, TypeScript,
   shell and Makefile syntax highlighting.
-- Click a line number to comment on it; shift-click to extend to a range. Comment on a whole file
-  from its header, or on the whole review from the Finish dialog.
+- Click a line number to comment on it; shift-click, or drag across line numbers, to select a
+  range. Comment on a whole file from its header, or on the whole review from the Finish dialog.
 - **Finish** opens the Finish dialog: write a summary, curate every comment (including the
   agent's), each shown with the code it is on and edited in place, copy the review as Markdown,
   and send it, or copy and send in one step with Copy and finish. Cancel is in the same dialog.

@@ -6,6 +6,7 @@ import type { Api, ChangedFile, Comment, FileDiff, Gap, Placement, TextDiff, Lin
 import { renderCode } from "./code";
 import { h } from "./dom";
 import { CommentEditor } from "./editor";
+import { LineDrag, type Selection } from "./linedrag";
 import { VirtualList } from "./scroller";
 import { lineTarget, type State, targetEnd, targetLabel } from "./state";
 
@@ -43,7 +44,6 @@ interface ShownGap extends Gap {
 }
 
 /** The gutter lines a new comment targets: start..end on one side. */
-type Selection = { side: Side; start: number; end: number };
 
 type Item = { hunk: string } | { gap: ShownGap } | { line: Line } | { left: Line | null; right: Line | null };
 
@@ -109,6 +109,9 @@ export class FileView {
   /** Expanded context lines keyed by new-side line number. */
   private expanded = new Map<number, WireLine>();
   private selection: Selection | null = null;
+  /** The range a gutter drag in progress covers, shown instead of the selection. */
+  private dragged: Selection | null = null;
+  private readonly drag: LineDrag;
   private editor: CommentEditor | null = null;
   /** A transition is leaving the open editor; every other transition meanwhile is refused. */
   private leaving = false;
@@ -135,6 +138,24 @@ export class FileView {
     this.list = new VirtualList(listEl, ROW_HEIGHT, 90);
     this.mode = localStorage.getItem("rvw.mode") === "split" ? "split" : "unified";
     listEl.addEventListener("click", (e) => this.onClick(e));
+    this.drag = new LineDrag(listEl, {
+      start: (e) => this.gutterAt(e.target),
+      lineAt: (side, x, y) => this.lineAt(side, x, y),
+      preview: (sel) => {
+        this.dragged = sel;
+        this.list.refresh();
+      },
+      done: (sel) => {
+        this.dragged = sel;
+        this.run(
+          this.openLineEditor(sel).finally(() => {
+            if (this.dragged !== sel) return;
+            this.dragged = null;
+            this.list.refresh();
+          }),
+        );
+      },
+    });
     this.strip = h("div", "d-hscroll");
     this.stripSpacer = h("div", "d-hscroll-spacer");
     this.strip.append(this.stripSpacer);
@@ -236,6 +257,7 @@ export class FileView {
    */
   async show(i: number): Promise<void> {
     if (!(await this.leaveEditor())) return;
+    this.drag.cancel();
     this.loading?.abort();
     const ctl = new AbortController();
     this.loading = ctl;
@@ -264,6 +286,7 @@ export class FileView {
 
   setMode(mode: Mode): void {
     if (mode === this.mode) return;
+    this.drag.cancel();
     const anchor = this.anchorAt(this.list.firstVisible());
     this.mode = mode;
     localStorage.setItem("rvw.mode", mode);
@@ -708,13 +731,13 @@ export class FileView {
     if (n !== null && this.commentableFile()) {
       el.dataset["side"] = side;
       el.dataset["line"] = String(n);
-      el.title = "Click to comment, shift-click to extend";
+      el.title = "Click to comment; shift-click or drag to select lines";
     }
     return el;
   }
 
   private isSelected(side: Side, n: number | null): boolean {
-    const s = this.selection;
+    const s = this.dragged ?? this.selection;
     return !!s && n !== null && s.side === side && n >= s.start && n <= s.end;
   }
 
@@ -817,14 +840,27 @@ export class FileView {
   }
 
   private onClick(e: MouseEvent): void {
-    const ln = e.target instanceof Element ? e.target.closest<HTMLElement>(".d-ln[data-line]") : null;
-    const f = this.commentableFile();
-    if (!ln || !f) return;
-    const side = parseSide(ln.dataset["side"]);
-    const n = Number(ln.dataset["line"]);
-    if (!side || !Number.isInteger(n)) return;
+    const at = this.gutterAt(e.target);
+    if (!at) return;
+    const { side, line: n } = at;
     const s = this.selection;
     this.run(this.openLineEditor(e.shiftKey && s && s.side === side ? { side, start: Math.min(s.start, n), end: Math.max(s.end, n) } : { side, start: n, end: n }));
+  }
+
+  /** The side and line of the commentable gutter cell target is in, if any. */
+  private gutterAt(target: EventTarget | null): { side: Side; line: number } | null {
+    const ln = target instanceof Element ? target.closest<HTMLElement>(".d-ln[data-line]") : null;
+    if (!ln || !this.commentableFile()) return null;
+    const side = parseSide(ln.dataset["side"]);
+    const line = Number(ln.dataset["line"]);
+    return side && Number.isInteger(line) ? { side, line } : null;
+  }
+
+  /** The line on side of the diff row at client point (x, y), wherever in the row the point is. */
+  private lineAt(side: Side, x: number, y: number): number | null {
+    const row = document.elementFromPoint(x, y)?.closest(".d-row");
+    if (!row || !this.list.el.contains(row)) return null;
+    return this.gutterAt(row.querySelector(`.d-ln[data-side="${side}"][data-line]`))?.line ?? null;
   }
 
   /** The (side, line) a row shows, used to keep position across view changes. */
