@@ -18,6 +18,9 @@ export type Placement =
   | { target: "line"; file: number; side: Side; line: number }
   | { target: "range"; file: number; side: Side; start: number; end: number };
 
+/** Where a comment is: a saved comment's target, or a new comment's placement. */
+export type CommentSite = Target | Placement;
+
 export interface Comment {
   readonly id: string;
   /** The comment's entity tag: an edit names it, so it never overwrites text it did not load. */
@@ -29,6 +32,8 @@ export interface Comment {
   readonly file: number | null;
   /** The server's result-order key; compare with compareOrder and never interpret it. */
   readonly order: readonly number[];
+  /** The earlier comment this one was copied from by Still applies (REQ-CMT-011). */
+  readonly copiedFrom: string | undefined;
 }
 
 /** Orders comments as the result does, by the server's keys. */
@@ -57,6 +62,55 @@ export interface ChangedFile {
   readonly commentable: boolean;
   /** The outermost vendored directory holding the file. */
   readonly vendoredDir: string | undefined;
+  /** How the file relates to its last reviewed version; undefined when it was never reviewed. */
+  readonly round: FileRound | undefined;
+}
+
+/**
+ * A file's round state at session start (REQ-RND-008):
+ * - changed: its new side differs from the reviewed version's;
+ * - base: only its old side differs;
+ * - changed_base: both differ;
+ * - same: it equals the reviewed version.
+ */
+export type RoundState = "changed" | "base" | "changed_base" | "same";
+
+export interface FileRound {
+  readonly state: RoundState;
+  /** The reviewed version was reviewed with whitespace hidden. */
+  readonly reviewedWs: boolean;
+  readonly reviewedAt: Date;
+}
+
+/** Where an earlier comment stands in this snapshot; null until its file is requested. */
+export type EarlierStatus = "current" | "outdated" | "unplaced";
+
+/** A comment from the last delivered review: read-only context, never part of this review's result. */
+export interface EarlierComment {
+  readonly id: string;
+  readonly author: Author;
+  readonly body: string;
+  readonly at: Date;
+  /** The target as it was delivered; paths and lines are the reviewed snapshot's. */
+  readonly target: Target;
+  /** The changed file with the comment's file key, or null. */
+  readonly file: number | null;
+  /** Known without Git for review and file comments; null for line and range comments of a changed file. */
+  readonly status: EarlierStatus | null;
+}
+
+/**
+ * An earlier line or range comment as the file request places it. Current: start..end are the
+ * placed lines on side. Outdated: start..end are the original lines, quoted from the comment's blob.
+ */
+export interface EarlierPlacement {
+  readonly id: string;
+  readonly status: EarlierStatus;
+  readonly side: Side;
+  readonly start: number;
+  readonly end: number;
+  readonly quote: readonly string[];
+  readonly quoteNote: string;
 }
 
 /** How far rename detection ran for the changed-file list. */
@@ -73,6 +127,11 @@ export interface Session {
   readonly searchLimits: SearchLimits;
   /** How often to poll GET /api/status, in milliseconds; the server derives it from its close grace (Q-42). */
   readonly statusIntervalMs: number;
+  /** The draft's Hide whitespace setting (REQ-DIFF-012). */
+  readonly hideWhitespace: boolean;
+  /** The newest delivery the review ledger records, or undefined when it records none. */
+  readonly lastReviewAt: Date | undefined;
+  readonly earlier: readonly EarlierComment[];
 }
 
 /** How much of a target a quote shows, and how many IDs one quotes request takes. */
@@ -105,6 +164,9 @@ export interface StatusReply {
   /** Generated Go files' indexes once they are known, else null; every count is published after them. */
   readonly generated: readonly number[] | null;
   readonly generatedError: string;
+  /** Whitespace-only files once they are known, else null; absent from replies to a poll that already has them. */
+  readonly whitespace: readonly number[] | null;
+  readonly whitespaceError: string;
 }
 
 /**
@@ -200,6 +262,28 @@ export interface OtherDiff {
 
 export type FileDiff = TextDiff | OtherDiff;
 
+/** Which changes a file is shown as: since, the interdiff from the reviewed version (REQ-RND-010); all, the snapshot's. */
+export type Scope = "since" | "all";
+
+/** What a file request served: the diff, and the round facts that go with it. */
+export interface FileReply {
+  readonly diff: FileDiff;
+  readonly scope: Scope;
+  /** Why an interdiff was asked for and not served: "missing" (REQ-RND-012) or another server reason. */
+  readonly sinceUnavailable: string | undefined;
+  /** Per hunk, whether it changes only whitespace; undefined unless asked for. */
+  readonly wsOnly: readonly boolean[] | undefined;
+  /** New-side line ranges [from, to] the interdiff adds, for All changes (REQ-RND-013). */
+  readonly sinceAdded: readonly (readonly [number, number])[];
+  readonly earlier: readonly EarlierPlacement[];
+}
+
+/** Which diff a file request asks for. */
+export interface FileQuery {
+  readonly since: boolean;
+  readonly ws: boolean;
+}
+
 /** Unchanged lines, each numbered on both sides. */
 export interface ContextLines {
   lines: Line[];
@@ -251,12 +335,14 @@ export class Api {
     return toSession(await this.json("GET", "/api/session"));
   }
 
-  async file(i: number, signal?: AbortSignal): Promise<FileDiff> {
-    return toFileDiff(await this.json("GET", `/api/file?i=${i}`, undefined, signal));
+  async file(i: number, q: FileQuery, signal?: AbortSignal): Promise<FileReply> {
+    const query = `i=${i}${q.since ? "&scope=since" : ""}${q.ws ? "&ws=1" : ""}`;
+    return toFileReply(await this.json("GET", `/api/file?${query}`, undefined, signal));
   }
 
-  async context(i: number, from: number, to: number): Promise<ContextLines> {
-    return toContextLines(await this.json("GET", `/api/file/context?i=${i}&from=${from}&to=${to}`));
+  /** Unchanged lines from..to of a gap; since asks for a gap of the interdiff. */
+  async context(i: number, from: number, to: number, since: boolean): Promise<ContextLines> {
+    return toContextLines(await this.json("GET", `/api/file/context?i=${i}&from=${from}&to=${to}${since ? "&scope=since" : ""}`));
   }
 
   /**
@@ -282,8 +368,21 @@ export class Api {
     await this.send("DELETE", `/api/comments/${encodeURIComponent(id)}`, undefined, undefined, { "If-Match": `"${version}"` });
   }
 
-  async setViewed(i: number, viewed: boolean): Promise<void> {
-    await this.send("PUT", `/api/viewed/${i}`, { viewed });
+  /** Sets the viewed mark of every file in files, in one draft change (REQ-NAV-010). */
+  async setViewed(files: readonly number[], viewed: boolean): Promise<void> {
+    await this.send("PUT", "/api/viewed", { files, viewed });
+  }
+
+  async setHideWhitespace(hide: boolean): Promise<void> {
+    await this.send("PUT", "/api/hide-whitespace", { hide });
+  }
+
+  /**
+   * Copies earlier comment eid into the draft as comment id (REQ-CMT-011). An earlier comment
+   * already copied returns its existing copy, so a lost reply can be resent.
+   */
+  async copyEarlier(eid: string, id: string): Promise<Comment> {
+    return toComment(await this.json("POST", `/api/earlier/${encodeURIComponent(eid)}/copy`, { id }));
   }
 
   async setSummary(summary: string): Promise<void> {
@@ -317,8 +416,9 @@ export class Api {
     return toSearchReply(await this.json("GET", `/api/search?q=${encodeURIComponent(text)}`, undefined, signal), files);
   }
 
-  async status(since: number): Promise<StatusReply> {
-    return toStatus(await this.json("GET", `/api/status?since=${since}`));
+  /** The status since the counts cursor; wsKnown leaves out the whitespace-only marks already received. */
+  async status(since: number, wsKnown: boolean): Promise<StatusReply> {
+    return toStatus(await this.json("GET", `/api/status?since=${since}${wsKnown ? "&ws_known=1" : ""}`));
   }
 
   /**
@@ -439,11 +539,60 @@ function toComment(v: unknown): Comment {
   return {
     id: str(o["id"], "comment id"),
     version: num(o["version"], "comment version"),
-    author: oneOf(o["author"], ["human", "agent"] as const, "comment author"),
+    author: oneOf(o["author"], AUTHORS, "comment author"),
     target: toTarget(o["target"]),
     body: str(o["body"], "comment body"),
     file: o["file"] === null ? null : num(o["file"], "comment file"),
     order: arr(o["order"], "comment order").map((n) => num(n, "comment order")),
+    copiedFrom: optStr(o["copied_from"], "copied_from"),
+  };
+}
+
+const AUTHORS = ["human", "agent"] as const;
+const ROUND_STATES = ["changed", "base", "changed_base", "same"] as const;
+const EARLIER_STATUSES = ["current", "outdated", "unplaced"] as const;
+
+function date(v: unknown, what: string): Date {
+  const d = new Date(str(v, what));
+  if (Number.isNaN(d.getTime())) throw new BadReply(what);
+  return d;
+}
+
+function toRound(v: unknown): FileRound | undefined {
+  if (v === undefined) return undefined;
+  const o = obj(v, "file round");
+  return {
+    state: oneOf(o["state"], ROUND_STATES, "round state"),
+    reviewedWs: bool(o["reviewed_ws"], "reviewed_ws"),
+    reviewedAt: date(o["reviewed_at"], "reviewed_at"),
+  };
+}
+
+function toEarlier(v: unknown, files: number): EarlierComment {
+  const o = obj(v, "earlier comment");
+  const file = o["file"] === null ? null : num(o["file"], "earlier file");
+  if (file !== null && (file < 0 || file >= files)) throw new BadReply(`earlier file ${file}`);
+  return {
+    id: str(o["id"], "earlier id"),
+    author: oneOf(o["author"], AUTHORS, "earlier author"),
+    body: str(o["body"], "earlier body"),
+    at: date(o["at"], "earlier at"),
+    target: toTarget(o["target"]),
+    file,
+    status: o["status"] === null || o["status"] === undefined ? null : oneOf(o["status"], EARLIER_STATUSES, "earlier status"),
+  };
+}
+
+function toPlacement(v: unknown): EarlierPlacement {
+  const o = obj(v, "earlier placement");
+  return {
+    id: str(o["id"], "placement id"),
+    status: oneOf(o["status"], EARLIER_STATUSES, "placement status"),
+    side: oneOf(o["side"], SIDES, "placement side"),
+    start: num(o["start"], "placement start"),
+    end: num(o["end"], "placement end"),
+    quote: o["quote"] === undefined ? [] : arr(o["quote"], "placement quote").map((l) => str(l, "placement quote line")),
+    quoteNote: optStr(o["quote_note"], "quote_note") ?? "",
   };
 }
 
@@ -463,21 +612,26 @@ function toFile(v: unknown): ChangedFile {
     newMode: optStr(o["new_mode"], "new_mode"),
     commentable: bool(o["commentable"], "commentable"),
     vendoredDir: optStr(o["vendored_dir"], "vendored_dir"),
+    round: toRound(o["round"]),
   };
 }
 
 function toSession(v: unknown): Session {
   const o = obj(v, "session");
+  const files = arr(o["files"], "files").map(toFile);
   return {
     source: str(o["source"], "source"),
     renameDetection: oneOf(o["rename_detection"], ["full", "missing_blobs", "limit_exceeded"] as const, "rename_detection"),
-    files: arr(o["files"], "files").map(toFile),
+    files,
     comments: arr(o["comments"], "comments").map(toComment),
     summary: str(o["summary"], "summary"),
     viewed: arr(o["viewed"], "viewed").map((i) => num(i, "viewed index")),
     quoteLimits: toQuoteLimits(o["quotes"]),
     searchLimits: toSearchLimits(o["search"]),
     statusIntervalMs: toStatusInterval(o["status_interval_ms"]),
+    hideWhitespace: bool(o["hide_whitespace"], "hide_whitespace"),
+    lastReviewAt: o["last_review_at"] === undefined ? undefined : date(o["last_review_at"], "last_review_at"),
+    earlier: o["earlier"] === undefined ? [] : arr(o["earlier"], "earlier").map((e) => toEarlier(e, files.length)),
   };
 }
 
@@ -520,6 +674,9 @@ function toStatus(v: unknown): StatusReply {
   }
   const generatedDone = bool(o["generated_done"], "generated_done");
   const generated = o["generated"] === undefined ? [] : arr(o["generated"], "generated").map((i) => num(i, "generated index"));
+  // Absent when the poll said it already has the marks, or the server has not finished them.
+  const whitespaceDone = o["whitespace_done"] === undefined ? false : bool(o["whitespace_done"], "whitespace_done");
+  const whitespace = o["whitespace"] === undefined ? [] : arr(o["whitespace"], "whitespace").map((i) => num(i, "whitespace index"));
   return {
     headMoved: bool(o["head_moved"], "head_moved"),
     counts,
@@ -528,6 +685,8 @@ function toStatus(v: unknown): StatusReply {
     countsError: optStr(o["counts_error"], "counts_error") ?? "",
     generated: generatedDone ? generated : null,
     generatedError: optStr(o["generated_error"], "generated_error") ?? "",
+    whitespace: whitespaceDone ? whitespace : null,
+    whitespaceError: optStr(o["whitespace_error"], "whitespace_error") ?? "",
   };
 }
 
@@ -575,6 +734,32 @@ function toFileDiff(v: unknown): FileDiff {
     new: neu,
     hunks,
     ...(gapAfter ? { gap_after: gapAfter } : {}),
+  };
+}
+
+function toRanges(v: unknown): (readonly [number, number])[] {
+  if (v === undefined) return [];
+  return arr(v, "since_added").map((r) => {
+    const [a, b, ...rest] = arr(r, "since_added range");
+    const from = num(a, "since_added from");
+    const to = num(b, "since_added to");
+    if (rest.length > 0 || from < 1 || to < from) throw new BadReply("since_added range");
+    return [from, to] as const;
+  });
+}
+
+function toFileReply(v: unknown): FileReply {
+  const o = obj(v, "file reply");
+  const diff = toFileDiff(o);
+  const wsOnly = o["ws_only"] === undefined ? undefined : arr(o["ws_only"], "ws_only").map((b) => bool(b, "ws_only"));
+  if (wsOnly && (diff.kind !== "text" || wsOnly.length !== diff.hunks.length)) throw new BadReply("ws_only does not match the hunks");
+  return {
+    diff,
+    scope: o["scope"] === undefined ? "all" : oneOf(o["scope"], ["all", "since"] as const, "scope"),
+    sinceUnavailable: optStr(o["since_unavailable"], "since_unavailable"),
+    wsOnly,
+    sinceAdded: toRanges(o["since_added"]),
+    earlier: o["earlier"] === undefined ? [] : arr(o["earlier"], "earlier placements").map(toPlacement),
   };
 }
 

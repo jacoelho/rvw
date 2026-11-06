@@ -23,6 +23,16 @@ REQ-NAV-007 and AC-NAV-003, a change to REQ-NAV-003 and the Excluded list, and *
 revision 1 accepted: content search reads changed files' contents without a file request**), relative to revision 1. Revision 2 also raises
 the minimum Git version from 2.44 to 2.50, which the repository owner accepted on 2026-11-05 (Q-33); the rest of
 revision 2 remains proposed.
+
+Contract revision: 3, 2026-11-06, against workspace `main` at 93f5edd. Proposed, not accepted: it adds review rounds
+(Q-49): a review ledger and retention refs (REQ-RND-001 to REQ-RND-007), round states and pre-set viewed marks
+(REQ-RND-008, REQ-RND-009), the Since last review view (REQ-RND-010 to REQ-RND-014), the reviewed-unchanged and
+whitespace-only rows (REQ-NAV-008, REQ-NAV-009), earlier comments (REQ-CMT-009 to REQ-CMT-012), hiding whitespace
+(REQ-DIFF-011, REQ-DIFF-012), viewed marks on rows that hold files (REQ-NAV-010), lazy round facts (REQ-PERF-005),
+their acceptance checks (AC-RND-001 to AC-RND-003, AC-DIFF-004, AC-CMT-004, AC-NAV-004) and definitions; it changes
+REQ-NAV-005, AC-SRC-002, AC-PERF-001, the Draft and Viewed mark definitions and the Excluded list. **It changes
+INV-PLAT-004 and REQ-DIFF-001, which revision 1 accepted**: rvw may write refs under `refs/rvw/`, and a
+shown diff may be an interdiff or omit whitespace-only hunks.
 Decision owner: repository owner (jacoelho)
 Effective scope: target version only. No deployed contract, persisted data or compatibility promise binds this
 replacement (Q-03 in [decisions.md](decisions.md)).
@@ -49,7 +59,10 @@ Excluded:
 - GitHub of any kind: pull requests, comments, publication, tokens (Q-02);
 - staged-only review and arbitrary `A..B` ranges (Q-01);
 - the terminal UI and `--stdout`/`--json` diff outputs (Q-04);
-- reloading a snapshot during a session, and carrying comments between review rounds (Q-17);
+- reloading a snapshot during a session (Q-17);
+- placing an earlier comment by searching for its text, carrying comments for more than one round, and listing files
+  reviewed earlier that are no longer changed (Q-49);
+- treating formatting that moves code across lines, such as `gofmt` joining lines, as whitespace-only (Q-49);
 - line wrapping in the diff (Q-11);
 - Linux, Windows and WebAssembly (Q-14);
 - an MCP server (Q-05);
@@ -116,12 +129,57 @@ two and INV-PLAT-005 clears the environment.
   - *range*: an inclusive start and end line on one side of one changed file, with start before end.
 - **Author**: either `human` or `agent`.
 - **Review result**: an optional summary, every comment, and the snapshot that the comments refer to.
-- **Draft**: the comments, summary and viewed marks of an unfinished session.
+- **Draft**: the comments, summary, viewed marks and Hide whitespace setting of an unfinished session.
 - **Unresolvable source**: any of these: the current directory is not inside a Git worktree; `git` is older than 2.50;
   the base ref is omitted and origin/HEAD is not set; the base ref does not resolve; no merge base exists; `HEAD` is unborn for a source that needs a commit; the snapshot has no changed files.
 - **Session**: one run of `rvw` from start until exit.
-- **Viewed mark**: a per-file flag set by the human. It is keyed by the file's old and new paths, which are unique
-  within the snapshot; the draft's key already fixes the snapshot's trees and so the files' blobs.
+- **Viewed mark**: a per-file flag set by the human, or pre-set when a draft is created (REQ-RND-009). It is keyed by the file's old and new paths, which are unique
+  within the snapshot; the draft's key already fixes the snapshot's trees and so the files' blobs. A mark also
+  records whether whitespace was hidden when it was set.
+- **File key**: a changed file's old path and new path, either absent for an added or deleted file.
+- **File version**: a changed file's old mode and blob ID and new mode and blob ID, either side absent for an added or
+  deleted file.
+- **Review ledger**: what the human has reviewed in one worktree, kept across sessions: per file key, the reviewed
+  version; the earlier comments; and the Hide whitespace setting of the last recorded round.
+- **Reviewed version**: for one file key, the file version whose viewed mark was set when a review result carrying it
+  was delivered, with that mark's whitespace flag, the delivery time, and the snapshot's base and head tree IDs.
+- **Round state**: a changed file's relation to the reviewed version under its file key:
+  - *unreviewed*: there is no reviewed version;
+  - *reviewed unchanged*: the file version equals the reviewed version, and the reviewed version's whitespace flag is
+    clear or whitespace is hidden;
+  - *changed since review*: the new side's mode or blob ID differs from the reviewed version's;
+  - *base changed*: the new side equals the reviewed version's and the old side differs;
+  - *reviewed with whitespace hidden*: the file version equals the reviewed version, the reviewed version's whitespace
+    flag is set, and whitespace is shown.
+  A file can be both changed since review and base changed when both sides differ.
+- **Interdiff**: for a file changed since review whose current and reviewed new sides both exist and are text that
+  is not over a large-file limit, of one kind (both symbolic links or both files), the hunks that `git diff-pairs -z -p`, with the snapshot diff
+  command's `-c` settings and output options, reports for a raw record pairing the reviewed version's new side, as the
+  old side, with the file's new side, under the file's new path.
+- **Whitespace-only hunk**: a hunk of a shown diff none of whose added or deleted lines `git diff-pairs -w -p`, fed
+  the same record, reports as added or deleted, matched by side and line number, in a diff where every line the `-w`
+  patch adds or deletes is an added or deleted line of some hunk. In any other diff no hunk is whitespace-only,
+  because the `-w` patch has paired lines differently.
+- **Whitespace-only file**: a changed file that is not a rename, binary or submodule and has no side over 1 MiB, whose
+  sides are both present with equal modes, whose `git diff-pairs --numstat` reports at least one added or deleted line and whose
+  `git diff-pairs -w --numstat` reports none.
+- **Earlier comment**: a comment of the last review result delivered from this worktree, read-only in later sessions.
+  For a line or range target it also holds the blob ID of its side. Its ID is the first 16 hexadecimal digits of the
+  SHA-256 of the delivery time in Unix nanoseconds, a NUL byte and the draft comment's ID, so the IDs of two deliveries
+  differ.
+- **Earlier comment status**: for a line or range earlier comment on a changed file, found by diffing its blob with the
+  blob of the same side in the snapshot with `git diff-pairs -p -U0`:
+  - *current*: the blobs are equal, or no hunk deletes a line of its target or adds a line between two of them; it is
+    placed at the target's lines moved by the hunks before them;
+  - *outdated*: a hunk deletes a line of its target or adds a line between two of them;
+  - *unplaced*: its blob is missing or Git compares the two blobs as binary, or the blobs differ and either is over a
+    large-file limit (REQ-PERF-002), or the side or file key no longer exists in the snapshot, or the side is a
+    submodule, or one blob is a symlink's and the other a file's, or its placement could not be computed.
+  A file or review earlier comment is current while its file key, if any, is a changed file.
+- **Worktree ID**: the first 16 hexadecimal digits of the SHA-256 of the worktree's absolute path.
+- **Retention ref**: a ref named `refs/rvw/<worktree ID>/<base tree ID>-<head tree ID>` for one delivered review,
+  pointing at a commit whose tree holds that snapshot's base tree as `base` and head tree as `head`, so `git gc` run
+  from any worktree keeps their objects.
 
 ## Contract
 
@@ -153,9 +211,9 @@ Basis: No GitHub, repository owner, 2026-11-05 (Q-02). Since the source no longe
 
 #### INV-PLAT-004 — Repository left unchanged
 
-Status: accepted
-Statement: The rvw command shall not change the repository's refs, index, worktree files or configuration.
-Basis: Proposed (Q-07). Writing loose objects to the object database for an uncommitted tree is the only allowed write under the Git directory; see REQ-SRC-005.
+Status: proposed
+Statement: The rvw command shall not change the repository's index, worktree files, configuration or refs other than retention refs.
+Basis: Proposed (Q-07). Revision 1 accepted this without the retention-ref exception; revision 3 adds it (Q-49). The allowed writes under the Git directory are loose objects for an uncommitted tree (REQ-SRC-005) and for retention-ref commits and trees, and the retention refs themselves (REQ-RND-005). Executed observation on Apple Git 2.54: a ref under `refs/rvw/` keeps its objects through `git gc --prune=now` run from any worktree, and `git push` and `git push --all` do not send it; `git push --mirror` sends it and `git log --all` shows it. A per-worktree ref under `refs/worktree/` was rejected: `git gc --prune=now` run from another worktree pruned its objects, after which `git for-each-ref` and `git gc` in the owning worktree failed on the missing object (Q-49).
 
 ### Source selection
 
@@ -369,6 +427,30 @@ Status: proposed
 Statement: When the human clicks a line number, the review UI shall select that line and open a comment editor on the selection; when the human shift-clicks a line number on the same side as the selected lines, it shall extend the selection to include that line and open the editor on the extended selection; while the human drags from a line number with no modifier key held, it shall select the lines from the pressed line to the line under the pointer, on the pressed side only, keeping the last line while the pointer is over a row without a line on that side, and scroll the diff while the pointer is held at its top or bottom edge; on release, inside or outside the diff, it shall open one comment editor on that selection; and a press and release on one line shall act as a click. Opening an editor on a selection while a new comment's editor is open shall move that editor, its text kept, to the selection, or, if the move is refused, say why and keep the editor's own lines; while another comment is being edited, opening one leaves that edit first, and while a save or leave is pending nothing opens (Q-46).
 Basis: The repository owner asked for drag-select for multi-line ranges, 2026-11-06 (Q-48). Click and shift-click predate it and are recorded here with it.
 
+#### REQ-CMT-009 — Earlier comments in a file
+
+Status: proposed
+Statement: When a changed file is shown, the review UI shall show each of its earlier comments read-only with its author, body and status, a current line or range comment at its placed lines while its side's snapshot lines are shown, an outdated one with its target's lines read from its blob and cut as REQ-OUT-006 states, and any other at the top of the file.
+Basis: The repository owner asked to keep comments where they hold and mark the rest outdated, like GitHub, 2026-11-06 (Q-49). Placement follows Git's own diff between the comment's blob and the snapshot's (Earlier comment status), not a text search, so a comment is never placed on the wrong line. Under Since last review the old side shown is the reviewed version, so an old-side comment is shown at the top of the file.
+
+#### REQ-CMT-010 — Earlier comments in the Finish dialog
+
+Status: proposed
+Statement: When the human opens the Finish dialog, the review UI shall list the earlier review comments and the earlier comments whose file key is not a changed file, read-only with their author, target, body and status, apart from the draft's comments.
+Basis: Proposed (Q-49). These have no file to be shown in; listing them keeps them from vanishing silently.
+
+#### REQ-CMT-011 — Still applies
+
+Status: proposed
+Statement: When the human chooses Still applies on an earlier comment that no draft comment was copied from, the rvw command shall add to the draft, subject to REQ-CMT-005, a comment with its body and author, recording the copied earlier comment's ID, targeting its placed lines when it is a current line or range comment and REQ-CMT-001 accepts them, its file when its file key is a changed file with a commentable path, and the review otherwise.
+Basis: Proposed (Q-49). Earlier comments last one round: the next round shows only this round's delivered comments, so a point the agent has not addressed is carried by copying it. Recording the origin makes a repeated choice or a resent request add nothing. The ID is opaque: a draft whose copied-from ID names no earlier comment in the ledger, as after another delivery or expiry, restores normally and the ID is ignored (REQ-DRF-005 does not apply).
+
+#### REQ-CMT-012 — Earlier comments outside the result
+
+Status: proposed
+Statement: The rvw command shall leave earlier comments out of the draft, apart from the copied-from IDs of REQ-CMT-011, and out of the comment limits and the review result.
+Basis: Proposed (Q-49). The agent already received them; the output contract is unchanged. A copy made by Still applies is an ordinary comment.
+
 #### REQ-DRF-001 — Draft persistence
 
 Status: accepted
@@ -399,13 +481,99 @@ Status: proposed
 Statement: When a session starts for a snapshot whose draft is unreadable, of another format version, or holds a comment, summary, viewed mark or limit that is invalid for the snapshot, the rvw command shall move the draft aside under a name that does not match any snapshot's key, name its new path and the reason on stderr, start as if no draft existed, and delete the moved file once it is 30 days old.
 Basis: Proposed (Q-25). Failing every start would strand the human on that snapshot until they find and delete the file; silently discarding it would lose their work. Moving it aside keeps the work recoverable by hand and lets the review continue. A Git or file system error while restoring is not a property of the draft and still fails the start.
 
+### Review rounds
+
+#### REQ-RND-001 — Review ledger identity
+
+Status: proposed
+Statement: The rvw command shall keep one review ledger per repository common Git directory and worktree path, in a file under `~/Library/Application Support/rvw/ledgers`.
+Basis: The repository owner asked to hide what was already reviewed and show what changed since, mainly for `rvw branch --uncommitted`, 2026-11-06 (Q-49). Every agent edit makes a new snapshot and so a new draft (REQ-DRF-002); the ledger is what carries over. It is not keyed by source kind or snapshot: blob IDs make a reviewed version comparable across sources.
+
+#### REQ-RND-002 — Recording a round
+
+Status: proposed
+Statement: When the review result has been written to stdout, the rvw command shall record in the review ledger before exiting the file version of each changed file whose viewed mark is set as its file key's reviewed version, the result's comments as the earlier comments in place of the ledger's, and the draft's Hide whitespace setting.
+Basis: The repository owner chose "files marked viewed" as what counts as reviewed, 2026-11-06 (Q-49). Recording only a delivered result means a cancelled, interrupted, closed or undelivered review records nothing, and a mark cleared before Finish does not count. A file whose mark is clear keeps its earlier reviewed version, so its next round still compares against what the human last saw. Copy and finish delivers through the same finish (REQ-OUT-008).
+
+#### REQ-RND-003 — Ledger lock and merge
+
+Status: proposed
+Statement: While the rvw command reads or writes a review ledger, the rvw command shall hold an exclusive lock on a lock file beside the ledger that is never renamed, taken within 2 seconds or not at all, and write the ledger atomically after applying its changes to the content read under that lock.
+Basis: Proposed (Q-49). Sessions for different snapshots of one worktree can run at once, so each write merges into the latest content instead of overwriting it; per file key, the later delivery wins. The lock is held only for one read or one write, never for a session.
+
+#### REQ-RND-004 — Ledger bounds
+
+Status: proposed
+Statement: When the rvw command reads or writes a review ledger, the rvw command shall drop the reviewed versions and earlier comments delivered more than 30 days before the time of the read or write, then keep only the reviewed versions of the 256 most recently delivered snapshots and, of those, at most the 20,000 most recently delivered.
+Basis: Proposed (Q-49). The 256 snapshots bound the retention refs; 20,000 reviewed versions bound the ledger to a few MiB. Earlier comments are already bounded by REQ-CMT-005. Only reviewed versions and earlier comments expire: the Hide whitespace setting and the last review time name no snapshot (REQ-DIFF-012 takes the setting from the last recorded round with no age limit). A write that would make the ledger larger than 64 MiB, which a read rejects, fails the recording and leaves the ledger as it was.
+
+#### REQ-RND-005 — Retention refs
+
+Status: proposed
+Statement: When the rvw command records a round, the rvw command shall under the ledger lock first point the delivered snapshot's retention ref at a new commit dated at the delivery time, then write the ledger, and only after that write succeeds delete each ref under `refs/rvw/<worktree ID>/` that the ledger no longer names and each ref under `refs/rvw/` whose commit is more than 30 days old, without running Git hooks, signing a commit or writing a reflog.
+Basis: The repository owner chose an untracked ref over keeping refs unchanged, 2026-11-06 ("if is not tracked seems the cleanest?") (Q-49). An uncommitted snapshot's blobs are unreachable and `git gc` may prune them (Q-07); the Since view and earlier comment statuses need them. Executed observation on Apple Git 2.54: `update-ref` ran a `reference-transaction` hook unless `-c core.hooksPath=/dev/null` was given, and `commit-tree --no-gpg-sign` succeeded with `commit.gpgSign=true` and a failing `gpg.program`. A new commit per delivery keeps the ref's age equal to the newest delivery the ledger records for that snapshot. The commit's author and committer names, emails and dates are set explicitly in `commit-tree`'s environment (`rvw <rvw@localhost>`, the ledger's clock), so neither user identity nor inherited `GIT_*_DATE` variables apply, and `-c core.logAllRefUpdates=false` keeps `always` from writing a reflog. The order keeps every ref the ledger on disk names: a crash after the ref write leaves an extra ref that the next recording deletes. A ledger as read names no snapshot delivered more than 30 days ago (REQ-RND-004), so a ref older than that is named by no ledger and the age rule also removes the refs of a removed worktree. Each ref write and delete names the commit it expects the ref to hold, so a session of another worktree that re-dated a ref after the listing keeps it, and restoring a ref after a failed ledger write returns it to the commit it held rather than one recomputed from the ledger, whose newest naming delivery can be older than the ref's.
+
+#### REQ-RND-006 — Ledger failure
+
+Status: proposed
+Statement: If locking, reading or writing the review ledger, or writing or deleting a retention ref, fails, then the rvw command shall write the failure to stderr, keep the session's outcome and exit status, continue as if the ledger were empty when the failure happens at session start, and leave the ledger and every retention ref unchanged when a lock, read, ref write or ledger write for recording a round fails.
+Basis: Proposed (Q-49). The ledger serves the human's next round; it must never cost the agent a delivered review or block a start. Recording over a ledger it could not read would erase other sessions' reviewed versions and delete their refs.
+
+#### REQ-RND-007 — Invalid ledger
+
+Status: proposed
+Statement: If a session starts with a review ledger that is unreadable, of another format version or invalid, then the rvw command shall move it aside under a name no worktree's ledger uses, name its new path and the reason on stderr, continue as if the ledger were empty, and delete the moved file once it is 30 days old.
+Basis: Proposed (Q-49), following unrestorable drafts (REQ-DRF-005).
+
+#### REQ-RND-008 — Round states
+
+Status: proposed
+Statement: When a session starts, the rvw command shall give each changed file its round state from the review ledger and the changed-file list, without reading file contents.
+Basis: Proposed (Q-49). The changed-file list already carries every file's modes and blob IDs, so the comparison costs no Git work (REQ-PERF-004).
+
+#### REQ-RND-009 — Pre-set viewed marks
+
+Status: proposed
+Statement: When a session starts without a restorable draft, the rvw command shall set in the new draft the viewed mark of each reviewed-unchanged file, with its reviewed version's whitespace flag.
+Basis: Proposed (Q-49). GitHub's "Viewed" semantics: a mark stays until the file changes. Finishing again records the file again, which renews it within REQ-RND-004's 30 days.
+
+#### REQ-RND-010 — Since last review
+
+Status: proposed
+Statement: While at least one changed file is changed since review, the review UI shall offer a choice between All changes and Since last review, starting at Since last review, under which each file changed since review that has an interdiff is shown as its interdiff, with context expansion as REQ-DIFF-004 states, its old-side draft comments at the top of the file, and only its new-side lines that REQ-CMT-001 accepts as targets offering a comment.
+Basis: The repository owner asked to see what changed since the last review as a subset, through a toggle or dropdown, 2026-11-06 (Q-49). The interdiff's new side is the snapshot's new side, so its comments are ordinary snapshot targets (REQ-OUT-004); its old side is the reviewed version, which is not in the snapshot. Other files, including a file deleted since the review or added since a review of its deletion, show their snapshot hunks under either choice; a file changed since review whose versions are binary, large or of different kinds does so with a note that its changes since review cannot be shown as lines. The choice is transient UI state, not part of the draft.
+
+#### REQ-RND-011 — Round labels
+
+Status: proposed
+Statement: The review UI shall label each file changed since review, each base-changed file and each file reviewed with whitespace hidden as such in the file tree and in its diff header.
+Basis: Proposed (Q-49). After a rebase onto a moved base, an interdiff can include upstream edits; the base-changed label says so.
+
+#### REQ-RND-012 — Reviewed version unavailable
+
+Status: proposed
+Statement: If the reviewed version's new-side blob of a file changed since review is missing from the local object database, then the review UI shall show that file's snapshot hunks under Since last review and state that the reviewed version is unavailable.
+Basis: Proposed (Q-49). A retention ref can fail to be written (REQ-RND-006) or be deleted by hand, and `git gc` then prunes the blob.
+
+#### REQ-RND-013 — Changes since review in All changes
+
+Status: proposed
+Statement: While All changes is chosen, the review UI shall mark each new-side line of a shown file changed since review that the file's interdiff reports as added.
+Basis: Proposed (Q-49), after lgtm's mark: the full diff stays, and the lines new since the review stand out. A failed computation marks no lines.
+
+#### REQ-RND-014 — Old-side navigation under Since last review
+
+Status: proposed
+Statement: While Since last review is chosen, when a navigation targets an old-side line or old-side comment of a file shown as its interdiff, the review UI shall switch to All changes and then show the target.
+Basis: Proposed (Q-49). The interdiff's old side is the reviewed version, so the snapshot's old-side lines are not in it; next and previous comment, the Finish dialog, the search palette and content search can all target them.
+
 ### Diff presentation
 
 #### REQ-DIFF-001 — Git patch is the diff
 
-Status: accepted
-Statement: The review UI shall present each changed file's hunks exactly as the snapshot diff command reports them.
-Basis: Proposed (Q-06). Git is the reference users compare against, so there is no second diff engine.
+Status: proposed
+Statement: The review UI shall present each shown diff's hunks exactly as `git` reports them: the snapshot diff command's for a changed file, and `git diff-pairs` for an interdiff (REQ-RND-010), less the whitespace-only hunks hidden under REQ-DIFF-011.
+Basis: Proposed (Q-06). Git is the reference users compare against, so there is no second diff engine. Revision 1 accepted this for the snapshot diff only; revision 3 adds the interdiff and hidden whitespace-only hunks (Q-49). A `-w` patch is never shown: its context lines carry new-side text on both sides, so old-side line text and quoted code would disagree with the snapshot.
 
 #### REQ-DIFF-002 — Unified and split views
 
@@ -461,6 +629,18 @@ Status: proposed
 Statement: When the diff's rows change while a file stays shown, such as a comment deleted, an editor saved into its comment, a draft moved or context shown, the review UI shall keep the topmost row in view that is still shown at the same place on screen, unless the change itself reveals a row the human asked for: an opened comment editor, a toggled view (REQ-DIFF-002) or a revealed line; when another file is shown, it shall show that file from its first row, unless the navigation targets a line or a comment in it, which is then revealed; and when the open comment editor has the focus, a re-render the human did not start in that editor shall leave its focus, text, caret and selection unchanged.
 Basis: The repository owner asked to fix the scroll jump, 2026-11-06 (Q-48). A shifting view loses the human's place, and an editor losing focus sends the next keys to the page shortcuts.
 
+#### REQ-DIFF-011 — Hide whitespace
+
+Status: proposed
+Statement: While whitespace is hidden, the review UI shall show, in place of each whitespace-only hunk of a shown diff whose lines carry no comment or earlier comment, one row saying that a whitespace-only change is hidden, which shows the hunk when the human activates it or a navigation targets one of its lines.
+Basis: The repository owner asked to hide whitespace changes, 2026-11-06 (Q-49). Executed observation on Apple Git 2.54: `git diff-pairs -w -p` drops whitespace-only line changes, and lines moved across line breaks are not whitespace-only. Hiding whole hunks of the normal patch keeps every shown line's text and number equal to the snapshot (REQ-DIFF-001). A hunk mixing whitespace and other changes is shown whole.
+
+#### REQ-DIFF-012 — Hide whitespace setting
+
+Status: proposed
+Statement: The review UI shall offer a Hide whitespace setting, kept in the draft, which a new draft takes from the review ledger's last recorded round, or off when there is none.
+Basis: Proposed (Q-49). The human who hides whitespace in one round usually wants it hidden in the next.
+
 ### File navigation
 
 #### REQ-NAV-001 — File tree
@@ -490,8 +670,8 @@ Basis: The repository owner asked that `vendor/` and `node_modules/` not dominat
 #### REQ-NAV-005 — Generated Go files
 
 Status: proposed
-Statement: The review UI shall show the generated Go files directly in each directory under one tree row in that directory, marked generated with their number, collapsed until the human expands it, and expanded whenever the file filter changes to non-empty text until the human collapses it; it shall show no line counts for generated Go files, in place of REQ-NAV-001's line counts, and leave them out of the line-count totals; moving to the next or previous file shall skip files in a collapsed generated row, and selecting such a file by any other means shall expand it.
-Basis: The repository owner asked that well-formed generated Go files be hidden like vendored ones and chose "group per directory", 2026-11-05 (Q-24). Generated files stay in the file list, the comment targets and the review result. Finding them reads changed files' content, so, like line counts under REQ-PERF-004, it runs after the UI is served: rows may regroup after the first paint, a file the human selected or interacted with stays shown, a generated file shown only because it was first, and not yet interacted with, is replaced by the first file outside a collapsed group (if any), and until then generated files have no line counts. If they cannot be found, no file is grouped, every file that is not vendored gets line counts, and the UI says generated files are not grouped.
+Statement: The review UI shall show the generated Go files outside the reviewed-unchanged row directly in each directory under one tree row in that directory, marked generated with their number, collapsed until the human expands it, and expanded whenever the file filter changes to non-empty text until the human collapses it, with no line counts for generated Go files, in place of REQ-NAV-001's line counts, and none in the line-count totals, and skip files in a collapsed generated row when moving to the next or previous file, and expand that row when such a file is selected by any other means.
+Basis: The repository owner asked that well-formed generated Go files be hidden like vendored ones and chose "group per directory", 2026-11-05 (Q-24). Revision 3 leaves files in the reviewed-unchanged row (REQ-NAV-008) out of the generated rows and rewrites the statement as one obligation. Generated files stay in the file list, the comment targets and the review result. Finding them reads changed files' content, so, like line counts under REQ-PERF-004, it runs after the UI is served: rows may regroup after the first paint, a file the human selected or interacted with stays shown, a generated file shown only because it was first, and not yet interacted with, is replaced by the first file outside a collapsed group (if any), and until then generated files have no line counts. If they cannot be found, no file is grouped, every file that is not vendored gets line counts, and the UI says generated files are not grouped.
 
 #### REQ-NAV-006 — Search palette
 
@@ -504,6 +684,24 @@ Basis: The repository owner asked for a ⌘K search palette for files, lines and
 Status: proposed
 Statement: When the palette's input starts with `#`, the review UI shall search the rest as text in each changed file's shown version, as stored in the snapshot (the new version, or the old version of a deleted file), and list the matching lines, one per line, in changed-file order then line order; the text must be valid UTF-8 of at least 3 characters and at most 256 bytes, with no NUL, CR or line feed, and the rvw command shall refuse other text; the match is a fixed string, ignoring ASCII case unless the text holds an ASCII uppercase letter; binary sides, symlink sides, regular files that change only their mode, missing blobs, submodules and sides over 1 MiB are not searched; the search keeps at most 500 lines and stops after 2 seconds or 16 MiB of `git grep` output, and when it stops early the UI says some files may not be listed, the kept matches being those found first (changed files with a new side in order, then deleted files in order); choosing a line shows it as in REQ-NAV-006.
 Basis: The repository owner asked for text search in the palette, 2026-11-05/06 (Q-47). The bounds keep one search within one file slot's work; ASCII-only case folding gives `git` and rvw one rule in every locale.
+
+#### REQ-NAV-008 — Reviewed-unchanged row
+
+Status: proposed
+Statement: The review UI shall show the reviewed-unchanged files that are not vendored and had no comment or earlier comment when the session started under one tree row after every other row except the whitespace-only row, marked reviewed unchanged with their number and holding their directories, collapsed, expanded and skipped as REQ-NAV-005 states for a generated row.
+Basis: The repository owner asked to hide what was already reviewed and has not changed, 2026-11-06 (Q-49). The files stay in the file list, the comment targets and the review result, as vendored and generated files do. A file that carries a comment stays in view, because the comment may still need its context. Membership is fixed at start apart from whitespace being shown or hidden (round state definition), so the tree does not move under the human as comments are added.
+
+#### REQ-NAV-009 — Whitespace-only row
+
+Status: proposed
+Statement: While whitespace is hidden, the review UI shall show the whitespace-only files that are not vendored, generated or in the reviewed-unchanged row and had no comment or earlier comment when the session started under one tree row after the reviewed-unchanged row, marked whitespace only with their number and holding their directories, collapsed, expanded, skipped and regrouped as REQ-NAV-005 states for a generated row.
+Basis: Proposed (Q-49). Finding whitespace-only files runs one `git diff-pairs -w --numstat` over the candidate files (differing text blobs always count a changed line without `-w`), so, like generated files, it runs after the UI is served. If they cannot be found, no file is grouped and the UI says whitespace-only files are not grouped. Executed observation on Apple Git 2.54: a whitespace-only rename and a mode-only change both report no lines under `-w`, which is why renames and unequal modes are excluded by definition.
+
+#### REQ-NAV-010 — Viewed marks on rows that hold files
+
+Status: proposed
+Statement: When the human toggles the viewed mark of a directory row or of a vendored, generated, reviewed-unchanged or whitespace-only row, the review UI shall set the viewed mark of every changed file the tree shows below it if any of them is clear, or otherwise clear all of them, in one draft change, and show the row as viewed while every file it shows below it is viewed.
+Basis: The repository owner asked for an easier way to mark files reviewed, "perhaps per directory", 2026-11-06 (Q-49). One draft change keeps a thousand marks to one atomic write (REQ-DRF-001). Under a filter only the files shown are marked, so no file is marked reviewed unseen. The marks record the current Hide whitespace setting.
 
 ### Syntax highlighting
 
@@ -544,6 +742,12 @@ Basis: Proposed. Server memory stays proportional to one request, not to the sna
 Status: accepted
 Statement: When a session starts, the rvw command shall read file contents only for changed files and only as `git` itself does to build the snapshot and its changed-file list.
 Basis: Proposed. Today's implementation copies every tracked worktree file at startup, as the pre-rewrite analysis found. Line counts need every changed file's content, so they are computed after the UI is served.
+
+#### REQ-PERF-005 — Lazy round facts
+
+Status: proposed
+Statement: The rvw command shall compute a changed file's interdiff, whitespace-only hunks and earlier comment statuses only when the review UI requests that file, and find whitespace-only files only after the review UI is served.
+Basis: Proposed (Q-49). Each costs `git diff-pairs` runs per file, so computing them at start would make startup proportional to the snapshot's content (REQ-PERF-004). An earlier comment on an unchanged blob is current without any Git work.
 
 ### Local security
 
@@ -673,7 +877,7 @@ Counterexample: Diffing the branch against its tip rather than the merge base fa
 ### AC-SRC-002 — Uncommitted snapshot leaves the repository unchanged
 
 Covers: REQ-SRC-005, INV-PLAT-004
-Expected: The index file bytes, `git status --porcelain=v2` output, refs and config are identical before and after building the snapshot, including with `core.splitIndex=true` and in a linked worktree. Apart from loose objects, no file under the Git directory is added or changed, and no temporary file remains.
+Expected: The index file bytes, `git status --porcelain=v2` output, refs and config are identical before and after building the snapshot, including with `core.splitIndex=true` and in a linked worktree. Apart from loose objects, no file under the Git directory is added or changed, and no temporary file remains. After a full session that finishes, the only further changes are loose objects and refs under `refs/rvw/` (AC-RND-002).
 Verification: Planned Go integration test.
 Counterexample: Running `git add -A` against the real index fails the index-bytes comparison.
 
@@ -727,6 +931,13 @@ Covers: REQ-CMT-008
 Expected: Dragging across line numbers highlights the lines from the pressed line to the line under the pointer, on the pressed side only, keeps the last line while the pointer is over a row without one on that side, and opens one editor on that range on release; the click the release produces opens nothing else, and the next click is an ordinary one, also after a release outside the diff. A press and release on one line with the pointer jittering is a click, or with Shift an extension of the selection. A drag with Shift, ⌘, Ctrl or Alt held highlights nothing, opens no editor and leaves an open editor, its text and its highlighted lines unchanged. Holding a drag at the diff's bottom or top edge scrolls it, and the range extends to the lines scrolled into view without the pointer moving; the scrolling stops on release. Dragging upwards with a draft open moves the draft, its text kept, to the range from the lower line to the higher; a drag that cannot move the editor says why and shows the editor's own lines highlighted again.
 Verification: Browser tests in `cmd/rvw`.
 
+### AC-CMT-004 — Earlier comments
+
+Covers: REQ-CMT-009, REQ-CMT-010, REQ-CMT-011, REQ-CMT-012, REQ-PERF-005
+Expected: Round 1 delivers a line comment on `a.go:10`, a range comment on `a.go:20-22`, an old-side comment, a file comment, a review comment and a line comment on `gone.go`. Before round 2 the agent inserts 3 lines above line 10, edits line 21, and reverts `gone.go`. Round 2 shows the line comment as current at line 13, the range comment as outdated with its round 1 lines, the old-side comment as current, and the file comment at the top of the file; the Finish dialog lists the review comment as current and the `gone.go` comment as unplaced. None can be edited. With round 1's blob pruned, the line comment is unplaced. Still applies on the current line comment adds a draft comment at line 13 with the same author and body; on the outdated one, a file comment; choosing it again adds nothing. The round 2 result contains only the draft's comments. Round 3, after round 2 delivered only the copied comment, shows that one alone. Opening the session reads no blob for earlier comments; opening `a.go` runs the mapping.
+Verification: Go tests for status and placement with expectations written by hand; planned browser test.
+Counterexample: Placing by searching for the original text puts a comment on a duplicated line and fails the placement check.
+
 ### AC-SES-003 — Finish acknowledgement
 
 Covers: REQ-SES-011, REQ-SES-007
@@ -738,6 +949,26 @@ Verification: Planned process test with a browser.
 Covers: REQ-DRF-001, REQ-DRF-002, REQ-DRF-003, REQ-DRF-005
 Expected: After SIGINT, restarting the same source on the unchanged repository restores all comments, the summary and the viewed marks, and a repeated seed is ignored with a stderr notice. After a further commit, the same command starts an empty draft. `rvw branch`, `rvw branch main` and `rvw branch origin/main` naming the same base commit share one draft. A draft file replaced by invalid JSON, or holding a comment on a line outside the file, is moved aside on the next start: stderr names the moved file, which keeps the old bytes, and the session starts with the seed applied.
 Verification: Planned process test.
+
+### AC-RND-001 — Recording rounds in the ledger
+
+Covers: REQ-RND-001, REQ-RND-002, REQ-RND-003, REQ-RND-004, REQ-RND-006, REQ-RND-007
+Expected: Finishing a review with two of three files marked viewed records exactly those two file versions, the result's comments and the Hide whitespace setting; Copy and finish records the same. Cancel, SIGINT, a closed page and a closed stdout record nothing. A mark set and then cleared before Finish records nothing for that file, and a file whose mark is clear keeps its earlier reviewed version. Two sessions on different snapshots of one worktree that finish in turn both leave their reviewed versions, the later one winning for a shared file key, and the earlier comments are the later delivery's. A second worktree of the same repository sees an empty ledger. With a fixed clock, reviewed versions and earlier comments 31 days old are dropped when the ledger is next read or written, and the 257th snapshot's write drops the oldest snapshot's versions. A ledger directory that cannot be written gives a stderr line and exit 0 with the result delivered. A ledger replaced by invalid JSON is moved aside on the next start, stderr names the moved file, and the session starts with no round states.
+Verification: Planned Go tests in the owning package and a process test driving the HTTP API.
+Counterexample: Recording at the time a mark is set records the cleared mark and fails.
+
+### AC-RND-002 — Retention refs
+
+Covers: REQ-RND-005, INV-PLAT-004
+Expected: After finishing `rvw branch --uncommitted` in a linked worktree with an untracked file marked viewed, `git for-each-ref refs/rvw/` lists one ref, under the worktree's ID and named by the snapshot's tree IDs, whose commit's tree has `base` and `head` equal to the snapshot's trees; `git gc --prune=now` run from the main worktree keeps the untracked file's blob; a round recorded in the main worktree leaves the linked worktree's ref; a ref under `refs/rvw/` whose commit is 31 days old is deleted by the next recording in any worktree, while a snapshot delivered on day 1 and again on day 29 keeps its ref through a recording in another worktree on day 31; inherited `GIT_COMMITTER_DATE` and `GIT_AUTHOR_NAME` do not change the commit's date or author; a ledger made unreadable before recording leaves every ref and the ledger unchanged; a `reference-transaction` hook that writes a file does not run; `commit.gpgSign=true` with `gpg.program=false` and no `user.name` still writes the ref; `core.logAllRefUpdates=always` writes no reflog for it. A later round whose ledger no longer names the first snapshot deletes its ref. No other ref, the index, the config and the worktree files change.
+Verification: Planned Go integration test against fixture repositories.
+Counterexample: Writing under `refs/worktree/rvw/` loses the blob to the main worktree's `git gc` and fails.
+
+### AC-RND-003 — Round states and the Since view
+
+Covers: REQ-RND-008, REQ-RND-009, REQ-RND-010, REQ-RND-011, REQ-RND-012, REQ-RND-013, REQ-RND-014, REQ-NAV-008, REQ-NAV-005
+Expected: Round 1 marks files `a`, `b`, `c` and `g` (generated) viewed and finishes. Before round 2 the agent edits `a`, leaves `b`, `g` and `c` unchanged, and comments are on `c` from round 1. Round 2: `b` and `g` are in the reviewed-unchanged row, viewed, and `g` is in no generated row; `c` is outside the row; `a` is labelled changed since review, the view starts at Since last review, and `a`'s hunks equal `git diff-pairs -p` fed a raw record from round 1's blob to round 2's, written by hand in the test. Commenting a new-side line in `a`'s interdiff gives a new-side target equal to the same line in All changes; old-side lines offer no comment; next comment onto an old-side draft comment of `a` switches to All changes and shows it. In All changes, the lines the agent added are marked. After the base ref moves to a commit that changes `b`'s old side only, `b` is labelled base changed and outside the row. With round 1's retention ref deleted and `git gc --prune=now` run, `a` shows its snapshot hunks with the unavailable notice. With no ledger, the choice is not offered.
+Verification: Go tests for round states and the interdiff at the HTTP API; planned browser test for the tree, labels and view.
 
 ### AC-DIFF-001 — Rendered hunks match git
 
@@ -757,6 +988,13 @@ Covers: REQ-DIFF-010
 Expected: With the view scrolled into a file, deleting a comment above the view, showing context above it, saving an editor above it into a shorter comment and moving a partly hidden draft to a line below each leave the topmost line wholly in view at the same place on screen. Moving to another file from the tree shows it from its first row, wherever the previous one was scrolled. More context arriving or another comment being deleted while an editor is open leaves its text, caret and selection, and a bare `j` then types a letter rather than moving to the next file.
 Verification: Browser tests in `cmd/rvw`.
 
+### AC-DIFF-004 — Hidden whitespace
+
+Covers: REQ-DIFF-001, REQ-DIFF-011, REQ-DIFF-012, REQ-NAV-009, REQ-RND-008
+Expected: With whitespace hidden, a hunk that only reindents is replaced by one row that shows it when activated; a hunk mixing reindentation with a changed token is shown whole; a whitespace-only hunk with a comment on one of its lines is shown; a palette `path:n` into a hidden hunk shows it; in a file whose old side is an indented `x` followed by ten `x` lines and whose new side is ten `x` lines, no hunk is hidden; every shown line's text and numbers equal the snapshot diff command's. A file changed only in indentation is in the whitespace-only row once it is found; a whitespace-only rename, a mode change plus reindentation, a binary file and a file whose lines are joined by reformatting are not. Showing whitespace removes the row. A new draft takes the setting of the last recorded round. A file marked viewed with whitespace hidden is reviewed unchanged in the next round while whitespace is hidden, and reviewed with whitespace hidden, labelled so and outside the reviewed-unchanged row, while it is shown.
+Verification: Go tests for whitespace-only hunks and files at the HTTP API; planned browser test.
+Counterexample: Showing the `git diff-pairs -w -p` patch puts new-side text on old-side context lines and fails the line-text check.
+
 ### AC-NAV-001 — Vendored directories
 
 Covers: REQ-NAV-001, REQ-NAV-004
@@ -775,6 +1013,12 @@ Covers: REQ-NAV-003, REQ-NAV-006, REQ-NAV-007, REQ-PERF-003
 Expected: ⌘K opens the palette with its input focused, and does nothing in a comment editor; Esc closes it, gives the focus back and leaves an editor behind it open. `util` lists `internal/util.go` before `pkg/test_util.go` before `pkg/util/other.go`; a camelCase query finds its file; a rename is found and highlighted through its old path; equal scores keep tree order; at most 50 rows show; a query matching nothing says so; an empty query lists the first files in tree order; a vendored or generated file opens with its group expanded; with the filter `long` applied, the empty palette lists the full tree order and a file hidden by the filter can be opened through it, and the filter is kept. `docs/a b:c.md` is a files query; `x:0`, `x:007`, `x:-1` and `x:1.5` are files queries; `long.txt:300` and `:12` are line queries. `long.txt:10` selects and centres the line; `long.txt:200` expands it as context; `long.txt:9999` and a large file's line outside its hunks open the file with a notice, also before the line counts arrive; `deleted.txt:3` selects the old side; an unknown path gives a message and Enter goes nowhere; `c` after a reveal comments on that line. `:N` in the shown file keeps context expanded earlier and does not reload the file. `#needle` rows each mark one match, and choosing a row shows its line, also outside hunks and on a deleted file's old side. Search requests wait 200 ms after the last keystroke, are aborted when superseded, and a superseded or late reply is never shown, nor is a reply after close-and-reopen or after switching to a files query; Enter while a reply is pending goes nowhere; short, over-long and files-mode queries send nothing; refused, unavailable, failed and malformed replies are shown inline and the palette stays usable. A search over a 600-line match file says it stopped early, and the rows in the document stay at most the visible rows plus 50. File text and paths with markup render as text. On the server, a search reads the snapshot trees, not the worktree, skips binary, symlink, missing, submodule and over-1 MiB sides and regular files that change only their mode, so a mode-only file never uses up the 500-line cap, folds ASCII case only, replaces invalid UTF-8, never sends a raw path, takes a file slot after validating its text, and its `git` process stops when the client goes away or the session ends.
 Verification: Go tests in `internal/source` and `internal/server`; browser tests in `cmd/rvw`.
 
+### AC-NAV-004 — Viewed marks on rows that hold files
+
+Covers: REQ-NAV-010, REQ-DIFF-007
+Expected: Toggling a directory with one of three files viewed marks all three in one draft write; toggling it again clears all three; the directory shows viewed exactly while all files below it are viewed, also after one is cleared from its own row. Toggling a collapsed vendored row marks its files without expanding it. A directory of 1,000 files is marked by one request.
+Verification: Planned Go test of the draft write and browser test of the tree.
+
 ### AC-HL-001 — Highlighting
 
 Covers: REQ-HL-001, REQ-HL-002
@@ -783,8 +1027,8 @@ Verification: Planned Go test of the token API plus a browser check.
 
 ### AC-PERF-001 — Bounded work at the target workload
 
-Covers: REQ-PERF-001, REQ-PERF-002, REQ-PERF-003, REQ-PERF-004
-Expected: On a synthetic fixture of 1,000 changed files of 10,000 lines each, the number of diff rows in the document never exceeds the visible rows plus 50 while scrolling. Server memory after viewing 100 files stays within a fixed bound. Startup reads no unchanged file content. Latency figures are recorded as measurements, not pass/fail (Q-12).
+Covers: REQ-PERF-001, REQ-PERF-002, REQ-PERF-003, REQ-PERF-004, REQ-PERF-005, REQ-RND-008
+Expected: On a synthetic fixture of 1,000 changed files of 10,000 lines each, the number of diff rows in the document never exceeds the visible rows plus 50 while scrolling. Server memory after viewing 100 files stays within a fixed bound. Startup reads no unchanged file content, also with a review ledger of 20,000 reviewed versions and 4,096 earlier comments, and runs no `git diff-pairs` before the UI is served. Latency figures are recorded as measurements, not pass/fail (Q-12).
 Verification: Planned benchmark and browser test; startup reads checked with `fs_usage`.
 
 ### AC-SEC-001 — Local request protection
@@ -811,3 +1055,4 @@ Verification: Planned manual run in Claude Code.
 - How the TypeScript is built and embedded, provided `go install` produces a working binary.
 - The word-diff algorithm, within REQ-DIFF-003's cap.
 - Visual design, colours and theme, provided both light and dark system appearances are readable.
+- The review ledger's file format, provided it carries a format version, and the retention commit's message.

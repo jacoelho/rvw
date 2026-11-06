@@ -116,7 +116,7 @@ func TestOneTerminalOutcome(t *testing.T) {
 		{http.MethodPut, "/api/comments/late", `{"target":{"target":"review"},"body":"late"}`, []reqOption{createOnly}},
 		{http.MethodPut, "/api/comments/late", `{"body":"late"}`, []reqOption{editAt(1)}},
 		{http.MethodDelete, "/api/comments/late", "", []reqOption{editAt(1)}},
-		{http.MethodPut, "/api/viewed/0", `{"viewed":true}`, nil},
+		{http.MethodPut, "/api/viewed", `{"files":[0],"viewed":true}`, nil},
 	} {
 		r := f.do(c.method, c.path, c.body, c.opts...)
 		if r.status != http.StatusGone {
@@ -480,14 +480,14 @@ func resumedSummary(t *testing.T, f *fixture) string {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	s, o, err := review.Start(t.Context(), store, f.snap, review.Seed{})
+	s, o, err := review.Start(t.Context(), store, f.snap, review.Fresh{Seed: review.Seed{}})
 	if err != nil {
 		t.Fatalf("start from the kept draft: %v", err)
 	}
 	if !o.Resumed() {
 		t.Fatal("the next run did not resume the kept draft")
 	}
-	return s.View().Summary
+	return s.Draft().Summary
 }
 
 // TestInterruptWhileIdle checks that ending Run's context while nothing is in flight returns

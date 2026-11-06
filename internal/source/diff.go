@@ -94,7 +94,9 @@ type FileDiff struct {
 	// Old and New hold the sides' content: nil when the side is absent, or the file is large or
 	// not text.
 	Old, New []byte
-	Facts    FileFacts
+	// record is the raw record the hunks came from, so WhitespaceOnly diffs the same pairing.
+	record string
+	Facts  FileFacts
 }
 
 // Facts reads changed file i's facts: one patch run, plus a line count of each present side no
@@ -131,7 +133,7 @@ func (s *Snapshot) read(ctx context.Context, i int, keep bool) (FileDiff, error)
 		newData, newFacts, errNew = s.repo.side(ctx, f.NewBlob)
 	}
 	if err := errors.Join(errOld, errNew); err != nil {
-		if errors.Is(err, errMissing) {
+		if errors.Is(err, ErrMissing) {
 			return unavailable, nil
 		}
 		return FileDiff{}, err
@@ -172,6 +174,7 @@ func (s *Snapshot) read(ctx context.Context, i int, keep bool) (FileDiff, error)
 		return d, nil
 	}
 	d.Facts.Kind = KindText
+	d.record = s.records[i]
 	d.Facts.Hunks = make([]HunkRange, len(hunks))
 	for k, h := range hunks {
 		d.Facts.Hunks[k] = h.HunkRange
@@ -195,7 +198,7 @@ func (r *Repo) side(ctx context.Context, id string) (data []byte, facts SideFact
 		return nil, SideFacts{}, err
 	}
 	if info.missing {
-		return nil, SideFacts{}, errMissing
+		return nil, SideFacts{}, ErrMissing
 	}
 	facts = SideFacts{Present: true, Size: info.size}
 	if info.size > LargeBytes {
@@ -252,7 +255,7 @@ func (s *Snapshot) patch(ctx context.Context, i int) ([][]byte, error) {
 func (s *Snapshot) numstatBinary(ctx context.Context, i int) (bool, error) {
 	var count LineCount
 	n := 0
-	err := s.numStat(ctx, []int{i}, func(_ int, c LineCount) { count, n = c, n+1 })
+	err := s.numStat(ctx, []int{i}, false, func(_ int, c LineCount) { count, n = c, n+1 })
 	if err != nil {
 		return false, err
 	}
@@ -414,6 +417,11 @@ func (s *Snapshot) Lines(ctx context.Context, i int, newSide bool, ranges []Line
 	if id == "" || f.Submodule() {
 		return nil, fmt.Errorf("%s has no content on that side", f.Path())
 	}
+	return s.repo.blobLines(ctx, id, ranges, keep)
+}
+
+// blobLines is Lines for blob id.
+func (r *Repo) blobLines(ctx context.Context, id string, ranges []LineRange, keep int) ([][]SideLine, error) {
 	last := 0
 	for _, r := range ranges {
 		if r.Start < 1 || r.End < r.Start {
@@ -433,7 +441,7 @@ func (s *Snapshot) Lines(ctx context.Context, i int, newSide bool, ranges []Line
 	}
 	slices.SortFunc(byStart, func(a, b int) int { return cmp.Compare(ranges[a].Start, ranges[b].Start) })
 	var active []int
-	err := s.repo.readBlob(ctx, id, func(_ int64, body io.Reader) error {
+	err := r.readBlob(ctx, id, func(_ int64, body io.Reader) error {
 		br := bufio.NewReaderSize(body, 64<<10)
 		next := 0
 		for n := 1; n <= last; n++ {
@@ -513,7 +521,7 @@ func (s *Snapshot) NumStat(ctx context.Context, yield func(i int, c LineCount)) 
 	if len(present) == 0 {
 		return nil
 	}
-	return s.numStat(ctx, present, yield)
+	return s.numStat(ctx, present, false, yield)
 }
 
 // maxNumStatOutput bounds one numstat command's output: two counts, the record's paths and a
@@ -524,9 +532,14 @@ const maxNumStatOutput = maxRawOutput
 // yields each file's count as it arrives. Each record is followed by a lone NUL, which makes
 // diff-pairs flush its output for the records before it and echo the NUL, so git writes one
 // count per batch while stdin is still open and counts stream instead of arriving at the end.
-// diff-pairs prints one record per input record in input order; each is checked against the file
-// it is taken for before it is yielded.
-func (s *Snapshot) numStat(ctx context.Context, files []int, yield func(i int, c LineCount)) error {
+// diff-pairs prints one record per input record in input order, except that with ignoreSpace it
+// prints none for a whitespace-only pair; each is checked against the file it is taken for before
+// it is yielded.
+func (s *Snapshot) numStat(ctx context.Context, files []int, ignoreSpace bool, yield func(i int, c LineCount)) error {
+	format := []string{"--numstat"}
+	if ignoreSpace {
+		format = []string{"-w", "--numstat"}
+	}
 	in := make([]io.Reader, 0, 2*len(files))
 	for _, i := range files {
 		in = append(in, strings.NewReader(s.records[i]), strings.NewReader("\x00"))
@@ -535,6 +548,17 @@ func (s *Snapshot) numStat(ctx context.Context, files []int, yield func(i int, c
 		for k, i := range files {
 			if err := ctx.Err(); err != nil {
 				return fmt.Errorf("numstat: %w", err)
+			}
+			// With -w, git prints no record for a pair whose only changes are whitespace: the
+			// batch is its delimiter alone, and the pair changes no line.
+			if ignoreSpace {
+				if b, err := out.Peek(1); err == nil && b[0] == 0 {
+					if _, err := out.ReadByte(); err != nil {
+						return err
+					}
+					yield(i, LineCount{})
+					continue
+				}
 			}
 			c, oldPath, newPath, err := readNumStat(out)
 			if err != nil {
@@ -556,7 +580,7 @@ func (s *Snapshot) numStat(ctx context.Context, files []int, yield func(i int, c
 			return err
 		}
 		return nil
-	}, diffPairs("--numstat")...)
+	}, diffPairs(format...)...)
 	return err
 }
 
@@ -734,3 +758,5 @@ func gapStart(g Gap, newSide bool) int {
 	}
 	return g.OldFrom
 }
+
+func bufioReader(b []byte) *bufio.Reader { return bufio.NewReader(bytes.NewReader(b)) }

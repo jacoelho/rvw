@@ -32,8 +32,9 @@ Each fact has one owner. Other modules ask the owner; none recomputes its rules.
 | --- | --- | --- |
 | `internal/source` | Every Git fact, through its single `git` runner: origin/HEAD's target (`OriginHead`), the snapshot's trees, the changed-file list and renames, patches and hunks, file contents, line counts, the large-file rule, context gaps and which lines are showable, vendored directories, generated Go files, content search: its text rules (`NewSearchText`), bounds, order, pathspec batching, which files it reads (through the mode-only predicate it shares with the diff) and each match's window, split at rune starts | Anything about comments or the session |
 | `internal/review` | The draft and its one writer, `Session`: comment targets and their validation, limits, authorship, the viewed marks, the summary, the draft file and its lock, quoting and the omission note, result order and rendering in Markdown and JSON | Git, HTTP, presentation |
-| `internal/server` | The HTTP boundary: token, Host and cross-origin checks, CSP, request-shape validation, translation between wire JSON and domain types, the file-request slots, the search endpoint and its slot (it only replaces invalid UTF-8 in the match windows), the background reads of line counts and generated files, the end of the session | Business rules: it asks `review` and `source` |
-| `cmd/rvw` | Arguments, defaulting an omitted base ref to origin/HEAD's target, the session's start and end, signals, opening the browser, the stdout write | Everything above |
+| `internal/server` | The HTTP boundary: token, Host and cross-origin checks, CSP, request-shape validation, translation between wire JSON and domain types, the file-request slots, the search endpoint and its slot (it only replaces invalid UTF-8 in the match windows), the background reads of line counts, generated files and whitespace-only files, the end of the session | Business rules: it asks `review` and `source` |
+| `internal/round` | The review ledger, its store and lock, retention refs it names, round states, pre-set viewed marks, earlier comments and their statuses (see Review rounds) | Git commands, the draft, HTTP |
+| `cmd/rvw` | Arguments, defaulting an omitted base ref to origin/HEAD's target, the session's start and end, signals, opening the browser, the stdout write, reading the ledger at start and recording a delivered round | Everything above |
 | `web` | Layout and interaction. One client (`Api`) decodes every reply at the boundary; one store (`State`) holds every draft and status fact and changes only after the server saved it; one `CommentEditor` owns a comment's save rules. `State` alone says whether a comment is saved; an editor's row placement derives from it; the editor owns only the base its writes assume. The search palette owns query parsing, fuzzy file ranking and its transient query and results. The review strip (`strip.ts`) draws each file's viewed state from `State` in tree order and holds only which file is shown | Any rule the server owns: gaps, vendored or generated status, result order, quote limits, the omission note, search-text rules |
 
 Consequences that keep ownership single:
@@ -102,6 +103,9 @@ Inside a boundary, values are trusted; there is no re-validation.
     report page closed when the grace ended a session whose fate is interrupted.
   - `cmd/rvw` owns the signals, the exit statuses and their single stderr report; a second signal asks the server,
     which asks the session (`Abandon`), so one chain decides the exit status.
+  - Everything on stderr is a `log/slog` text record without a time: `level=… msg="…"` and named values, quoted
+    when they hold spaces, `=` or quotes, so the review URL and draft paths are quoted. `cmd/rvw` builds the one
+    logger and passes it to `source.Resolve` and `server.Config.Log`; the `log` package is denied by depguard.
 - **Page presence** ([Q-42](decisions.md#q-42--closing-the-review-page-ends-the-session)). The page sends a close
   notice on `pagehide`; `server.presence` then arms one timer for the 10 s close grace. Any request that passes the
   Host, token and cross-origin checks disarms it, so a reload or another open tab keeps the session; when it fires,
@@ -225,6 +229,13 @@ Designed for at least 1,000 changed files of 10,000 lines each and up to 4,096 c
 - Rename detection runs only when every blob is present: the file list is built without `-M`, the blobs are checked,
   and only then is it re-listed with `-M -l1000`. The result (`full`, `missing_blobs`, `limit_exceeded`) is sent to the
   UI, which shows the two degraded cases.
+- If computing a file's per-file decorations for `GET /api/file` fails (whitespace-only hunks, lines added since
+  review), the failure is logged and the file is served without them: no lines are marked as added since review.
+  Earlier comment placement degrades per comment instead: `round.Prior.Place` diffs each commented blob once (at most
+  one per side per file, each bounded like a file's patch), and a failed diff or quote read leaves only the comments
+  it serves unplaced, each with its `Cause`, which the server logs. Only a cancelled request fails. Copying an earlier
+  comment fails while its own placement cannot be computed, rather than falling back to its file: the copy records
+  `copied_from`, so a fallback copy could never be retried onto its lines.
 - A delivery failure, a signal or a server failure keeps the draft, so re-running `rvw` resumes it.
 - Mutations, finish and cancel after the session ended reply 410, and the UI shows that `rvw` has stopped. Reads
   answer until shutdown; requests cancelled by the end reply 503.
@@ -237,7 +248,8 @@ Designed for at least 1,000 changed files of 10,000 lines each and up to 4,096 c
   redirect the repository, index or configuration or change patch output (`GIT_DIR`, `GIT_INDEX_FILE`,
   `GIT_CONFIG_*`, `GIT_EXTERNAL_DIFF`, …), plus `GIT_TERMINAL_PROMPT=0` and `GIT_NO_LAZY_FETCH=1`.
 - No Git object parsing.
-- `rvw` never changes refs, the index, worktree files or configuration. Uncommitted changes are snapshotted through a
+- `rvw` never changes refs, the index, worktree files or configuration (contract revision 3 proposes retention refs
+  under `refs/rvw/`; see Review rounds below). Uncommitted changes are snapshotted through a
   private copy of the index.
 - The only listener is `127.0.0.1` on a random port. Every API request needs the session token, and the page runs
   under a strict CSP. Code and comment bodies are set as text, never as HTML.
@@ -250,6 +262,54 @@ Designed for at least 1,000 changed files of 10,000 lines each and up to 4,096 c
 - `web/src/favicon.svg` is the product mark: the favicon, and inlined by the build as the page's
   brand so the end page shows it after the server has gone. `favicon.png` is the same mark
   rasterised at 32px for Safari before 26; re-render it when the SVG changes.
+
+## Review rounds (contract revision 3, proposed)
+
+[Q-49](decisions.md#q-49--review-rounds) records the decision.
+
+- **Ownership.** `internal/round` owns the review ledger: its JSON format (`format.go`, decoupled from the draft's and
+  the wire's), the per-worktree file and its lock (`store.go`), merge, bounds and expiry (`ledger.go`), which
+  retention refs the ledger names, and what a session derives from it (`prior.go`): each file's round state, the
+  viewed marks a new draft starts with, the reviewed-unchanged rule (`round.Unchanged`; the web UI's
+  `State.reviewedUnchanged` applies the same rule as Hide whitespace changes, and `State` alone reads the wire round
+  state, through `changedSince` and `baseChanged`), whether a file has an interdiff and why not (`Prior.Since`,
+  `round.Fallback`), and the earlier comments with their statuses and Still applies targets (`Prior.StillApplies`).
+  `internal/source` owns the Git commands and which pairs of blobs compare as text (`readTextSides`: kinds and
+  REQ-PERF-002 limits), shared by `Interdiff` and `ChangesFrom` (`-U0` hunk ranges from any blob to a file's side),
+  `BlobLines`, `WhitespaceOnly` and `WhitespaceOnlyFiles` (`-w` patch and numstat through `git diff-pairs`), and
+  `KeepTrees`, `UndoKeep`, `RetentionRefs` and `DeleteRefs` (`mktree`, `commit-tree`, `update-ref --stdin`,
+  `for-each-ref`) with hooks, signing and reflogs disabled per command. Every retention ref write names the commit it
+  expects the ref to hold, so a session never overwrites, undoes or deletes another session's concurrent write.
+  `internal/review` keeps the draft, which holds each viewed mark's whitespace flag, the Hide whitespace setting and
+  each comment's copied-from ID; `Session.CopyComment` takes the targets `round` orders and keeps the first it
+  accepts. `internal/server` only translates (`rounds.go`): it maps `round` values to wire names and runs each round
+  call that reads Git inside a file-request slot. Dependencies stay acyclic: `round` → `review`, `source`; `server`
+  and `cmd/rvw` → `round`.
+- **Lifecycle.** At start, `cmd/rvw` opens the draft store, then reads the ledger once under its lock (taken within 2
+  s), bounded as of now. It builds the immutable `round.Prior` for the snapshot from it to seed `review.Start`
+  (`Fresh`: pre-set marks and the Hide whitespace setting, used only for a new draft) and passes the ledger itself to
+  `server.Config`; `server.New` builds its own `Prior` from the session's snapshot, so the server's round facts cannot
+  describe another snapshot. Building it twice costs one pass over the changed-file list. Any ledger failure is
+  reported on stderr and leaves the session without history; an invalid ledger is moved aside. After a `Finished`
+  outcome, `cmd/rvw` records `round.Delivered(snapshot, final draft, now)`; `Store.Record` holds the lock for the one
+  recording, within 10 s, in the order: read and merge, retention ref, atomic ledger write, stale-ref deletion. The
+  retention ref is dated by the newest delivery that names its snapshot, so it is never older than what the ledger
+  keeps. A failed lock, read or ref write records nothing; a ledger write that fails before its rename returns the ref
+  to the exact commit it held, or deletes it, while it still holds the commit this recording wrote. Stale-ref deletion
+  is one transaction over the refs as listed; a ref another worktree's session moved since the listing fails it, and
+  it is retried once from a fresh listing. Recomputing the ref from the old ledger was rejected: the ref's date can be
+  a superseded delivery's, newer than the old ledger implies. Recording failures are reported on stderr and never
+  change the exit status. No ledger work happens for any other outcome.
+- **Bounds.** Ledger: 20,000 reviewed versions from at most 256 snapshots, 30 days applied on read and write, 64 MiB
+  on read and write (a larger write fails the recording), and the comment limits for earlier comments; retention refs:
+  at most 256 per worktree. `Prior` is computed from the changed-file list alone, so opening a session reads no blob.
+  Interdiffs, `-w` patches and earlier comment statuses run inside the file request's slot, one `git diff-pairs` per
+  distinct pair of blobs. Whitespace-only files are found by one background `git diff-pairs -w --numstat` after the UI
+  is served, and published whole when it ends, or as none with the error when it fails, as the generated marks are.
+- **Known limits.** Retention refs are deleted only when a round is recorded in some worktree, so a repository whose
+  reviews stop keeps up to 256 refs per worktree. `git push --mirror` sends them and `git log --all` shows them.
+  A ref under `refs/rvw/` that `KeepTrees` could not have written (another name, or not a commit) is never listed,
+  deleted or counted.
 
 ## Trade-offs and known limits
 

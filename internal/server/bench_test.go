@@ -3,8 +3,7 @@ package server_test
 import (
 	"context"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -61,7 +60,7 @@ func newBenchServer(b *testing.B, base, head map[string]string, seed string) *be
 		b.Fatal(err)
 	}
 	b.Cleanup(func() { _ = repo.Close() })
-	snap, err := repo.Resolve(ctx, source.Last(), log.New(io.Discard, "", 0))
+	snap, err := repo.Resolve(ctx, source.Last(), slog.New(slog.DiscardHandler))
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -70,14 +69,15 @@ func newBenchServer(b *testing.B, base, head map[string]string, seed string) *be
 		b.Fatal(err)
 	}
 	b.Cleanup(func() { _ = store.Close() })
-	sess, _, err := review.Start(ctx, store, snap, seedOf(b, seed))
+	sess, _, err := review.Start(ctx, store, snap, review.Fresh{Seed: seedOf(b, seed)})
 	if err != nil {
 		b.Fatal(err)
 	}
 	srv := server.New(server.Config{
 		Assets:  fstest.MapFS{"index.html": {Data: []byte(indexHTML)}},
-		Session: sess, Token: testToken, Deliver: func(review.Result) error { return nil },
-		Log: log.New(io.Discard, "", 0),
+		Session: sess, Token: testToken,
+		Deliver: func(review.Result) error { return nil },
+		Log:     slog.New(slog.DiscardHandler),
 	})
 	return &benchServer{b: b, h: srv.HandlerForTest(benchAddr), snap: snap, sess: sess}
 }

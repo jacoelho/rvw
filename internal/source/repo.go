@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -221,8 +221,8 @@ func (r *Repo) OriginHead(ctx context.Context) (string, error) {
 	return ref, nil
 }
 
-// Resolve builds the snapshot for src. progress receives human-readable progress lines.
-func (r *Repo) Resolve(ctx context.Context, src Source, progress *log.Logger) (*Snapshot, error) {
+// Resolve builds the snapshot for src. progress receives what Resolve is doing while it runs.
+func (r *Repo) Resolve(ctx context.Context, src Source, progress *slog.Logger) (*Snapshot, error) {
 	if src.kind == "" {
 		return nil, errors.New("source not set")
 	}
@@ -238,7 +238,7 @@ func (r *Repo) Resolve(ctx context.Context, src Source, progress *log.Logger) (*
 		return nil, err
 	}
 	if src.uncommitted {
-		progress.Println("rvw: snapshotting uncommitted changes (git add -A into a private index)")
+		progress.Info("snapshotting uncommitted changes", "how", "git add -A into a private index")
 		snap.headTree, err = r.uncommittedTree(ctx)
 	} else {
 		snap.headTree, err = r.treeOf(ctx, head)

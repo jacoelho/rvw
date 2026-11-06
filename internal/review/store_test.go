@@ -34,19 +34,19 @@ func TestDraftRestoresTheReview(t *testing.T) {
 		}
 	}
 	for _, path := range []string{pathA, pathRenNew, pathDeleted} {
-		if err := s.SetViewed(fx.fileIndex(t, path), true); err != nil {
+		if err := s.SetViewed([]int{fx.fileIndex(t, path)}, true); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := s.SetViewed(fx.fileIndex(t, pathA), false); err != nil {
+	if err := s.SetViewed([]int{fx.fileIndex(t, pathA)}, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SetSummary("summary\n"); err != nil {
 		t.Fatal(err)
 	}
-	want := s.View()
+	want := s.Draft()
 	if len(want.Viewed) != 2 || len(want.Comments) != 5 {
-		t.Fatalf("view before restart = %+v", want)
+		t.Fatalf("draft before restart = %+v", want)
 	}
 	s.End()
 	if err := st.Close(); err != nil {
@@ -54,14 +54,14 @@ func TestDraftRestoresTheReview(t *testing.T) {
 	}
 
 	st = openStore(t, dir, fx.key(fx.last))
-	s, o, err := review.Start(t.Context(), st, fx.last, review.NewSeed(review.SeedComment{Target: reviewTarget, Body: "second seed"}))
+	s, o, err := review.Start(t.Context(), st, fx.last, review.Fresh{Seed: review.NewSeed(review.SeedComment{Target: reviewTarget, Body: "second seed"})})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, moved, _ := o.MovedAside(); moved || !o.Resumed() {
 		t.Fatalf("Start: resumed = %v, moved aside = %v; want the draft resumed", o.Resumed(), moved)
 	}
-	if got := withoutVersions(s.View()); !reflect.DeepEqual(got, withoutVersions(want)) {
+	if got := withoutVersions(s.Draft()); !reflect.DeepEqual(got, withoutVersions(want)) {
 		t.Fatalf("restored =\n%+v\nwant\n%+v", got, want)
 	}
 	for _, c := range want.Comments {
@@ -73,7 +73,7 @@ func TestDraftRestoresTheReview(t *testing.T) {
 		t.Fatal(err)
 	}
 	var bodies []string
-	for _, c := range s.View().Comments {
+	for _, c := range s.Draft().Comments {
 		if c.Target == line(pathA, review.New, 2) {
 			bodies = append(bodies, c.Body)
 		}
@@ -95,10 +95,10 @@ func TestDraftPersistedBeforeApplying(t *testing.T) {
 	if _, err := s.CreateComment(t.Context(), "c1", on(t, s, line(pathA, review.New, 1)), "persisted"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetViewed(0, true); err != nil {
+	if err := s.SetViewed([]int{0}, true); err != nil {
 		t.Fatal(err)
 	}
-	want := s.View()
+	want := s.Draft()
 	c1 := versionOf(t, s, "c1")
 
 	if err := os.Chmod(dir, 0o500); err != nil {
@@ -109,7 +109,7 @@ func TestDraftPersistedBeforeApplying(t *testing.T) {
 		"new comment":     second(s.CreateComment(t.Context(), "c2", on(t, s, reviewTarget), "x")),
 		"edited comment":  second(s.EditComment("c1", c1, "edited")),
 		"deleted comment": s.DeleteComment("c1", c1),
-		"viewed":          s.SetViewed(0, false),
+		"viewed":          s.SetViewed([]int{0}, false),
 		"summary":         s.SetSummary("x"),
 	}
 	for name, err := range failures {
@@ -123,8 +123,8 @@ func TestDraftPersistedBeforeApplying(t *testing.T) {
 			t.Errorf("%s: a storage failure reported as stale: %v", name, err)
 		}
 	}
-	if got := s.View(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("view after failed saves =\n%+v\nwant\n%+v", got, want)
+	if got := s.Draft(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("draft after failed saves =\n%+v\nwant\n%+v", got, want)
 	}
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -181,11 +181,11 @@ func TestDraftKeyIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := openStore(t, dir, keys["uncommitted"])
-	other, o, err := review.Start(t.Context(), st, fx.uncommitted, review.NewSeed())
+	other, o, err := review.Start(t.Context(), st, fx.uncommitted, review.Fresh{Seed: review.NewSeed()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, moved, _ := o.MovedAside(); o.Resumed() || moved || other.View().Summary != "" {
+	if _, moved, _ := o.MovedAside(); o.Resumed() || moved || other.Draft().Summary != "" {
 		t.Fatal("a different snapshot loaded the draft")
 	}
 }
@@ -240,7 +240,7 @@ func TestExpireDrafts(t *testing.T) {
 	}
 
 	st = openStore(t, dir, fx.key(fx.last))
-	_, o, err := review.Start(t.Context(), st, fx.last, review.NewSeed())
+	_, o, err := review.Start(t.Context(), st, fx.last, review.Fresh{Seed: review.NewSeed()})
 	if _, moved, _ := o.MovedAside(); err != nil || o.Resumed() || moved {
 		t.Fatalf("Start after expiry: resumed = %v, moved aside = %v, err = %v; want a new draft", o.Resumed(), moved, err)
 	}

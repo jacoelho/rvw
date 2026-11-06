@@ -292,8 +292,8 @@ func TestPageClosed(t *testing.T) {
 	if err != nil || len(drafts) != 1 {
 		t.Fatalf("drafts %v (%v), want exactly one", drafts, err)
 	}
-	if want := "rvw: the review page was closed; saved draft changes are kept at " + drafts[0]; !strings.Contains(p.stderr.String(), want) {
-		t.Errorf("stderr lacks %q:\n%s", want, p.stderr)
+	if rec, ok := logRecord(p.stderr.String(), pageClosedMsg); !ok || rec["draft"] != drafts[0] {
+		t.Errorf("stderr lacks %q naming draft %s:\n%s", pageClosedMsg, drafts[0], p.stderr)
 	}
 	if resumed, s := w.inspectDraft("last"); !resumed || s.Summary != "kept after close" {
 		t.Errorf("after the page closed the next run resumed=%v with summary %q", resumed, s.Summary)
@@ -311,7 +311,7 @@ func TestSignalsKeepDraft(t *testing.T) {
 	p := w.start(procOptions{}, args...)
 	p.waitURL()
 	p.must(http.MethodPut, "/api/summary", `{"summary":"before restore"}`, http.StatusNoContent)
-	p.must(http.MethodPut, "/api/viewed/0", `{"viewed":true}`, http.StatusNoContent)
+	p.must(http.MethodPut, "/api/viewed", `{"files":[0],"viewed":true}`, http.StatusNoContent)
 	p.signal(syscall.SIGINT)
 	if code := p.exitCode(); code != 130 {
 		t.Fatalf("SIGINT: exit %d, want 130; stderr:\n%s", code, p.stderr)
@@ -325,7 +325,7 @@ func TestSignalsKeepDraft(t *testing.T) {
 	if !strings.Contains(p.stderr.String(), resumedNotice) {
 		t.Errorf("rerun did not resume the draft; stderr:\n%s", p.stderr)
 	}
-	if !strings.Contains(p.stderr.String(), "rvw: the seed was ignored because a draft exists") {
+	if _, ok := logRecord(p.stderr.String(), "the seed was ignored because a draft exists"); !ok {
 		t.Errorf("rerun with --seed did not say the seed was ignored; stderr:\n%s", p.stderr)
 	}
 	s := p.session()
@@ -363,7 +363,7 @@ func TestInvalidSeedWithDraft(t *testing.T) {
 	if code := p.cmd.ProcessState.ExitCode(); code != 1 {
 		t.Errorf("exit %d, want 1; stderr:\n%s", code, p.stderr)
 	}
-	if strings.Contains(p.stderr.String(), "rvw: review at") {
+	if _, ok := logRecord(p.stderr.String(), "review at"); ok {
 		t.Errorf("an invalid seed still served a review; stderr:\n%s", p.stderr)
 	}
 	if resumed, s := w.inspectDraft("branch", "main"); !resumed || s.Summary != "kept" {
@@ -398,16 +398,14 @@ func TestCorruptDraftMovedAside(t *testing.T) {
 	p = w.start(procOptions{}, "branch", "main", "--seed", w.seedFile("seed.json", agentRangeSeed))
 	p.waitURL()
 	stderr := p.stderr.String()
-	_, after, ok := strings.Cut(stderr, "could not be restored")
+	rec, ok := logRecord(stderr, "the saved draft could not be restored and was moved aside")
 	if !ok {
 		t.Fatalf("stderr does not say the draft could not be restored:\n%s", stderr)
 	}
-	// The drafts directory holds a space, so the path runs from the directory to the line's end.
-	k := strings.Index(after, dir+string(filepath.Separator))
-	if k < 0 {
-		t.Fatalf("the notice names no path under %s:\n%s", dir, stderr)
+	aside := rec["path"]
+	if filepath.Dir(aside) != dir {
+		t.Fatalf("the notice names %q, not a path under %s:\n%s", aside, dir, stderr)
 	}
-	aside, _, _ := strings.Cut(after[k:], "\n")
 	if aside == draft {
 		t.Fatalf("the draft was not moved: notice names %s", aside)
 	}
@@ -590,7 +588,7 @@ func TestSecondSignalAfterCancel(t *testing.T) {
 	if out := p.stdout.String(); out != "" {
 		t.Errorf("stdout after cancel: %q", out)
 	}
-	if n := strings.Count(p.stderr.String(), "rvw: review cancelled"); n != 1 {
+	if n := countRecords(p.stderr.String(), "review cancelled"); n != 1 {
 		t.Errorf("stderr reports the cancel %d times; want once:\n%s", n, p.stderr)
 	}
 	if resumed, _ := w.inspectDraft("last"); resumed {
@@ -651,8 +649,9 @@ func TestSecondSignalDuringDelivery(t *testing.T) {
 	})
 	time.Sleep(100 * time.Millisecond)
 	p.signalTwice("second signal during delivery", syscall.SIGINT, 1, 10*time.Second)
-	if want := "the draft is kept at " + drafts[0]; !strings.Contains(p.stderr.String(), want) {
-		t.Errorf("stderr does not say %q:\n%s", want, p.stderr)
+	const keptMsg = "the review result was not delivered; the draft is kept"
+	if rec, ok := logRecord(p.stderr.String(), keptMsg); !ok || rec["draft"] != drafts[0] {
+		t.Errorf("stderr does not say %q naming draft %s:\n%s", keptMsg, drafts[0], p.stderr)
 	}
 	if resumed, s := w.inspectDraft("last"); !resumed || s.Summary != "kept" {
 		t.Errorf("after a second signal during delivery: resumed=%v summary %q; want the draft kept", resumed, s.Summary)
@@ -723,22 +722,19 @@ func TestSecondInstance(t *testing.T) {
 
 // TestBrowserOpenFails checks that a failing browser open is reported with the URL and the
 // session keeps serving.
+const openFailMsg = "could not open the browser; open the URL yourself"
+
 func TestBrowserOpenFails(t *testing.T) {
 	t.Parallel()
 	w := featureWorld(t)
 	p := w.start(procOptions{extra: []string{"RVW_TEST_OPEN_FAIL=1"}}, "last")
 	p.waitURL()
 	p.waitFor("the open failure", func() bool {
-		return strings.Contains(p.stderr.String(), "rvw: could not open the browser")
+		_, ok := logRecord(p.stderr.String(), openFailMsg)
+		return ok
 	})
-	line := ""
-	for l := range strings.Lines(p.stderr.String()) {
-		if strings.HasPrefix(l, "rvw: could not open the browser") {
-			line = l
-		}
-	}
-	if !strings.Contains(line, openFailMarker) || !strings.HasSuffix(line, "open "+p.url+" yourself\n") {
-		t.Errorf("open failure line %q, want open's output and the URL", line)
+	if rec, _ := logRecord(p.stderr.String(), openFailMsg); !strings.Contains(rec["err"], openFailMarker) || rec["url"] != p.url {
+		t.Errorf("open failure record %v, want open's output and the URL %s", rec, p.url)
 	}
 	p.session()
 	p.must(http.MethodPost, "/api/cancel", "", http.StatusNoContent)
@@ -754,7 +750,8 @@ func (w *world) repoState() map[string]string {
 	gitDir := filepath.Join(w.repo, ".git")
 	st := map[string]string{
 		"status": w.git("--no-optional-locks", "status", "--porcelain=v2", "--branch", "--untracked-files=all"),
-		"refs":   w.git("for-each-ref", "--format=%(refname) %(objectname)"),
+		// Retention refs are the one ref change a finished session makes (INV-PLAT-004).
+		"refs":   w.git("for-each-ref", "--format=%(refname) %(objectname)", "--exclude=refs/rvw/"),
 		"index":  readFile(w.t, filepath.Join(gitDir, "index")),
 		"HEAD":   readFile(w.t, filepath.Join(gitDir, "HEAD")),
 		"config": readFile(w.t, filepath.Join(gitDir, "config")),
@@ -789,7 +786,8 @@ func (w *world) repoState() map[string]string {
 }
 
 // TestRepositoryUnchanged checks that a full session over committed, staged, unstaged and
-// untracked changes leaves refs, index, worktree and configuration as they were.
+// untracked changes leaves refs outside refs/rvw/, index, worktree and configuration as they were,
+// and adds one retention ref.
 func TestRepositoryUnchanged(t *testing.T) {
 	t.Parallel()
 	w := featureWorld(t)
@@ -809,7 +807,7 @@ func TestRepositoryUnchanged(t *testing.T) {
 	p.waitURL()
 	p.must(http.MethodGet, "/api/file?i=0", "", http.StatusOK)
 	p.createComment("c1", `{"target":{"target":"line","file":0,"side":"new","line":31},"body":"Why?"}`)
-	p.must(http.MethodPut, "/api/viewed/0", `{"viewed":true}`, http.StatusNoContent)
+	p.must(http.MethodPut, "/api/viewed", `{"files":[0],"viewed":true}`, http.StatusNoContent)
 	p.finish()
 	if code := p.exitCode(); code != 0 {
 		t.Fatalf("exit %d, want 0; stderr:\n%s", code, p.stderr)
@@ -825,6 +823,9 @@ func TestRepositoryUnchanged(t *testing.T) {
 		if _, ok := before[k]; !ok {
 			t.Errorf("%s appeared", k)
 		}
+	}
+	if refs := strings.Fields(w.git("for-each-ref", "--format=%(refname)", "refs/rvw/")); len(refs) != 1 {
+		t.Errorf("retention refs %q, want one", refs)
 	}
 }
 
@@ -865,7 +866,7 @@ func TestArguments(t *testing.T) {
 		if got := strings.Contains(stderr, "Usage:"); got != c.wantUsage {
 			t.Errorf("rvw %v: usage on stderr = %v, want %v; stderr:\n%s", c.args, got, c.wantUsage, stderr)
 		}
-		if !strings.Contains(stderr, c.message) {
+		if !stderrSays(stderr, c.message) {
 			t.Errorf("rvw %q: stderr does not say %q:\n%s", c.args, c.message, stderr)
 		}
 		if c.absent != "" && strings.Contains(stderr, c.absent) {
@@ -1027,7 +1028,7 @@ func TestBranchWithoutOriginHead(t *testing.T) {
 		t.Errorf("exit %d, want 1; stderr:\n%s", code, stderr)
 	}
 	for _, want := range []string{"origin/HEAD is not set", "name a base ref"} {
-		if !strings.Contains(stderr, want) {
+		if !stderrSays(stderr, want) {
 			t.Errorf("stderr does not say %q:\n%s", want, stderr)
 		}
 	}
@@ -1090,7 +1091,7 @@ func TestUnresolvableSource(t *testing.T) {
 			if code := p.cmd.ProcessState.ExitCode(); code != 1 {
 				t.Errorf("exit %d, want 1; stderr:\n%s", code, stderr)
 			}
-			if !strings.Contains(stderr, tc.reason) {
+			if !stderrSays(stderr, tc.reason) {
 				t.Errorf("stderr does not say %q:\n%s", tc.reason, stderr)
 			}
 			if urlPattern.MatchString(stderr) {

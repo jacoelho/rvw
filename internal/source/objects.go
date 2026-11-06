@@ -142,7 +142,7 @@ func (r *Repo) readBlob(ctx context.Context, id string, fn func(size int64, body
 			return err
 		}
 		if info.missing {
-			return errMissing
+			return ErrMissing
 		}
 		if info.kind != "blob" {
 			return fmt.Errorf("object %s is a %s, not a blob", id, info.kind)
@@ -160,7 +160,8 @@ func (r *Repo) readBlob(ctx context.Context, id string, fn func(size int64, body
 	})
 }
 
-var errMissing = errors.New("object missing from the local object database")
+// ErrMissing reports an object absent from the local object database.
+var ErrMissing = errors.New("object missing from the local object database")
 
 // ErrClosed is returned by reads through a Repo after Close.
 var ErrClosed = errors.New("the repository has been closed")

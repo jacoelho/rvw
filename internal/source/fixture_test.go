@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -211,7 +211,7 @@ func open(t *testing.T, dir string) *source.Repo {
 	return repo
 }
 
-var quiet = log.New(io.Discard, "", 0)
+var quiet = slog.New(slog.DiscardHandler)
 
 func resolve(t *testing.T, dir string, src source.Source) *source.Snapshot {
 	t.Helper()

@@ -566,8 +566,11 @@ kbd {
   stroke-linejoin: round;
 }
 
+/* A directory row's viewed checkbox sits in this column, so it is the checkbox's width. */
 .tree-viewed {
-  width: 10px;
+  display: inline-flex;
+  justify-content: center;
+  width: 12px;
   color: var(--muted);
 }
 
@@ -1340,6 +1343,183 @@ kbd {
 
 .end-note {
   margin-left: 8px;
+  color: var(--muted);
+}
+
+/* Review rounds (contract revision 3): the whitespace setting, the round strip, round groups and
+   tags in the tree, round labels, the since marks and hidden whitespace in the diff, and earlier
+   comments. Earlier comments are read-only context, so they recede: no ground, neutral chips. */
+
+.ws-toggle {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+
+.ws-toggle input {
+  margin: 0;
+  accent-color: var(--primary);
+}
+
+.round-banner {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 var(--inset) 6px 16px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.round-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.round-banner b {
+  color: var(--fg);
+  font-weight: 500;
+}
+
+.seg {
+  flex: none;
+  display: inline-flex;
+  height: var(--control-h);
+  border: 1px solid var(--control);
+  border-radius: var(--radius-control);
+  overflow: hidden;
+}
+
+.seg button {
+  padding: 0 12px;
+  border: 0;
+  background: var(--sheet);
+  color: var(--muted);
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.seg button + button {
+  border-left: 1px solid var(--control);
+}
+
+.seg button.on {
+  background: var(--frame-active);
+  color: var(--fg);
+  font-weight: 500;
+}
+
+.dir-check {
+  width: 12px;
+  height: 12px;
+  margin: 0;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+/* Not a tree-row: it is a rule between the tree and the round groups, never selected. */
+.tree-sep {
+  left: 16px;
+  right: 12px;
+  height: 28px;
+  background: linear-gradient(var(--rule), var(--rule)) center / 100% 1px no-repeat;
+}
+
+.tree-round .tree-name {
+  font-style: italic;
+}
+
+.rtag {
+  min-width: 3ch;
+  color: var(--muted);
+  font-family: var(--sans);
+  font-size: 11px;
+  text-align: right;
+}
+
+.fh-path {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.fh-round {
+  flex: none;
+  color: var(--muted);
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+@media (max-width: 768px) {
+  .fh-round {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+/* Lines added since the review, in All changes (REQ-RND-013): a bar in the gutter. */
+.d-line.since .d-ln:first-child,
+.d-half.since .d-ln {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.d-hidden-ws {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: var(--code-x);
+  background: var(--hunk-bg);
+  color: var(--muted);
+  font: 12px var(--sans);
+}
+
+.earlier .c-card {
+  background: transparent;
+}
+
+.earlier .badge,
+.chip-cur {
+  border: 1px solid var(--border);
+  background: var(--raised);
+  color: var(--muted);
+}
+
+.chip {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font: 500 11px/16px var(--sans);
+}
+
+.chip-out {
+  background: var(--notice-bg);
+  color: var(--notice-ink);
+}
+
+.e-when {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.e-quote {
+  height: auto;
+}
+
+.fin-earlier-head {
+  margin: 8px 0;
+}
+
+.fin-earlier-note {
   color: var(--muted);
 }
 

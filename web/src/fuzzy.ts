@@ -8,10 +8,13 @@ export interface Candidate {
   readonly oldPath?: string | undefined;
 }
 
+/** Which of a file's paths a query matched. */
+export type MatchedPath = "path" | "oldPath";
+
 /** A ranked file: which of its paths matched, and the matched UTF-16 positions in that path. */
 export interface Ranked {
   readonly i: number;
-  readonly on: "path" | "oldPath";
+  readonly on: MatchedPath;
   readonly positions: readonly number[];
 }
 

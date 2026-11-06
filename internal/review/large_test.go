@@ -101,7 +101,7 @@ func TestLargeFileCommentsStayInsideHunks(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			st := openStore(t, t.TempDir(), fx.key(fx.last))
-			s, _, err := review.Start(t.Context(), st, fx.last, review.NewSeed(review.SeedComment{Target: tt.target, Body: "seeded"}))
+			s, _, err := review.Start(t.Context(), st, fx.last, review.Fresh{Seed: review.NewSeed(review.SeedComment{Target: tt.target, Body: "seeded"})})
 			if tt.valid != (err == nil) {
 				t.Fatalf("Start with the comment as a seed: err = %v; want valid = %v", err, tt.valid)
 			}
@@ -126,7 +126,7 @@ func TestLargeFileCommentsStayInsideHunks(t *testing.T) {
 			if !strings.Contains(err.Error(), tt.target.Path()) {
 				t.Errorf("CreateComment error %q does not name %s", err, tt.target.Path())
 			}
-			if n := len(s.View().Comments); n != 0 {
+			if n := len(s.Draft().Comments); n != 0 {
 				t.Errorf("a rejected comment left %d comments", n)
 			}
 		})

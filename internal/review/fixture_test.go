@@ -3,8 +3,7 @@ package review_test
 import (
 	"errors"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -153,7 +152,7 @@ func (fx *fixture) fileIndex(t *testing.T, path string) int {
 
 func resolve(t *testing.T, repo *source.Repo, src source.Source) *source.Snapshot {
 	t.Helper()
-	snap, err := repo.Resolve(t.Context(), src, log.New(io.Discard, "", 0))
+	snap, err := repo.Resolve(t.Context(), src, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("resolve %s: %v", src, err)
 	}
@@ -229,7 +228,7 @@ func openStore(t *testing.T, dir, key string) *review.Store {
 func (fx *fixture) start(t *testing.T, dir string, seed review.Seed) (*review.Session, *review.Store) {
 	t.Helper()
 	st := openStore(t, dir, fx.key(fx.last))
-	s, o, err := review.Start(t.Context(), st, fx.last, seed)
+	s, o, err := review.Start(t.Context(), st, fx.last, review.Fresh{Seed: seed})
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -331,7 +330,7 @@ func on(tb testing.TB, s *review.Session, target review.Target) review.Placement
 // versionOf is comment id's current version, as an editor that just loaded it holds.
 func versionOf(tb testing.TB, s *review.Session, id string) int64 {
 	tb.Helper()
-	for _, c := range s.View().Comments {
+	for _, c := range s.Draft().Comments {
 		if c.ID == id {
 			return c.Version
 		}
@@ -340,7 +339,7 @@ func versionOf(tb testing.TB, s *review.Session, id string) int64 {
 }
 
 // withoutVersions clears the versions, which a restore does not keep.
-func withoutVersions(v review.View) review.View {
+func withoutVersions(v review.Draft) review.Draft {
 	v.Comments = slices.Clone(v.Comments)
 	for i := range v.Comments {
 		v.Comments[i].Version = 0

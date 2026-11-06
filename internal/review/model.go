@@ -168,7 +168,10 @@ type Comment struct {
 	ID     string
 	Author Author
 	Body   string
-	Target Target
+	// CopiedFrom is the ID of the earlier comment this comment was copied from by Still applies,
+	// or "" (REQ-CMT-011). It is opaque: no check ties it to an earlier comment.
+	CopiedFrom string
+	Target     Target
 	// File is the changed-file index Target names, or -1 for a review comment.
 	File int
 	// Seq is the creation order, unique within a draft.

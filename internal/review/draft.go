@@ -9,10 +9,11 @@ const draftVersion = 2
 // draftFile is the persisted draft. Its types belong to this format alone, so a change to the
 // agent-facing formats cannot silently change it. Comments are revalidated on load.
 type draftFile struct { //nolint:govet // fieldalignment: field order is the JSON member order.
-	Version  int            `json:"version"`
-	Comments []draftComment `json:"comments"`
-	Summary  string         `json:"summary"`
-	Viewed   []viewedFile   `json:"viewed"`
+	Version        int            `json:"version"`
+	Comments       []draftComment `json:"comments"`
+	Summary        string         `json:"summary"`
+	Viewed         []viewedFile   `json:"viewed"`
+	HideWhitespace bool           `json:"hide_whitespace,omitzero"`
 }
 
 type draftComment struct { //nolint:govet // fieldalignment: field order is the JSON member order.
@@ -21,6 +22,8 @@ type draftComment struct { //nolint:govet // fieldalignment: field order is the 
 	Target draftTarget `json:"target"`
 	Body   string      `json:"body"`
 	Seq    int64       `json:"seq"`
+	// CopiedFrom is the earlier comment Still applies copied, opaque to the draft (REQ-CMT-011).
+	CopiedFrom string `json:"copied_from,omitzero"`
 }
 
 type draftTarget struct {
@@ -31,10 +34,12 @@ type draftTarget struct {
 	End   int    `json:"end,omitzero"`
 }
 
-// viewedFile keys a viewed mark by the file's paths, which are unique within a snapshot.
+// viewedFile keys a viewed mark by the file's paths, which are unique within a snapshot, and
+// records whether whitespace was hidden when it was set.
 type viewedFile struct {
-	OldPath string `json:"old_path"`
-	NewPath string `json:"new_path"`
+	OldPath    string `json:"old_path"`
+	NewPath    string `json:"new_path"`
+	Whitespace bool   `json:"whitespace,omitzero"`
 }
 
 func draftTargetOf(t Target) draftTarget {
@@ -77,12 +82,13 @@ func authorOf(s string) (Author, error) {
 // encodeDraft is the persisted form of st; comments are in result order.
 func encodeDraft(st state, comments []Comment, viewed []viewedFile) draftFile {
 	d := draftFile{
-		Version: draftVersion, Summary: st.summary,
+		Version: draftVersion, Summary: st.summary, HideWhitespace: st.hideWhitespace,
 		Comments: make([]draftComment, 0, len(comments)), Viewed: viewed,
 	}
 	for _, c := range comments {
 		d.Comments = append(d.Comments, draftComment{
 			ID: c.ID, Author: string(c.Author), Target: draftTargetOf(c.Target), Body: c.Body, Seq: c.Seq,
+			CopiedFrom: c.CopiedFrom,
 		})
 	}
 	return d

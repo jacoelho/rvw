@@ -10,7 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/round"
 	"github.com/jacoelho/rvw/internal/server"
 	"github.com/jacoelho/rvw/internal/source"
 	"github.com/jacoelho/rvw/web"
@@ -40,6 +41,10 @@ const (
 
 const openTimeout = 10 * time.Second
 
+// recordTimeout bounds recording a round after delivery: the ledger lock wait and the git calls
+// that keep and prune retention refs.
+const recordTimeout = 10 * time.Second
+
 func main() {
 	// Without this, a write to a closed stdout pipe kills the process before deliver can report
 	// the failure and keep the draft.
@@ -48,15 +53,22 @@ func main() {
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	// msg writes whole lines to stderr; it appends a newline only when one is missing.
-	msg := log.New(stderr, "", 0)
+	msg := newLogger(stderr)
 	cmd, err := parseArgs(args)
 	if err != nil {
-		msg.Printf("rvw: %v\n\n%s", err, usage)
+		msg.Error("invalid command line", "err", err)
+		// Usage help is plain text after the record; the exit status says the command line was
+		// invalid whether or not it was written.
+		if _, werr := io.WriteString(stderr, "\n"+usage); werr != nil {
+			msg.Error("write usage help", "err", werr)
+		}
 		return exitUsage
 	}
 	if cmd.help {
-		msg.Print(usage)
+		if _, werr := io.WriteString(stderr, usage); werr != nil {
+			msg.Error("write usage help", "err", werr)
+			return exitFailure
+		}
 		return exitOK
 	}
 
@@ -95,7 +107,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 				o := l.srv.Abandon()
 				cause := ""
 				if o == server.DeliveryFailed {
-					cause = "rvw: a second signal ended the session before the review result was delivered"
+					cause = "a second signal ended the session before the review result was delivered"
 				}
 				if c := l.report(o, cause, msg); c != exitInterrupted {
 					code = c
@@ -137,21 +149,21 @@ type live struct {
 	code  int
 }
 
-func (l *live) report(o server.Outcome, cause string, msg *log.Logger) int {
+func (l *live) report(o server.Outcome, cause string, msg *slog.Logger) int {
 	l.once.Do(func() {
 		if cause != "" {
-			msg.Println(cause)
+			msg.Error(cause)
 		}
 		l.code = exitFor(o, l.draft, msg)
 	})
 	return l.code
 }
 
-func session(ctx context.Context, cmd command, stdin io.Reader, stdout io.Writer, msg *log.Logger, current *atomic.Pointer[live]) int {
+func session(ctx context.Context, cmd command, stdin io.Reader, stdout io.Writer, msg *slog.Logger, current *atomic.Pointer[live]) int {
 	// fail ends a startup step. A signal that cut the step short is reported as the signal, not
 	// as the step's failure.
 	fail := func(err error) int {
-		msg.Printf("rvw: %v", err)
+		msg.Error("cannot start the review", "err", err)
 		if ctx.Err() != nil {
 			return exitInterrupted
 		}
@@ -167,7 +179,7 @@ func session(ctx context.Context, cmd command, stdin io.Reader, stdout io.Writer
 	}
 	defer func() {
 		if closeErr := repo.Close(); closeErr != nil {
-			msg.Printf("rvw: %v", closeErr)
+			msg.Warn("close repository", "err", closeErr)
 		}
 	}()
 	src, err := resolveRequest(ctx, repo, cmd.request)
@@ -178,7 +190,7 @@ func session(ctx context.Context, cmd command, stdin io.Reader, stdout io.Writer
 	if err != nil {
 		return fail(err)
 	}
-	msg.Println(review.DescribeSource(snap))
+	msg.LogAttrs(ctx, slog.LevelInfo, "reviewing", review.SourceAttrs(snap)...)
 
 	var seed review.Seed
 	if cmd.seedPath != "" {
@@ -192,7 +204,7 @@ func session(ctx context.Context, cmd command, stdin io.Reader, stdout io.Writer
 		return fail(err)
 	}
 	if expireErr := review.ExpireDrafts(dir, time.Now()); expireErr != nil {
-		msg.Printf("rvw: %v", expireErr)
+		msg.Warn("expire drafts", "err", expireErr)
 	}
 	// A held lock fails here too; LockedError carries the other session's URL.
 	store, err := review.OpenStore(dir, review.DraftKey(snap))
@@ -201,20 +213,24 @@ func session(ctx context.Context, cmd command, stdin io.Reader, stdout io.Writer
 	}
 	defer func() {
 		if closeErr := store.Close(); closeErr != nil {
-			msg.Printf("rvw: %v", closeErr)
+			msg.Warn("close draft store", "err", closeErr)
 		}
 	}()
 
-	sess, opening, err := review.Start(ctx, store, snap, seed)
+	ledgerStore, ledger := openLedger(snap, msg)
+	prior := round.NewPrior(snap, ledger)
+	sess, opening, err := review.Start(ctx, store, snap, review.Fresh{
+		Seed: seed, Viewed: prior.PresetMarks(), HideWhitespace: prior.HideWhitespace(),
+	})
 	if err != nil {
 		return fail(err)
 	}
 	if path, moved, reason := opening.MovedAside(); moved {
-		msg.Printf("rvw: the saved draft could not be restored (%v); it was moved to %s", reason, path)
+		msg.Warn("the saved draft could not be restored and was moved aside", "path", path, "reason", reason)
 	} else if opening.Resumed() {
-		msg.Printf("rvw: resuming the saved draft %s", store.Path())
+		msg.Info("resuming the saved draft", "path", store.Path())
 		if cmd.seedPath != "" {
-			msg.Println("rvw: the seed was ignored because a draft exists")
+			msg.Info("the seed was ignored because a draft exists")
 		}
 	}
 
@@ -229,19 +245,68 @@ func session(ctx context.Context, cmd command, stdin io.Reader, stdout io.Writer
 		return fail(errors.Join(err, ln.Close()))
 	}
 	srv := server.New(server.Config{
-		Session: sess, Token: token, Assets: web.Assets(), Log: msg,
+		Session: sess, Ledger: ledger, Token: token, Assets: web.Assets(), Log: msg,
 		Deliver: func(r review.Result) error { return deliver(stdout, r, cmd.json) },
 	})
 	l := &live{srv: srv, draft: store.Path()}
 	current.Store(l)
-	msg.Printf("rvw: review at %s", url)
+	msg.Info("review at", "url", url)
 	stopOpener := startOpener(ctx, url, msg)
 	outcome, err := srv.Run(ctx, ln)
 	stopOpener()
 	if err != nil {
-		msg.Printf("rvw: %v", err)
+		msg.Error("serve the review", "err", err)
+	}
+	if outcome == server.Finished && ledgerStore != nil {
+		// The result is already delivered: a ledger failure costs the next round its history,
+		// never this round its result (REQ-RND-006).
+		d := round.Delivered(snap, sess.Draft(), time.Now())
+		// Recording runs after a signal too, but bounded, so a stuck git cannot hold the exit.
+		recCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+		recErr := ledgerStore.Record(recCtx, repo, d)
+		cancel()
+		if recErr != nil {
+			msg.Warn("record the review round", "err", recErr)
+		}
 	}
 	return l.report(outcome, "", msg)
+}
+
+// newLogger writes rvw's records to stderr as text, one line each. Records carry no time: they are
+// read as the session goes, and a timestamp would only make them harder to compare.
+func newLogger(stderr io.Writer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if len(groups) == 0 && a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return a
+		},
+	}))
+}
+
+// openLedger opens and loads the worktree's review ledger. Every failure is reported and leaves the
+// session without history (REQ-RND-006): the zero Ledger, and a nil store when there is none to
+// record into.
+func openLedger(snap *source.Snapshot, msg *slog.Logger) (*round.Store, round.Ledger) {
+	dir, err := round.LedgerDir()
+	if err != nil {
+		msg.Warn("find the review ledger", "err", err)
+		return nil, round.Ledger{}
+	}
+	if expireErr := round.ExpireLedgers(dir, time.Now()); expireErr != nil {
+		msg.Warn("expire review ledgers", "err", expireErr)
+	}
+	store, err := round.OpenStore(dir, snap.CommonDir(), snap.TopLevel())
+	if err != nil {
+		msg.Warn("open the review ledger", "err", err)
+		return nil, round.Ledger{}
+	}
+	l, err := store.Load(time.Now())
+	if err != nil {
+		msg.Warn("load the review ledger", "err", err)
+	}
+	return store, l
 }
 
 // resolveRequest turns the command line's request into a source. An omitted base ref is
@@ -261,24 +326,24 @@ func resolveRequest(ctx context.Context, repo *source.Repo, req request) (source
 }
 
 // exitFor reports a session's outcome on stderr and returns rvw's exit status for it.
-func exitFor(outcome server.Outcome, draft string, msg *log.Logger) int {
+func exitFor(outcome server.Outcome, draft string, msg *slog.Logger) int {
 	switch outcome {
 	case server.Finished:
 		return exitOK
 	case server.Cancelled:
-		msg.Println("rvw: review cancelled")
+		msg.Info("review cancelled")
 		return exitCancelled
 	case server.DeliveryFailed, server.Failed:
-		msg.Printf("rvw: the draft is kept at %s", draft)
+		msg.Error("the review result was not delivered; the draft is kept", "draft", draft)
 		return exitFailure
 	case server.Interrupted:
-		msg.Printf("rvw: interrupted; the draft is kept at %s", draft)
+		msg.Info("interrupted; the draft is kept", "draft", draft)
 		return exitInterrupted
 	case server.PageClosed:
-		msg.Printf("rvw: the review page was closed; saved draft changes are kept at %s", draft)
+		msg.Info("the review page was closed; saved draft changes are kept", "draft", draft)
 		return exitPageClosed
 	default:
-		msg.Printf("rvw: internal error: unexpected outcome %d; the draft is kept at %s", outcome, draft)
+		msg.Error("internal error: unexpected outcome; the draft is kept", "outcome", int(outcome), "draft", draft)
 		return exitFailure
 	}
 }
@@ -331,7 +396,7 @@ func deliver(stdout io.Writer, r review.Result, asJSON bool) error {
 
 // startOpener opens url in the background. The returned stop cancels the open command if it is
 // still running and waits for it, so no open process outlives the session.
-func startOpener(ctx context.Context, url string, msg *log.Logger) (stop func()) {
+func startOpener(ctx context.Context, url string, msg *slog.Logger) (stop func()) {
 	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
@@ -345,7 +410,7 @@ func startOpener(ctx context.Context, url string, msg *log.Logger) (stop func())
 }
 
 // openBrowser asks macOS to open url. Failure is reported and the session keeps serving.
-func openBrowser(ctx context.Context, url string, msg *log.Logger) {
+func openBrowser(ctx context.Context, url string, msg *slog.Logger) {
 	ctx, cancel := context.WithTimeout(ctx, openTimeout)
 	defer cancel()
 	// G204: the executable is fixed and url is the session URL rvw built.
@@ -354,7 +419,7 @@ func openBrowser(ctx context.Context, url string, msg *log.Logger) {
 	cmd.WaitDelay = time.Second
 	out, err := cmd.CombinedOutput()
 	if err != nil && ctx.Err() != context.Canceled {
-		msg.Printf("rvw: could not open the browser (%v): open %s yourself", errWithOutput(err, out), url)
+		msg.Warn("could not open the browser; open the URL yourself", "url", url, "err", errWithOutput(err, out))
 	}
 }
 

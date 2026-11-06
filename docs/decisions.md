@@ -144,7 +144,8 @@ Executed observation on Apple Git 2.54:
   unchanged, and the snapshot missed it. Observed by the test review on 2026-11-05.
 
 Trade-off: `git add -A` writes blob and tree objects into the repository's object database. They are unreachable and
-`git gc` prunes them. INV-PLAT-004 allows this explicitly.
+`git gc` prunes them. INV-PLAT-004 allows this explicitly. Revision 3 keeps the objects of a delivered review
+reachable through a retention ref, so the next round can diff against them ([Q-49](#q-49--review-rounds)).
 
 Rejected alternatives:
 
@@ -246,8 +247,8 @@ accept only review comments; this avoids a byte-preserving path encoding for a r
 - Reloading the snapshot during a session. If `HEAD` moves, the UI shows a notice (REQ-SES-010); the human finishes or
   cancels and the agent re-runs. Worktree edits are not detected: that would mean rebuilding the uncommitted tree
   repeatedly, writing objects each time.
-- Carrying comments into a second review round. The agent addresses comments, re-runs `rvw`, and the human reviews the
-  new snapshot fresh. Re-anchoring is a candidate for v2 once real use shows it is needed.
+- ~~Carrying comments into a second review round.~~ Superseded by [Q-49](#q-49--review-rounds) in contract revision 3
+  (proposed): real use of `rvw branch --uncommitted` showed it is needed.
 
 ### Q-18 — Agent comment seeding
 
@@ -686,8 +687,8 @@ Before this, a human who closed the review tab left `rvw` running until someone 
 waited. Now the page sends a close notice on `pagehide`: `POST /api/page-closed`, a `keepalive` fetch with the
 session token. It is same-origin, so it passes the checks of Q-44 without a preflight. The server then ends the
 session as page closed after a 10-second grace, unless some page makes an authenticated request first. `rvw` keeps
-the saved draft, writes nothing to stdout, writes `rvw: the review page was closed; saved draft changes are kept at
-<path>` to stderr and exits 4.
+the saved draft, writes nothing to stdout, writes the record `msg="the review page was closed; saved draft changes
+are kept" draft=<path>` to stderr and exits 4.
 
 The presence rule is that any authenticated request after the notice keeps the session. A reload sends the notice
 and then loads the session again. Another open tab polls the status. Two things keep that tab's request inside the
@@ -976,3 +977,107 @@ Rejected:
   shift every line in view.
 - Refocusing the editor by hand after each failed save, discard or leave: it covered only the rebuilds its callers
   knew about, and a rebuild the editor did not cause still sent the next keys to the page shortcuts.
+
+### Q-49 — Review rounds
+
+Proposed on 2026-11-06 for contract revision 3; not accepted. The repository owner's main use is `rvw branch
+--uncommitted`, run again after each agent turn, and asked, 2026-11-06, to hide whitespace changes, hide what was
+already reviewed and has not changed, show what changed since the last review as a subset, through a toggle or
+dropdown, and keep earlier comments where they still hold, marking the rest outdated like GitHub. The owner then
+decided:
+
+- reviewed means marked viewed, with an easier way to mark files, "perhaps per directory" (REQ-NAV-010);
+- an untracked ref is acceptable for keeping reviewed objects ("if is not tracked seems the cleanest?");
+- "support the use case I described": this supersedes the carry-over half of Q-17.
+
+Design:
+
+- **Review ledger** (REQ-RND-001 to REQ-RND-007). Per worktree, beside the drafts, not per snapshot: every agent edit
+  is a new snapshot and a new draft, so only something keyed by worktree can carry over. Entries are keyed by file key
+  and hold file versions (modes and blob IDs), so a round state is a comparison with the changed-file list and costs
+  no Git work at start. It is written once, after a delivered result, under a short lock that merges into the latest
+  content, because sessions for different snapshots of one worktree can overlap.
+- **Retention refs** (REQ-RND-005). `refs/rvw/<worktree ID>/<base>-<head>`, one per delivered snapshot that the ledger
+  still names. Shared refs, namespaced per worktree, because `git gc` in any worktree must see them. Executed
+  observation on Apple Git 2.54: they keep their objects through `git gc --prune=now` from any worktree and are not
+  sent by `git push` or `git push --all`; `update-ref` runs the `reference-transaction` hook unless hooks are disabled
+  for the command; `commit-tree --no-gpg-sign` overrides `commit.gpgSign`. Known cost: `git push --mirror` sends them
+  and `git log --all` shows them in every worktree. Each delivery points the ref at a new commit dated by rvw's clock,
+  so the ref's age is its newest delivery's. The ref is written before the ledger and stale refs are deleted after it,
+  so this worktree's ledger on disk never names a ref this worktree deleted; refs older than 30 days are deleted by
+  any worktree's recording, which cleans up after a removed worktree. Expiry also applies on read, so another
+  worktree's age prune stays consistent with every ledger, idle or not. Expiry covers only reviewed versions and
+  earlier comments: the Hide whitespace setting and last-review time name no snapshot and persist. A ledger write over
+  64 MiB is refused rather than trimmed: the readable ledger stays intact, and the condition needs paths averaging
+  over 1.5 KiB across 20,000 versions.
+- **Whitespace** (REQ-DIFF-011, REQ-NAV-009). Hide hunks of the normal patch that the `-w` patch leaves without a
+  changed line; never show the `-w` patch. When the `-w` patch changes a line outside the normal patch's changed
+  lines, it has paired repeated lines differently, and nothing in that file is hidden: executed observation by the
+  critic review, an indented `x` above ten `x` lines, deleted, gives a normal hunk deleting line 1 and a `-w` hunk
+  deleting line 11.
+- **Reviewed with whitespace hidden** is its own round state, labelled and not grouped while whitespace is shown, so a
+  review that hid whitespace never counts for a view that shows it.
+- **Since last review** (REQ-RND-010). The interdiff is one `git diff-pairs` run on a raw record built from two blob
+  IDs, the same shape as every other patch (Q-33). Executed observation: `diff-pairs` accepts such a hand-built
+  record.
+- **Earlier comments** (REQ-CMT-009 to REQ-CMT-012). Only the last delivered result's comments carry over. A comment
+  that still applies is carried forward by Still applies; one the human does not carry is treated as addressed. Status
+  comes from Git's diff between the comment's blob and the snapshot's, computed when the file opens.
+- **Grouping precedence**: vendored, then reviewed unchanged, then generated, then whitespace only. A file with a
+  comment or earlier comment at start is never grouped by the two new rows.
+- **Draft format** stays version 2 (REQ-DRF-005). Rounds add only optional members (`hide_whitespace`,
+  `copied_from`, a viewed mark's `whitespace`), each omitted at its zero value, so a draft written by v0.0.3 restores
+  unchanged. A draft that uses them is moved aside by an older build, whose strict decoder rejects unknown members;
+  that costs only a downgrade. Rejected: version 3, which would move every interrupted v0.0.3 review aside for no
+  change in meaning; reading both versions, a parallel path for one format.
+
+Open for the owner before acceptance: the request said "a subset of the changes"; the Since view shows the interdiff,
+which also shows lines the agent added and then removed and, after a rebase, upstream edits. The subset filter is
+rejected below.
+
+Rejected:
+
+- Showing the `git diff-pairs -w -p` patch: its context lines carry new-side text on both sides, so old-side lines and
+  quoted code would disagree with the snapshot (REQ-DIFF-001).
+- Dimming whitespace-only lines instead of hiding: the owner asked to hide them.
+- Recording reviewed versions when a viewed mark is set: a mark cleared before Finish, or a cancelled review, would
+  count as reviewed.
+- Keying the ledger by source kind or snapshot: a file reviewed under `rvw uncommitted` is equally reviewed under
+  `rvw branch --uncommitted`, and the blob IDs already identify the content.
+- Relying on `git gc`'s default two-week grace for unreachable objects: `git gc --prune=now` or an aggressive
+  configuration loses the reviewed blobs.
+- An rvw-private object store read through `GIT_ALTERNATE_OBJECT_DIRECTORIES`: it copies blobs and adds storage and
+  expiry code, to avoid a ref the owner accepts.
+- Per-worktree refs (`refs/worktree/rvw/`), the first proposal: executed observation by the critic review on Apple
+  Git 2.54, confirmed: `git gc --prune=now` run from another worktree pruned their objects, and `git for-each-ref` and
+  `git gc` in the owning worktree then failed on the missing object. A linked worktree for the agent beside the main
+  checkout is the target workflow, and the default two-week prune is shorter than the ledger's 30 days.
+- Un-namespaced shared refs such as `refs/rvw/<base>-<head>` (lgtm's approach): two worktrees' recordings would
+  delete each other's refs.
+- A Git or agent hook: the baseline is the human's viewed marks, which rvw already sees; a hook adds nothing.
+- A subset filter (snapshot hunks intersected with the interdiff's lines): more logic, and lines the agent added then
+  removed would only be markers; the interdiff shows them directly.
+- Placing comments by searching for their text (lgtm's anchor): a duplicated line places a comment wrongly, and wrong
+  placement is worse than "outdated". Git's diff is deterministic.
+- Accumulating earlier comments across rounds: it needs a resolve action and unbounded growth; one round plus Still
+  applies covers it.
+- Listing files reviewed earlier that are no longer changed ("reverted"): they are not changed files, so they cannot
+  be commented, and the ledger cannot tell them from another branch's files.
+- Detecting reformatting that moves code across lines (for example with `gofmt`): `-w` does not cover it, and a
+  formatter-based check is per language and runs user-visible tools; deferred until real use asks for it.
+- Live reloading of the snapshot (lgtm polls every 500 ms): Q-17's first point still holds.
+
+### Q-50 — Stderr records
+
+Decided on 2026-11-06 by the repository owner: use `log/slog` instead of `*log.Logger`, and deny the `log` package in
+depguard. No contract revision is needed: the contract fixes what goes to stderr (REQ-OUT-005, REQ-SES-001, and the
+draft and ledger requirements naming a path and a reason), not how a line is laid out.
+
+- Every stderr line is one `slog.TextHandler` record with the time left out: `level=INFO msg="review at"
+  url="http://127.0.0.1:…/#token=…"`. A value is quoted when it holds a space, `=` or a quote, so the review URL
+  (because of `#token=`) and draft paths under `Application Support` always are. An agent can read the URL, the draft
+  path and the reason as named values instead of matching a prose sentence.
+- The time is dropped because the human reads the lines as the session goes and the agent already sees them in order.
+- Usage help stays plain text after the `invalid command line` record, since it is meant for a person.
+- Rejected: keeping the `rvw: …` prose lines through `*log.Logger`. Each message had its own sentence shape, so a
+  reader had to match each sentence to find a path or the URL inside it.

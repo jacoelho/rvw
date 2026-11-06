@@ -16,8 +16,9 @@ fmt-check:
 		exit 1; \
 	}
 
-lint: $(BIN)/golangci-lint
+lint: $(BIN)/golangci-lint web/node_modules
 	$(BIN)/golangci-lint run
+	cd web && npm run lint
 
 $(BIN)/golangci-lint: go.mod .golangci.yml Makefile | $(BIN)
 	$(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)

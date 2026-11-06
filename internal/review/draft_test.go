@@ -59,8 +59,38 @@ func assertDraftUntouched(t *testing.T, st *review.Store, want []byte) {
 	}
 }
 
+// TestDraftRoundMembersRestore: the members repeat rounds added to format version 2 are optional
+// and restore exactly: the Hide whitespace setting, a mark set with whitespace hidden and the
+// earlier comment a comment was copied from (REQ-DIFF-012, REQ-RND-008, REQ-CMT-011).
+func TestDraftRoundMembersRestore(t *testing.T) {
+	t.Parallel()
+	fx := newFixture(t)
+	st := openStore(t, t.TempDir(), fx.key(fx.last))
+	installDraft(t, st, readTestdata(t, "draft_valid_rounds.json"))
+	s, o, err := review.Start(t.Context(), st, fx.last, review.Fresh{Seed: review.NewSeed()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, moved, reason := o.MovedAside(); moved || !o.Resumed() {
+		t.Fatalf("Start: resumed = %v, moved aside = %v (%v); want the draft resumed", o.Resumed(), moved, reason)
+	}
+	v := s.Draft()
+	if !v.HideWhitespace {
+		t.Error("Hide whitespace is off; want the draft's setting, on")
+	}
+	wantViewed := []review.Mark{{File: fx.fileIndex(t, pathA), Whitespace: true}, {File: fx.fileIndex(t, pathDeleted)}}
+	slices.SortFunc(wantViewed, func(a, b review.Mark) int { return a.File - b.File })
+	if !slices.Equal(v.Viewed, wantViewed) {
+		t.Errorf("viewed = %v; want %v", v.Viewed, wantViewed)
+	}
+	if len(v.Comments) != 1 || v.Comments[0].CopiedFrom != "e-123" {
+		t.Errorf("comments = %+v; want l1 copied from e-123", v.Comments)
+	}
+}
+
 // TestDraftFormatRestores checks that a hand-written draft of the persisted format restores
-// exactly; this pins the format a later rvw must read. Sequence numbers keep their relative order,
+// exactly; this pins the format a later rvw must read. draft_valid.json is byte for byte what
+// rvw v0.0.3 wrote, so it must not change. Sequence numbers keep their relative order,
 // however large, and a comment created after the restore comes after every restored one, also after
 // a restart.
 func TestDraftFormatRestores(t *testing.T) {
@@ -76,19 +106,19 @@ func TestDraftFormatRestores(t *testing.T) {
 			dir := t.TempDir()
 			st := openStore(t, dir, fx.key(fx.last))
 			installDraft(t, st, data)
-			s, o, err := review.Start(t.Context(), st, fx.last, review.NewSeed(review.SeedComment{Target: reviewTarget, Body: "ignored"}))
+			s, o, err := review.Start(t.Context(), st, fx.last, review.Fresh{Seed: review.NewSeed(review.SeedComment{Target: reviewTarget, Body: "ignored"})})
 			if err != nil {
 				t.Fatal(err)
 			}
 			if _, moved, reason := o.MovedAside(); moved || !o.Resumed() {
 				t.Fatalf("Start: resumed = %v, moved aside = %v (%v); want the draft resumed", o.Resumed(), moved, reason)
 			}
-			v := s.View()
+			v := s.Draft()
 			if v.Summary != "Needs work.\n" {
 				t.Errorf("summary %q; want the draft's summary", v.Summary)
 			}
-			wantViewed := []int{fx.fileIndex(t, pathA), fx.fileIndex(t, pathDeleted)}
-			slices.Sort(wantViewed)
+			wantViewed := []review.Mark{{File: fx.fileIndex(t, pathA)}, {File: fx.fileIndex(t, pathDeleted)}}
+			slices.SortFunc(wantViewed, func(a, b review.Mark) int { return a.File - b.File })
 			if !slices.Equal(v.Viewed, wantViewed) {
 				t.Errorf("viewed = %v; want %v", v.Viewed, wantViewed)
 			}
@@ -126,7 +156,7 @@ func TestDraftFormatRestores(t *testing.T) {
 			}
 
 			again := openStore(t, dir, fx.key(fx.last))
-			s2, o2, err := review.Start(t.Context(), again, fx.last, review.NewSeed())
+			s2, o2, err := review.Start(t.Context(), again, fx.last, review.Fresh{Seed: review.NewSeed()})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -134,7 +164,7 @@ func TestDraftFormatRestores(t *testing.T) {
 				t.Fatalf("the draft rvw saved did not resume")
 			}
 			var ids []string
-			for _, c := range s2.View().Comments {
+			for _, c := range s2.Draft().Comments {
 				if c.Target == line(pathA, review.New, 2) {
 					ids = append(ids, c.ID)
 				}
@@ -212,7 +242,7 @@ func tooManyComments(n int) []byte {
 func assertMovedAside(t *testing.T, fx *fixture, st *review.Store, draft []byte) {
 	t.Helper()
 	seed := review.NewSeed(review.SeedComment{Target: reviewTarget, Body: "seeded"})
-	s, o, err := review.Start(t.Context(), st, fx.last, seed)
+	s, o, err := review.Start(t.Context(), st, fx.last, review.Fresh{Seed: seed})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -230,7 +260,7 @@ func assertMovedAside(t *testing.T, fx *fixture, st *review.Store, draft []byte)
 	if got, err := os.ReadFile(moved); err != nil || !bytes.Equal(got, draft) {
 		t.Errorf("moved draft: %v; want the original bytes", err)
 	}
-	if got := s.View().Comments; len(got) != 1 || got[0].Body != "seeded" || got[0].Author != review.Agent {
+	if got := s.Draft().Comments; len(got) != 1 || got[0].Body != "seeded" || got[0].Author != review.Agent {
 		t.Errorf("comments = %+v; want the seed", got)
 	}
 	if now, err := os.ReadFile(st.Path()); err != nil || bytes.Equal(now, draft) {
@@ -242,7 +272,7 @@ func assertMovedAside(t *testing.T, fx *fixture, st *review.Store, draft []byte)
 		t.Fatal(err)
 	}
 	st2 := openStore(t, dir, fx.key(fx.last))
-	_, o, err = review.Start(t.Context(), st2, fx.last, review.NewSeed())
+	_, o, err = review.Start(t.Context(), st2, fx.last, review.Fresh{Seed: review.NewSeed()})
 	if _, again, _ := o.MovedAside(); err != nil || again || !o.Resumed() {
 		t.Errorf("restart: resumed = %v, moved aside = %v, err = %v; want the seeded draft resumed", o.Resumed(), again, err)
 	}
@@ -265,7 +295,7 @@ func TestDraftThatCannotBeCheckedStaysInPlace(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
 		// The draft's line comment needs git to validate, so the cancellation is observed.
-		if _, _, err := review.Start(ctx, st, fx.last, review.NewSeed()); !errors.Is(err, context.Canceled) {
+		if _, _, err := review.Start(ctx, st, fx.last, review.Fresh{Seed: review.NewSeed()}); !errors.Is(err, context.Canceled) {
 			t.Fatalf("Start with a cancelled context = %v; want context.Canceled", err)
 		}
 		assertDraftUntouched(t, st, draft)
@@ -280,7 +310,7 @@ func TestDraftThatCannotBeCheckedStaysInPlace(t *testing.T) {
 		if err := os.Chmod(st.Path(), 0); err != nil {
 			t.Fatal(err)
 		}
-		_, _, err := review.Start(t.Context(), st, fx.last, review.NewSeed())
+		_, _, err := review.Start(t.Context(), st, fx.last, review.Fresh{Seed: review.NewSeed()})
 		if err == nil || !strings.Contains(err.Error(), st.Path()) {
 			t.Fatalf("Start with an unreadable draft = %v; want an error naming %s", err, st.Path())
 		}
@@ -302,7 +332,7 @@ func TestExpireDiscardedDrafts(t *testing.T) {
 	for range 2 {
 		st := openStore(t, dir, fx.key(fx.last))
 		installDraft(t, st, []byte("{corrupt"))
-		s, o, err := review.Start(t.Context(), st, fx.last, review.NewSeed())
+		s, o, err := review.Start(t.Context(), st, fx.last, review.Fresh{Seed: review.NewSeed()})
 		if _, moved, _ := o.MovedAside(); err != nil || !moved {
 			t.Fatalf("Start: moved aside = %v, err = %v; want the corrupt draft moved aside", moved, err)
 		}

@@ -6,7 +6,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
-	"strconv"
+	"log/slog"
 	"strings"
 	"unicode/utf8"
 
@@ -115,27 +115,41 @@ func (s *Session) quote(ctx context.Context, cs []Comment) ([]Quote, error) {
 		}
 		g.comments = append(g.comments, k)
 		start, end := c.Target.Lines()
-		g.ranges = append(g.ranges, source.LineRange{Start: start, End: min(end, start+MaxQuoteLines-1)})
+		g.ranges = append(g.ranges, QuoteRange(start, end))
 	}
 	for _, g := range groups {
-		// Keeping a few bytes past the limit lets cutLine find a rune boundary.
-		lines, err := s.snap.Lines(ctx, g.key.file, g.key.side == New, g.ranges, MaxQuoteLineBytes+utf8.UTFMax)
+		lines, err := s.snap.Lines(ctx, g.key.file, g.key.side == New, g.ranges, QuoteKeep)
 		if err != nil {
 			f := s.snap.File(g.key.file)
 			return nil, fmt.Errorf("quote %s: %w", f.Path(), err)
 		}
 		for j, k := range g.comments {
-			q := &out[k]
 			start, end := cs[k].Target.Lines()
-			q.OmittedLines = end - start + 1 - len(lines[j])
-			for _, l := range lines[j] {
-				cut := cutLine(l.Text)
-				q.OmittedBytes += l.Bytes - len(cut)
-				q.Code = append(q.Code, cut)
-			}
+			out[k] = CutQuote(start, end, lines[j])
 		}
 	}
 	return out, nil
+}
+
+// QuoteRange is the line range to read for a quote of lines start to end: at most MaxQuoteLines.
+func QuoteRange(start, end int) source.LineRange {
+	return source.LineRange{Start: start, End: min(end, start+MaxQuoteLines-1)}
+}
+
+// QuoteKeep is the line prefix to read for a quote: a few bytes past MaxQuoteLineBytes let CutQuote
+// find a rune boundary.
+const QuoteKeep = MaxQuoteLineBytes + utf8.UTFMax
+
+// CutQuote is the quote of lines start to end from lines, read with QuoteRange and QuoteKeep: each
+// line cut at MaxQuoteLineBytes, with what was left out counted.
+func CutQuote(start, end int, lines []source.SideLine) Quote {
+	q := Quote{OmittedLines: end - start + 1 - len(lines)}
+	for _, l := range lines {
+		cut := cutLine(l.Text)
+		q.OmittedBytes += l.Bytes - len(cut)
+		q.Code = append(q.Code, cut)
+	}
+	return q
 }
 
 // cutLine cuts a line after MaxQuoteLineBytes at a UTF-8 boundary.
@@ -314,12 +328,16 @@ func RenderJSON(r Result) ([]byte, error) {
 	return append(data, '\n'), nil
 }
 
-// DescribeSource is the one-line source description written to stderr at start.
-func DescribeSource(snap *source.Snapshot) string {
+// SourceAttrs describes snap's source for the start record on stderr: the source, the base and
+// head trees, the HEAD commit ("unborn" when there is none) and the changed-file count.
+func SourceAttrs(snap *source.Snapshot) []slog.Attr {
 	head := snap.HeadCommit()
 	if head == "" {
 		head = "unborn"
 	}
-	return fmt.Sprintf("rvw: reviewing %s (base %s, head %s, HEAD %s, %s)", snap.Source().String(),
-		short(snap.BaseTree()), short(snap.HeadTree()), short(head), strconv.Itoa(snap.FileCount())+" "+plural(snap.FileCount(), "file", "files"))
+	return []slog.Attr{
+		slog.String("source", snap.Source().String()), slog.String("base", short(snap.BaseTree())),
+		slog.String("head", short(snap.HeadTree())), slog.String("HEAD", short(head)),
+		slog.Int("files", snap.FileCount()),
+	}
 }
