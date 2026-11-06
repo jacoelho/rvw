@@ -75,3 +75,74 @@ func BenchmarkResolve(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkSearch searches the last commit of a repository whose last commit adds 1,000 files of
+// 10,000 lines, for a needle on every hundredth line (the result reaches the match limit) and one
+// on a single line.
+func BenchmarkSearch(b *testing.B) {
+	dir, err := filepath.EvalSymlinks(b.TempDir())
+	if err != nil {
+		b.Fatal(err)
+	}
+	ctx := context.Background()
+	git := func(args ...string) {
+		if _, err := gitOutput(ctx, dir, nil, nil, args...); err != nil {
+			b.Fatal(err)
+		}
+	}
+	git("init", "-q", "-b", "main")
+	if err := writeFile(filepath.Join(dir, "keep.txt"), "base\n"); err != nil {
+		b.Fatal(err)
+	}
+	git("add", "-A")
+	git("commit", "-q", "--no-verify", "-m", "base")
+	const files, lines = 1000, 10_000
+	for i := range files {
+		var content strings.Builder
+		for l := range lines {
+			switch {
+			case l%100 == 0:
+				fmt.Fprintf(&content, "common token %d\n", l)
+			case i == files/2 && l == lines/2+1:
+				content.WriteString("the rare token\n")
+			default:
+				fmt.Fprintf(&content, "line %d of file %d\n", l, i)
+			}
+		}
+		if err := writeFile(filepath.Join(dir, fmt.Sprintf("d%02d/f%04d.txt", i%50, i)), content.String()); err != nil {
+			b.Fatal(err)
+		}
+	}
+	git("add", "-A")
+	git("commit", "-q", "--no-verify", "-m", "head")
+	repo, err := source.Open(ctx, dir)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = repo.Close() })
+	snap, err := repo.Resolve(ctx, source.Last(), quiet)
+	if err != nil {
+		b.Fatal(err)
+	}
+	for _, tc := range []struct {
+		needle string
+		want   int
+	}{
+		{"common token", 500},
+		{"rare token", 1},
+	} {
+		b.Run(strings.ReplaceAll(tc.needle, " ", "-"), func(b *testing.B) {
+			n, err := source.NewSearchText(tc.needle)
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			for b.Loop() {
+				res, err := snap.Search(ctx, n)
+				if err != nil || len(res.Matches) != tc.want {
+					b.Fatalf("Search(%q) = %d matches, %v; want %d", tc.needle, len(res.Matches), err, tc.want)
+				}
+			}
+		})
+	}
+}

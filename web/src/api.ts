@@ -70,6 +70,7 @@ export interface Session {
   readonly summary: string;
   readonly viewed: readonly number[];
   readonly quoteLimits: QuoteLimits;
+  readonly searchLimits: SearchLimits;
   /** How often to poll GET /api/status, in milliseconds; the server derives it from its close grace (Q-42). */
   readonly statusIntervalMs: number;
 }
@@ -78,6 +79,12 @@ export interface Session {
 export interface QuoteLimits {
   readonly maxLines: number;
   readonly maxIds: number;
+}
+
+/** The length rules of search text (REQ-NAV-007); the server owns them and refuses other text. */
+export interface SearchLimits {
+  readonly minChars: number;
+  readonly maxBytes: number;
 }
 
 export interface LineCount {
@@ -98,6 +105,28 @@ export interface StatusReply {
   /** Generated Go files' indexes once they are known, else null; every count is published after them. */
   readonly generated: readonly number[] | null;
   readonly generatedError: string;
+}
+
+/**
+ * One matched line of a content search. before, match and after are the line's text around the
+ * match; cutStart and cutEnd report that the line goes on beyond them.
+ */
+export interface SearchMatch {
+  /** The changed file's index. */
+  readonly file: number;
+  readonly side: Side;
+  readonly line: number;
+  readonly before: string;
+  readonly match: string;
+  readonly after: string;
+  readonly cutStart: boolean;
+  readonly cutEnd: boolean;
+}
+
+/** A content search's matches, by file index then line; truncated when the search stopped early. */
+export interface SearchReply {
+  readonly matches: readonly SearchMatch[];
+  readonly truncated: boolean;
 }
 
 export type FinishReply = { readonly delivered: true; readonly markdown: string } | { readonly delivered: false; readonly error: string };
@@ -280,6 +309,14 @@ export class Api {
     await this.send("POST", "/api/cancel");
   }
 
+  /**
+   * Searches the changed files' shown sides for text (REQ-NAV-007). files are the session's changed
+   * files: every match must name one of them and a side it has.
+   */
+  async search(text: string, files: readonly ChangedFile[], signal: AbortSignal): Promise<SearchReply> {
+    return toSearchReply(await this.json("GET", `/api/search?q=${encodeURIComponent(text)}`, undefined, signal), files);
+  }
+
   async status(since: number): Promise<StatusReply> {
     return toStatus(await this.json("GET", `/api/status?since=${since}`));
   }
@@ -332,7 +369,7 @@ export class Api {
 
 type Obj = Record<string, unknown>;
 
-class BadReply extends Error {
+export class BadReply extends Error {
   constructor(what: string) {
     super(`unexpected server reply: ${what}`);
   }
@@ -439,6 +476,7 @@ function toSession(v: unknown): Session {
     summary: str(o["summary"], "summary"),
     viewed: arr(o["viewed"], "viewed").map((i) => num(i, "viewed index")),
     quoteLimits: toQuoteLimits(o["quotes"]),
+    searchLimits: toSearchLimits(o["search"]),
     statusIntervalMs: toStatusInterval(o["status_interval_ms"]),
   };
 }
@@ -457,6 +495,16 @@ function toQuoteLimits(v: unknown): QuoteLimits {
     throw new BadReply(`quote limits ${maxLines}, ${maxIds}`);
   }
   return { maxLines, maxIds };
+}
+
+function toSearchLimits(v: unknown): SearchLimits {
+  const o = obj(v, "search limits");
+  const minChars = num(o["min_chars"], "min_chars");
+  const maxBytes = num(o["max_bytes"], "max_bytes");
+  if (!Number.isInteger(minChars) || minChars < 1 || !Number.isInteger(maxBytes) || maxBytes < minChars) {
+    throw new BadReply(`search limits ${minChars}, ${maxBytes}`);
+  }
+  return { minChars, maxBytes };
 }
 
 function toStatus(v: unknown): StatusReply {
@@ -546,4 +594,31 @@ function toFinishReply(v: unknown): FinishReply {
   const o = obj(v, "finish reply");
   if (bool(o["delivered"], "delivered")) return { delivered: true, markdown: optStr(o["markdown"], "markdown") ?? "" };
   return { delivered: false, error: optStr(o["error"], "error") ?? "unknown error" };
+}
+
+function toSearchReply(v: unknown, files: readonly ChangedFile[]): SearchReply {
+  const o = obj(v, "search reply");
+  const matches = arr(o["matches"], "search matches").map((m): SearchMatch => {
+    const mo = obj(m, "search match");
+    const file = num(mo["file"], "match file");
+    const f = files[file];
+    if (!f) throw new BadReply(`match file ${file}`);
+    const side = oneOf(mo["side"], SIDES, "match side");
+    if ((side === "new" ? f.newPath : f.oldPath) === undefined) throw new BadReply(`match side ${side} of file ${file}`);
+    const line = num(mo["line"], "match line");
+    if (line < 1) throw new BadReply(`match line ${line}`);
+    const match = str(mo["match"], "match text");
+    if (match === "") throw new BadReply("empty match text");
+    return {
+      file,
+      side,
+      line,
+      before: str(mo["before"], "match before"),
+      match,
+      after: str(mo["after"], "match after"),
+      cutStart: bool(mo["cut_start"], "match cut_start"),
+      cutEnd: bool(mo["cut_end"], "match cut_end"),
+    };
+  });
+  return { matches, truncated: bool(o["truncated"], "truncated") };
 }

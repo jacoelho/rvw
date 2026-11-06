@@ -17,8 +17,10 @@ the viewed mark's key, the snapshot diff command (per-file hunks and counts from
 default base ref (Q-38: REQ-SRC-002, REQ-SRC-004, REQ-SES-009, AC-SRC-001, AC-SRC-003, the Base ref,
 Snapshot and Unresolvable source definitions, and the JSON format), the cross-origin checks (Q-44: REQ-SEC-002,
 AC-SEC-001), the page close (Q-42: new REQ-SES-012, and changes to REQ-SES-003, REQ-AGT-001 and AC-SES-001), and Copy
-and finish (Q-43: new REQ-OUT-008, and a change to AC-CMT-002), and line selection and a stable view (Q-48: new
-REQ-CMT-008, REQ-DIFF-010, AC-CMT-003 and AC-DIFF-003), relative to revision 1. Revision 2 also raises
+and finish (Q-43: new REQ-OUT-008, and a change to AC-CMT-002), line selection and a stable view (Q-48: new
+REQ-CMT-008, REQ-DIFF-010, AC-CMT-003 and AC-DIFF-003), and the search palette (Q-47: new REQ-NAV-006,
+REQ-NAV-007 and AC-NAV-003, a change to REQ-NAV-003 and the Excluded list, and **a change to REQ-PERF-003, which
+revision 1 accepted: content search reads changed files' contents without a file request**), relative to revision 1. Revision 2 also raises
 the minimum Git version from 2.44 to 2.50, which the repository owner accepted on 2026-11-05 (Q-33); the rest of
 revision 2 remains proposed.
 Decision owner: repository owner (jacoelho)
@@ -50,7 +52,8 @@ Excluded:
 - reloading a snapshot during a session, and carrying comments between review rounds (Q-17);
 - line wrapping in the diff (Q-11);
 - Linux, Windows and WebAssembly (Q-14);
-- an MCP server (Q-05).
+- an MCP server (Q-05);
+- symbol search; regular-expression, fuzzy or Unicode case-folding content search; searching removed lines (Q-47).
 
 Preserved: none. Every current promise is replaceable (Q-03).
 
@@ -474,9 +477,9 @@ Basis: Proposed (Q-04).
 
 #### REQ-NAV-003 — Keyboard operation
 
-Status: accepted
-Statement: The review UI shall support moving to the next and previous file, next and previous hunk, next and previous comment, starting a comment on the current line, toggling the viewed mark, toggling the diff view, focusing the file filter and finishing the review from the keyboard.
-Basis: Proposed (Q-04). The key list is in [the README](../README.md#in-the-browser).
+Status: proposed
+Statement: The review UI shall support moving to the next and previous file, next and previous hunk, next and previous comment, starting a comment on the current line, toggling the viewed mark, toggling the diff view, focusing the file filter, opening the search palette and finishing the review from the keyboard.
+Basis: Proposed (Q-04). Opening the search palette is proposed in revision 2 (Q-47). The key list is in [the README](../README.md#in-the-browser).
 
 #### REQ-NAV-004 — Vendored directories
 
@@ -489,6 +492,18 @@ Basis: The repository owner asked that `vendor/` and `node_modules/` not dominat
 Status: proposed
 Statement: The review UI shall show the generated Go files directly in each directory under one tree row in that directory, marked generated with their number, collapsed until the human expands it, and expanded whenever the file filter changes to non-empty text until the human collapses it; it shall show no line counts for generated Go files, in place of REQ-NAV-001's line counts, and leave them out of the line-count totals; moving to the next or previous file shall skip files in a collapsed generated row, and selecting such a file by any other means shall expand it.
 Basis: The repository owner asked that well-formed generated Go files be hidden like vendored ones and chose "group per directory", 2026-11-05 (Q-24). Generated files stay in the file list, the comment targets and the review result. Finding them reads changed files' content, so, like line counts under REQ-PERF-004, it runs after the UI is served: rows may regroup after the first paint, a file the human selected or interacted with stays shown, a generated file shown only because it was first, and not yet interacted with, is replaced by the first file outside a collapsed group (if any), and until then generated files have no line counts. If they cannot be found, no file is grouped, every file that is not vendored gets line counts, and the UI says generated files are not grouped.
+
+#### REQ-NAV-006 — Search palette
+
+Status: proposed
+Statement: When the human presses ⌘K outside a comment editor or text area, the review UI shall open a search palette, which lists changed files regardless of the file filter, in which: empty input lists the first 50 changed files in tree order; other text lists up to 50 changed files whose path, or old path of a rename, fuzzy-matches it, best first; `<path>:<n>`, with n a positive decimal without leading zeros, opens the best-matching file at line n of its new side, or of its old side for a deleted file, so a path ending in `:<digits>` is read as a line; `:<n>` goes to line n of the shown file without reloading it; a line between hunks is shown by expanding context, and a line that cannot be shown opens the file with a notice saying so; choosing a result first leaves the open comment editor as any other navigation does (Q-46), and goes nowhere if that is refused; and Enter while results for a newer query are pending is ignored.
+Basis: The repository owner asked for a ⌘K search palette for files, lines and text, 2026-11-05/06 (Q-47). Its query and results are transient UI state, not part of the draft.
+
+#### REQ-NAV-007 — Content search
+
+Status: proposed
+Statement: When the palette's input starts with `#`, the review UI shall search the rest as text in each changed file's shown version, as stored in the snapshot (the new version, or the old version of a deleted file), and list the matching lines, one per line, in changed-file order then line order; the text must be valid UTF-8 of at least 3 characters and at most 256 bytes, with no NUL, CR or line feed, and the rvw command shall refuse other text; the match is a fixed string, ignoring ASCII case unless the text holds an ASCII uppercase letter; binary sides, symlink sides, regular files that change only their mode, missing blobs, submodules and sides over 1 MiB are not searched; the search keeps at most 500 lines and stops after 2 seconds or 16 MiB of `git grep` output, and when it stops early the UI says some files may not be listed, the kept matches being those found first (changed files with a new side in order, then deleted files in order); choosing a line shows it as in REQ-NAV-006.
+Basis: The repository owner asked for text search in the palette, 2026-11-05/06 (Q-47). The bounds keep one search within one file slot's work; ASCII-only case folding gives `git` and rvw one rule in every locale.
 
 ### Syntax highlighting
 
@@ -520,9 +535,9 @@ Basis: Provisional value pending the measurement in Q-12.
 
 #### REQ-PERF-003 — Lazy file content
 
-Status: accepted
-Statement: The rvw command shall read a changed file's patch and contents only when the review UI requests that file and discard them after the response is sent.
-Basis: Proposed. Server memory stays proportional to one request, not to the snapshot.
+Status: proposed
+Statement: The rvw command shall read a changed file's patch and contents only when the review UI requests that file, or when a content search (REQ-NAV-007) reads the changed files' contents through `git grep`, and discard them after the response is sent.
+Basis: Proposed. Server memory stays proportional to one request, not to the snapshot. Revision 2 adds the content-search clause to this requirement, which revision 1 accepted (Q-47); that change is proposed.
 
 #### REQ-PERF-004 — Startup proportional to change
 
@@ -753,6 +768,12 @@ Verification: Go HTTP tests for the session and counts; planned browser test for
 Covers: REQ-NAV-001, REQ-NAV-005
 Expected: In a fixture with Go files whose marker precedes the package clause (also after a `//go:build` line and with CRLF line ends), a marker after the package clause, a near-miss marker, a deleted generated file, a renamed generated file, a generated file under `vendor/`, a non-Go file carrying the marker and a missing blob, the server reports exactly the generated Go files that are not vendored, before any line count, and reports line counts only for files that are neither vendored nor generated. If finding them fails, it reports the failure, groups nothing and counts every file that is not vendored. In the UI, generated rows appear once the marks arrive, each directory's generated row starts collapsed, expands on click and while filtering, shows the number of comments on its hidden files while collapsed, `j`/`k` skip its files, a file the human selected or interacted with stays shown, and a generated file shown at load and not yet interacted with is replaced by the first file outside a collapsed group, or, when every file is folded, stays shown with its row revealed.
 Verification: Go tests for detection and the status stream; planned browser test for the tree.
+
+### AC-NAV-003 — Search palette
+
+Covers: REQ-NAV-003, REQ-NAV-006, REQ-NAV-007, REQ-PERF-003
+Expected: ⌘K opens the palette with its input focused, and does nothing in a comment editor; Esc closes it, gives the focus back and leaves an editor behind it open. `util` lists `internal/util.go` before `pkg/test_util.go` before `pkg/util/other.go`; a camelCase query finds its file; a rename is found and highlighted through its old path; equal scores keep tree order; at most 50 rows show; a query matching nothing says so; an empty query lists the first files in tree order; a vendored or generated file opens with its group expanded; with the filter `long` applied, the empty palette lists the full tree order and a file hidden by the filter can be opened through it, and the filter is kept. `docs/a b:c.md` is a files query; `x:0`, `x:007`, `x:-1` and `x:1.5` are files queries; `long.txt:300` and `:12` are line queries. `long.txt:10` selects and centres the line; `long.txt:200` expands it as context; `long.txt:9999` and a large file's line outside its hunks open the file with a notice, also before the line counts arrive; `deleted.txt:3` selects the old side; an unknown path gives a message and Enter goes nowhere; `c` after a reveal comments on that line. `:N` in the shown file keeps context expanded earlier and does not reload the file. `#needle` rows each mark one match, and choosing a row shows its line, also outside hunks and on a deleted file's old side. Search requests wait 200 ms after the last keystroke, are aborted when superseded, and a superseded or late reply is never shown, nor is a reply after close-and-reopen or after switching to a files query; Enter while a reply is pending goes nowhere; short, over-long and files-mode queries send nothing; refused, unavailable, failed and malformed replies are shown inline and the palette stays usable. A search over a 600-line match file says it stopped early, and the rows in the document stay at most the visible rows plus 50. File text and paths with markup render as text. On the server, a search reads the snapshot trees, not the worktree, skips binary, symlink, missing, submodule and over-1 MiB sides and regular files that change only their mode, so a mode-only file never uses up the 500-line cap, folds ASCII case only, replaces invalid UTF-8, never sends a raw path, takes a file slot after validating its text, and its `git` process stops when the client goes away or the session ends.
+Verification: Go tests in `internal/source` and `internal/server`; browser tests in `cmd/rvw`.
 
 ### AC-HL-001 — Highlighting
 

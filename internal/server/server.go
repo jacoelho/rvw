@@ -244,6 +244,7 @@ func (s *Server) handler(addr string) http.Handler {
 	api.HandleFunc("GET /api/file", s.getFile)
 	api.HandleFunc("GET /api/file/context", s.getContext)
 	api.HandleFunc("GET /api/quotes", s.getQuotes)
+	api.HandleFunc("GET /api/search", s.getSearch)
 	api.HandleFunc("PUT /api/comments/{id}", s.putComment)
 	api.HandleFunc("DELETE /api/comments/{id}", s.deleteComment)
 	api.HandleFunc("PUT /api/viewed/{i}", s.putViewed)

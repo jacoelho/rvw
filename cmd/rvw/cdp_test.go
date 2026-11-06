@@ -4,9 +4,9 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"io"
 	"os"
@@ -72,12 +72,12 @@ type cdpError struct {
 }
 
 type cdpMessage struct {
-	ID        int64           `json:"id,omitempty"`
-	Method    string          `json:"method,omitempty"`
-	SessionID string          `json:"sessionId,omitempty"`
-	Params    json.RawMessage `json:"params,omitempty"`
-	Result    json.RawMessage `json:"result,omitempty"`
-	Error     *cdpError       `json:"error,omitempty"`
+	ID        int64          `json:"id,omitzero"`
+	Method    string         `json:"method,omitzero"`
+	SessionID string         `json:"sessionId,omitzero"`
+	Params    jsontext.Value `json:"params,omitzero"`
+	Result    jsontext.Value `json:"result,omitzero"`
+	Error     *cdpError      `json:"error,omitzero"`
 }
 
 type browser struct {
@@ -188,8 +188,8 @@ func (b *browser) call(session, method string, params, out any) error {
 	data, err := json.Marshal(struct {
 		ID        int64  `json:"id"`
 		Method    string `json:"method"`
-		SessionID string `json:"sessionId,omitempty"`
-		Params    any    `json:"params,omitempty"`
+		SessionID string `json:"sessionId,omitzero"`
+		Params    any    `json:"params,omitzero"`
 	}{id, method, session, params})
 	if err != nil {
 		return err
@@ -428,7 +428,7 @@ func (pg *page) eval(expr string, out any) {
 func (pg *page) tryEval(expr string, out any) error {
 	var r struct {
 		Result struct {
-			Value json.RawMessage `json:"value"`
+			Value jsontext.Value `json:"value"`
 		} `json:"result"`
 		ExceptionDetails *struct {
 			Text      string `json:"text"`
@@ -506,9 +506,9 @@ func (pg *page) fatalf(format string, args ...any) {
 			session = "(rvw exited)"
 		default:
 			if status, data := pg.proc.do("GET", "/api/session", ""); status == 200 {
-				var buf bytes.Buffer
-				_ = json.Indent(&buf, data, "", "  ")
-				session = buf.String()
+				v := jsontext.Value(data)
+				_ = v.Indent() // best effort: unindented JSON is still readable
+				session = string(v)
 			}
 		}
 	}

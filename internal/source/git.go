@@ -31,6 +31,28 @@ var clearedEnv = []string{
 // argument limit; a longer list is split across commands.
 const maxPathspecBytes = 64 << 10
 
+// pathspecBatches calls yield with consecutive runs of paths, in order, each totalling at most
+// maxPathspecBytes (a single longer path is a run of its own). It stops at yield's first error.
+func pathspecBatches(paths []string, yield func([]string) error) error {
+	start, size := 0, 0
+	for i, p := range paths {
+		if i > start && size+len(p)+1 > maxPathspecBytes {
+			if err := yield(paths[start:i]); err != nil {
+				return err
+			}
+			start, size = i, 0
+		}
+		size += len(p) + 1
+	}
+	if start < len(paths) {
+		return yield(paths[start:])
+	}
+	return nil
+}
+
+// noColor turns off colour, which a user's color.* configuration could turn on.
+const noColor = "--no-color"
+
 // maxStderr bounds the stderr kept from a failed git command.
 const maxStderr = 4 << 10
 

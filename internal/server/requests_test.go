@@ -2,20 +2,24 @@ package server_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/jacoelho/rvw/internal/server"
 )
 
-// gatedGit puts a git shim first on PATH. While the returned gate file exists, every patch command
-// (one with a standalone -p) appends a line to the log and waits until the gate is removed; every
-// other command runs the real git at once. The gate starts open; hold creates it.
+// gatedGit puts a git shim first on PATH. While the returned gate file exists, every command whose
+// arguments match the shim's pattern appends a line with its process ID to the log and waits until
+// the gate is removed; every other command runs the next git on PATH at once. The gate starts
+// open; hold creates it. Shims stack: a later shim's next git is the earlier shim.
 //
 // It sets PATH for the whole process, so its tests cannot run in parallel.
 type gatedGit struct {
@@ -23,7 +27,15 @@ type gatedGit struct {
 	gate, log string
 }
 
-func newGatedGit(t *testing.T) *gatedGit {
+// The patterns, sh case patterns over " $* ", of the commands a gatedGit holds. patchCommands
+// has a standalone -p; searchCommands has --column, which startup's generated-file grep never
+// passes.
+const (
+	patchCommands  = `*" -p "*`
+	searchCommands = `*" --column "*`
+)
+
+func newGatedGit(t *testing.T, pattern string) *gatedGit {
 	t.Helper()
 	gitPath, err := exec.LookPath("git")
 	if err != nil {
@@ -32,9 +44,9 @@ func newGatedGit(t *testing.T) *gatedGit {
 	dir := t.TempDir()
 	g := &gatedGit{t: t, gate: filepath.Join(dir, "gate"), log: filepath.Join(dir, "log")}
 	script := "#!/bin/sh\n" +
-		"case \" $* \" in *\" -p \"*)\n" +
+		"case \" $* \" in " + pattern + ")\n" +
 		"  if [ -e '" + g.gate + "' ]; then\n" +
-		"    echo x >> '" + g.log + "'\n" +
+		"    echo $$ >> '" + g.log + "'\n" +
 		"    while [ -e '" + g.gate + "' ]; do sleep 0.05; done\n" +
 		"  fi;;\n" +
 		"esac\n" +
@@ -60,16 +72,46 @@ func (g *gatedGit) release() {
 	}
 }
 
-// held is the number of patch commands that reached the gate.
-func (g *gatedGit) held() int {
+// held is the number of commands that reached the gate.
+func (g *gatedGit) held() int { return len(g.pids()) }
+
+// pids are the process IDs of the commands that reached the gate: the shim's shell, which the
+// server started and must stop.
+func (g *gatedGit) pids() []int {
 	data, err := os.ReadFile(g.log)
 	if os.IsNotExist(err) {
-		return 0
+		return nil
 	}
 	if err != nil {
 		g.t.Fatal(err)
 	}
-	return strings.Count(string(data), "\n")
+	var out []int
+	for f := range strings.FieldsSeq(string(data)) {
+		pid, err := strconv.Atoi(f)
+		if err != nil {
+			g.t.Fatalf("gate log %s: %v", g.log, err)
+		}
+		out = append(out, pid)
+	}
+	return out
+}
+
+// waitGone waits until every gated command has exited and been reaped: a zombie still exists.
+func (g *gatedGit) waitGone() {
+	g.t.Helper()
+	pids := g.pids()
+	if len(pids) == 0 {
+		g.t.Fatal("no command reached the gate; the check would prove nothing")
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for _, pid := range pids {
+		for !errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+			if time.Now().After(deadline) {
+				g.t.Fatalf("gated git process %d still exists", pid)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 }
 
 func (g *gatedGit) waitHeld(n int) {
@@ -77,17 +119,17 @@ func (g *gatedGit) waitHeld(n int) {
 	deadline := time.Now().Add(10 * time.Second)
 	for g.held() < n {
 		if time.Now().After(deadline) {
-			g.t.Fatalf("%d patch commands reached the gate; want %d", g.held(), n)
+			g.t.Fatalf("%d gated commands reached the gate; want %d", g.held(), n)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 }
 
 // TestSessionEndCancelsRequests covers plan item F: when the session ends, requests still running
-// git are cancelled, so Run shuts down without waiting for them, and the request that ended the
-// session is still answered.
+// git are cancelled, so Run shuts down without waiting for them and their git processes are gone,
+// and the request that ended the session is still answered.
 func TestSessionEndCancelsRequests(t *testing.T) {
-	for _, tc := range []struct {
+	ends := []struct {
 		end  func(f *fixture, stop context.CancelFunc)
 		name string
 		want server.Outcome
@@ -96,23 +138,31 @@ func TestSessionEndCancelsRequests(t *testing.T) {
 			f.mustStatus(f.do(http.MethodPost, "/api/cancel", ""), http.StatusNoContent, "cancel")
 		}},
 		{name: "signal", want: server.Interrupted, end: func(_ *fixture, stop context.CancelFunc) { stop() }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			g := newGatedGit(t)
-			f := newFixture(t, smallRepo(t), fixtureOptions{})
-			done, stop := f.serveRun()
-			g.hold()
-			go func() { _, _ = f.send(http.MethodGet, "/api/file?i=0", "") }()
-			g.waitHeld(1)
+	}
+	requests := []struct{ name, path, gated string }{
+		{"file", "/api/file?i=0", patchCommands},
+		{"search", "/api/search?q=line", searchCommands},
+	}
+	for _, tc := range ends {
+		for _, req := range requests {
+			t.Run(tc.name+"/"+req.name, func(t *testing.T) {
+				g := newGatedGit(t, req.gated)
+				f := newFixture(t, smallRepo(t), fixtureOptions{})
+				done, stop := f.serveRun()
+				g.hold()
+				go func() { _, _ = f.send(http.MethodGet, req.path, "") }()
+				g.waitHeld(1)
 
-			tc.end(f, stop)
-			// Without cancellation, Shutdown waits for the held request until its deadline and Run
-			// reports that it could not shut down.
-			res := waitRun(t, done)
-			if res.outcome != tc.want || res.err != nil {
-				t.Errorf("Run = %v, %v; want %v, nil", res.outcome, res.err, tc.want)
-			}
-		})
+				tc.end(f, stop)
+				// Without cancellation, Shutdown waits for the held request until its deadline and
+				// Run reports that it could not shut down.
+				res := waitRun(t, done)
+				if res.outcome != tc.want || res.err != nil {
+					t.Errorf("Run = %v, %v; want %v, nil", res.outcome, res.err, tc.want)
+				}
+				g.waitGone()
+			})
+		}
 	}
 }
 
@@ -120,7 +170,7 @@ func TestSessionEndCancelsRequests(t *testing.T) {
 // file's diff, so it waits for a file slot like a file view; a review comment and an edit need
 // none, and the session stays responsive meanwhile. It relies on the server's two file slots.
 func TestCommentValidationTakesAFileSlot(t *testing.T) {
-	g := newGatedGit(t)
+	g := newGatedGit(t, patchCommands)
 	f := newFixture(t, smallRepo(t), fixtureOptions{})
 	_, _ = f.serveRun()
 	g.hold()
@@ -171,12 +221,16 @@ func TestSlotWaitEndsWithAReply(t *testing.T) {
 			body: `{"target":{"target":"line","file":0,"side":"new","line":3},"body":"y"}`, opts: []reqOption{createOnly}},
 		{name: "quotes", method: http.MethodGet, path: "/api/quotes?id=r1"},
 		{name: "result", method: http.MethodGet, path: "/api/result.md"},
+		{name: "search", method: http.MethodGet, path: "/api/search?q=line"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			g := newGatedGit(t)
+			g := newGatedGit(t, patchCommands)
+			// Any search that ran would reach this gate and be logged.
+			searches := newGatedGit(t, searchCommands)
 			f := newFixture(t, smallRepo(t), fixtureOptions{})
 			done, stop := f.serveRun()
 			g.hold()
+			searches.hold()
 			for range 2 {
 				go func() { _, _ = f.send(http.MethodGet, "/api/file?i=0", "") }()
 			}
@@ -205,6 +259,9 @@ func TestSlotWaitEndsWithAReply(t *testing.T) {
 			}
 			if n := g.held(); n != 2 {
 				t.Errorf("%d patch commands ran; want the 2 that held the slots", n)
+			}
+			if n := searches.held(); n != 0 {
+				t.Errorf("%d searches ran; want none", n)
 			}
 			if got.r.status != http.StatusServiceUnavailable || strings.TrimSpace(string(got.r.body)) == "" {
 				t.Errorf("status %d, body %q; want 503 with a reason", got.r.status, got.r.body)

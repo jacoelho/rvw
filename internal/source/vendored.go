@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"maps"
 	"path"
+	"slices"
 	"strings"
 )
 
@@ -97,26 +99,9 @@ func vendoredDir(p string, goSum map[string]bool) string {
 
 // markRegularFiles sets paths[p] for every key p that is a regular file in tree.
 func (s *Snapshot) markRegularFiles(ctx context.Context, tree string, paths map[string]bool) error {
-	var batch []string
-	size := 0
-	flush := func() error {
-		if len(batch) == 0 {
-			return nil
-		}
-		err := s.lsTree(ctx, tree, batch, paths)
-		batch, size = batch[:0], 0
-		return err
-	}
-	for p := range paths {
-		if len(batch) > 0 && size+len(p)+1 > maxPathspecBytes {
-			if err := flush(); err != nil {
-				return err
-			}
-		}
-		batch = append(batch, p)
-		size += len(p) + 1
-	}
-	return flush()
+	return pathspecBatches(slices.Sorted(maps.Keys(paths)), func(batch []string) error {
+		return s.lsTree(ctx, tree, batch, paths)
+	})
 }
 
 // lsTree lists pathspecs in tree; the runner's --literal-pathspecs makes each name one path, and

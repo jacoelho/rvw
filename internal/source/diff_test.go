@@ -27,6 +27,8 @@ func classificationFixture(t *testing.T) *repo {
 	r.write("rename-edit.txt", long.String())
 	r.write("mode.sh", "echo mode\n")
 	r.write("typechange", "regular\n")
+	// The same blob before and after: a regular file holding exactly its later symlink target.
+	r.write("typechange-same", "same target")
 	r.write("binary.bin", "bin\x00ary\x01\n")
 	r.write("noeol.txt", "a\nb")
 	r.write("deleted.txt", "gone 1\ngone 2\n")
@@ -49,6 +51,10 @@ func classificationFixture(t *testing.T) *repo {
 	}
 	r.remove("typechange")
 	if err := os.Symlink("target", r.path("typechange")); err != nil {
+		t.Fatal(err)
+	}
+	r.remove("typechange-same")
+	if err := os.Symlink("same target", r.path("typechange-same")); err != nil {
 		t.Fatal(err)
 	}
 	r.write("binary.bin", "bin\x00ary\x02\n")
@@ -93,19 +99,21 @@ func TestChangedFileClassification(t *testing.T) {
 		"moved-edit.txt": source.KindText,
 		"mode.sh":        source.KindModeOnly,
 		"typechange":     source.KindText,
-		"binary.bin":     source.KindBinary,
-		"noeol.txt":      source.KindText,
-		"empty.txt":      source.KindText,
-		"deleted.txt":    source.KindText,
-		"-dash.txt":      source.KindText,
-		"with space.txt": source.KindText,
-		"x[ab].txt":      source.KindText,
-		"xa.txt":         source.KindText,
-		"attr.txt":       source.KindBinary,
-		"new\nline.txt":  source.KindText,
-		`quo"te.txt`:     source.KindText,
-		"sub":            source.KindSubmodule,
-		nonUTF8Path:      source.KindText,
+		// git diffs a type change as a deletion plus an addition, even with equal blobs.
+		"typechange-same": source.KindText,
+		"binary.bin":      source.KindBinary,
+		"noeol.txt":       source.KindText,
+		"empty.txt":       source.KindText,
+		"deleted.txt":     source.KindText,
+		"-dash.txt":       source.KindText,
+		"with space.txt":  source.KindText,
+		"x[ab].txt":       source.KindText,
+		"xa.txt":          source.KindText,
+		"attr.txt":        source.KindBinary,
+		"new\nline.txt":   source.KindText,
+		`quo"te.txt`:      source.KindText,
+		"sub":             source.KindSubmodule,
+		nonUTF8Path:       source.KindText,
 	}
 	if snap.FileCount() != len(wantKind) {
 		t.Errorf("FileCount = %d, want %d", snap.FileCount(), len(wantKind))
@@ -145,7 +153,10 @@ func TestChangedFileClassification(t *testing.T) {
 			oldData, newData := sideBlob(t, r, "HEAD^", f.OldPath), sideBlob(t, r, "HEAD", f.NewPath)
 			added, deleted := checkHunks(t, f.Path(), d.Hunks, oldData, newData)
 			want := numstat[f.OldPath+"\x00"+f.NewPath]
-			if added != want.Added || deleted != want.Deleted {
+			// git's numstat counts a type change with equal blobs as 0/0, though its patch
+			// deletes and adds the content; the hunks follow the patch.
+			sameBlobType := f.Status == source.StatusType && f.OldBlob == f.NewBlob
+			if !sameBlobType && (added != want.Added || deleted != want.Deleted) {
 				t.Errorf("hunks add %d delete %d lines; git numstat %+v", added, deleted, want)
 			}
 			checkSide(t, "old", d.Facts.Old, d.Old, oldData, f.OldPath != "")

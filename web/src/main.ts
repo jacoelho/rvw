@@ -5,6 +5,7 @@ import { Api, type Comment, HttpError, isGone, type RenameDetection } from "./ap
 import { h } from "./dom";
 import { FileView } from "./fileview";
 import { FinishDialog } from "./finish";
+import { type GoTarget, Palette } from "./palette";
 import { State } from "./state";
 import { FileTree } from "./tree";
 
@@ -46,6 +47,7 @@ class Page {
   private readonly tree: FileTree;
   private readonly view: FileView;
   private readonly finish: FinishDialog;
+  private readonly palette: Palette;
   private readonly filter: HTMLInputElement;
   private readonly banners: HTMLElement;
   private readonly toast: HTMLElement;
@@ -122,7 +124,13 @@ class Page {
         else this.end("Review not delivered", `rvw could not write the result (${o.error}). The draft was kept: run rvw again to resume.`);
       },
     });
-    app.append(this.finish.el);
+    this.palette = new Palette(state, api, {
+      go: (t) => this.run(this.goTo(t)),
+      current: () => this.view.file,
+      order: () => this.tree.fullOrder(),
+      failed,
+    });
+    app.append(this.finish.el, this.palette.el);
 
     state.onChange((change) => {
       switch (change) {
@@ -187,13 +195,32 @@ class Page {
     };
   }
 
-  private async select(i: number, auto = false): Promise<void> {
+  /** Shows file i; true once it is shown. */
+  private async select(i: number, auto = false): Promise<boolean> {
     this.autoSelected = auto;
     this.tree.select(i, false);
-    await this.view.show(i);
+    const shown = await this.view.show(i);
     // show is refused while the editor cannot be left; the tree follows the shown file, and expands
     // directories only for a file actually shown.
     this.tree.select(this.view.file);
+    return shown;
+  }
+
+  /**
+   * Goes to a palette result. The open editor is left first, as for any move (Q-46); in the shown
+   * file the line is revealed without reloading, so context expanded earlier stays.
+   */
+  private async goTo(t: GoTarget): Promise<void> {
+    if (this.ended) return;
+    if (t.file === this.view.file && this.view.loaded) {
+      if (!(await this.view.leaveEditor())) return;
+    } else if (!(await this.select(t.file))) {
+      return;
+    }
+    if (t.line === undefined || this.ended) return;
+    const shown = await this.view.revealLine(t.side ?? "new", t.line);
+    if (shown === "absent") this.notify(`Line ${t.line} is not shown: the file has no such line; the file is open`);
+    else if (shown === "hidden") this.notify(`Line ${t.line} is not shown: it is outside the lines this file shows; the file is open`);
   }
 
   /**
@@ -264,6 +291,13 @@ class Page {
 
   private onKey(e: KeyboardEvent): void {
     if (this.ended) return;
+    if (e.key.toLowerCase() === "k" && e.metaKey && !e.ctrlKey && !e.altKey) {
+      if (this.finish.isOpen || this.palette.isOpen) return;
+      if (e.target instanceof Element && e.target.closest("textarea, [contenteditable]")) return;
+      e.preventDefault();
+      this.palette.open();
+      return;
+    }
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       if (this.finish.isOpen) {
@@ -394,8 +428,13 @@ class Page {
       if (!this.ended) this.end("rvw is no longer running", "This review session has ended. Saved changes are in the draft.");
       return;
     }
-    const msg = err instanceof Error ? err.message : String(err);
-    this.toast.textContent = msg;
+    this.notify(err instanceof Error ? err.message : String(err), true);
+  }
+
+  /** Shows text in the toast for a while; an error is styled as one. */
+  private notify(text: string, error = false): void {
+    this.toast.textContent = text;
+    this.toast.classList.toggle("info", !error);
     this.toast.hidden = false;
     window.clearTimeout(this.toastTimer);
     this.toastTimer = window.setTimeout(() => (this.toast.hidden = true), 6000);

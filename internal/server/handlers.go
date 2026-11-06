@@ -79,6 +79,7 @@ type sessionJSON struct {
 	Summary         string        `json:"summary"`
 	Viewed          []int         `json:"viewed"`
 	Quotes          quoteLimits   `json:"quotes"`
+	Search          searchLimits  `json:"search"`
 	// StatusIntervalMs is how often the UI polls GET /api/status, in milliseconds.
 	StatusIntervalMs int64 `json:"status_interval_ms"`
 }
@@ -88,6 +89,13 @@ type sessionJSON struct {
 type quoteLimits struct {
 	MaxLines int `json:"max_lines"`
 	MaxIDs   int `json:"max_ids"`
+}
+
+// searchLimits tells the palette the length rules of search text, so it sends only text the
+// server accepts (REQ-NAV-007). source.NewSearchText owns them.
+type searchLimits struct {
+	MinChars int `json:"min_chars"`
+	MaxBytes int `json:"max_bytes"`
 }
 
 // The wire names of source's enums. Source values carry no spelling, so an unknown value is a
@@ -154,6 +162,7 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
 		Source: snap.Source().String(), RenameDetection: renames,
 		Files:            make([]fileJSON, snap.FileCount()),
 		Quotes:           quoteLimits{MaxLines: review.MaxQuoteLines, MaxIDs: maxQuoteIDs},
+		Search:           searchLimits{MinChars: source.MinSearchTextRunes, MaxBytes: source.MaxSearchTextBytes},
 		StatusIntervalMs: s.statusInterval.Milliseconds(),
 	}
 	for i := range out.Files {

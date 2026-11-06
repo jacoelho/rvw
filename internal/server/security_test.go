@@ -71,6 +71,8 @@ func TestSecurityMatrix(t *testing.T) {
 		{"API with token as query", http.MethodGet, "/api/session?token=" + f.token, "", []reqOption{withoutToken()}, http.StatusUnauthorized},
 		{"write without token", http.MethodPut, "/api/summary", summary, []reqOption{withoutToken()}, http.StatusUnauthorized},
 		{"quotes without token", http.MethodGet, "/api/quotes?id=x", "", []reqOption{withoutToken()}, http.StatusUnauthorized},
+		{"search without token", http.MethodGet, "/api/search?q=line", "", []reqOption{withoutToken()}, http.StatusUnauthorized},
+		{"search with token as query", http.MethodGet, "/api/search?q=line&token=" + f.token, "", []reqOption{withoutToken()}, http.StatusUnauthorized},
 		{"API with foreign Host", http.MethodGet, "/api/session", "", []reqOption{withForeignHost()}, http.StatusMisdirectedRequest},
 		{"asset with foreign Host", http.MethodGet, "/", "", []reqOption{withForeignHost()}, http.StatusMisdirectedRequest},
 		{"write with foreign Host", http.MethodPut, "/api/summary", summary, []reqOption{withForeignHost()}, http.StatusMisdirectedRequest},

@@ -232,3 +232,39 @@ func BenchmarkResult(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkSearch serves a content search over 25 modified 10,000-line files whose new sides hold
+// the needle on every thousandth line, and a search that matches nothing.
+func BenchmarkSearch(b *testing.B) {
+	const files, lines = 25, 10000
+	base, head := map[string]string{}, map[string]string{}
+	for f := range files {
+		p := fmt.Sprintf("f%02d.txt", f)
+		var ob, nb strings.Builder
+		for n := 1; n <= lines; n++ {
+			fmt.Fprintf(&ob, "file %d line %d of the old side, padded to a typical source width\n", f, n)
+			if n%1000 == 0 {
+				fmt.Fprintf(&nb, "file %d line %d changed\n", f, n)
+			} else {
+				fmt.Fprintf(&nb, "file %d line %d of the old side, padded to a typical source width\n", f, n)
+			}
+		}
+		base[p], head[p] = ob.String(), nb.String()
+	}
+	s := newBenchServer(b, base, head, "")
+	for _, c := range []struct{ name, q, want string }{
+		{"matches", "changed", `"line":10000`},
+		{"no-match", "absent%20text", `"matches":[]`},
+	} {
+		b.Run(c.name, func(b *testing.B) {
+			path := "/api/search?q=" + c.q
+			if body := s.get(path); !strings.Contains(string(body), c.want) {
+				b.Fatalf("search reply lacks %s: %.300s", c.want, body)
+			}
+			b.ReportAllocs()
+			for b.Loop() {
+				s.get(path)
+			}
+		})
+	}
+}
