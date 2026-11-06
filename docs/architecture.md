@@ -12,7 +12,7 @@ human reviews in the browser and finishes; `rvw` writes the review result to std
 ```text
 agent ──runs──▶ cmd/rvw ─── lifecycle, signals, stdout
                   │
-                  ├─ internal/source    git facts: snapshot, file list, patches, contents, gaps
+                  ├─ internal/source    git facts: snapshot, file list, patches, contents, gaps, content search
                   ├─ internal/review    the draft: comments, summary, viewed marks, lock, result
                   └─ internal/server    loopback HTTP: auth, translation, bounded file work
                         ├─ internal/highlight  syntax spans
@@ -30,11 +30,11 @@ Each fact has one owner. Other modules ask the owner; none recomputes its rules.
 
 | Owner | Owns | Does not own |
 | --- | --- | --- |
-| `internal/source` | Every Git fact, through its single `git` runner: origin/HEAD's target (`OriginHead`), the snapshot's trees, the changed-file list and renames, patches and hunks, file contents, line counts, the large-file rule, context gaps and which lines are showable, vendored directories, generated Go files | Anything about comments or the session |
+| `internal/source` | Every Git fact, through its single `git` runner: origin/HEAD's target (`OriginHead`), the snapshot's trees, the changed-file list and renames, patches and hunks, file contents, line counts, the large-file rule, context gaps and which lines are showable, vendored directories, generated Go files, content search: its text rules (`NewSearchText`), bounds, order, pathspec batching, which files it reads (through the mode-only predicate it shares with the diff) and each match's window, split at rune starts | Anything about comments or the session |
 | `internal/review` | The draft and its one writer, `Session`: comment targets and their validation, limits, authorship, the viewed marks, the summary, the draft file and its lock, quoting and the omission note, result order and rendering in Markdown and JSON | Git, HTTP, presentation |
-| `internal/server` | The HTTP boundary: token, Host and cross-origin checks, CSP, request-shape validation, translation between wire JSON and domain types, the file-request slots, the background reads of line counts and generated files, the end of the session | Business rules: it asks `review` and `source` |
+| `internal/server` | The HTTP boundary: token, Host and cross-origin checks, CSP, request-shape validation, translation between wire JSON and domain types, the file-request slots, the search endpoint and its slot (it only replaces invalid UTF-8 in the match windows), the background reads of line counts and generated files, the end of the session | Business rules: it asks `review` and `source` |
 | `cmd/rvw` | Arguments, defaulting an omitted base ref to origin/HEAD's target, the session's start and end, signals, opening the browser, the stdout write | Everything above |
-| `web` | Layout and interaction. One client (`Api`) decodes every reply at the boundary; one store (`State`) holds every draft and status fact and changes only after the server saved it; one `CommentEditor` owns a comment's save rules. `State` alone says whether a comment is saved; an editor's row placement derives from it; the editor owns only the base its writes assume | Any rule the server owns: gaps, vendored or generated status, result order, quote limits, the omission note |
+| `web` | Layout and interaction. One client (`Api`) decodes every reply at the boundary; one store (`State`) holds every draft and status fact and changes only after the server saved it; one `CommentEditor` owns a comment's save rules. `State` alone says whether a comment is saved; an editor's row placement derives from it; the editor owns only the base its writes assume. The search palette owns query parsing, fuzzy file ranking and its transient query and results | Any rule the server owns: gaps, vendored or generated status, result order, quote limits, the omission note, search-text rules |
 
 Consequences that keep ownership single:
 
@@ -61,7 +61,12 @@ External data is validated once, where it enters, and converted to domain types:
 - **HTTP requests** are checked for shape in `server` (400), then handed to `review`, which applies the domain rules
   (422). A `review.Placement` is data: the server checks only its kind and members, and the session checks it against
   the snapshot.
-- **Server replies** are decoded in the UI's `Api` into readonly types, including the `TextDiff | OtherDiff` union.
+- **Search text** (`q`) is validated by `source.NewSearchText` before a slot is taken (400); the session document
+  carries its length rules so the palette checks the server's values. **`git grep` output** is
+  checked per record: a path among the batch's changed paths, line ≥ 1, column ≥ 1 and a matched span inside the
+  line; anything else is an error, never a partial match.
+- **Server replies** are decoded in the UI's `Api` into readonly types, including the `TextDiff | OtherDiff` union. `toSearchReply` checks each match's file index against the file
+  list, that the file has the match's side, its line and a non-empty match.
   The lines inside diff blocks are trusted unchecked: checking them costs a pass over every shown line, and the
   binary that embeds the page sends them.
 
@@ -153,10 +158,15 @@ Inside a boundary, values are trusted; there is no re-validation.
   opens: Finish opens only after the diff view's editor is left, and the dialog leaves its editor before opening another.
   A failed save keeps that editor open with the reason, and nothing else opens. The dialog's editor saves only itself.
   `FileView.leaveEditor` is the single gate for leaving the diff view's open editor, whether to open another editor,
-  to show another file (tree click, j/k, ]/[, an automatic regroup reselect) or to open Finish
+  to show another file (tree click, j/k, ]/[, a palette result, an automatic regroup reselect) or to open Finish
   ([Q-46](decisions.md#q-46--one-editor-transition-at-a-time)). While a leave is pending, every other transition is
   refused; the transition that started it decides what is shown next. A click on Edit while Finish is leaving the
-  editor opens nothing, because that editor is still saving.
+  editor opens nothing, because that editor is still saving. A palette result in the shown file also goes through
+  `leaveEditor`, then reveals its line without reloading the file.
+- **Content search.** Each search's `git grep` runs belong to its request: they stop when the client goes away, the
+  session ends, the match cap or output limit is reached or the 2 s budget is spent. The UI sends a search 200 ms after
+  the last keystroke, aborts it on the next keystroke, close or mode change, and applies a reply only while it is the
+  current search. The palette's cleanup on close runs synchronously, not on the dialog's later close event.
 - **Saved comments and editors.** `State` alone says whether a comment is saved; an editor's row placement derives from
   it, so every rebuild, including the ones `State` triggers while a save is still in flight, shows one row per comment
   ([Q-39](decisions.md#q-39--whether-a-comment-is-saved)). The Finish dialog shows its open editor whatever its
@@ -172,7 +182,7 @@ Inside a boundary, values are trusted; there is no re-validation.
 Designed for at least 1,000 changed files of 10,000 lines each and up to 4,096 comments:
 
 - A file's patch and contents are read only when the UI asks for it. Every request handler that runs `git` takes one of
-  two file slots first: file and context views, line and range creates, quotes and the result preview. This bounds
+  two file slots first: file and context views, line and range creates, quotes, content searches and the result preview. This bounds
   server memory to two files. A request still waiting for a slot when the session ends replies 503. Two paths take no
   slot: Finish, which the session phase serializes and which must not wait behind UI reads, and the status HEAD check,
   which is cached and runs at most once per interval. Quoting streams lines, so the quote limits bound its memory.
@@ -181,12 +191,16 @@ Designed for at least 1,000 changed files of 10,000 lines each and up to 4,096 c
   output is therefore capped. The one exception is the long-lived `git cat-file --batch-command` (`objects.go`), which
   is written to and read from for the session's life; each reply is read to the size git announces for it, which its
   callers check first (the large-file rule).
-- Pathspec arguments, used to find vendored directories and generated files, are batched to at most 64 KiB. Patches
+- Pathspec arguments, used to find vendored directories and generated files and to search content, are batched to at
+  most 64 KiB by one policy (`pathspecBatches`). Patches
   and line counts take no pathspecs: their records go to `git diff-pairs` on stdin.
 - The UI polls the status at the interval the server sends: half the close grace, at most 5 s. Deriving it from the
   grace keeps a sibling tab's poll inside the grace, and the 5 s cap keeps the moved-HEAD notice within REQ-SES-010's
   10 s. Page presence holds one timer.
 - Highlighting runs within a 2 s budget per side and falls back to plain text after it.
+- Content search keeps at most 500 lines, reads at most 16 MiB of `git grep` output through `stream`'s limit, runs
+  for at most 2 s, and keeps a 496-byte window per line; its text is 3 characters to 256 bytes. Reaching a bound
+  returns the matches found first with a truncation flag.
 - Word diff gives up after 256 edits, and runs only on lines up to 1,000 characters.
 - A file over 1 MiB or 20,000 lines is large: no context, no highlighting.
 - Comments, bodies, the summary, seeds, drafts and quotes all have fixed limits, owned by `review`.
@@ -241,5 +255,7 @@ Designed for at least 1,000 changed files of 10,000 lines each and up to 4,096 c
 | Buffer a patch whole, up to 64 MiB | A huge rewrite's reply is large; streaming is the next step if it matters |
 | Seed validation reads each commented file's diff | A 300-comment seed over 150 files measured 6 s of startup |
 | Snapshot uncommitted changes with `git add -A` into a private index | A large unignored, untracked tree is slow and fills the object database; the fix is to ignore it |
-| Browser find sees only rendered rows | The file filter and hunk navigation cover it; there is no cross-file text search |
+| Content search reruns `git grep` per query, with no index | Repeated blob reads per query; buys flat memory and no staleness |
+| Search decides per searched side, without reading patches | A match may sit on a line the view cannot show (large by lines, other side large or binary); the file opens with a notice. Symlink targets are not searched |
+| ASCII-only case folding in content search | `école` does not find `ÉCOLE` or `École`; `git` and rvw agree in every locale |
 | The long-lived `cat-file` grew from 38 MB to 70 MB over 520 file views | Not yet explained |

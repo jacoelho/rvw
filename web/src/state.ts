@@ -1,7 +1,7 @@
 // The page's copy of the review. The server is authoritative: State is the one writer of every
 // fact here, and applies a change only after the server has saved it.
 
-import { type Api, type ChangedFile, type Comment, compareOrder, HttpError, type LineCount, type Placement, type QuoteLimits, type RenameDetection, type Session, type Side, type Target } from "./api";
+import { type Api, type ChangedFile, type Comment, compareOrder, HttpError, type LineCount, type Placement, type QuoteLimits, type RenameDetection, type SearchLimits, type Session, type Side, type Target } from "./api";
 
 /**
  * What changed, for listeners to refresh only what shows it:
@@ -28,6 +28,7 @@ export class State {
   readonly sourceLabel: string;
   readonly renameDetection: RenameDetection;
   readonly quoteLimits: QuoteLimits;
+  readonly searchLimits: SearchLimits;
   /** The status poll interval in milliseconds, set by the server. */
   readonly statusIntervalMs: number;
   private readonly commentById = new Map<string, Comment>();
@@ -53,6 +54,7 @@ export class State {
     this.sourceLabel = s.source;
     this.renameDetection = s.renameDetection;
     this.quoteLimits = s.quoteLimits;
+    this.searchLimits = s.searchLimits;
     this.statusIntervalMs = s.statusIntervalMs;
     this.viewedFiles = new Set(s.viewed);
     this.summaryValue = s.summary;

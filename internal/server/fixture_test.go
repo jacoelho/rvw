@@ -3,7 +3,7 @@ package server_test
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"fmt"
 	"io"
 	"log"
@@ -411,11 +411,11 @@ type fileDTO struct {
 
 type targetDTO struct {
 	Target string `json:"target"`
-	Path   string `json:"path,omitempty"`
-	Side   string `json:"side,omitempty"`
-	Line   int    `json:"line,omitempty"`
-	Start  int    `json:"start,omitempty"`
-	End    int    `json:"end,omitempty"`
+	Path   string `json:"path,omitzero"`
+	Side   string `json:"side,omitzero"`
+	Line   int    `json:"line,omitzero"`
+	Start  int    `json:"start,omitzero"`
+	End    int    `json:"end,omitzero"`
 }
 
 type commentDTO struct {
@@ -428,12 +428,12 @@ type commentDTO struct {
 
 // placementDTO is where a create request places a comment: a file index, never a path.
 type placementDTO struct {
-	File   *int   `json:"file,omitempty"`
+	File   *int   `json:"file,omitzero"`
 	Target string `json:"target"`
-	Side   string `json:"side,omitempty"`
-	Line   int    `json:"line,omitempty"`
-	Start  int    `json:"start,omitempty"`
-	End    int    `json:"end,omitempty"`
+	Side   string `json:"side,omitzero"`
+	Line   int    `json:"line,omitzero"`
+	Start  int    `json:"start,omitzero"`
+	End    int    `json:"end,omitzero"`
 }
 
 func (f *fixture) session() sessionDTO {
@@ -466,7 +466,8 @@ func decode(t *testing.T, data []byte, v any) {
 
 func mustJSON(t *testing.T, v any) string {
 	t.Helper()
-	data, err := json.Marshal(v)
+	// Deterministic: callers compare encodings, and v2 orders map members randomly by default.
+	data, err := json.Marshal(v, json.Deterministic(true))
 	if err != nil {
 		t.Fatal(err)
 	}

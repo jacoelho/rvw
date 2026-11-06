@@ -39,6 +39,8 @@ export class FileTree {
   private filterToggled = new Map<string, boolean>();
   private selected = -1;
   private fileOrder: number[] = [];
+  /** Every file in tree order, whatever the filter. */
+  private allOrder: number[] = [];
   /** Files below a collapsed vendored directory or generated group. */
   private folded = new Set<number>();
   /** Each file's directory keys, outermost first. */
@@ -96,6 +98,11 @@ export class FileTree {
     return this.fileOrder;
   }
 
+  /** Every file index in tree order, ignoring the filter. */
+  fullOrder(): readonly number[] {
+    return this.allOrder;
+  }
+
   /** Reports whether file i is below a collapsed vendored directory or generated group; next and previous file skip it. */
   isFolded(i: number): boolean {
     return this.folded.has(i);
@@ -145,9 +152,10 @@ export class FileTree {
     return out;
   }
 
-  private rebuild(): void {
+  /** The directory tree of entries, generated files apart in their directory's group. */
+  private dirsFor(entries: readonly { i: number; path: string }[]): Dir {
     const root = newDir("");
-    for (const { i, path } of this.matching()) {
+    for (const { i, path } of entries) {
       const vendoredDir = this.state.files[i]?.vendoredDir;
       const parts = path.split("/");
       const name = parts.pop() ?? path;
@@ -166,8 +174,12 @@ export class FileTree {
       }
       (this.state.generated.has(i) ? d.generated : d.files).push({ i, name });
     }
+    return root;
+  }
+
+  private rebuild(): void {
+    const root = this.dirsFor(this.matching());
     const rows: TreeRow[] = [];
-    const order: number[] = [];
     const folded = new Set<number>();
     const dirsOf = new Map<number, string[]>();
     const walk = (d: Dir, depth: number, prefix: string, dirs: string[], shown: boolean, inFolded: boolean): void => {
@@ -191,7 +203,6 @@ export class FileTree {
         walk(node, depth + 1, key + "/", [...dirs, key], shown && !collapsed, inFolded || (collapsed && node.vendored));
       }
       const file = (f: { i: number; name: string }, fileDepth: number, fileDirs: string[], fileShown: boolean, fileFolded: boolean): void => {
-        order.push(f.i);
         dirsOf.set(f.i, fileDirs);
         if (fileFolded) folded.add(f.i);
         if (fileShown) rows.push({ kind: "file", i: f.i, name: f.name, depth: fileDepth });
@@ -207,7 +218,8 @@ export class FileTree {
     };
     walk(root, 0, "", [], true, false);
     this.rows = rows;
-    this.fileOrder = order;
+    this.fileOrder = orderOf(root);
+    this.allOrder = this.filter ? orderOf(this.dirsFor(this.state.files.map((f, i) => ({ i, path: f.path })))) : this.fileOrder;
     this.folded = folded;
     this.dirsOf = dirsOf;
     const members = new Map<string, number[]>();
@@ -300,4 +312,15 @@ function commentSlot(n: number): HTMLElement {
   count.setAttribute("aria-hidden", "true");
   slot.append(svg, count);
   return slot;
+}
+
+/**
+ * The tree order of d's files: each subdirectory's in turn, then d's own files, then its generated
+ * group. Collapsing single-child directory chains into one row leaves this order unchanged.
+ */
+function orderOf(d: Dir, out: number[] = []): number[] {
+  for (const sub of d.dirs.values()) orderOf(sub, out);
+  for (const f of d.files) out.push(f.i);
+  for (const f of d.generated) out.push(f.i);
+  return out;
 }

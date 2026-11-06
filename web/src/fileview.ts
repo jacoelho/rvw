@@ -251,12 +251,18 @@ export class FileView {
     return this.mode;
   }
 
+  /** The shown file's diff has loaded. */
+  get loaded(): boolean {
+    return this.diff !== null;
+  }
+
   /**
    * Loads and shows file i. A pending editor is discarded only after it was saved or is empty; the
-   * call is refused while the editor cannot be left.
+   * call is refused while the editor cannot be left. True once file i is shown; false when refused,
+   * superseded by another show, or its diff failed to load.
    */
-  async show(i: number): Promise<void> {
-    if (!(await this.leaveEditor())) return;
+  async show(i: number): Promise<boolean> {
+    if (!(await this.leaveEditor())) return false;
     this.drag.cancel();
     this.loading?.abort();
     const ctl = new AbortController();
@@ -271,17 +277,59 @@ export class FileView {
     this.setRows();
     try {
       const d = await this.api.file(i, ctl.signal);
-      if (ctl.signal.aborted) return;
+      if (ctl.signal.aborted) return false;
       this.diff = d;
       this.rebuild();
       this.list.scrollToIndex(0, "start");
       await this.revealTargets(i, d, ctl.signal);
+      return !ctl.signal.aborted;
     } catch (err) {
-      if (ctl.signal.aborted) return;
+      if (ctl.signal.aborted) return false;
       this.rows = [{ k: "note", text: `Could not load this file: ${err instanceof Error ? err.message : err}`, cls: "error" }];
       this.setRows();
       this.hooks.failed(err);
+      return false;
     }
+  }
+
+  /**
+   * Shows line on side of the loaded file, centred and selected, expanding the context that holds
+   * it. A deleted file has only its old side, so a new-side request means the old side. "absent":
+   * the side does not exist or has fewer lines; "hidden": the line is in no hunk and no expandable
+   * gap (a large or non-text file, or a line past the end); "superseded": another file or load
+   * replaced this one meanwhile, and nothing was changed.
+   */
+  async revealLine(side: Side, line: number): Promise<"shown" | "absent" | "hidden" | "superseded"> {
+    const d = this.diff;
+    const i = this.index;
+    const ctl = this.loading;
+    const f = this.state.files[i];
+    if (!d || !f) return "superseded";
+    if (side === "new" && f.newPath === undefined) side = "old";
+    const s = d[side];
+    // A side's line count is known unless it is too large to be counted, which leaves lines 0.
+    const counted = s.lines > 0 || s.size === 0;
+    if (!s.present || (counted && line > s.lines)) return "absent";
+    let row = this.rowOf(side, line);
+    if (row < 0) {
+      if (d.kind !== "text" || d.large) return "hidden";
+      const ranges = gapRanges(d, [{ side, start: line, end: line }]);
+      if (ranges.length === 0) return "hidden";
+      const fetched: WireLine[] = [];
+      for (const [a, b] of ranges) {
+        const res = await this.api.context(i, a, b);
+        if (this.loading !== ctl || this.index !== i) return "superseded";
+        fetched.push(...res.lines);
+      }
+      for (const l of fetched) if (l.new !== undefined) this.expanded.set(l.new, l);
+      this.rebuild();
+      row = this.rowOf(side, line);
+      if (row < 0) return "hidden";
+    }
+    this.selection = { side, start: line, end: line };
+    this.list.refresh();
+    this.list.scrollToIndex(row, "center");
+    return "shown";
   }
 
   setMode(mode: Mode): void {
@@ -766,31 +814,12 @@ export class FileView {
    */
   private async revealTargets(i: number, d: FileDiff, signal: AbortSignal): Promise<void> {
     if (d.kind !== "text" || d.large) return;
-    const gaps: Gap[] = [];
-    for (const hk of d.hunks) if (hk.gap_before) gaps.push(hk.gap_before);
-    if (d.gap_after) gaps.push(d.gap_after);
-    // Ranges are merged per gap: the server serves a range only inside one gap, and two gaps
-    // can be adjacent in new-side numbers around a hunk that only deletes.
-    const merged: [number, number][] = [];
-    for (const g of gaps) {
-      const want: [number, number][] = [];
-      for (const c of this.state.commentsFor(i)) {
-        const t = c.target;
-        if (t.target !== "line" && t.target !== "range") continue;
-        const start = t.target === "line" ? t.line : t.start;
-        // Old-side numbers map into the gap's new-side numbering by a fixed offset.
-        const off = t.side === "new" ? 0 : g.from - g.old_from;
-        const a = Math.max(g.from, start + off - REVEAL_MARGIN);
-        const b = Math.min(g.to, targetEnd(t) + off + REVEAL_MARGIN);
-        if (a <= b) want.push([a, b]);
-      }
-      want.sort((x, y) => x[0] - y[0]);
-      let last: [number, number] | undefined;
-      for (const [a, b] of want) {
-        if (last && a <= last[1] + 1) last[1] = Math.max(last[1], b);
-        else merged.push((last = [a, b]));
-      }
+    const wants: Selection[] = [];
+    for (const c of this.state.commentsFor(i)) {
+      const t = c.target;
+      if (t.target === "line" || t.target === "range") wants.push({ side: t.side, start: t.target === "line" ? t.line : t.start, end: targetEnd(t) });
     }
+    const merged = gapRanges(d, wants);
     if (merged.length === 0) return;
     try {
       for (const [a, b] of merged) {
@@ -891,6 +920,36 @@ export class FileView {
       return false;
     });
   }
+}
+
+/**
+ * The new-side line ranges to fetch so every wanted line that lies between hunks is shown with
+ * REVEAL_MARGIN lines around it: the one rule for which gap holds a line. Ranges are merged per
+ * gap, since the server serves a range only inside one gap, and two gaps can be adjacent in
+ * new-side numbers around a hunk that only deletes.
+ */
+export function gapRanges(d: TextDiff, wants: readonly Selection[]): [number, number][] {
+  const gaps: Gap[] = [];
+  for (const hk of d.hunks) if (hk.gap_before) gaps.push(hk.gap_before);
+  if (d.gap_after) gaps.push(d.gap_after);
+  const merged: [number, number][] = [];
+  for (const g of gaps) {
+    const want: [number, number][] = [];
+    for (const t of wants) {
+      // Old-side numbers map into the gap's new-side numbering by a fixed offset.
+      const off = t.side === "new" ? 0 : g.from - g.old_from;
+      const a = Math.max(g.from, t.start + off - REVEAL_MARGIN);
+      const b = Math.min(g.to, t.end + off + REVEAL_MARGIN);
+      if (a <= b) want.push([a, b]);
+    }
+    want.sort((x, y) => x[0] - y[0]);
+    let last: [number, number] | undefined;
+    for (const [a, b] of want) {
+      if (last && a <= last[1] + 1) last[1] = Math.max(last[1], b);
+      else merged.push((last = [a, b]));
+    }
+  }
+  return merged;
 }
 
 /**

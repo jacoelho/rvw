@@ -29,8 +29,10 @@ const (
 // such a file is not marked generated.
 func (s *Snapshot) GoGenerated(ctx context.Context) ([]bool, error) {
 	out := make([]bool, len(s.files))
-	// Paths are unique within one tree, so each tree's path maps to one file index.
-	byTree := map[string]map[string]int{s.headTree: {}, s.baseTree: {}}
+	// Paths are unique within one tree, so each tree's path maps to one file index. paths keeps
+	// each tree's candidates in file-index order, so the commands are deterministic.
+	paths := map[string][]string{}
+	index := map[string]map[string]int{s.headTree: {}, s.baseTree: {}}
 	for i, f := range s.files {
 		if f.Missing || f.Submodule() || s.vendored[i] != "" {
 			continue
@@ -42,26 +44,15 @@ func (s *Snapshot) GoGenerated(ctx context.Context) ([]bool, error) {
 		if !strings.HasSuffix(path, ".go") || (mode != "100644" && mode != "100755") {
 			continue
 		}
-		byTree[tree][path] = i
+		paths[tree] = append(paths[tree], path)
+		index[tree][path] = i
 	}
 	for _, tree := range []string{s.headTree, s.baseTree} {
-		paths := byTree[tree]
-		var batch []string
-		size := 0
-		for p := range paths {
-			if len(batch) > 0 && size+len(p)+1 > maxPathspecBytes {
-				if err := s.grepGenerated(ctx, tree, batch, paths, out); err != nil {
-					return nil, err
-				}
-				batch, size = batch[:0], 0
-			}
-			batch = append(batch, p)
-			size += len(p) + 1
-		}
-		if len(batch) > 0 {
-			if err := s.grepGenerated(ctx, tree, batch, paths, out); err != nil {
-				return nil, err
-			}
+		err := pathspecBatches(paths[tree], func(batch []string) error {
+			return s.grepGenerated(ctx, tree, batch, index[tree], out)
+		})
+		if err != nil {
+			return nil, err
 		}
 	}
 	return out, nil
@@ -72,7 +63,7 @@ func (s *Snapshot) GoGenerated(ctx context.Context) ([]bool, error) {
 // keeps binary blobs in the record format.
 func (s *Snapshot) grepGenerated(ctx context.Context, tree string, pathspecs []string, index map[string]int, out []bool) error {
 	args := append([]string{
-		"grep", "-a", "-z", "-m", "1", "--no-color", "--no-line-number", "--no-column", "-E",
+		"grep", "-a", "-z", "-m", "1", noColor, "--no-line-number", "--no-column", "-E",
 		"-e", generatedMarker, "-e", packageClause, tree, "--",
 	}, pathspecs...)
 	_, err := s.repo.run.stream(ctx, maxRawOutput, nil, nil, func(r *bufio.Reader) error {
@@ -105,7 +96,7 @@ func parseGrep(r *bufio.Reader, prefix string, emit func(path string, marker boo
 		}
 		path, ok := strings.CutPrefix(strings.TrimSuffix(rec, "\x00"), prefix)
 		if !ok {
-			return fmt.Errorf("git grep: malformed record %q", rec)
+			return fmt.Errorf("git grep: malformed record %q", truncate([]byte(rec), 80))
 		}
 		head, err := r.Peek(len(markerPrefix))
 		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, bufio.ErrBufferFull) {
@@ -120,7 +111,7 @@ func parseGrep(r *bufio.Reader, prefix string, emit func(path string, marker boo
 			if errors.Is(err, bufio.ErrBufferFull) {
 				continue
 			}
-			return fmt.Errorf("git grep: truncated record for %q: %w", path, err)
+			return fmt.Errorf("git grep: truncated record for %q: %w", truncate([]byte(path), 80), err)
 		}
 		if err := emit(path, marker); err != nil {
 			return err

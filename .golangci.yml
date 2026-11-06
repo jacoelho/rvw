@@ -106,6 +106,9 @@ linters:
             - $gostd
             - github.com/alecthomas/chroma/v2
             - github.com/jacoelho/rvw
+          deny:
+            - pkg: encoding/json$
+              desc: use encoding/json/v2 and encoding/json/jsontext
 
         cmd-rvw-production:
           list-mode: strict

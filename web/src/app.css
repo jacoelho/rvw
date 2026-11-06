@@ -32,6 +32,8 @@
   --del-wd: #ff9c9c66;
   --hunk-bg: #eaeef2;
   --sel-bg: #fff8c5;
+  --mark-bg: #fff3a3;
+  --mark-fg: #1f2328;
   --hl-k: #cf222e;
   --hl-s: #0a3069;
   --hl-c: #59636e;
@@ -77,6 +79,8 @@
     --del-wd: #f8514966;
     --hunk-bg: #1b2129;
     --sel-bg: #3b2e00;
+    --mark-bg: #bb800966;
+    --mark-fg: #e6edf3;
     --hl-k: #ff7b72;
     --hl-s: #a5d6ff;
     --hl-c: #9ea7b3;
@@ -946,6 +950,112 @@ button {
   gap: 8px;
 }
 
+/* Search palette */
+
+.palette {
+  width: min(720px, 92vw);
+  height: fit-content;
+  max-height: 70vh;
+  margin: 12vh auto 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--fg);
+  box-shadow: var(--dialog-shadow);
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.palette[open] {
+  display: flex;
+}
+
+.palette::backdrop {
+  background: var(--backdrop);
+}
+
+.pal-input {
+  flex: none;
+  margin: 10px 10px 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.4 var(--mono);
+}
+
+.pal-mode,
+.pal-status {
+  flex: none;
+  padding: 0 12px 6px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.pal-status:empty {
+  display: none;
+}
+
+.pal-list {
+  flex: 0 1 auto;
+  height: min(26px * 14, 50vh);
+  overflow: auto;
+  position: relative;
+  border-top: 1px solid var(--border);
+}
+
+.pal-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  white-space: pre;
+  overflow: hidden;
+  cursor: pointer;
+  font: 12px/26px var(--mono);
+}
+
+.pal-row:hover {
+  background: var(--bg-hover);
+}
+
+.pal-row.sel {
+  background: var(--row-sel);
+}
+
+.pal-row mark {
+  background: var(--mark-bg);
+  color: var(--mark-fg);
+  border-radius: 2px;
+}
+
+.pal-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pal-path.old,
+.pal-from,
+.pal-loc {
+  color: var(--fg-muted);
+}
+
+.pal-loc {
+  flex: none;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pal-code {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* Toast and end page */
 
 .toast {
@@ -958,6 +1068,11 @@ button {
   background: var(--danger-fill);
   color: #fff;
   box-shadow: 0 4px 12px #0004;
+}
+
+.toast.info {
+  background: var(--fg);
+  color: var(--bg);
 }
 
 .end {

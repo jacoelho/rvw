@@ -88,7 +88,9 @@ type Snapshot struct {
 	files      []ChangedFile
 	// records[i] is files[i]'s raw record from the listing. Patches and counts are computed from
 	// these records, so the listing alone decides how a file's sides are paired.
-	records  []string
+	records []string
+	// sizes is the size of every non-submodule blob of files, -1 when absent locally.
+	sizes    map[string]int64
 	vendored []string // vendored directory per file, see VendoredDir
 	renames  RenameDetection
 }
@@ -244,9 +246,11 @@ func (r *Repo) Resolve(ctx context.Context, src Source, progress *log.Logger) (*
 	if err != nil {
 		return nil, err
 	}
-	if snap.files, snap.records, snap.renames, err = r.changedFiles(ctx, snap.baseTree, snap.headTree); err != nil {
+	list, err := r.changedFiles(ctx, snap.baseTree, snap.headTree)
+	if err != nil {
 		return nil, err
 	}
+	snap.files, snap.records, snap.sizes, snap.renames = list.files, list.records, list.sizes, list.renames
 	if len(snap.files) == 0 {
 		return nil, errors.New("nothing to review: " + src.String() + " has no changes")
 	}

@@ -19,8 +19,13 @@ type snapshotView struct {
 	Files      []source.ChangedFile
 	Diffs      []source.FileDiff
 	Counts     map[int]source.LineCount
+	Searches   map[string]source.SearchResult
 	Renames    source.RenameDetection
 }
+
+// viewTexts are the searches a snapshotView records: a common word, an ASCII-cased one, and
+// non-ASCII text whose case a UTF-8 locale would fold.
+var viewTexts = []string{"line", "LINE", "élan", "ÉLAN"}
 
 func view(t *testing.T, snap *source.Snapshot) snapshotView {
 	t.Helper()
@@ -38,12 +43,16 @@ func view(t *testing.T, snap *source.Snapshot) snapshotView {
 	if err != nil {
 		t.Fatalf("NumStat: %v", err)
 	}
+	v.Searches = map[string]source.SearchResult{}
+	for _, text := range viewTexts {
+		v.Searches[text] = search(t, snap, text)
+	}
 	return v
 }
 
 // TestResolveIgnoresHostileConfigurationAndEnvironment checks that repository configuration that
-// changes porcelain diff output and inherited Git variables leave the snapshot, its hunks and its
-// line counts unchanged. It is not parallel because it sets process environment variables.
+// changes porcelain diff or grep output, inherited Git variables and the locale leave the
+// snapshot, its hunks, its line counts and its search results unchanged. It is not parallel because it sets process environment variables.
 func TestResolveIgnoresHostileConfigurationAndEnvironment(t *testing.T) {
 	r := newRepo(t)
 	var long strings.Builder
@@ -64,10 +73,14 @@ func TestResolveIgnoresHostileConfigurationAndEnvironment(t *testing.T) {
 	r.write("x[ab].txt", "glob changed\n")
 	r.write("xa.txt", "plain changed\n")
 	r.write("café.txt", "accent changed\n")
+	r.write("accent.txt", "élan\nÉLAN\nLINE upper\n")
 
 	want := view(t, resolve(t, r.dir, source.Uncommitted()))
 	if want.Renames != source.RenameDetectionFull {
 		t.Fatal("fixture: renames not detected under a clean configuration")
+	}
+	if n := len(want.Searches["élan"].Matches); n != 1 {
+		t.Fatalf("fixture: élan matches %d lines under a clean configuration, want 1", n)
 	}
 
 	for _, kv := range [][2]string{
@@ -86,6 +99,11 @@ func TestResolveIgnoresHostileConfigurationAndEnvironment(t *testing.T) {
 		{"core.pager", "false"},
 		{"pager.diff-tree", "true"},
 		{"alias.diff-tree", "log"},
+		{"grep.patternType", "perl"},
+		{"grep.lineNumber", "false"},
+		{"grep.column", "false"},
+		{"color.grep", "always"},
+		{"submodule.recurse", "true"},
 	} {
 		r.git("config", kv[0], kv[1])
 	}
@@ -113,6 +131,8 @@ func TestResolveIgnoresHostileConfigurationAndEnvironment(t *testing.T) {
 		"GIT_ICASE_PATHSPECS":              "1",
 		"GIT_PAGER":                        "false",
 		"PAGER":                            "false",
+		"LANG":                             "en_US.UTF-8",
+		"LC_ALL":                           "en_US.UTF-8",
 	} {
 		t.Setenv(k, v)
 	}

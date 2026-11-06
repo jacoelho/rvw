@@ -3,7 +3,7 @@
 package main
 
 import (
-	"encoding/json"
+	"encoding/json/v2"
 	"fmt"
 	"math"
 	"net/http"
@@ -2046,23 +2046,36 @@ func startTwoFiles(t *testing.T) (*proc, *page) {
 	return p, pg
 }
 
-// fileIndex is the index the session gives path.
+// fileIndex is the index the session gives the file whose new path is path.
 func (p *proc) fileIndex(path string) int {
+	p.t.Helper()
+	return p.fileIndexBy("new", path)
+}
+
+// oldFileIndex is the index the session gives the file whose old path is path, as a deleted
+// file has no new path.
+func (p *proc) oldFileIndex(path string) int {
+	p.t.Helper()
+	return p.fileIndexBy("old", path)
+}
+
+func (p *proc) fileIndexBy(side, path string) int {
 	p.t.Helper()
 	var s struct {
 		Files []struct {
 			NewPath string `json:"new_path"`
+			OldPath string `json:"old_path"`
 		} `json:"files"`
 	}
 	if err := json.Unmarshal(p.must(http.MethodGet, "/api/session", "", http.StatusOK), &s); err != nil {
 		p.t.Fatal(err)
 	}
 	for i, f := range s.Files {
-		if f.NewPath == path {
+		if side == "new" && f.NewPath == path || side == "old" && f.OldPath == path {
 			return i
 		}
 	}
-	p.t.Fatalf("no file %s in the session", path)
+	p.t.Fatalf("no file with %s path %s in the session", side, path)
 	return -1
 }
 

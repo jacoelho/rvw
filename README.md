@@ -67,8 +67,13 @@ Keys:
 | `s` | toggle unified / split view |
 | `←` / `→` | scroll the split view sideways |
 | `/` | focus the file filter |
+| `⌘K` | search: files, `path:line`, `:line`, `#text` |
 | `⌘↵` | save the comment; in the Finish dialog, send; elsewhere, open Finish |
 | `Esc` | close the editor, else the dialog |
+
+In the search palette, plain text finds changed files by fuzzy path; `path:12` opens the best match at line 12;
+`:12` goes to line 12 of the shown file; `#text` searches the changed files' contents (at least 3 characters, a fixed
+string, ignoring ASCII case unless the text has an ASCII uppercase letter).
 
 ### Exit status
 

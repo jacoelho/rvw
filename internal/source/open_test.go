@@ -15,7 +15,8 @@ import (
 )
 
 // shimGit puts a git on PATH that runs script's case arms before the real git. The script sees the
-// arguments as " $* "; $LOG names a file the arms may append to. It returns the log's path.
+// arguments as " $* "; $LOG names a file the arms may append to, and $REAL_GIT the real git, which
+// an arm may exec itself. It returns the log's path.
 // Callers cannot run in parallel: PATH is process-wide.
 func shimGit(t *testing.T, arms string) string {
 	t.Helper()
@@ -25,7 +26,7 @@ func shimGit(t *testing.T, arms string) string {
 	}
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "log")
-	script := "#!/bin/sh\nLOG='" + logPath + "'\ncase \" $* \" in\n" + arms + "\nesac\nexec '" + gitPath + "' \"$@\"\n"
+	script := "#!/bin/sh\nLOG='" + logPath + "'\nREAL_GIT='" + gitPath + "'\ncase \" $* \" in\n" + arms + "\nesac\nexec \"$REAL_GIT\" \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}

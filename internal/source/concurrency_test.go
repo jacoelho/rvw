@@ -98,8 +98,8 @@ func TestCloseStopsGitProcesses(t *testing.T) {
 	processesGone(t, readPIDs(t, pidLog))
 }
 
-// TestSnapshotConcurrentReads checks that concurrent Lines, Content, Diff and NumStat on one
-// snapshot each return what a lone call returns.
+// TestSnapshotConcurrentReads checks that concurrent Lines, Content, Diff, NumStat and Search on
+// one snapshot each return what a lone call returns.
 func TestSnapshotConcurrentReads(t *testing.T) {
 	t.Parallel()
 	r := newRepo(t)
@@ -129,6 +129,8 @@ func TestSnapshotConcurrentReads(t *testing.T) {
 	if err := snap.NumStat(t.Context(), func(i int, c source.LineCount) { wantCounts[i] = c }); err != nil {
 		t.Fatal(err)
 	}
+	wantSearch := search(t, snap, "new 1")
+	needle := newSearchText(t, "new 1")
 
 	var wg sync.WaitGroup
 	for g := range 16 {
@@ -167,6 +169,11 @@ func TestSnapshotConcurrentReads(t *testing.T) {
 					if err != nil || !reflect.DeepEqual(counts, wantCounts) {
 						t.Errorf("concurrent NumStat differs (err %v)", err)
 					}
+				case 3:
+					res, err := snap.Search(t.Context(), needle)
+					if err != nil || !reflect.DeepEqual(res, wantSearch) {
+						t.Errorf("concurrent Search differs (err %v)", err)
+					}
 				}
 			}
 		})
@@ -174,10 +181,10 @@ func TestSnapshotConcurrentReads(t *testing.T) {
 	wg.Wait()
 }
 
-// TestPatchAndCountCancellation checks that cancelling Diff while its diff-pairs runs, and
-// NumStat while its input feed is blocked, returns the context's error promptly, leaves no
-// diff-pairs process, running or unreaped, and that the next call succeeds. The shim holds
-// diff-pairs without reading its input until the gate goes; NumStat's input is larger than a pipe
+// TestPatchAndCountCancellation checks that cancelling Diff while its diff-pairs runs, NumStat
+// while its input feed is blocked, and Search while its git grep runs, returns the context's error
+// promptly, leaves no such process, running or unreaped, and that the next call succeeds. The
+// shim holds diff-pairs and git grep without reading input until the gate goes; NumStat's input is larger than a pipe
 // holds, so its feed blocks. Not parallel: the shim changes PATH.
 func TestPatchAndCountCancellation(t *testing.T) {
 	r := newRepo(t)
@@ -194,8 +201,9 @@ func TestPatchAndCountCancellation(t *testing.T) {
 	gate := filepath.Join(t.TempDir(), "gate")
 	// Every diff-pairs logs its PID, gated or not; the gated one is the shim's shell, which the
 	// runner started and must stop.
-	logPath := shimGit(t, `*" diff-pairs "*) echo $$ >> "$LOG"; if [ -e '`+gate+`' ]; then while [ -e '`+gate+`' ]; do sleep 0.05; done; exit 1; fi;;`)
+	logPath := shimGit(t, `*" diff-pairs "*|*" --column "*) echo $$ >> "$LOG"; if [ -e '`+gate+`' ]; then while [ -e '`+gate+`' ]; do sleep 0.05; done; exit 1; fi;;`)
 	snap := resolve(t, r.dir, source.Last())
+	newNeed := newSearchText(t, "new")
 
 	for _, tc := range []struct {
 		name string
@@ -207,6 +215,10 @@ func TestPatchAndCountCancellation(t *testing.T) {
 		}},
 		{"NumStat", func(ctx context.Context) error {
 			return snap.NumStat(ctx, func(int, source.LineCount) {})
+		}},
+		{"Search", func(ctx context.Context) error {
+			_, err := snap.Search(ctx, newNeed)
+			return err
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -222,7 +234,7 @@ func TestPatchAndCountCancellation(t *testing.T) {
 			deadline := time.Now().Add(10 * time.Second)
 			for logLines(t, logPath) == started {
 				if time.Now().After(deadline) {
-					t.Fatal("diff-pairs never started")
+					t.Fatalf("%s: the gated git command never started", tc.name)
 				}
 				time.Sleep(10 * time.Millisecond)
 			}

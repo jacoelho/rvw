@@ -166,7 +166,7 @@ func (s *Snapshot) read(ctx context.Context, i int, keep bool) (FileDiff, error)
 			Old:  SideFacts{Present: oldFacts.Present, Size: oldFacts.Size},
 			New:  SideFacts{Present: newFacts.Present, Size: newFacts.Size},
 		}}, nil
-	case len(hunks) == 0 && f.OldMode != f.NewMode && f.OldPath != "" && f.NewPath != "":
+	case f.modeOnly():
 		d.Facts.Kind = KindModeOnly
 		d.Facts.Large = false
 		return d, nil

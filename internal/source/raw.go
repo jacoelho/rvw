@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -26,8 +28,10 @@ const (
 
 // Git file modes of interest.
 const (
-	modeSubmodule = "160000"
-	modeNone      = "000000"
+	modeSubmodule  = "160000"
+	modeNone       = "000000"
+	modeRegular    = "100644"
+	modeExecutable = "100755"
 )
 
 // ChangedFile is one entry of the snapshot diff command's raw output.
@@ -54,6 +58,16 @@ func (f ChangedFile) Path() string {
 // Submodule reports whether either side is a gitlink.
 func (f ChangedFile) Submodule() bool {
 	return f.OldMode == modeSubmodule || f.NewMode == modeSubmodule
+}
+
+// modeOnly reports whether the change is only a regular file's executable bit: both sides are
+// regular files (100644/100755) with the same blob and different modes. REQ-DIFF-005 shows such
+// a file without lines (KindModeOnly), and content search skips it for the same reason. A type
+// change with equal blobs (a regular file replaced by a symlink to its content) is excluded:
+// git diffs it as a deletion plus an addition, both with lines.
+func (f ChangedFile) modeOnly() bool {
+	regular := func(mode string) bool { return mode == modeRegular || mode == modeExecutable }
+	return regular(f.OldMode) && regular(f.NewMode) && f.OldMode != f.NewMode && f.OldBlob == f.NewBlob
 }
 
 // HasSide reports whether the file exists on the old (false) or new (true) side.
@@ -87,7 +101,7 @@ const renameLimitWarning = "rename detection was skipped"
 // options (Definitions), shared by the listing and the per-file patches and counts.
 var (
 	diffConfig = []string{"-c", "diff.suppressBlankEmpty=false", "-c", "core.quotePath=true"}
-	diffOutput = []string{"--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/"}
+	diffOutput = []string{noColor, "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/"}
 )
 
 // diffTree returns the snapshot diff command's arguments up to the trees (Definitions).
@@ -107,49 +121,64 @@ func diffPairs(format ...string) []string {
 	return append(append(args, diffOutput...), format...)
 }
 
+// listing is the changed-file list of a pair of trees.
+type listing struct {
+	// sizes holds the size of every non-submodule blob of files, or -1 when the blob is absent
+	// from the local object database.
+	sizes map[string]int64
+	files []ChangedFile
+	// records[i] is files[i]'s raw record.
+	records []string
+	renames RenameDetection
+}
+
 // changedFiles lists the snapshot's files and each file's raw record. It first lists without
-// rename detection, which reads no blob content, checks that every blob is present, and only then
-// re-lists with -M.
-func (r *Repo) changedFiles(ctx context.Context, base, head string) ([]ChangedFile, []string, RenameDetection, error) {
+// rename detection, which reads no blob content, sizes every blob, and only when every blob is
+// present re-lists with -M. The -M listing pairs the same blobs, so the sizes cover it.
+func (r *Repo) changedFiles(ctx context.Context, base, head string) (listing, error) {
 	out, err := r.run.output(ctx, maxRawOutput, nil, append(diffTree(false, "--raw"), base, head)...)
 	if err != nil {
-		return nil, nil, 0, err
+		return listing{}, err
 	}
 	files, records, err := parseRaw(out)
 	if err != nil {
-		return nil, nil, 0, err
+		return listing{}, err
 	}
-	missing, err := r.missingBlobs(ctx, files)
+	sizes, err := r.blobSizes(ctx, files)
 	if err != nil {
-		return nil, nil, 0, err
+		return listing{}, err
 	}
-	if len(missing) > 0 {
+	if slices.ContainsFunc(slices.Collect(maps.Values(sizes)), func(n int64) bool { return n < 0 }) {
 		for i := range files {
-			files[i].Missing = missing[files[i].OldBlob] || missing[files[i].NewBlob]
+			files[i].Missing = sizes[files[i].OldBlob] < 0 || sizes[files[i].NewBlob] < 0
 		}
-		return files, records, RenameDetectionMissingBlobs, nil
+		return listing{files: files, records: records, sizes: sizes, renames: RenameDetectionMissingBlobs}, nil
 	}
 	out, stderr, err := r.run.outputStderr(ctx, maxRawOutput, []string{"LC_ALL=C"}, append(diffTree(true, "--raw"), base, head)...)
 	if err != nil {
-		return nil, nil, 0, err
+		return listing{}, err
 	}
 	if files, records, err = parseRaw(out); err != nil {
-		return nil, nil, 0, err
+		return listing{}, err
 	}
+	renames := RenameDetectionFull
 	if strings.Contains(stderr, renameLimitWarning) {
-		return files, records, RenameDetectionLimitExceeded, nil
+		renames = RenameDetectionLimitExceeded
 	}
-	return files, records, RenameDetectionFull, nil
+	return listing{files: files, records: records, sizes: sizes, renames: renames}, nil
 }
 
-// missingBlobs returns the blobs of files that are absent from the local object database. One
-// `cat-file --batch-check` answers for every blob.
-func (r *Repo) missingBlobs(ctx context.Context, files []ChangedFile) (map[string]bool, error) {
+// blobSizes returns the size of every non-submodule blob of files, or -1 for a blob absent from
+// the local object database. One `cat-file --batch-check` answers for every blob.
+func (r *Repo) blobSizes(ctx context.Context, files []ChangedFile) (map[string]int64, error) {
 	var ids []string
-	seen := map[string]bool{}
+	sizes := map[string]int64{}
 	add := func(id, mode string) {
-		if id != "" && mode != modeSubmodule && !seen[id] {
-			seen[id] = true
+		if id == "" || mode == modeSubmodule {
+			return
+		}
+		if _, ok := sizes[id]; !ok {
+			sizes[id] = -1
 			ids = append(ids, id)
 		}
 	}
@@ -157,9 +186,8 @@ func (r *Repo) missingBlobs(ctx context.Context, files []ChangedFile) (map[strin
 		add(f.OldBlob, f.OldMode)
 		add(f.NewBlob, f.NewMode)
 	}
-	missing := map[string]bool{}
 	if len(ids) == 0 {
-		return missing, nil
+		return sizes, nil
 	}
 	var in strings.Builder
 	for _, id := range ids {
@@ -183,8 +211,12 @@ func (r *Repo) missingBlobs(ctx context.Context, files []ChangedFile) (map[strin
 		fields := strings.Fields(string(line))
 		switch {
 		case len(fields) == 2 && fields[0] == id && fields[1] == "missing":
-			missing[id] = true
 		case len(fields) == 3 && fields[0] == id:
+			size, err := strconv.ParseInt(fields[2], 10, 64)
+			if err != nil || size < 0 {
+				return nil, fmt.Errorf("cat-file: reply %q for object %s", truncate(line, 80), id)
+			}
+			sizes[id] = size
 		default:
 			return nil, fmt.Errorf("cat-file: reply %q for object %s", truncate(line, 80), id)
 		}
@@ -192,7 +224,7 @@ func (r *Repo) missingBlobs(ctx context.Context, files []ChangedFile) (map[strin
 	if len(out) > 0 {
 		return nil, errors.New("cat-file: unexpected output after the last reply")
 	}
-	return missing, nil
+	return sizes, nil
 }
 
 // maxReplyLine bounds one `cat-file --batch-check` reply: a SHA-256 id, the longest type name and

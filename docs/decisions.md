@@ -515,6 +515,9 @@ interval.
 
 Rejected: a slot for Finish, which can stall the human's last action behind two slow file views.
 
+Revision 2 adds content search (Q-47) to the slot holders: it validates its text first, so refused text takes no
+slot, then holds one slot for its `git grep` runs.
+
 ### Q-35 — Abandoned deliveries
 
 Decided on 2026-11-05 (implementation; [architecture.md](architecture.md#state-and-lifecycle)). After a signal, Run
@@ -848,6 +851,89 @@ Rejected:
   failure path, and the human's Edit click silently becomes a navigation.
 - Queueing the navigation to run after the switch: hidden deferred work, and it is unclear which click wins.
 - A `switchingEditor` check in each caller: that duplicated policy caused the defect.
+
+### Q-47 — Search palette
+
+Decided on 2026-11-05/06: the repository owner asked for a ⌘K palette that finds changed files by fuzzy path, goes
+to `path:line` and `:line`, and searches text with `#text` (REQ-NAV-006, REQ-NAV-007, AC-NAV-003). The rest is
+proposed in contract revision 2 and decided in implementation:
+
+- Search reads the snapshot's trees (`git grep <tree> -- <paths>`), never the worktree, so results match the diff
+  shown even after the worktree changes.
+- Blob sizes come from the `batch-check` the snapshot already runs; sides over 1 MiB are skipped before `git` runs,
+  binary sides through `git grep -I`, which follows git's own binary detection, and missing blobs, submodules and
+  mode-only files are never named.
+- Mode-only means both sides are regular files (`100644`/`100755`) with the same blob and different modes. One
+  predicate, `ChangedFile.modeOnly`, gives both `KindModeOnly` (REQ-DIFF-005) and the search skip, so mode-only
+  files never use up the 500-line cap. A type change is excluded even
+  with equal blobs, because git diffs it as a deletion plus an addition, both with lines.
+- Bounds: 500 matched lines, 16 MiB of output through `stream`'s limit, a 2 s budget, and a 496-byte window per line
+  (120 + 256 + 120: 120 bytes each side of a match of at most 256). Reaching the line cap or the output limit ends the run; the budget
+  is a context cause. A `git` failure is an error, not truncation, even when it coincides with a cap.
+- Order is deterministic: head-tree files in changed-file order, then base-tree (deleted) files, each in line order.
+  A truncated result is therefore the matches found first in that order.
+- `source` returns each match's window already split into the text before the match, the matched bytes and the text
+  after, cut at rune starts; the server only replaces invalid UTF-8.
+- The palette lists changed files regardless of the file filter: it exists to reach any changed file, and the filter
+  is a separate view of the tree (REQ-NAV-002). Opening a file through it keeps the filter.
+- The wire names a file by its changed-file index, so no raw path crosses it and the UI resolves paths it already
+  validated.
+- `git` runs under `LC_ALL=C` with smart case limited to ASCII: the text ignores ASCII case unless it holds an ASCII
+  uppercase letter. Git and rvw then apply one rule whatever the environment's locale.
+- `NewSearchText` owns the text rules: at least 3 characters, at most 256 bytes, valid UTF-8, no NUL, CR or LF. The
+  session document carries the two length rules, so the UI checks the server's values, not a copy of them, to avoid
+  sending text the server refuses; the server's check is still the authority.
+- A match names its file and side; the UI refuses a reply naming a side the file does not have.
+- One truncation flag, with UI text ("some files may not be listed") that holds for every cause.
+- Pathspec batches of at most 64 KiB, the policy `GoGenerated` and `markRegularFiles` already use.
+- Content search takes a file slot (Q-34) and is cancelled with its request: client disconnect, session end, or the
+  budget all stop its `git` process.
+- The palette's close cleans up synchronously: the dialog's close event comes a task later, after a fast reopen, and
+  focus left on the closed input would swallow the page's next key.
+
+Approximations:
+
+- Search decides per searched side; the view decides per file. A match can therefore be listed in a file the view
+  shows without that line: a file large by line count but at most 1 MiB; a file whose other side is over 1 MiB,
+  for a match outside its hunks; and a file whose other side is binary, which the view shows as binary. Choosing
+  such a match opens the file with a notice (REQ-NAV-006). Deciding exactly needs each file's patch, a `git` run
+  per searched file, which the per-file laziness of the server rules out; skipping every file with a large side
+  would drop matches the view does show, such as a large file cut to a small one.
+- Symlink sides are not searched: `git grep` reads no symlink blob, and reading the targets would need a second
+  way of reading blobs beside `git grep`. The view shows a symlink's target as a text line, so a target holding the
+  text is not listed.
+- A `<path>:<n>` query whose path itself ends in `:<digits>` is read as a line; the file is still found as a plain
+  files query without the suffix.
+- Line counts for `path:N` come from the file's own diff, not the background line counts, so a line past the end is
+  reported before the counts arrive.
+
+Rejected:
+
+- Symbol search: needs a parser per language and an index; not asked for.
+- Client-side content search: the UI would have to load every changed file, against REQ-PERF-003 and the 1,000-file
+  target.
+- Fuzzy or regular-expression content matching: costlier to bound, and regex text is a second language for the human.
+- Unicode case folding: locale-dependent in `git`, and git's rules differ from Go's, so the server could not state
+  what matched.
+- Searching the worktree: it can differ from the snapshot the diff shows.
+- Searching removed lines: needs a second tree grep per file and a two-sided result model.
+- `:(literal)` pathspec magic: the paths are already literal under `--literal-pathspecs`.
+- Server-side fuzzy file search: the UI already holds every path; a round trip per keystroke buys nothing.
+- Counting lines before searching: a second full read of every blob.
+- A per-file `-m` cap: a file with many matches would still dominate; the global cap with deterministic order
+  defines the subset.
+- Streaming replies: partial UI state per keystroke, for at most 500 rows.
+- A persistent index: memory and staleness against a per-query `git grep` whose cost is bounded.
+- Skipping the file slot: an unbounded number of concurrent greps.
+- A truncation-reason enum: one message covers every cause, and the owner did not ask for per-cause text.
+- Interleaving trees per batch: alternating indices would multiply `git` runs for no ordering the human sees.
+- Recording mode-only matches as an approximation: their lines are unreachable, they use up the 500-line cap, and the
+  rule for which files show lines would stay split between the diff and the search.
+- Showing a mode-only file's content as context: it changes accepted REQ-DIFF-005.
+- A blob-equality-only mode-only predicate: it would reclassify same-content type changes and hide their diff.
+- Exported offsets into one window string: the transport would depend on an invariant only `source` checks.
+- The palette respecting the file filter: the palette's purpose is reaching any changed file, and the filter is a
+  separate tree view (REQ-NAV-002).
 
 ## Supersession on acceptance
 
