@@ -2,13 +2,14 @@
 // comment editor. The server derives hunks, line numbers, change pairing and word changes; this
 // module only lays them out as virtual rows.
 
-import type { Api, ChangedFile, Comment, FileDiff, Gap, Placement, TextDiff, Line as WireLine, Range, Side, Span, Target } from "./api";
+import type { Api, ChangedFile, Comment, CommentSite, EarlierComment, EarlierPlacement, FileDiff, FileReply, Gap, Placement, TextDiff, Line as WireLine, Range, Side, Span } from "./api";
 import { renderCode } from "./code";
 import { h } from "./dom";
 import { CommentEditor } from "./editor";
 import { LineDrag, type Selection } from "./linedrag";
-import { VirtualList } from "./scroller";
-import { lineTarget, type State, targetEnd, targetLabel } from "./state";
+import { type Align, VirtualList } from "./scroller";
+import { earlierCard } from "./earlier";
+import { clock, earlierStatus, lineTarget, type State, targetEnd, targetLabel } from "./state";
 
 export const ROW_HEIGHT = 20;
 const CONTEXT_STEP = 50;
@@ -20,11 +21,25 @@ const SPLIT_GUTTER_COLUMNS = 8;
 /** Columns an arrow key moves split code text sideways. */
 const SPLIT_KEY_STEP = 8;
 
-export type Mode = "unified" | "split";
+export type Layout = "unified" | "split";
+
+/** A step through rows or files: 1 forward, -1 back. */
+export type Step = 1 | -1;
+
+/** How revealLine ended; see revealLine. */
+export type Reveal = "shown" | "absent" | "hidden" | "superseded";
+/** How a show ended: refused leaves the earlier file and its scope untouched; superseded and failed do not. */
+export type Load = "shown" | "refused" | "superseded" | "failed";
+
+/** What an editor opens on: a saved comment, or the placement of a new one. */
+type EditorSubject = Comment | Placement;
+
+/** A shown line's change: context, added or deleted. */
+type LineOp = " " | "+" | "-";
 
 /** One shown line: a patch line or an expanded context line. */
 interface Line {
-  op: " " | "+" | "-";
+  op: LineOp;
   old: number | null;
   new: number | null;
   text: string;
@@ -45,7 +60,19 @@ interface ShownGap extends Gap {
 
 /** The gutter lines a new comment targets: start..end on one side. */
 
-type Item = { hunk: string } | { gap: ShownGap } | { line: Line } | { left: Line | null; right: Line | null };
+/** A whitespace-only hunk shown as one row (REQ-DIFF-011): its index and its changed line count. */
+interface HiddenHunk {
+  hunk: number;
+  lines: number;
+}
+
+type Item = { hunk: string } | { gap: ShownGap } | { hidden: HiddenHunk } | { line: Line } | { left: Line | null; right: Line | null };
+
+/** The lines a hunk spans on each side, for matching targets to it; [0, -1] when it has none. */
+interface HunkSpan {
+  old: readonly [number, number];
+  new: readonly [number, number];
+}
 
 type DRow =
   | { k: "note"; text: string; cls: string }
@@ -54,12 +81,15 @@ type DRow =
   | { k: "gap"; gap: ShownGap }
   | { k: "line"; line: Line }
   | { k: "split"; left: Line | null; right: Line | null }
+  | { k: "hidden"; h: HiddenHunk }
   | { k: "comment"; c: Comment; at: string }
+  | { k: "earlier"; e: EarlierComment; p: EarlierPlacement | undefined; at: string }
   | { k: "editor"; ed: CommentEditor; at: string };
 
 /** The key a row's height is cached under: a comment's changes with its body and whether it is labelled. */
 function rowKey(r: DRow): string {
   if (r.k === "comment") return `c:${r.c.id}:${r.c.body.length}:${r.at === "top"}`;
+  if (r.k === "earlier") return `e:${r.e.id}:${r.at === "top"}`;
   if (r.k === "editor") return r.ed.key;
   return rowId(r);
 }
@@ -76,6 +106,10 @@ function rowId(r: DRow): string {
       return `c:${r.c.id}@${r.at}`;
     case "editor":
       return `c:${r.ed.id}@${r.at}`;
+    case "earlier":
+      return `e:${r.e.id}@${r.at}`;
+    case "hidden":
+      return `w:${r.h.hunk}`;
     case "line":
       return `l:${r.line.old ?? ""}:${r.line.new ?? ""}`;
     case "split":
@@ -96,6 +130,10 @@ export type DiffApi = Pick<Api, "file" | "context">;
 
 export interface FileViewHooks {
   failed(err: unknown): void;
+  /** Whether file i is to be shown as its interdiff: Since last review is chosen and i changed since review. */
+  since(i: number): boolean;
+  /** Chooses All changes and shows the shown file again (REQ-RND-014); true once it is shown. */
+  showAll(): Promise<boolean>;
 }
 
 export class FileView {
@@ -103,12 +141,21 @@ export class FileView {
   private readonly header: HTMLElement;
   private index = -1;
   private diff: FileDiff | null = null;
+  /** The loaded file's reply: its scope, whitespace-only hunks and earlier comment placements. */
+  private reply: FileReply | null = null;
+  private spans: HunkSpan[] = [];
+  /** Whitespace-only hunks the human or a navigation showed. */
+  private revealed = new Set<number>();
+  /** Earlier comment placements of the loaded file, by earlier comment ID. */
+  private placements = new Map<string, EarlierPlacement>();
   private loading: AbortController | null = null;
-  private mode: Mode;
+  private chosenLayout: Layout;
   private rows: DRow[] = [];
   /** Expanded context lines keyed by new-side line number. */
   private expanded = new Map<number, WireLine>();
   private selection: Selection | null = null;
+  /** Id of the comment ] or [ last showed in this load of the file; steps start from it while it is in view. */
+  private commentAt: string | null = null;
   /** The range a gutter drag in progress covers, shown instead of the selection. */
   private dragged: Selection | null = null;
   private readonly drag: LineDrag;
@@ -136,7 +183,7 @@ export class FileView {
   ) {
     this.header = headerEl;
     this.list = new VirtualList(listEl, ROW_HEIGHT, 90);
-    this.mode = localStorage.getItem("rvw.mode") === "split" ? "split" : "unified";
+    this.chosenLayout = localStorage.getItem("rvw.mode") === "split" ? "split" : "unified";
     listEl.addEventListener("click", (e) => this.onClick(e));
     this.drag = new LineDrag(listEl, {
       start: (e) => this.gutterAt(e.target),
@@ -170,10 +217,10 @@ export class FileView {
     listEl.append(probeBox);
     // Split rows never scroll sideways; find-in-page or focus can still scroll the list, so undo it.
     listEl.addEventListener("scroll", () => {
-      if (this.mode === "split" && listEl.scrollLeft !== 0) listEl.scrollLeft = 0;
+      if (this.chosenLayout === "split" && listEl.scrollLeft !== 0) listEl.scrollLeft = 0;
     }, { passive: true });
     new ResizeObserver(() => this.updateSplitRange()).observe(listEl);
-    this.applyMode();
+    this.applyLayout();
   }
 
   /** Wheel input in split view: horizontal motion moves the code text, vertical scrolls rows. */
@@ -189,8 +236,8 @@ export class FileView {
   };
 
   /** Moves split code text sideways by dir steps; false in unified view, where rows scroll natively. */
-  scrollSideways(dir: 1 | -1): boolean {
-    if (this.mode !== "split") return false;
+  scrollSideways(dir: Step): boolean {
+    if (this.chosenLayout !== "split") return false;
     this.setSplitX(this.strip.scrollLeft + dir * SPLIT_KEY_STEP * this.ch);
     return true;
   }
@@ -205,7 +252,7 @@ export class FileView {
    * rounded up to whole characters so no glyph is cut in half at the code box's edge.
    */
   private publishSplitX(): void {
-    const x = this.mode === "split" ? Math.ceil(this.strip.scrollLeft / this.ch) * this.ch : 0;
+    const x = this.chosenLayout === "split" ? Math.ceil(this.strip.scrollLeft / this.ch) * this.ch : 0;
     this.list.el.style.setProperty("--split-x", `${x}px`);
   }
 
@@ -215,7 +262,7 @@ export class FileView {
    * box. The strip keeps its height whenever split is on, so showing it never changes the list's size.
    */
   private updateSplitRange(): void {
-    if (this.mode !== "split") return;
+    if (this.chosenLayout !== "split") return;
     const ch = (this.ch = this.probe.getBoundingClientRect().width / 100 || 7);
     // The old half is the narrower code box: it also holds the 1px divider.
     const box = this.list.el.clientWidth / 2 - SPLIT_GUTTER_COLUMNS * ch - 1;
@@ -225,9 +272,9 @@ export class FileView {
     this.publishSplitX();
   }
 
-  /** Applies the mode's layout: split owns the horizontal offset, unified scrolls natively. */
-  private applyMode(): void {
-    const split = this.mode === "split";
+  /** Applies the layout: split owns the horizontal offset, unified scrolls natively. */
+  private applyLayout(): void {
+    const split = this.chosenLayout === "split";
     this.list.el.classList.toggle("split", split);
     this.strip.hidden = !split;
     if (split) this.list.el.addEventListener("wheel", this.onWheel, { passive: false });
@@ -247,8 +294,8 @@ export class FileView {
     return this.index;
   }
 
-  get viewMode(): Mode {
-    return this.mode;
+  get layout(): Layout {
+    return this.chosenLayout;
   }
 
   /** The shown file's diff has loaded. */
@@ -256,39 +303,70 @@ export class FileView {
     return this.diff !== null;
   }
 
+  /** The shown file is shown as its interdiff, whose old side is the reviewed version. */
+  get interdiff(): boolean {
+    return this.reply?.scope === "since";
+  }
+
+  /**
+   * Shows the shown file again with the current scope and whitespace setting, keeping the
+   * line in view where it can.
+   */
+  async reload(): Promise<Load> {
+    if (this.index < 0) return "refused";
+    const anchor = this.anchorAt(this.list.firstVisible());
+    const load = await this.show(this.index);
+    if (load !== "shown") return load;
+    if (anchor) {
+      const at = this.rowOf(anchor.side, anchor.line);
+      if (at >= 0) this.list.scrollToIndex(at, "start");
+    }
+    return "shown";
+  }
+
   /**
    * Loads and shows file i. A pending editor is discarded only after it was saved or is empty; the
-   * call is refused while the editor cannot be left. True once file i is shown; false when refused,
-   * superseded by another show, or its diff failed to load.
+   * call is refused, changing nothing, while the editor cannot be left; it is superseded by a later
+   * show, and failed when its diff did not load.
    */
-  async show(i: number): Promise<boolean> {
-    if (!(await this.leaveEditor())) return false;
+  async show(i: number): Promise<Load> {
+    if (!(await this.leaveEditor())) return "refused";
     this.drag.cancel();
     this.loading?.abort();
     const ctl = new AbortController();
     this.loading = ctl;
     this.index = i;
     this.diff = null;
+    this.reply = null;
+    this.spans = [];
+    this.revealed = new Set();
+    this.placements = new Map();
     this.expanded = new Map();
     this.selection = null;
+    this.commentAt = null;
     this.resetHorizontal();
     this.renderHeader();
     this.rows = [{ k: "note", text: "Loading…", cls: "muted" }];
     this.setRows();
     try {
-      const d = await this.api.file(i, ctl.signal);
-      if (ctl.signal.aborted) return false;
+      const reply = await this.api.file(i, { since: this.hooks.since(i), ws: this.state.hideWhitespace }, ctl.signal);
+      if (ctl.signal.aborted) return "superseded";
+      const d = reply.diff;
+      this.reply = reply;
       this.diff = d;
+      this.spans = d.kind === "text" ? d.hunks.map(hunkSpan) : [];
+      for (const p of reply.earlier) this.placements.set(p.id, p);
+      this.renderHeader();
       this.rebuild();
       this.list.scrollToIndex(0, "start");
       await this.revealTargets(i, d, ctl.signal);
-      return !ctl.signal.aborted;
+      return ctl.signal.aborted ? "superseded" : "shown";
     } catch (err) {
-      if (ctl.signal.aborted) return false;
+      if (ctl.signal.aborted) return "superseded";
       this.rows = [{ k: "note", text: `Could not load this file: ${err instanceof Error ? err.message : err}`, cls: "error" }];
       this.setRows();
       this.hooks.failed(err);
-      return false;
+      return "failed";
     }
   }
 
@@ -299,25 +377,34 @@ export class FileView {
    * gap (a large or non-text file, or a line past the end); "superseded": another file or load
    * replaced this one meanwhile, and nothing was changed.
    */
-  async revealLine(side: Side, line: number): Promise<"shown" | "absent" | "hidden" | "superseded"> {
+  async revealLine(side: Side, line: number): Promise<Reveal> {
     const d = this.diff;
     const i = this.index;
     const ctl = this.loading;
     const f = this.state.files[i];
     if (!d || !f) return "superseded";
     if (side === "new" && f.newPath === undefined) side = "old";
+    // The interdiff's old side is the reviewed version, not the snapshot's old side.
+    if (side === "old" && this.interdiff) {
+      if (!(await this.hooks.showAll()) || this.index !== i) return "superseded";
+      return this.revealLine(side, line);
+    }
     const s = d[side];
     // A side's line count is known unless it is too large to be counted, which leaves lines 0.
     const counted = s.lines > 0 || s.size === 0;
     if (!s.present || (counted && line > s.lines)) return "absent";
     let row = this.rowOf(side, line);
+    if (row < 0 && this.unhide(side, line, line)) {
+      this.rebuild();
+      row = this.rowOf(side, line);
+    }
     if (row < 0) {
       if (d.kind !== "text" || d.large) return "hidden";
       const ranges = gapRanges(d, [{ side, start: line, end: line }]);
       if (ranges.length === 0) return "hidden";
       const fetched: WireLine[] = [];
       for (const [a, b] of ranges) {
-        const res = await this.api.context(i, a, b);
+        const res = await this.api.context(i, a, b, this.interdiff);
         if (this.loading !== ctl || this.index !== i) return "superseded";
         fetched.push(...res.lines);
       }
@@ -332,13 +419,14 @@ export class FileView {
     return "shown";
   }
 
-  setMode(mode: Mode): void {
-    if (mode === this.mode) return;
+  setLayout(layout: Layout): void {
+    if (layout === this.chosenLayout) return;
     this.drag.cancel();
     const anchor = this.anchorAt(this.list.firstVisible());
-    this.mode = mode;
-    localStorage.setItem("rvw.mode", mode);
-    this.applyMode();
+    this.chosenLayout = layout;
+    // Saved in earlier versions under this key; renaming it would drop the human's choice.
+    localStorage.setItem("rvw.mode", layout);
+    this.applyLayout();
     this.rebuild();
     if (anchor) {
       const at = this.rowOf(anchor.side, anchor.line);
@@ -358,20 +446,54 @@ export class FileView {
   }
 
   /** Scrolls to the next (dir 1) or previous (dir -1) hunk header. */
-  moveHunk(dir: 1 | -1): void {
+  moveHunk(dir: Step): void {
     this.moveTo(dir, (r) => r.k === "hunk");
   }
 
   /** Scrolls to the next or previous comment of this file; false when there is none that way. */
-  moveComment(dir: 1 | -1): boolean {
-    return this.moveTo(dir, (r) => r.k === "comment");
+  async moveComment(dir: Step): Promise<boolean> {
+    for (let n = this.commentCursor(dir) + dir; n >= 0 && n < this.rows.length; n += dir) {
+      const r = this.rows[n]!;
+      if (r.k !== "comment") continue;
+      await this.showComment(r.c, n, "start");
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * The row a comment step starts after: the comment last shown while it is still in view, else
+   * the edge of the view, so a comment in the first visible row is the next one, not skipped.
+   */
+  private commentCursor(dir: Step): number {
+    const first = this.list.firstVisible();
+    const at = this.rows.findIndex((r) => r.k === "comment" && r.c.id === this.commentAt);
+    if (at >= first && at <= this.list.lastVisible()) return at;
+    return dir === 1 ? first - 1 : first;
   }
 
   /** Scrolls to the first or last comment row. */
-  scrollToEdgeComment(last: boolean): void {
+  async scrollToEdgeComment(last: boolean): Promise<void> {
     const idx = this.rows.map((r, n) => (r.k === "comment" ? n : -1)).filter((n) => n >= 0);
     const at = last ? idx[idx.length - 1] : idx[0];
-    if (at !== undefined) this.list.scrollToIndex(at, "center");
+    const r = at === undefined ? undefined : this.rows[at];
+    if (r?.k === "comment") await this.showComment(r.c, at!, "center");
+  }
+
+  /**
+   * Scrolls to comment c's row n. An old-side comment of an interdiff is shown at the top, away
+   * from its line, so All changes is chosen first and the comment shown at its line (REQ-RND-014).
+   */
+  private async showComment(c: Comment, n: number, align: Align): Promise<void> {
+    const t = c.target;
+    if ((t.target === "line" || t.target === "range") && t.side === "old" && this.interdiff) {
+      const i = this.index;
+      if (!(await this.hooks.showAll()) || this.index !== i) return;
+      n = this.rows.findIndex((r) => r.k === "comment" && r.c.id === c.id);
+      if (n < 0) return;
+    }
+    this.commentAt = c.id;
+    this.list.scrollToIndex(n, align);
   }
 
   /** Opens the editor on the selection, else on the first line in view. */
@@ -384,7 +506,7 @@ export class FileView {
     }
     for (let n = this.list.firstVisible(); n < this.rows.length; n++) {
       const a = this.anchorAt(n);
-      if (a && this.rows[n]?.k !== "comment") {
+      if (a && this.rows[n]?.k !== "comment" && this.commentableSide(a.side)) {
         this.run(this.openLineEditor({ side: a.side, start: a.line, end: a.line }));
         return;
       }
@@ -464,7 +586,7 @@ export class FileView {
    * other open editor is left first, as moving to another file leaves it, and a failed save keeps
    * it open showing why.
    */
-  private async openEditor(on: Comment | Placement, sel: Selection | null): Promise<void> {
+  private async openEditor(on: EditorSubject, sel: Selection | null): Promise<void> {
     const prev = this.editor;
     // A pending save would land after the editor is replaced, so the editor stays until it ends.
     if (prev?.isSaving || this.leaving) return;
@@ -494,7 +616,7 @@ export class FileView {
     return true;
   }
 
-  private moveTo(dir: 1 | -1, match: (r: DRow) => boolean): boolean {
+  private moveTo(dir: Step, match: (r: DRow) => boolean): boolean {
     const first = this.list.firstVisible();
     const start = dir === 1 ? first + 1 : first - 1;
     for (let n = start; n >= 0 && n < this.rows.length; n += dir) {
@@ -504,6 +626,11 @@ export class FileView {
       }
     }
     return false;
+  }
+
+  /** Lines on side take comments: an interdiff's old side is the reviewed version, outside the snapshot. */
+  private commentableSide(side: Side): boolean {
+    return side === "new" || !this.interdiff;
   }
 
   /** The shown file when it accepts line and file comments, else null. */
@@ -522,6 +649,8 @@ export class FileView {
       title.append(h("span", "fh-path old", f.renamedFrom), h("span", "fh-arrow", " → "));
     }
     title.append(h("span", "fh-path", f.path));
+    const round = this.roundLabel(f, this.index);
+    if (round) title.append(h("span", "fh-round", round));
     const actions = h("div", "fh-actions");
     if (f.commentable) {
       const fc = h("button", "btn", "Comment on file");
@@ -538,10 +667,46 @@ export class FileView {
     this.header.append(title, actions);
   }
 
+  /** The header's round label (REQ-RND-011), or "" for a file with nothing to say. */
+  private roundLabel(f: ChangedFile, i: number): string {
+    const r = f.round;
+    if (!r) return "";
+    const base = this.state.baseChanged(i);
+    if (this.state.changedSince(i)) {
+      let text = "Changed since review";
+      const n = this.sinceCounts();
+      if (n) text += ` · ${n} since ${clock(r.reviewedAt)}`;
+      return base ? `${text} · Base changed` : text;
+    }
+    if (base) return "Base changed";
+    return this.state.reviewedWithWhitespaceHidden(i) ? "Reviewed with whitespace hidden" : "";
+  }
+
+  /** "+a −d" of the changes since review, as far as the loaded reply tells them, or "". */
+  private sinceCounts(): string {
+    const reply = this.reply;
+    if (!reply) return "";
+    if (reply.scope === "since" && reply.diff.kind === "text") {
+      let add = 0;
+      let del = 0;
+      for (const hk of reply.diff.hunks) {
+        for (const b of hk.blocks) {
+          add += b.add?.length ?? 0;
+          del += b.del?.length ?? 0;
+        }
+      }
+      return `+${add} −${del}`;
+    }
+    if (reply.sinceAdded.length === 0) return "";
+    let add = 0;
+    for (const [a, b] of reply.sinceAdded) add += b - a + 1;
+    return `+${add}`;
+  }
+
   /** Marks the shown file viewed or not. A failed save also redraws the header, so its checkbox reverts. */
   async setViewed(viewed: boolean): Promise<void> {
     try {
-      await this.state.setViewed(this.index, viewed);
+      await this.state.setViewed([this.index], viewed);
     } finally {
       this.renderHeader();
     }
@@ -552,7 +717,7 @@ export class FileView {
       count: () => this.rows.length,
       variable: (n) => {
         const k = this.rows[n]?.k;
-        return k === "comment" || k === "editor" || k === "info";
+        return k === "comment" || k === "editor" || k === "info" || k === "earlier";
       },
       key: (n) => rowKey(this.rows[n]!),
       id: (n) => rowId(this.rows[n]!),
@@ -571,15 +736,26 @@ export class FileView {
       rows.push({ k: "note", text: "Large file: shown without syntax highlighting or context expansion.", cls: "warn" });
     }
     if (!f.commentable) rows.push({ k: "note", text: "This path cannot take file or line comments; use a review comment.", cls: "muted" });
+    const unavailable = this.reply?.sinceUnavailable;
+    if (unavailable === "missing") rows.push({ k: "note", text: "The reviewed version is unavailable; showing all changes.", cls: "warn" });
+    else if (unavailable !== undefined) rows.push({ k: "note", text: "Changes since review cannot be shown as lines for this file; showing all changes.", cls: "muted" });
 
-    const lines = d.kind === "text" ? this.lines(d) : [];
     const fileComments = this.state.commentsFor(this.index);
+    const earlier = this.state.earlierFor(this.index);
+    const lines = d.kind === "text" ? this.lines(d, fileComments) : [];
     const placed = new Set<string>();
     const anchors = new Map<string, Comment[]>();
     for (const c of fileComments) {
-      if (c.target.target === "file" || c.target.target === "review") continue;
+      if (c.target.target === "file" || c.target.target === "review" || !this.commentableSide(c.target.side)) continue;
       const key = `${c.target.side}:${targetEnd(c.target)}`;
       anchors.set(key, [...(anchors.get(key) ?? []), c]);
+    }
+    const earlierAnchors = new Map<string, EarlierComment[]>();
+    for (const e of earlier) {
+      const p = this.placements.get(e.id);
+      if (!p || p.status !== "current" || !this.commentableSide(p.side)) continue;
+      const key = `${p.side}:${p.end}`;
+      earlierAnchors.set(key, [...(earlierAnchors.get(key) ?? []), e]);
     }
     const ed = this.editor;
     // A comment State holds is shown once: its editor takes the comment's row. A saved editor that
@@ -589,6 +765,9 @@ export class FileView {
 
     // File comments, then line comments whose line is not shown, sit above the diff.
     const top: DRow[] = [];
+    for (const e of earlier) {
+      if (e.target.target === "file") top.push({ k: "earlier", e, p: this.placements.get(e.id), at: "file" });
+    }
     for (const c of fileComments) {
       if (c.target.target === "file") top.push(this.commentRow(c, "file"));
     }
@@ -598,6 +777,10 @@ export class FileView {
     const emitAnchor = (side: Side, n: number | null): void => {
       if (n === null) return;
       const key = `${side}:${n}`;
+      for (const e of earlierAnchors.get(key) ?? []) {
+        body.push({ k: "earlier", e, p: this.placements.get(e.id), at: key });
+        placed.add(e.id);
+      }
       for (const c of anchors.get(key) ?? []) {
         body.push(this.commentRow(c, key));
         placed.add(c.id);
@@ -622,6 +805,10 @@ export class FileView {
         body.push({ k: "gap", gap: item.gap });
         continue;
       }
+      if ("hidden" in item) {
+        body.push({ k: "hidden", h: item.hidden });
+        continue;
+      }
       if ("line" in item) {
         body.push({ k: "line", line: item.line });
         emitLineAnchors(item.line, null);
@@ -630,6 +817,11 @@ export class FileView {
         emitLineAnchors(item.left, "old");
         emitLineAnchors(item.right, "new");
       }
+    }
+    // Earlier comments not at a shown line (outdated, unplaced, or an interdiff's old side) come
+    // first, then draft comments not at a shown line.
+    for (const e of earlier) {
+      if (e.target.target !== "file" && !placed.has(e.id)) top.push({ k: "earlier", e, p: this.placements.get(e.id), at: "top" });
     }
     for (const c of fileComments) {
       if (c.target.target !== "file" && !placed.has(c.id)) top.push(this.commentRow(c, "top"));
@@ -661,11 +853,49 @@ export class FileView {
     return { k: "comment", c, at };
   }
 
-  /** The file's shown lines in display order, with hunk headers and gaps. */
-  private lines(d: TextDiff): Item[] {
+  /**
+   * Whether hunk n is shown as one hidden-whitespace row: it changes only whitespace, whitespace is
+   * hidden, nothing showed it, and no comment, earlier comment or open editor is on its lines.
+   */
+  private hidesHunk(n: number, comments: readonly Comment[]): boolean {
+    if (!this.reply?.wsOnly?.[n] || !this.state.hideWhitespace || this.revealed.has(n)) return false;
+    const span = this.spans[n];
+    if (!span) return false;
+    const on = (side: Side, a: number, b: number): boolean => a <= span[side][1] && b >= span[side][0];
+    for (const c of comments) {
+      const t = c.target;
+      if (t.target === "line" && on(t.side, t.line, t.line)) return false;
+      if (t.target === "range" && on(t.side, t.start, t.end)) return false;
+    }
+    for (const p of this.placements.values()) if (p.status === "current" && on(p.side, p.start, p.end)) return false;
+    const ed = this.editor?.target;
+    if (ed && (ed.target === "line" || ed.target === "range") && on(ed.side, ed.target === "line" ? ed.line : ed.start, targetEnd(ed))) return false;
+    return true;
+  }
+
+  /** Shows the hidden whitespace-only hunks holding lines start..end on side; true if any was hidden. */
+  private unhide(side: Side, start: number, end: number): boolean {
+    const comments = this.state.commentsFor(this.index);
+    let any = false;
+    this.spans.forEach((span, n) => {
+      if (start <= span[side][1] && end >= span[side][0] && this.hidesHunk(n, comments)) {
+        this.revealed.add(n);
+        any = true;
+      }
+    });
+    return any;
+  }
+
+  private showHunk(n: number): void {
+    this.revealed.add(n);
+    this.rebuild();
+  }
+
+  /** The file's shown lines in display order, with hunk headers, gaps and hidden hunks. */
+  private lines(d: TextDiff, comments: readonly Comment[]): Item[] {
     const out: Item[] = [];
     const pushLine = (l: Line): void => {
-      out.push(this.mode === "unified" ? { line: l } : { left: l.op === "+" ? null : l, right: l.op === "-" ? null : l });
+      out.push(this.chosenLayout === "unified" ? { line: l } : { left: l.op === "+" ? null : l, right: l.op === "-" ? null : l });
     };
     const emitGap = (g: Gap | undefined, before: boolean, after: boolean): void => {
       if (!g) return;
@@ -691,14 +921,20 @@ export class FileView {
         if (w) pushLine(toLine(" ", w));
       }
     };
-    for (const hk of d.hunks) {
+    for (const [n, hk] of d.hunks.entries()) {
       emitGap(hk.gap_before, false, true);
+      if (this.hidesHunk(n, comments)) {
+        let changed = 0;
+        for (const b of hk.blocks) changed += Math.max(b.del?.length ?? 0, b.add?.length ?? 0);
+        out.push({ hidden: { hunk: n, lines: changed } });
+        continue;
+      }
       out.push({ hunk: hk.header });
       for (const b of hk.blocks) {
         for (const w of b.ctx ?? []) pushLine(toLine(" ", w));
         const del = (b.del ?? []).map((w) => toLine("-", w));
         const add = (b.add ?? []).map((w) => toLine("+", w));
-        if (this.mode === "unified") {
+        if (this.chosenLayout === "unified") {
           for (const l of del) out.push({ line: l });
           for (const l of add) out.push({ line: l });
         } else {
@@ -723,6 +959,16 @@ export class FileView {
         return h("div", "d-hunk", r.text);
       case "gap":
         return this.renderGap(r.gap);
+      case "hidden": {
+        const row = h("div", "d-row d-hidden-ws");
+        row.append(h("span", "", `⋯ ${r.h.lines} ${r.h.lines === 1 ? "line" : "lines"} changed only in whitespace`));
+        const show = h("button", "link", "Show");
+        show.addEventListener("click", () => this.showHunk(r.h.hunk));
+        row.append(show);
+        return row;
+      }
+      case "earlier":
+        return this.renderEarlier(r.e, r.p);
       case "line":
         return this.renderUnified(r.line);
       case "split": {
@@ -742,6 +988,7 @@ export class FileView {
     const side: Side = l.op === "-" ? "old" : "new";
     const n = side === "old" ? l.old : l.new;
     if (this.isSelected(side, n)) row.classList.add("sel");
+    if (l.op !== "-" && this.addedSince(l.new)) row.classList.add("since");
     row.append(
       this.lineNumber(l.op === "+" ? null : l.old, "old"),
       this.lineNumber(l.op === "-" ? null : l.new, "new"),
@@ -760,6 +1007,7 @@ export class FileView {
     half.classList.add(`op${opClass(l.op)}`);
     const n = side === "old" ? l.old : l.new;
     if (this.isSelected(side, n)) half.classList.add("sel");
+    if (side === "new" && this.addedSince(n)) half.classList.add("since");
     half.append(this.lineNumber(n, side), h("span", "d-mark", l.op === " " ? "" : l.op), this.code(l));
     return half;
   }
@@ -774,9 +1022,16 @@ export class FileView {
     return el;
   }
 
+  /** New-side line n was added since the last review (REQ-RND-013). */
+  private addedSince(n: number | null): boolean {
+    if (n === null || !this.reply) return false;
+    for (const [a, b] of this.reply.sinceAdded) if (n >= a && n <= b) return true;
+    return false;
+  }
+
   private lineNumber(n: number | null, side: Side): HTMLElement {
     const el = h("span", "d-ln", n === null ? "" : String(n));
-    if (n !== null && this.commentableFile()) {
+    if (n !== null && this.commentableFile() && this.commentableSide(side)) {
       el.dataset["side"] = side;
       el.dataset["line"] = String(n);
       el.title = "Click to comment; shift-click or drag to select lines";
@@ -817,13 +1072,18 @@ export class FileView {
     const wants: Selection[] = [];
     for (const c of this.state.commentsFor(i)) {
       const t = c.target;
-      if (t.target === "line" || t.target === "range") wants.push({ side: t.side, start: t.target === "line" ? t.line : t.start, end: targetEnd(t) });
+      if ((t.target === "line" || t.target === "range") && this.commentableSide(t.side)) {
+        wants.push({ side: t.side, start: t.target === "line" ? t.line : t.start, end: targetEnd(t) });
+      }
+    }
+    for (const p of this.placements.values()) {
+      if (p.status === "current" && this.commentableSide(p.side)) wants.push({ side: p.side, start: p.start, end: p.end });
     }
     const merged = gapRanges(d, wants);
     if (merged.length === 0) return;
     try {
       for (const [a, b] of merged) {
-        const res = await this.api.context(i, a, b);
+        const res = await this.api.context(i, a, b, this.interdiff);
         if (signal.aborted || i !== this.index) return;
         for (const l of res.lines) if (l.new !== undefined) this.expanded.set(l.new, l);
       }
@@ -835,8 +1095,9 @@ export class FileView {
 
   private async expand(from: number, to: number): Promise<void> {
     const i = this.index;
-    const res = await this.api.context(i, from, to);
-    if (i !== this.index) return;
+    const reply = this.reply;
+    const res = await this.api.context(i, from, to, this.interdiff);
+    if (i !== this.index || reply !== this.reply) return;
     for (const l of res.lines) if (l.new !== undefined) this.expanded.set(l.new, l);
     this.rebuild();
   }
@@ -855,6 +1116,15 @@ export class FileView {
     const card = h("div", "c-card");
     card.append(head, h("div", "c-body", c.body));
     el.append(card);
+    return el;
+  }
+
+  private renderEarlier(e: EarlierComment, p: EarlierPlacement | undefined): HTMLElement {
+    const status = earlierStatus(e, p);
+    const t = e.target;
+    const newSide = status === "current" && p?.side === "new" && (t.target === "line" || t.target === "range");
+    const el = h("div", `d-comment earlier${status === "outdated" ? " outdated" : ""}${newSide ? " side-new" : ""}`);
+    el.append(earlierCard(this.state, e, p, (task) => this.run(task)));
     return el;
   }
 
@@ -927,6 +1197,25 @@ export class FileView {
   }
 }
 
+/** The lines hunk hk spans on each side. */
+function hunkSpan(hk: TextDiff["hunks"][number]): HunkSpan {
+  const lo = { old: Infinity, new: Infinity };
+  const hi = { old: -Infinity, new: -Infinity };
+  const see = (w: WireLine): void => {
+    if (w.old !== undefined) {
+      lo.old = Math.min(lo.old, w.old);
+      hi.old = Math.max(hi.old, w.old);
+    }
+    if (w.new !== undefined) {
+      lo.new = Math.min(lo.new, w.new);
+      hi.new = Math.max(hi.new, w.new);
+    }
+  };
+  for (const b of hk.blocks) for (const w of [...(b.ctx ?? []), ...(b.del ?? []), ...(b.add ?? [])]) see(w);
+  const span = (side: Side): readonly [number, number] => (hi[side] < lo[side] ? [0, -1] : [lo[side], hi[side]]);
+  return { old: span("old"), new: span("new") };
+}
+
 /**
  * The new-side line ranges to fetch so every wanted line that lies between hunks is shown with
  * REVEAL_MARGIN lines around it: the one rule for which gap holds a line. Ranges are merged per
@@ -986,7 +1275,7 @@ function isWide(c: number): boolean {
 }
 
 /** Places a new-side line comment under the new half in split view. */
-function sideClass(t: Target | Placement): string {
+function sideClass(t: CommentSite): string {
   return (t.target === "line" || t.target === "range") && t.side === "new" ? " side-new" : "";
 }
 

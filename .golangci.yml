@@ -109,6 +109,8 @@ linters:
           deny:
             - pkg: encoding/json$
               desc: use encoding/json/v2 and encoding/json/jsontext
+            - pkg: log$
+              desc: use log/slog
 
         cmd-rvw-production:
           list-mode: strict
@@ -118,6 +120,7 @@ linters:
           allow:
             - $gostd
             - github.com/jacoelho/rvw/internal/review$
+            - github.com/jacoelho/rvw/internal/round$
             - github.com/jacoelho/rvw/internal/server$
             - github.com/jacoelho/rvw/internal/source$
             - github.com/jacoelho/rvw/web$
@@ -131,8 +134,19 @@ linters:
             - $gostd
             - github.com/jacoelho/rvw/internal/highlight$
             - github.com/jacoelho/rvw/internal/review$
+            - github.com/jacoelho/rvw/internal/round$
             - github.com/jacoelho/rvw/internal/source$
             - github.com/jacoelho/rvw/internal/worddiff$
+
+        round-production:
+          list-mode: strict
+          files:
+            - "**/internal/round/*.go"
+            - "!**/*_test.go"
+          allow:
+            - $gostd
+            - github.com/jacoelho/rvw/internal/review$
+            - github.com/jacoelho/rvw/internal/source$
 
         review-production:
           list-mode: strict

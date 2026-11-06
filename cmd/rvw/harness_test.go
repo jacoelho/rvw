@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -246,7 +247,7 @@ func (w *world) run(args ...string) *proc {
 	return p
 }
 
-var urlPattern = regexp.MustCompile(`rvw: review at (http://(127\.0\.0\.1:\d+)/#token=(\S+))`)
+var urlPattern = regexp.MustCompile(`msg="review at" url="(http://(127\.0\.0\.1:\d+)/#token=([^"\s]+))"`)
 
 // waitFor polls until cond holds, the process exits, or the deadline passes.
 func (p *proc) waitFor(what string, cond func() bool) {
@@ -455,7 +456,77 @@ func (p *proc) session() sessionView {
 	return s
 }
 
-const resumedNotice = "rvw: resuming the saved draft"
+const resumedNotice = "resuming the saved draft"
+
+// logRecords parses rvw's stderr records, slog text lines of key=value pairs whose values are
+// bare or Go-quoted, into their attributes by key. Lines that are not records, such as usage
+// help, are skipped.
+func logRecords(stderr string) []map[string]string {
+	var out []map[string]string
+	for line := range strings.Lines(stderr) {
+		rec := map[string]string{}
+		rest := strings.TrimSpace(line)
+		for rest != "" {
+			key, after, ok := strings.Cut(rest, "=")
+			if !ok || key == "" || strings.ContainsAny(key, " \"") {
+				break
+			}
+			var v string
+			if strings.HasPrefix(after, `"`) {
+				q, err := strconv.QuotedPrefix(after)
+				if err != nil {
+					break
+				}
+				v, _ = strconv.Unquote(q)
+				after = after[len(q):]
+			} else {
+				v, after, _ = strings.Cut(after, " ")
+			}
+			rec[key] = v
+			rest = strings.TrimLeft(after, " ")
+		}
+		if _, ok := rec["msg"]; ok {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+// logRecord returns the first stderr record with message msg.
+func logRecord(stderr, msg string) (map[string]string, bool) {
+	for _, r := range logRecords(stderr) {
+		if r["msg"] == msg {
+			return r, true
+		}
+	}
+	return nil, false
+}
+
+// countRecords counts the stderr records with message msg.
+func countRecords(stderr, msg string) int {
+	n := 0
+	for _, r := range logRecords(stderr) {
+		if r["msg"] == msg {
+			n++
+		}
+	}
+	return n
+}
+
+// stderrSays reports whether stderr holds s in plain text or in one record's value.
+func stderrSays(stderr, s string) bool {
+	if strings.Contains(stderr, s) {
+		return true
+	}
+	for _, r := range logRecords(stderr) {
+		for _, v := range r {
+			if strings.Contains(v, s) {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // inspectDraft reruns rvw with args, reports whether it resumed a draft and what the session
 // holds, and interrupts it again (which keeps any draft as it was).
@@ -468,5 +539,6 @@ func (w *world) inspectDraft(args ...string) (resumed bool, s sessionView) {
 	if code := p.exitCode(); code != 130 {
 		w.t.Fatalf("inspecting rerun exited %d; stderr:\n%s", code, p.stderr)
 	}
-	return strings.Contains(p.stderr.String(), resumedNotice), s
+	_, resumed = logRecord(p.stderr.String(), resumedNotice)
+	return resumed, s
 }

@@ -43,7 +43,7 @@ func TestFactsPublishOnlyCountedFiles(t *testing.T) {
 		t.Parallel()
 		c := newFacts()
 		countAll(c)
-		if v := c.since(0); len(v.counts) != 0 || v.next != 0 || v.generated != nil || v.genDone {
+		if v := c.since(0, false); len(v.counts) != 0 || v.next != 0 || v.generated != nil || v.genDone {
 			t.Fatalf("before marks: %+v; want nothing published", v)
 		}
 		c.mark(genMarks(), nil)
@@ -60,12 +60,28 @@ func TestFactsPublishOnlyCountedFiles(t *testing.T) {
 
 func checkPublished(t *testing.T, c *contentFacts, want []fileCount) {
 	t.Helper()
-	v := c.since(0)
+	v := c.since(0, false)
 	if !v.genDone || !slices.Equal(v.generated, []int{genF}) || v.genErr != "" {
 		t.Errorf("marks: done %v generated %v err %q; want done [%d] none", v.genDone, v.generated, v.genErr, genF)
 	}
 	if !slices.Equal(v.counts, want) || v.next != len(want) {
 		t.Errorf("counts %+v next %d; want %+v next %d", v.counts, v.next, want, len(want))
+	}
+}
+
+// TestFactsFailedWhitespaceMarksNothing: a failed whitespace-only read publishes no file, only its
+// error; a complete read publishes every file found.
+func TestFactsFailedWhitespaceMarksNothing(t *testing.T) {
+	t.Parallel()
+	c := newFacts()
+	c.markWhitespace([]int{1}, errors.New("numstat failed"))
+	if v := c.since(0, false); !v.wsDone || v.ws != nil || v.wsErr != "numstat failed" {
+		t.Errorf("failed read: done %v files %v err %q; want done, none, numstat failed", v.wsDone, v.ws, v.wsErr)
+	}
+	ok := newFacts()
+	ok.markWhitespace([]int{1, 3}, nil)
+	if v := ok.since(0, false); !v.wsDone || !slices.Equal(v.ws, []int{1, 3}) || v.wsErr != "" {
+		t.Errorf("complete read: done %v files %v err %q; want done, [1 3], no error", v.wsDone, v.ws, v.wsErr)
 	}
 }
 
@@ -89,14 +105,14 @@ func TestFactsFailedMarksCountEveryUnvendoredFile(t *testing.T) {
 			if !before {
 				countAll(c)
 			}
-			v := c.since(0)
+			v := c.since(0, false)
 			if !v.genDone || v.generated != nil || v.genErr != "grep failed" {
 				t.Errorf("marks: done %v generated %v err %q; want done, none, grep failed", v.genDone, v.generated, v.genErr)
 			}
 			if !slices.Equal(v.counts, want) {
 				t.Errorf("counts %+v; want %+v", v.counts, want)
 			}
-			if later := c.since(1); later.genDone || later.genErr != "" || later.generated != nil {
+			if later := c.since(1, false); later.genDone || later.genErr != "" || later.generated != nil {
 				t.Errorf("since(1) carries marks: %+v", later)
 			}
 		})
@@ -109,16 +125,16 @@ func TestFactsCursor(t *testing.T) {
 	c := newFacts()
 	c.mark(genMarks(), nil)
 	c.count(plainA, source.LineCount{Added: 1, Deleted: 2})
-	next := c.since(0).next
+	next := c.since(0, false).next
 	c.count(plainB, source.LineCount{Added: 7, Deleted: 8})
-	v := c.since(next)
+	v := c.since(next, false)
 	if !slices.Equal(v.counts, wantPlain[1:]) || v.next != 2 || v.generated != nil || v.genDone {
 		t.Errorf("since(%d) = %+v; want only file %d's count, no marks", next, v, plainB)
 	}
-	if v := c.since(99); len(v.counts) != 0 || v.next != 2 {
+	if v := c.since(99, false); len(v.counts) != 0 || v.next != 2 {
 		t.Errorf("since(99) = %+v; want no counts, next 2", v)
 	}
-	if v := c.since(-1); !slices.Equal(v.counts, wantPlain) || !v.genDone {
+	if v := c.since(-1, false); !slices.Equal(v.counts, wantPlain) || !v.genDone {
 		t.Errorf("since(-1) = %+v; want the whole stream with marks", v)
 	}
 }
@@ -128,12 +144,12 @@ func TestFactsFinishCounts(t *testing.T) {
 	t.Parallel()
 	ok := newFacts()
 	ok.finishCounts(nil)
-	if v := ok.since(0); !v.countDone || v.countErr != "" {
+	if v := ok.since(0, false); !v.countDone || v.countErr != "" {
 		t.Errorf("finishCounts(nil): done %v err %q; want done, no error", v.countDone, v.countErr)
 	}
 	failed := newFacts()
 	failed.finishCounts(errors.New("numstat failed"))
-	if v := failed.since(0); !v.countDone || v.countErr != "numstat failed" {
+	if v := failed.since(0, false); !v.countDone || v.countErr != "numstat failed" {
 		t.Errorf("finishCounts(err): done %v err %q; want done, numstat failed", v.countDone, v.countErr)
 	}
 }
@@ -157,11 +173,11 @@ func TestFactsConcurrentViews(t *testing.T) {
 		}
 	}
 	for range 1000 {
-		check(c.since(0))
+		check(c.since(0, false))
 	}
 	wg.Wait()
-	check(c.since(0))
-	if v := c.since(0); len(v.counts) != len(wantPlain) {
+	check(c.since(0, false))
+	if v := c.since(0, false); len(v.counts) != len(wantPlain) {
 		t.Errorf("final counts %+v; want %+v", v.counts, wantPlain)
 	}
 }

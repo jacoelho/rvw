@@ -8,7 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/round"
 	"github.com/jacoelho/rvw/internal/source"
 )
 
@@ -52,7 +53,8 @@ const (
 	// minCloseGrace keeps the status interval, half the grace in whole milliseconds, at least
 	// 1 ms; the UI rejects a session document with a smaller status_interval_ms.
 	minCloseGrace = 2 * time.Millisecond
-	// maxStatusInterval caps the UI's status poll; REQ-SES-010 bounds the moved-HEAD notice to 10 s.
+	// maxStatusInterval caps the UI's status poll; REQ-SES-010 bounds the moved-HEAD notice to 10
+	// s.
 	maxStatusInterval = 5 * time.Second
 	headCacheTTL      = 2 * time.Second
 	readHeaderTimout  = 10 * time.Second
@@ -68,8 +70,11 @@ type Config struct {
 	Assets  fs.FS
 	Session *review.Session
 	Deliver func(review.Result) error
-	Log     *log.Logger
+	Log     *slog.Logger // nil discards
 	Token   string
+	// Ledger is the worktree's review ledger, from which the server derives the round facts of
+	// Session's snapshot; the zero Ledger means no earlier review.
+	Ledger round.Ledger
 	// FinishWait bounds how long Run, told to stop, waits for a delivery in progress; zero means
 	// 30 seconds.
 	FinishWait time.Duration
@@ -86,6 +91,8 @@ type Server struct {
 	slots    chan struct{} // see fileSlots
 	facts    *contentFacts
 	snap     *source.Snapshot // cfg.Session's
+	prior    *round.Prior     // snap's round facts, from cfg.Ledger
+	log      *slog.Logger     // cfg.Log, or a discarding logger
 	presence *presence
 	head     headState
 	cfg      Config
@@ -108,8 +115,13 @@ func New(cfg Config) *Server {
 	if grace < minCloseGrace {
 		panic(fmt.Sprintf("server: CloseGrace %v is below %v", grace, minCloseGrace))
 	}
+	logger := cfg.Log
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
 	return &Server{
-		cfg: cfg, snap: snap, facts: newContentFacts(snap), ended: make(chan Outcome, 1),
+		cfg: cfg, log: logger, snap: snap, prior: round.NewPrior(snap, cfg.Ledger), facts: newContentFacts(snap),
+		ended: make(chan Outcome, 1),
 		slots: make(chan struct{}, fileSlots), presence: newPresence(grace),
 		statusInterval: min(maxStatusInterval, grace/2),
 	}
@@ -247,7 +259,9 @@ func (s *Server) handler(addr string) http.Handler {
 	api.HandleFunc("GET /api/search", s.getSearch)
 	api.HandleFunc("PUT /api/comments/{id}", s.putComment)
 	api.HandleFunc("DELETE /api/comments/{id}", s.deleteComment)
-	api.HandleFunc("PUT /api/viewed/{i}", s.putViewed)
+	api.HandleFunc("PUT /api/viewed", s.putViewed)
+	api.HandleFunc("PUT /api/hide-whitespace", s.putHideWhitespace)
+	api.HandleFunc("POST /api/earlier/{eid}/copy", s.postEarlierCopy)
 	api.HandleFunc("PUT /api/summary", s.putSummary)
 	api.HandleFunc("GET /api/result.md", s.getResult)
 	api.HandleFunc("POST /api/finish", s.postFinish)
@@ -338,9 +352,10 @@ func (h *headState) movedSince(ctx context.Context, snap *source.Snapshot) (bool
 }
 
 // contentFacts owns the facts read from file contents after the UI is served, not before: which Go
-// files are generated and line counts. Both reads run at once, but no count is published before the
-// marks: until they land, counts wait in held, so a generated file's count is never published and a
-// client at cursor 0 gets the marks before any count.
+// files are generated, line counts, and which files are whitespace-only (REQ-DIFF-013). The
+// whitespace-only marks are published whole, once their read ends. The first two reads run at once,
+// but no count is published before the marks: until they land, counts wait in held, so a generated
+// file's count is never published and a client at cursor 0 gets the marks before any count.
 type contentFacts struct {
 	genErr    string
 	countErr  string
@@ -349,7 +364,10 @@ type contentFacts struct {
 	generated []int  // file indexes, ascending
 	counts    []fileCount
 	held      []fileCount // counts found before genDone; at most one per file
+	wsErr     string
+	ws        []int // whitespace-only file indexes, ascending; published once wsDone
 	mu        sync.Mutex
+	wsDone    bool
 	genDone   bool
 	countDone bool
 }
@@ -361,12 +379,14 @@ type fileCount struct {
 
 // factsView is what one status request reads from contentFacts.
 type factsView struct {
-	genErr, countErr string
-	generated        []int
-	counts           []fileCount
-	next             int
-	genDone          bool
-	countDone        bool
+	genErr, countErr, wsErr string
+	generated               []int
+	counts                  []fileCount
+	ws                      []int
+	next                    int
+	genDone                 bool
+	countDone               bool
+	wsDone                  bool
 }
 
 // newContentFacts returns the facts for files, with no read started.
@@ -378,9 +398,33 @@ func newContentFacts(snap *source.Snapshot) *contentFacts {
 	return &contentFacts{vendored: vendored}
 }
 
-// run reads both facts and returns when both reads have ended; cancelling ctx ends them.
+// markWhitespace publishes the whitespace-only files whole: a failed read (err set) publishes none,
+// with the error, as mark does for generated marks.
+func (c *contentFacts) markWhitespace(found []int, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.wsDone = true
+	if err != nil {
+		c.wsErr = err.Error()
+		return
+	}
+	c.ws = found
+}
+
+// run reads the facts and returns when every read has ended; cancelling ctx ends them.
 func (c *contentFacts) run(ctx context.Context, snap *source.Snapshot) {
 	var wg sync.WaitGroup
+	wsDone := make(chan struct{})
+	go func() {
+		defer close(wsDone)
+		var found []int
+		err := snap.WhitespaceOnlyFiles(ctx, func(i int) { found = append(found, i) })
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return
+		}
+		c.markWhitespace(found, err)
+	}()
+	defer func() { <-wsDone }()
 	wg.Go(func() {
 		gen, err := snap.GoGenerated(ctx)
 		if errors.Is(ctx.Err(), context.Canceled) {
@@ -451,11 +495,12 @@ func (c *contentFacts) publish(fc fileCount) {
 	c.counts = append(c.counts, fc)
 }
 
-// since returns the counts after cursor from. The generated marks belong to the stream's start:
-// they and genDone are returned only for from 0. Every count is published after the marks, so a
+// since returns the counts after cursor from, and the whitespace-only marks unless wsKnown says
+// the client holds them. The generated marks belong to the stream's start: they and genDone are
+// returned only for from 0. Every count is published after the marks, so a
 // client whose cursor moved past 0 already holds them, and one at 0 never sees genDone without
 // them. One lock makes each view a consistent snapshot.
-func (c *contentFacts) since(from int) factsView {
+func (c *contentFacts) since(from int, wsKnown bool) factsView {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	from = min(max(from, 0), len(c.counts))
@@ -465,6 +510,9 @@ func (c *contentFacts) since(from int) factsView {
 	}
 	if from == 0 {
 		v.generated, v.genDone, v.genErr = c.generated, c.genDone, c.genErr
+	}
+	if !wsKnown {
+		v.ws, v.wsDone, v.wsErr = c.ws, c.wsDone, c.wsErr
 	}
 	return v
 }

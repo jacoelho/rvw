@@ -96,15 +96,15 @@ func TestCommentRoundTrip(t *testing.T) {
 		t.Errorf("after delete: %v", got)
 	}
 
-	f.mustStatus(f.do(http.MethodPut, "/api/viewed/0", `{"viewed":true}`), http.StatusNoContent, "mark viewed")
+	f.mustStatus(f.do(http.MethodPut, "/api/viewed", `{"files":[0],"viewed":true}`), http.StatusNoContent, "mark viewed")
 	if got := f.session().Viewed; !slices.Equal(got, []int{0}) {
 		t.Errorf("viewed %v, want [0]", got)
 	}
-	f.mustStatus(f.do(http.MethodPut, "/api/viewed/0", `{"viewed":false}`), http.StatusNoContent, "clear viewed")
+	f.mustStatus(f.do(http.MethodPut, "/api/viewed", `{"files":[0],"viewed":false}`), http.StatusNoContent, "clear viewed")
 	if got := f.session().Viewed; len(got) != 0 {
 		t.Errorf("viewed %v after clearing", got)
 	}
-	f.mustStatus(f.do(http.MethodPut, "/api/viewed/1", `{"viewed":true}`), http.StatusNotFound, "viewed out of range")
+	f.mustStatus(f.do(http.MethodPut, "/api/viewed", `{"files":[1],"viewed":true}`), http.StatusUnprocessableEntity, "viewed out of range")
 
 	f.mustStatus(f.do(http.MethodPut, "/api/summary", `{"summary":"a\r\nb"}`), http.StatusNoContent, "summary")
 	if got := f.session().Summary; got != "a\nb" {

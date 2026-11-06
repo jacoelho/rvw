@@ -26,13 +26,16 @@ boundaries, lifecycle, bounds or trade-offs change.
 - Obtain every Git fact from the `git` executable through the single runner in `internal/source`.
   Do not parse Git objects or reimplement Git behaviour.
 - Open no network connection other than the loopback review listener.
-- Leave the repository's refs, index, worktree files and configuration unchanged.
+- Leave the repository's index, worktree files, configuration and refs unchanged. The one exception, if contract
+  revision 3 is accepted, is the retention refs under `refs/rvw/` (INV-PLAT-004).
 - Design for at least 1,000 changed files of at least 10,000 lines each, plus hundreds of comments.
   The server reads a file's patch and contents only when the UI asks for it and retains nothing
   per file; the UI renders only visible rows plus bounded overscan.
 - Validate external data at boundaries: seed documents, HTTP requests, and `git` output.
 - The web UI is TypeScript without a runtime framework under `web/`. `web/dist` is committed and
-  embedded; rebuild it with `make web` after changing `web/src`.
+  embedded; rebuild it with `make web` after changing `web/src`. A union type is a named type
+  alias, never written inline, except `T | null` or `T | undefined` and `Pick`/`Omit` key lists;
+  `make lint` enforces it (`web/scripts/check-unions.mjs`).
 
 ## Checks
 

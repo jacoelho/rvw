@@ -115,7 +115,7 @@ func TestParseSeedAcceptsAnEmptySeed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start with an empty seed: %v", err)
 	}
-	if n := len(s.View().Comments); n != 0 {
+	if n := len(s.Draft().Comments); n != 0 {
 		t.Fatalf("an empty seed added %d comments", n)
 	}
 }
@@ -215,10 +215,10 @@ func TestStartValidatesSeedTargets(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
 			st := openStore(t, dir, fx.key(fx.last))
-			s, _, err := review.Start(t.Context(), st, fx.last, review.NewSeed(
+			s, _, err := review.Start(t.Context(), st, fx.last, review.Fresh{Seed: review.NewSeed(
 				review.SeedComment{Target: reviewTarget, Body: "valid"},
 				review.SeedComment{Target: tt.target, Body: "seeded"},
-			))
+			)})
 			if !tt.valid {
 				assertSeedProblems(t, err, 2)
 				if fileExists(t, st.Path()) {
@@ -229,7 +229,7 @@ func TestStartValidatesSeedTargets(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Start: %v", err)
 			}
-			got := s.View().Comments
+			got := s.Draft().Comments
 			if len(got) != 2 || !slices.ContainsFunc(got, func(c review.Comment) bool {
 				return c.Target == tt.target && c.Body == "seeded" && c.Author == review.Agent
 			}) {
@@ -243,11 +243,11 @@ func TestStartNamesEveryRejectedSeedComment(t *testing.T) {
 	t.Parallel()
 	fx := newFixture(t)
 	st := openStore(t, t.TempDir(), fx.key(fx.last))
-	_, _, err := review.Start(t.Context(), st, fx.last, review.NewSeed(
+	_, _, err := review.Start(t.Context(), st, fx.last, review.Fresh{Seed: review.NewSeed(
 		review.SeedComment{Target: line(pathA, review.New, 99), Body: "x"},
 		review.SeedComment{Target: reviewTarget, Body: "x"},
 		review.SeedComment{Target: file("missing.go"), Body: "x"},
-	))
+	)})
 	assertSeedProblems(t, err, 1, 3)
 }
 
@@ -271,12 +271,12 @@ func TestStartSeedCommentCountLimit(t *testing.T) {
 	seed := review.NewSeed(comments...)
 
 	s, _ := fx.start(t, t.TempDir(), seed)
-	if n := len(s.View().Comments); n != review.MaxComments {
+	if n := len(s.Draft().Comments); n != review.MaxComments {
 		t.Fatalf("seeded %d comments; want %d", n, review.MaxComments)
 	}
 
 	st := openStore(t, t.TempDir(), fx.key(fx.last))
-	_, _, err := review.Start(t.Context(), st, fx.last, review.NewSeed(append(comments, review.SeedComment{Target: reviewTarget, Body: "x"})...))
+	_, _, err := review.Start(t.Context(), st, fx.last, review.Fresh{Seed: review.NewSeed(append(comments, review.SeedComment{Target: reviewTarget, Body: "x"})...)})
 	if _, ok := errors.AsType[*review.SeedError](err); !ok {
 		t.Fatalf("Start with %d comments: err = %v; want a *SeedError", review.MaxComments+1, err)
 	}
@@ -295,7 +295,7 @@ func TestStartSeedTotalBytesLimit(t *testing.T) {
 	fx.start(t, t.TempDir(), seed)
 
 	st := openStore(t, t.TempDir(), fx.key(fx.last))
-	_, _, err := review.Start(t.Context(), st, fx.last, review.NewSeed(append(comments, review.SeedComment{Target: reviewTarget, Body: "x"})...))
+	_, _, err := review.Start(t.Context(), st, fx.last, review.Fresh{Seed: review.NewSeed(append(comments, review.SeedComment{Target: reviewTarget, Body: "x"})...)})
 	if _, ok := errors.AsType[*review.SeedError](err); !ok {
 		t.Fatalf("Start with bodies over %d bytes: err = %v; want a *SeedError", review.MaxTotalBytes, err)
 	}
@@ -330,7 +330,7 @@ func TestStartRejectsInvalidSeedWhenDraftExists(t *testing.T) {
 				t.Fatal(err)
 			}
 			st = openStore(t, dir, fx.key(fx.last))
-			_, _, err = review.Start(t.Context(), st, fx.last, seed)
+			_, _, err = review.Start(t.Context(), st, fx.last, review.Fresh{Seed: seed})
 			if _, ok := errors.AsType[*review.SeedError](err); !ok {
 				t.Errorf("Start with a draft and an invalid seed: err = %v; want a *SeedError", err)
 			}
@@ -364,7 +364,7 @@ func startSeed(t *testing.T, fx *fixture, doc string) (*review.Session, error) {
 	t.Helper()
 	seed := parseSeed(t, doc)
 	st := openStore(t, t.TempDir(), fx.key(fx.last))
-	s, _, err := review.Start(t.Context(), st, fx.last, seed)
+	s, _, err := review.Start(t.Context(), st, fx.last, review.Fresh{Seed: seed})
 	if err != nil {
 		return nil, err
 	}
@@ -380,7 +380,7 @@ type seeded struct {
 func agentComments(t *testing.T, s *review.Session) []seeded {
 	t.Helper()
 	var out []seeded
-	for _, c := range s.View().Comments {
+	for _, c := range s.Draft().Comments {
 		if c.Author != review.Agent {
 			t.Errorf("comment %s author = %s; want agent", c.ID, c.Author)
 		}
@@ -435,7 +435,7 @@ func TestStartSeedOnAFileNamedLikeARenamedDirectory(t *testing.T) {
 	snap := resolve(t, repo, source.Last())
 	st := openStore(t, t.TempDir(), review.DraftKey(snap))
 	seed := parseSeed(t, `{"comments": [{"target": "line", "path": "foo", "side": "new", "line": 100, "body": "here"}]}`)
-	if _, _, err := review.Start(t.Context(), st, snap, seed); err != nil {
+	if _, _, err := review.Start(t.Context(), st, snap, review.Fresh{Seed: seed}); err != nil {
 		t.Fatalf("Start with a seed comment on foo: %v", err)
 	}
 }

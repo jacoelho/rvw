@@ -6,7 +6,7 @@ import (
 	"encoding/json/v2"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/round"
 	"github.com/jacoelho/rvw/internal/server"
 	"github.com/jacoelho/rvw/internal/source"
 )
@@ -161,6 +162,7 @@ func (d *deliveries) count() int {
 type fixture struct {
 	t         *testing.T
 	repo      *testRepo
+	git       *source.Repo // the session's repository, also the retention refs' writer
 	snap      *source.Snapshot
 	sess      *review.Session
 	store     *review.Store
@@ -185,6 +187,11 @@ type fixtureOptions struct {
 	seed        string        // a seed document; empty for none
 	finishWait  time.Duration // Config.FinishWait
 	closeGrace  time.Duration // Config.CloseGrace
+	// ledger, when set, is loaded at start as rvw does: the prior rounds, the preset viewed marks
+	// and the Hide whitespace setting come from it. Nil is an empty ledger.
+	ledger *round.Store
+	// log, when set, receives the server's log lines.
+	log io.Writer
 }
 
 // seedOf parses a seed document the way rvw's --seed does.
@@ -216,7 +223,7 @@ func newFixture(t *testing.T, repo *testRepo, opts fixtureOptions) *fixture {
 	if src == (source.Source{}) {
 		src = source.Last()
 	}
-	snap, err := r.Resolve(ctx, src, log.New(io.Discard, "", 0))
+	snap, err := r.Resolve(ctx, src, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,17 +236,29 @@ func newFixture(t *testing.T, repo *testRepo, opts fixtureOptions) *fixture {
 			t.Errorf("close store: %v", err)
 		}
 	})
-	sess, _, err := review.Start(ctx, store, snap, seedOf(t, opts.seed))
+	var ledger round.Ledger
+	if opts.ledger != nil {
+		if ledger, err = opts.ledger.Load(time.Now()); err != nil {
+			t.Fatalf("load ledger: %v", err)
+		}
+	}
+	prior := round.NewPrior(snap, ledger)
+	fresh := review.Fresh{Seed: seedOf(t, opts.seed), Viewed: prior.PresetMarks(), HideWhitespace: prior.HideWhitespace()}
+	sess, _, err := review.Start(ctx, store, snap, fresh)
 	if err != nil {
 		t.Fatal(err)
 	}
 	token := fmt.Sprintf("%s-%d", testToken, fixtureSeq.Add(1))
-	f := &fixture{t: t, repo: repo, snap: snap, sess: sess, store: store, token: token,
+	f := &fixture{t: t, repo: repo, git: r, snap: snap, sess: sess, store: store, token: token,
 		delivered: &deliveries{err: opts.deliverErr, hook: opts.deliverHook}}
+	logOut := io.Discard
+	if opts.log != nil {
+		logOut = opts.log
+	}
 	f.srv = server.New(server.Config{
 		Assets:  fstest.MapFS{"index.html": {Data: []byte(indexHTML)}},
-		Session: sess, Token: token, Deliver: f.delivered.deliver,
-		Log: log.New(io.Discard, "", 0), FinishWait: opts.finishWait, CloseGrace: opts.closeGrace,
+		Session: sess, Ledger: ledger, Token: token, Deliver: f.delivered.deliver,
+		Log: slog.New(slog.NewTextHandler(logOut, nil)), FinishWait: opts.finishWait, CloseGrace: opts.closeGrace,
 	})
 	return f
 }

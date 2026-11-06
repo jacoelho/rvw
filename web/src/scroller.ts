@@ -7,6 +7,9 @@
 
 export const OVERSCAN = 50;
 
+/** Where scrollToIndex puts a row: at the top, centred, or the least scroll that shows it. */
+export type Align = "start" | "center" | "nearest";
+
 export interface ListSource {
   count(): number;
   /** Variable rows are measured; fixed rows are rowHeight tall. */
@@ -155,7 +158,7 @@ export class VirtualList {
     return this.indexAt(this.el.scrollTop + this.el.clientHeight - 1);
   }
 
-  scrollToIndex(i: number, align: "start" | "center" | "nearest" = "nearest"): void {
+  scrollToIndex(i: number, align: Align = "nearest"): void {
     const n = this.count();
     if (n === 0) return;
     i = Math.max(0, Math.min(i, n - 1));

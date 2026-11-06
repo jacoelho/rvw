@@ -1,8 +1,9 @@
 // The Finish dialog: summary, the overview of every comment with its quoted code, edited in place,
 // Copy as Markdown, Copy and finish, Send and Cancel.
 
-import { type Api, type Comment, type Quote, type Target } from "./api";
+import { type Api, type Comment, type EarlierComment, type Quote, type Target } from "./api";
 import { h } from "./dom";
+import { earlierCard } from "./earlier";
 import { CommentEditor } from "./editor";
 import { VirtualList } from "./scroller";
 import { type State, targetLabel } from "./state";
@@ -16,18 +17,36 @@ export interface FinishHooks {
    * The session ended: delivered (with the result), not delivered, or cancelled. A delivered
    * result says whether it was copied first: "stale" when the copied text differs from it.
    */
-  ended(outcome: { kind: "sent"; markdown: string; copied: Copied } | { kind: "failed"; error: string } | { kind: "cancelled" }): void;
+  ended(outcome: Ending): void;
 }
+
+/** How a session ended, as the Finish dialog reports it. */
+export type Ending =
+  | { kind: "sent"; markdown: string; copied: Copied }
+  | { kind: "failed"; error: string }
+  | { kind: "cancelled" };
 
 export type Copied = "no" | "yes" | "stale";
 
-type Row = { k: "comment"; c: Comment } | { k: "edit"; ed: CommentEditor; c: Comment | null } | { k: "empty" };
+/**
+ * The rows: the draft's comments, then, apart, the earlier comments no file shows (REQ-CMT-010):
+ * review comments and those whose file is not a changed file.
+ */
+type Row =
+  | { k: "comment"; c: Comment }
+  | { k: "edit"; ed: CommentEditor; c: Comment | null }
+  | { k: "empty" }
+  | { k: "earlier-head" }
+  | { k: "earlier"; e: EarlierComment };
 
 /**
  * A comment's quote as the dialog knows it: loading, loaded, or failed. Keyed by the target it was
  * read for, so a comment whose target changed is read again.
  */
-type QuoteEntry = { target: string; quote: Quote | "loading" | "failed" };
+/** A comment's quoted lines: fetched, still loading, or failed to load. */
+type QuoteState = Quote | "loading" | "failed";
+
+type QuoteEntry = { target: string; quote: QuoteState };
 
 
 export class FinishDialog {
@@ -378,6 +397,8 @@ export class FinishDialog {
       rows.push({ k: "comment", c });
     }
     if (rows.length === 0) rows.push({ k: "empty" });
+    const earlier = this.state.earlier.filter((e) => e.file === null);
+    if (earlier.length > 0) rows.push({ k: "earlier-head" }, ...earlier.map((e) => ({ k: "earlier" as const, e })));
     this.rows = rows;
     this.list.setSource({
       count: () => this.rows.length,
@@ -386,14 +407,16 @@ export class FinishDialog {
         const r = this.rows[n]!;
         if (r.k === "comment") return `c:${r.c.id}:${r.c.author}:${r.c.body.length}`;
         if (r.k === "edit") return `e:${r.c?.id ?? ""}:${r.ed.errorRevision}`;
-        return "empty";
+        if (r.k === "earlier") return `p:${r.e.id}`;
+        return r.k;
       },
       // A comment and its editor are one row; a new review comment's editor is its own.
       id: (n) => {
         const r = this.rows[n]!;
         if (r.k === "comment") return `c:${r.c.id}`;
         if (r.k === "edit") return r.c ? `c:${r.c.id}` : `e:${r.ed.id}`;
-        return "empty";
+        if (r.k === "earlier") return `p:${r.e.id}`;
+        return r.k;
       },
       render: (n) => this.renderRow(this.rows[n]!),
     });
@@ -401,6 +424,18 @@ export class FinishDialog {
 
   private renderRow(r: Row): HTMLElement {
     if (r.k === "empty") return h("div", "fin-empty", this.agentOnly.checked ? "No agent comments." : "No comments.");
+    if (r.k === "earlier-head") {
+      const head = h("div", "fin-list-head fin-earlier-head");
+      head.append(h("span", "fin-title", "Earlier review"), h("span", "fin-earlier-note", "Read-only; not part of this review"));
+      return head;
+    }
+    if (r.k === "earlier") {
+      const row = h("div", "fin-comment earlier");
+      const t = r.e.target;
+      const where = t.target === "review" ? "review" : t.target === "file" ? t.path : `${t.path} · ${t.target === "line" ? `line ${t.line}` : `lines ${t.start}–${t.end}`} (reviewed version)`;
+      row.append(earlierCard(this.state, r.e, undefined, (task) => this.run(task), where));
+      return row;
+    }
     // The list measures rows by their own box, so the gap between cards is the row's padding.
     const row = h("div", `fin-comment author-${r.c?.author ?? "human"}`);
     const el = h("div", "c-card");
@@ -505,7 +540,7 @@ function targetKey(t: Target): string {
   return JSON.stringify(t);
 }
 
-function fillQuote(block: HTMLElement, q: Quote | "loading" | "failed"): void {
+function fillQuote(block: HTMLElement, q: QuoteState): void {
   if (q === "loading") return;
   block.classList.toggle("failed", q === "failed");
   if (q === "failed") {

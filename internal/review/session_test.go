@@ -25,10 +25,10 @@ func TestEditingAnAgentCommentBodyMakesItHuman(t *testing.T) {
 		`{"target": "line", "path": "a.go", "side": "new", "line": 2, "body": "first\r\nsecond"}`,
 		`{"target": "file", "path": "b.go", "body": "keep"}`,
 	)))
-	byBody := commentsByBody(s.View())
+	byBody := commentsByBody(s.Draft())
 	edited, kept := byBody["first\nsecond"], byBody["keep"]
 	if edited.Author != review.Agent || kept.Author != review.Agent {
-		t.Fatalf("seeded comments = %+v; want author agent", s.View().Comments)
+		t.Fatalf("seeded comments = %+v; want author agent", s.Draft().Comments)
 	}
 
 	// Saved unchanged, in the CRLF form an editor may send back.
@@ -56,12 +56,12 @@ func TestEditingAnAgentCommentBodyMakesItHuman(t *testing.T) {
 		t.Fatalf("author after reverting the edit = %s; want human", c.Author)
 	}
 
-	got := commentsByBody(s.View())
+	got := commentsByBody(s.Draft())
 	if got["first\nsecond"].Author != review.Human || got["keep"].Author != review.Agent {
-		t.Fatalf("comments = %+v; want the edited comment by human and the other by agent", s.View().Comments)
+		t.Fatalf("comments = %+v; want the edited comment by human and the other by agent", s.Draft().Comments)
 	}
 	if len(got) != 2 {
-		t.Fatalf("comments = %+v; editing must not add a comment", s.View().Comments)
+		t.Fatalf("comments = %+v; editing must not add a comment", s.Draft().Comments)
 	}
 }
 
@@ -86,12 +86,12 @@ func TestDeleteComment(t *testing.T) {
 	if _, err := s.CreateComment(t.Context(), "mine", on(t, s, reviewTarget), "human says"); err != nil {
 		t.Fatal(err)
 	}
-	for _, c := range s.View().Comments {
+	for _, c := range s.Draft().Comments {
 		if err := s.DeleteComment(c.ID, c.Version); err != nil {
 			t.Fatalf("delete %s: %v", c.ID, err)
 		}
 	}
-	if got := s.View().Comments; len(got) != 0 {
+	if got := s.Draft().Comments; len(got) != 0 {
 		t.Fatalf("comments after deleting all = %+v", got)
 	}
 	if err := s.DeleteComment("mine", 1); err != nil {
@@ -111,7 +111,7 @@ func TestCreateAndEditNeedTheirPrecondition(t *testing.T) {
 	if _, err := s.CreateComment(t.Context(), "c1", on(t, s, reviewTarget), "overwrite"); !errors.Is(err, review.ErrCommentExists) {
 		t.Errorf("CreateComment with a taken id: err = %v; want ErrCommentExists", err)
 	}
-	if got := commentByID(t, s.View(), "c1"); got.Body != "first" || got.Target != line(pathA, review.New, 2) {
+	if got := commentByID(t, s.Draft(), "c1"); got.Body != "first" || got.Target != line(pathA, review.New, 2) {
 		t.Errorf("comment after a refused create = %+v; want it unchanged", got)
 	}
 	deleted := versionOf(t, s, "c1")
@@ -124,7 +124,7 @@ func TestCreateAndEditNeedTheirPrecondition(t *testing.T) {
 	if _, err := s.CreateComment(t.Context(), "c2", on(t, s, reviewTarget), "fresh"); err != nil {
 		t.Fatalf("CreateComment with a fresh id: %v", err)
 	}
-	want := s.View()
+	want := s.Draft()
 	if len(want.Comments) != 1 || want.Comments[0].ID != "c2" {
 		t.Fatalf("comments = %+v; want only c2", want.Comments)
 	}
@@ -149,7 +149,7 @@ func TestRepeatedCreateReturnsTheStoredComment(t *testing.T) {
 	if err != nil || again != first {
 		t.Fatalf("repeated create = %+v, %v; want %+v", again, err, first)
 	}
-	if n := len(s.View().Comments); n != 1 {
+	if n := len(s.Draft().Comments); n != 1 {
 		t.Errorf("%d comments after a repeated create; want 1", n)
 	}
 	if got := readFile(t, st.Path()); got != draft {
@@ -189,7 +189,7 @@ func TestCreateWithATakenIDAndAnotherTarget(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	before := s.View()
+	before := s.Draft()
 	for name, c := range map[string]struct {
 		id     string
 		target review.Target
@@ -205,7 +205,7 @@ func TestCreateWithATakenIDAndAnotherTarget(t *testing.T) {
 			t.Errorf("%s: err = %v; want ErrCommentExists", name, err)
 		}
 	}
-	if after := s.View(); !reflect.DeepEqual(after, before) {
+	if after := s.Draft(); !reflect.DeepEqual(after, before) {
 		t.Errorf("view after refused creates = %+v; want %+v", after, before)
 	}
 }
@@ -247,7 +247,7 @@ func TestConcurrentCreatesOfOneID(t *testing.T) {
 	if winners != 1 {
 		t.Errorf("%d creates of one id with different bodies succeeded; want 1", winners)
 	}
-	if n := len(s.View().Comments); n != 2 {
+	if n := len(s.Draft().Comments); n != 2 {
 		t.Errorf("%d comments; want 2", n)
 	}
 }
@@ -279,7 +279,7 @@ func TestWhitespaceOnlyBodiesAreEmpty(t *testing.T) {
 			}
 		}
 	}
-	if n := len(s.View().Comments); n != 1 {
+	if n := len(s.Draft().Comments); n != 1 {
 		t.Errorf("%d comments after whitespace-only creates; want 1", n)
 	}
 }
@@ -310,7 +310,7 @@ func TestSessionNormalisesLineEndings(t *testing.T) {
 	if err := s.SetSummary("sum\r\nmary\r"); err != nil {
 		t.Fatal(err)
 	}
-	if got := s.View().Summary; got != "sum\nmary\n" {
+	if got := s.Draft().Summary; got != "sum\nmary\n" {
 		t.Fatalf("summary = %q; want LF line endings", got)
 	}
 }
@@ -324,7 +324,7 @@ func TestPutCommentRejectsInvalidComments(t *testing.T) {
 	if _, err := s.CreateComment(t.Context(), "keep", on(t, s, line(pathA, review.New, 1)), "existing"); err != nil {
 		t.Fatal(err)
 	}
-	before := s.View()
+	before := s.Draft()
 
 	tests := []struct {
 		target   review.Target
@@ -380,7 +380,7 @@ func TestPutCommentRejectsInvalidComments(t *testing.T) {
 			t.Errorf("%s: err = %v; want one *InvalidError", name, err)
 		}
 	}
-	if after := s.View(); !reflect.DeepEqual(after, before) {
+	if after := s.Draft(); !reflect.DeepEqual(after, before) {
 		t.Fatalf("draft changed after rejected comments:\n%+v\nwant\n%+v", after, before)
 	}
 	assertDraftRestores(t, fx, st, before)
@@ -493,7 +493,7 @@ func TestPutCommentLargeFile(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = repo.Close() })
 	snap := resolve(t, repo, source.Last())
-	s, _, err := review.Start(t.Context(), openStore(t, t.TempDir(), review.DraftKey(snap)), snap, review.NewSeed())
+	s, _, err := review.Start(t.Context(), openStore(t, t.TempDir(), review.DraftKey(snap)), snap, review.Fresh{Seed: review.NewSeed()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -562,13 +562,13 @@ func TestCommentCountLimit(t *testing.T) {
 	if _, err := s.CreateComment(t.Context(), "last", on(t, s, reviewTarget), "the 4096th"); err != nil {
 		t.Fatalf("the %dth comment: %v", review.MaxComments, err)
 	}
-	before := s.View()
+	before := s.Draft()
 
 	_, err := s.CreateComment(t.Context(), "over", on(t, s, reviewTarget), "the 4097th")
 	if _, ok := errors.AsType[*review.InvalidError](err); !ok {
 		t.Fatalf("the %dth comment: err = %v; want an *InvalidError", review.MaxComments+1, err)
 	}
-	if after := s.View(); !reflect.DeepEqual(after, before) {
+	if after := s.Draft(); !reflect.DeepEqual(after, before) {
 		t.Fatal("the comments changed after the rejected comment")
 	}
 	// At the limit, existing comments stay editable and a deletion makes room.
@@ -592,25 +592,25 @@ func TestTotalBodyBytesLimit(t *testing.T) {
 	if _, err := s.CreateComment(t.Context(), "last", on(t, s, reviewTarget), strings.Repeat("y", review.MaxBodyBytes-1)); err != nil {
 		t.Fatalf("a comment one byte under the total: %v", err)
 	}
-	before := s.View()
+	before := s.Draft()
 
 	// Growing an existing body past the total is rejected like a new comment.
 	_, err := s.EditComment("last", versionOf(t, s, "last"), strings.Repeat("y", review.MaxBodyBytes)+"\n")
 	if _, ok := errors.AsType[*review.InvalidError](err); !ok {
 		t.Fatalf("growing a body past the total: err = %v; want an *InvalidError", err)
 	}
-	if after := s.View(); !reflect.DeepEqual(after, before) {
+	if after := s.Draft(); !reflect.DeepEqual(after, before) {
 		t.Fatal("the comments changed after the rejected edit")
 	}
 	if _, err := s.EditComment("last", versionOf(t, s, "last"), full); err != nil {
 		t.Fatalf("a body reaching the total exactly: %v", err)
 	}
-	before = s.View()
+	before = s.Draft()
 	_, err = s.CreateComment(t.Context(), "extra", on(t, s, reviewTarget), "x")
 	if _, ok := errors.AsType[*review.InvalidError](err); !ok {
 		t.Fatalf("a comment past the total: err = %v; want an *InvalidError", err)
 	}
-	if after := s.View(); !reflect.DeepEqual(after, before) {
+	if after := s.Draft(); !reflect.DeepEqual(after, before) {
 		t.Fatal("the comments changed after the rejected comment")
 	}
 }
@@ -641,12 +641,12 @@ func TestCommentOrder(t *testing.T) {
 			t.Fatalf("put %s: %v", p.id, err)
 		}
 	}
-	keyBefore := commentByID(t, s.View(), "a-new-2-first").SortKey()
+	keyBefore := commentByID(t, s.Draft(), "a-new-2-first").SortKey()
 	// Editing a comment keeps its place in creation order.
 	if _, err := s.EditComment("a-new-2-first", versionOf(t, s, "a-new-2-first"), "a-new-2-first, edited"); err != nil {
 		t.Fatal(err)
 	}
-	if after := commentByID(t, s.View(), "a-new-2-first").SortKey(); after != keyBefore {
+	if after := commentByID(t, s.Draft(), "a-new-2-first").SortKey(); after != keyBefore {
 		t.Errorf("sort key after an edit = %v; want %v", after, keyBefore)
 	}
 
@@ -656,7 +656,7 @@ func TestCommentOrder(t *testing.T) {
 		"b-file", "b-old-3", "b-new-4",
 	}
 	var ids []string
-	view := s.View()
+	view := s.Draft()
 	for k, c := range view.Comments {
 		ids = append(ids, c.ID)
 		assertFileIndex(t, fx, c)
@@ -668,7 +668,7 @@ func TestCommentOrder(t *testing.T) {
 		}
 	}
 	if !slices.Equal(ids, want) {
-		t.Errorf("View order = %q\nwant %q", ids, want)
+		t.Errorf("Draft order = %q\nwant %q", ids, want)
 	}
 	r, err := s.Result(t.Context())
 	if err != nil {
@@ -820,7 +820,7 @@ func TestFinishDeliveryFailureKeepsDraft(t *testing.T) {
 	if _, err := s.CreateComment(t.Context(), "c1", on(t, s, reviewTarget), "keep me"); err != nil {
 		t.Fatal(err)
 	}
-	want := s.View()
+	want := s.Draft()
 	errBroken := errors.New("broken pipe")
 	_, err := s.Finish(t.Context(), func(review.Result) error { return errBroken })
 	if de, ok := errors.AsType[*review.DeliveryError](err); !ok || !errors.Is(de, errBroken) {
@@ -855,7 +855,7 @@ func TestEndKeepsDraft(t *testing.T) {
 	if _, err := s.CreateComment(t.Context(), "c1", on(t, s, reviewTarget), "x"); err != nil {
 		t.Fatal(err)
 	}
-	want := s.View()
+	want := s.Draft()
 	if got := s.End(); got != review.EndedByEnd {
 		t.Fatalf("End on an open session = %v; want EndedByEnd", got)
 	}
@@ -877,18 +877,18 @@ func TestConcurrentMutations(t *testing.T) {
 				if _, err := s.CreateComment(t.Context(), id, on(t, s, line(pathA, review.New, 1+i)), id); err != nil {
 					t.Error(err)
 				}
-				if err := s.SetViewed(w, i%2 == 0); err != nil {
+				if err := s.SetViewed([]int{w}, i%2 == 0); err != nil {
 					t.Error(err)
 				}
 				if err := s.SetSummary(id); err != nil {
 					t.Error(err)
 				}
-				_ = s.View()
+				_ = s.Draft()
 			}
 		})
 	}
 	wg.Wait()
-	v := s.View()
+	v := s.Draft()
 	if len(v.Comments) != workers*each {
 		t.Fatalf("%d comments; want %d", len(v.Comments), workers*each)
 	}
@@ -992,7 +992,7 @@ func assertEnded(t *testing.T, s *review.Session, want review.Ending) {
 		"CreateComment line": second(s.CreateComment(ctx, "after", on(t, s, line(pathA, review.New, 1)), "x")),
 		"EditComment":        second(s.EditComment("c1", versionOf(t, s, "c1"), "x")),
 		"DeleteComment":      s.DeleteComment("c1", 1),
-		"SetViewed":          s.SetViewed(0, true),
+		"SetViewed":          s.SetViewed([]int{0}, true),
 		"SetSummary":         s.SetSummary("x"),
 		"Cancel":             s.Cancel(),
 		"Finish":             second(s.Finish(ctx, func(review.Result) error { return nil })),
@@ -1008,14 +1008,14 @@ func assertEnded(t *testing.T, s *review.Session, want review.Ending) {
 }
 
 // assertDraftRestores closes st, reopens the draft and checks that a new session restores want.
-func assertDraftRestores(t *testing.T, fx *fixture, st *review.Store, want review.View) {
+func assertDraftRestores(t *testing.T, fx *fixture, st *review.Store, want review.Draft) {
 	t.Helper()
 	path := st.Path()
 	if err := st.Close(); err != nil {
 		t.Fatal(err)
 	}
 	st2 := openStore(t, filepath.Dir(path), fx.key(fx.last))
-	s, o, err := review.Start(t.Context(), st2, fx.last, review.NewSeed(review.SeedComment{Target: reviewTarget, Body: "ignored seed"}))
+	s, o, err := review.Start(t.Context(), st2, fx.last, review.Fresh{Seed: review.NewSeed(review.SeedComment{Target: reviewTarget, Body: "ignored seed"})})
 	if err != nil {
 		t.Fatalf("restart: %v", err)
 	}
@@ -1027,13 +1027,13 @@ func assertDraftRestores(t *testing.T, fx *fixture, st *review.Store, want revie
 	}
 	// Restoring renumbers sequence numbers; what persists is the order, and View lists comments in
 	// result order, where the sequence number breaks ties. Versions belong to one session.
-	if got := withoutSeqs(s.View()); !reflect.DeepEqual(got, withoutSeqs(want)) {
+	if got := withoutSeqs(s.Draft()); !reflect.DeepEqual(got, withoutSeqs(want)) {
 		t.Fatalf("restored draft =\n%+v\nwant\n%+v", got, want)
 	}
 }
 
 // withoutSeqs clears what a restore does not keep: sequence numbers and versions.
-func withoutSeqs(v review.View) review.View {
+func withoutSeqs(v review.Draft) review.Draft {
 	v.Comments = slices.Clone(v.Comments)
 	for i := range v.Comments {
 		v.Comments[i].Seq, v.Comments[i].Version = 0, 0
@@ -1041,7 +1041,7 @@ func withoutSeqs(v review.View) review.View {
 	return v
 }
 
-func commentByID(t *testing.T, v review.View, id string) review.Comment {
+func commentByID(t *testing.T, v review.Draft, id string) review.Comment {
 	t.Helper()
 	for _, c := range v.Comments {
 		if c.ID == id {
@@ -1079,7 +1079,7 @@ func assertFileIndex(t *testing.T, fx *fixture, c review.Comment) {
 	}
 }
 
-func commentsByBody(v review.View) map[string]review.Comment {
+func commentsByBody(v review.Draft) map[string]review.Comment {
 	m := map[string]review.Comment{}
 	for _, c := range v.Comments {
 		m[c.Body] = c
@@ -1191,13 +1191,13 @@ func TestEditNeedsTheLoadedVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EditComment with the edited version: %v", err)
 	}
-	before := s.View()
+	before := s.Draft()
 	for name, v := range map[string]int64{"created": created.Version, "edited": edited.Version} {
 		if _, err := s.EditComment("c1", v, "stale"); !errors.Is(err, review.ErrStale) {
 			t.Errorf("EditComment replaying the %s version: err = %v; want ErrStale", name, err)
 		}
 	}
-	if after := s.View(); !reflect.DeepEqual(after, before) {
+	if after := s.Draft(); !reflect.DeepEqual(after, before) {
 		t.Errorf("view after stale edits = %+v; want %+v", after, before)
 	}
 	if err := s.DeleteComment("c1", versionOf(t, s, "c1")); err != nil {
@@ -1216,10 +1216,10 @@ func TestEditNeedsTheLoadedVersion(t *testing.T) {
 	if got, err := s.EditComment("c1", latest.Version, "again"); err != nil || got != again {
 		t.Errorf("EditComment keeping the recreated comment's body = %+v, %v; want %+v unchanged", got, err, again)
 	}
-	if got := commentByID(t, s.View(), "c1"); got != again {
+	if got := commentByID(t, s.Draft(), "c1"); got != again {
 		t.Errorf("comment after stale edits = %+v; want %+v", got, again)
 	}
-	want := s.View()
+	want := s.Draft()
 	s.End()
 	assertDraftRestores(t, fx, st, want)
 }
@@ -1242,18 +1242,18 @@ func TestDeleteNeedsTheLoadedVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	before := s.View()
+	before := s.Draft()
 	if err := s.DeleteComment("c1", created.Version); !errors.Is(err, review.ErrStale) {
 		t.Errorf("DeleteComment at the version before another edit: err = %v; want ErrStale", err)
 	}
-	if after := s.View(); !reflect.DeepEqual(after, before) {
+	if after := s.Draft(); !reflect.DeepEqual(after, before) {
 		t.Errorf("view after a stale delete = %+v; want %+v", after, before)
 	}
 
 	if err := s.DeleteComment("c1", edited.Version); err != nil {
 		t.Fatalf("DeleteComment at the current version: %v", err)
 	}
-	if got := s.View().Comments; len(got) != 0 {
+	if got := s.Draft().Comments; len(got) != 0 {
 		t.Fatalf("comments after the delete = %+v; want none", got)
 	}
 	if err := s.DeleteComment("c1", edited.Version); err != nil {
@@ -1270,10 +1270,10 @@ func TestDeleteNeedsTheLoadedVersion(t *testing.T) {
 	if err := s.DeleteComment("c1", edited.Version); !errors.Is(err, review.ErrStale) {
 		t.Errorf("DeleteComment with the deleted comment's version: err = %v; want ErrStale", err)
 	}
-	if got := commentByID(t, s.View(), "c1"); got != again {
+	if got := commentByID(t, s.Draft(), "c1"); got != again {
 		t.Errorf("comment after a delayed delete = %+v; want %+v", got, again)
 	}
-	want := s.View()
+	want := s.Draft()
 	s.End()
 	assertDraftRestores(t, fx, st, want)
 }
@@ -1284,7 +1284,7 @@ func TestSeededAndRestoredCommentsAreEditable(t *testing.T) {
 	fx := newFixture(t)
 	dir := t.TempDir()
 	s, st := fx.start(t, dir, review.NewSeed(review.SeedComment{Target: reviewTarget, Body: "seeded"}))
-	seeded := s.View().Comments[0]
+	seeded := s.Draft().Comments[0]
 	if _, err := s.EditComment(seeded.ID, seeded.Version, "seeded, edited"); err != nil {
 		t.Fatalf("EditComment of a seeded comment: %v", err)
 	}
@@ -1293,11 +1293,11 @@ func TestSeededAndRestoredCommentsAreEditable(t *testing.T) {
 		t.Fatal(err)
 	}
 	st2 := openStore(t, dir, fx.key(fx.last))
-	restored, o, err := review.Start(t.Context(), st2, fx.last, review.NewSeed())
+	restored, o, err := review.Start(t.Context(), st2, fx.last, review.Fresh{Seed: review.NewSeed()})
 	if err != nil || !o.Resumed() {
 		t.Fatalf("restart: resumed %v, err %v", o.Resumed(), err)
 	}
-	c := restored.View().Comments[0]
+	c := restored.Draft().Comments[0]
 	if _, err := restored.EditComment(c.ID, c.Version, "restored, edited"); err != nil {
 		t.Fatalf("EditComment of a restored comment: %v", err)
 	}
@@ -1336,7 +1336,7 @@ func TestConcurrentEditsOfOneVersion(t *testing.T) {
 	if winner < 0 {
 		t.Fatal("no edit succeeded")
 	}
-	want := s.View()
+	want := s.Draft()
 	if got := commentByID(t, want, "c1").Body; got != fmt.Sprintf("edit %d", winner) {
 		t.Errorf("body = %q; want the winner's, edit %d", got, winner)
 	}

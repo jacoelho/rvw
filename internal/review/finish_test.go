@@ -110,7 +110,7 @@ func TestFailedBuildReopensTheSession(t *testing.T) {
 func TestDeliveringRejectsMutations(t *testing.T) {
 	t.Parallel()
 	s, _, _ := startQuoting(t)
-	before := s.View()
+	before := s.Draft()
 	entered, release := make(chan review.Result, 1), make(chan struct{})
 	finished := make(chan error, 1)
 	go func() {
@@ -128,7 +128,7 @@ func TestDeliveringRejectsMutations(t *testing.T) {
 		"CreateComment": second(s.CreateComment(ctx, "late", on(t, s, reviewTarget), "x")),
 		"EditComment":   second(s.EditComment("c1", versionOf(t, s, "c1"), "x")),
 		"DeleteComment": s.DeleteComment("c1", 1),
-		"SetViewed":     s.SetViewed(0, true),
+		"SetViewed":     s.SetViewed([]int{0}, true),
 		"SetSummary":    s.SetSummary("late"),
 		"Cancel":        s.Cancel(),
 		"Finish":        second(s.Finish(ctx, d.deliver)),
@@ -137,8 +137,8 @@ func TestDeliveringRejectsMutations(t *testing.T) {
 			t.Errorf("%s while delivering: err = %v; want ErrEnded", name, err)
 		}
 	}
-	if got := s.View(); !reflect.DeepEqual(got, before) {
-		t.Errorf("View while delivering = %+v; want %+v", got, before)
+	if got := s.Draft(); !reflect.DeepEqual(got, before) {
+		t.Errorf("Draft while delivering = %+v; want %+v", got, before)
 	}
 	close(release)
 	if err := recv(t, finished, "Finish"); err != nil {
@@ -255,9 +255,9 @@ func TestValidationDoesNotHoldTheSession(t *testing.T) {
 	}); err != nil {
 		t.Errorf("CreateComment: %v", err)
 	}
-	want := within(t, "View", s.View)
+	want := within(t, "Draft", s.Draft)
 	if want.Summary != "sum" || len(want.Comments) != 1 || want.Comments[0].ID != "r1" {
-		t.Errorf("View while a validation is held = %+v; want summary and comment r1", want)
+		t.Errorf("Draft while a validation is held = %+v; want summary and comment r1", want)
 	}
 	if got := within(t, "End", s.End); got != review.EndedByEnd {
 		t.Errorf("End = %v; want EndedByEnd", got)
@@ -267,8 +267,8 @@ func TestValidationDoesNotHoldTheSession(t *testing.T) {
 	if err := recv(t, held, "the held CreateComment"); !errors.Is(err, review.ErrEnded) {
 		t.Errorf("CreateComment whose validation outlasted the session = %v; want ErrEnded", err)
 	}
-	if got := s.View(); !reflect.DeepEqual(got, want) {
-		t.Errorf("View after the held CreateComment = %+v; want %+v", got, want)
+	if got := s.Draft(); !reflect.DeepEqual(got, want) {
+		t.Errorf("Draft after the held CreateComment = %+v; want %+v", got, want)
 	}
 	assertDraftRestores(t, fx, st, want)
 }

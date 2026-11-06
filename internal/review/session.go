@@ -49,9 +49,12 @@ const (
 // state is the draft content. It is copied before a mutation so a failed save leaves it intact.
 type state struct {
 	comments map[string]Comment
-	viewed   map[int]bool
-	summary  string
-	bytes    int // total body bytes
+	// viewed holds the files whose viewed mark is set, each with whether whitespace was hidden
+	// when the mark was set.
+	viewed         map[int]bool
+	summary        string
+	bytes          int // total body bytes
+	hideWhitespace bool
 }
 
 func emptyState() state {
@@ -87,19 +90,42 @@ func (o Opening) MovedAside() (path string, ok bool, reason error) {
 // reports refers to it.
 func (s *Session) Snapshot() *source.Snapshot { return s.snap }
 
-// Start opens the session for snap. It validates seed first, so an invalid seed fails even when a
-// draft exists. It then restores the draft in store. A draft that no longer validates against snap,
-// or that is unreadable as a draft, is moved aside and the session starts without it. Without a
-// restored draft, seed applies as agent comments.
+// Fresh is what a new draft starts with when no draft is restored.
+type Fresh struct {
+	// Viewed pre-sets viewed marks (REQ-RND-009), at most one per file.
+	Viewed []Mark
+	// Seed holds the agent's comments.
+	Seed Seed
+	// HideWhitespace is the Hide whitespace setting (REQ-DIFF-012).
+	HideWhitespace bool
+}
+
+// Start opens the session for snap. It validates fresh first, so an invalid seed or mark fails
+// even when a draft exists. It then restores the draft in store. A draft that no longer validates
+// against snap, or that is unreadable as a draft, is moved aside and the session starts without
+// it. Without a restored draft, the session starts from fresh: its seed as agent comments, its
+// viewed marks and its Hide whitespace setting; a new draft is written only when that differs
+// from an empty one.
 //
 // Restoring and seeding read each commented file's facts: one patch run, plus a line count of
 // each side for a file with line comments.
-func Start(ctx context.Context, store *Store, snap *source.Snapshot, seed Seed) (*Session, Opening, error) {
+func Start(ctx context.Context, store *Store, snap *source.Snapshot, fresh Fresh) (*Session, Opening, error) {
 	s := &Session{snap: snap, store: store, paths: newPathIndex(snap), state: emptyState()}
+	seed := fresh.Seed
 	seeded, err := s.seeded(ctx, seed)
 	if err != nil {
 		return nil, Opening{}, err
 	}
+	for _, m := range fresh.Viewed {
+		if m.File < 0 || m.File >= snap.FileCount() {
+			return nil, Opening{}, fmt.Errorf("viewed mark for file index %d out of range", m.File)
+		}
+		if _, dup := seeded.viewed[m.File]; dup {
+			return nil, Opening{}, fmt.Errorf("two viewed marks for file index %d", m.File)
+		}
+		seeded.viewed[m.File] = m.Whitespace
+	}
+	seeded.hideWhitespace = fresh.HideWhitespace
 	var o Opening
 	d, err := store.load()
 	if err == nil {
@@ -123,7 +149,7 @@ func Start(ctx context.Context, store *Store, snap *source.Snapshot, seed Seed) 
 	default:
 		return nil, Opening{}, fmt.Errorf("restore draft %s: %w", store.Path(), err)
 	}
-	if seed.Len() > 0 {
+	if seed.Len() > 0 || len(seeded.viewed) > 0 || seeded.hideWhitespace {
 		if err := s.commit(seeded); err != nil {
 			if o.movedTo != "" {
 				err = fmt.Errorf("saved draft moved to %s: %w", o.movedTo, err)
@@ -174,12 +200,13 @@ func (s *Session) restore(ctx context.Context, d draftFile) (state, int64, error
 		return state{}, 0, err
 	}
 	next.summary = summary
+	next.hideWhitespace = d.HideWhitespace
 	for _, vf := range d.Viewed {
 		i, ok := s.fileByPaths(vf)
 		if !ok {
 			return state{}, 0, invalid("viewed file %q -> %q is not a changed file", vf.OldPath, vf.NewPath)
 		}
-		next.viewed[i] = true
+		next.viewed[i] = vf.Whitespace
 	}
 	return next, nextSeq, nil
 }
@@ -204,7 +231,15 @@ func (s *Session) restoreComment(ctx context.Context, v *validator, dc draftComm
 	if err != nil {
 		return Comment{}, err
 	}
-	return Comment{ID: dc.ID, Author: author, Body: body, Target: t, File: file, Seq: dc.Seq, Version: s.nextVersion()}, nil
+	if dc.CopiedFrom != "" {
+		if err := checkID(dc.CopiedFrom); err != nil {
+			return Comment{}, err
+		}
+	}
+	return Comment{
+		ID: dc.ID, Author: author, Body: body, Target: t, File: file, Seq: dc.Seq, CopiedFrom: dc.CopiedFrom,
+		Version: s.nextVersion(),
+	}, nil
 }
 
 func (s *Session) fileByPaths(vf viewedFile) (int, bool) {
@@ -272,9 +307,9 @@ func (s *Session) commit(next state) error {
 func (s *Session) encode(st state) draftFile {
 	viewed := []viewedFile{}
 	for i := range s.snap.FileCount() {
-		if st.viewed[i] {
+		if ws, ok := st.viewed[i]; ok {
 			f := s.snap.File(i)
-			viewed = append(viewed, viewedFile{OldPath: f.OldPath, NewPath: f.NewPath})
+			viewed = append(viewed, viewedFile{OldPath: f.OldPath, NewPath: f.NewPath, Whitespace: ws})
 		}
 	}
 	return encodeDraft(st, sorted(st), viewed)
@@ -330,22 +365,77 @@ func (s *Session) CreateComment(ctx context.Context, id string, p Placement, bod
 		}
 		return Comment{}, ErrCommentExists
 	}
+	return s.addLocked(Comment{ID: id, Author: Human, Target: t, File: file, Body: body})
+}
+
+// addLocked adds c, whose ID is free, as the newest comment, within the comment limits. The caller
+// holds mu and has checked the phase.
+func (s *Session) addLocked(c Comment) (Comment, error) {
 	if len(s.state.comments) >= MaxComments {
 		return Comment{}, invalid("the review already has %d comments", MaxComments)
 	}
 	next := s.state.clone()
-	next.bytes += len(body)
+	next.bytes += len(c.Body)
 	if next.bytes > MaxTotalBytes {
 		return Comment{}, invalid("comment bodies would exceed %d bytes in total", MaxTotalBytes)
 	}
 	// A version spent on a failed save is never seen, so it needs no undo.
-	c := Comment{ID: id, Author: Human, Target: t, File: file, Body: body, Seq: s.nextSeq, Version: s.nextVersion()}
-	next.comments[id] = c
+	c.Seq, c.Version = s.nextSeq, s.nextVersion()
+	next.comments[c.ID] = c
 	if err := s.commit(next); err != nil {
 		return Comment{}, err
 	}
 	s.nextSeq++
 	return c, nil
+}
+
+// CopyComment adds comment id copied from earlier comment from (REQ-CMT-011): its author and body,
+// placed at the first of places the snapshot accepts, which callers order from the most specific;
+// the review target is the fallback when none is accepted. When a draft comment was already
+// copied from from, it returns that comment and writes nothing, whatever id is, so a repeated
+// choice or a resent request adds nothing.
+func (s *Session) CopyComment(ctx context.Context, id, from string, author Author, body string, places ...Placement) (Comment, error) {
+	if err := checkID(id); err != nil {
+		return Comment{}, err
+	}
+	if err := checkID(from); err != nil {
+		return Comment{}, err
+	}
+	if _, err := authorOf(string(author)); err != nil {
+		return Comment{}, err
+	}
+	body, err := normalizeBody(body)
+	if err != nil {
+		return Comment{}, err
+	}
+	if !s.isOpen() {
+		return Comment{}, ErrEnded
+	}
+	t, file := ReviewTarget(), -1
+	for _, p := range places {
+		pt, pf, perr := s.place(ctx, p)
+		if perr == nil {
+			t, file = pt, pf
+			break
+		}
+		if _, ok := errors.AsType[*InvalidError](perr); !ok {
+			return Comment{}, perr
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.phase != open {
+		return Comment{}, ErrEnded
+	}
+	for _, c := range s.state.comments {
+		if c.CopiedFrom == from {
+			return c, nil
+		}
+	}
+	if _, exists := s.state.comments[id]; exists {
+		return Comment{}, ErrCommentExists
+	}
+	return s.addLocked(Comment{ID: id, Author: author, Target: t, File: file, Body: body, CopiedFrom: from})
 }
 
 // place checks p against the snapshot and returns its target and file index (-1 for the review).
@@ -457,17 +547,30 @@ func (s *Session) DeleteComment(id string, version int64) error {
 	})
 }
 
-// SetViewed sets or clears file i's viewed mark.
-func (s *Session) SetViewed(i int, viewed bool) error {
-	if i < 0 || i >= s.snap.FileCount() {
-		return invalid("file index %d out of range", i)
+// SetViewed sets or clears the viewed marks of files in one draft change (REQ-NAV-010). A mark it
+// sets records the current Hide whitespace setting, also when it was already set.
+func (s *Session) SetViewed(files []int, viewed bool) error {
+	for _, i := range files {
+		if i < 0 || i >= s.snap.FileCount() {
+			return invalid("file index %d out of range", i)
+		}
 	}
 	return s.mutate(func(next *state) error {
-		if viewed {
-			next.viewed[i] = true
-		} else {
-			delete(next.viewed, i)
+		for _, i := range files {
+			if viewed {
+				next.viewed[i] = next.hideWhitespace
+			} else {
+				delete(next.viewed, i)
+			}
 		}
+		return nil
+	})
+}
+
+// SetHideWhitespace changes the Hide whitespace setting (REQ-DIFF-012).
+func (s *Session) SetHideWhitespace(hide bool) error {
+	return s.mutate(func(next *state) error {
+		next.hideWhitespace = hide
 		return nil
 	})
 }
@@ -508,21 +611,30 @@ func (s *Session) mutate(fn func(*state) error) error {
 	return s.commit(next)
 }
 
-// View is a read-only copy of the draft for presentation.
-type View struct {
+// Draft is a read-only copy of the draft for presentation.
+type Draft struct {
 	Comments []Comment // result order
 	Summary  string
-	Viewed   []int // file indexes, ascending
+	Viewed   []Mark // by file index, ascending
+	// HideWhitespace is the Hide whitespace setting.
+	HideWhitespace bool
 }
 
-// View returns the current draft.
-func (s *Session) View() View {
+// Mark is a set viewed mark.
+type Mark struct {
+	File int
+	// Whitespace reports that whitespace was hidden when the mark was set.
+	Whitespace bool
+}
+
+// Draft returns the current draft.
+func (s *Session) Draft() Draft {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	v := View{Comments: sorted(s.state), Summary: s.state.summary, Viewed: []int{}}
+	v := Draft{Comments: sorted(s.state), Summary: s.state.summary, Viewed: []Mark{}, HideWhitespace: s.state.hideWhitespace}
 	for i := range s.snap.FileCount() {
-		if s.state.viewed[i] {
-			v.Viewed = append(v.Viewed, i)
+		if ws, ok := s.state.viewed[i]; ok {
+			v.Viewed = append(v.Viewed, Mark{File: i, Whitespace: ws})
 		}
 	}
 	return v

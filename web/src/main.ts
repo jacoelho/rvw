@@ -1,13 +1,13 @@
 // Page wiring: session token, layout, keyboard, status polling and
 // the page shown after the session ends.
 
-import { Api, type Comment, HttpError, isGone, type RenameDetection } from "./api";
+import { Api, type Scope, HttpError, isGone, type RenameDetection } from "./api";
 import { count, h } from "./dom";
 import mark from "./favicon.svg";
-import { FileView } from "./fileview";
+import { FileView, type Step } from "./fileview";
 import { FinishDialog } from "./finish";
 import { type GoTarget, Palette } from "./palette";
-import { State } from "./state";
+import { clock, State } from "./state";
 import { ReviewStrip } from "./strip";
 import { FileTree } from "./tree";
 
@@ -47,17 +47,25 @@ async function main(): Promise<void> {
 
 class Page {
   private readonly tree: FileTree;
-  private readonly view: FileView;
+  private readonly fileView: FileView;
   private readonly finish: FinishDialog;
   private readonly palette: Palette;
   private readonly filter: HTMLInputElement;
   private readonly banners: HTMLElement;
   private readonly toast: HTMLElement;
-  private readonly modeButton: HTMLButtonElement;
+  private readonly layoutButton: HTMLButtonElement;
   private readonly filesButton: HTMLButtonElement;
   private readonly sidebar: HTMLElement;
   private readonly totals: HTMLElement;
   private readonly strip: ReviewStrip;
+  private readonly wsBox: HTMLInputElement;
+  /** The round strip under the top bar; empty when there was no earlier review. */
+  private readonly round: HTMLElement;
+  /**
+   * The scope of REQ-RND-010, Since last review or All changes: transient, never saved. Since last review applies only while
+   * some file is changed since review, so it starts there and the control shows only then.
+   */
+  private scope: Scope = "since";
   /** The shown file was picked at load, not by the human; the marks may move it off a generated file. */
   private autoSelected = false;
   /** The timer of the next scheduled poll; it only schedules the live run. */
@@ -92,14 +100,22 @@ class Page {
     search.addEventListener("click", () => {
       if (!this.finish.isOpen && !this.palette.isOpen) this.palette.open();
     });
+    const ws = h("label", "ws-toggle");
+    this.wsBox = h("input");
+    this.wsBox.type = "checkbox";
+    this.wsBox.checked = state.hideWhitespace;
+    this.wsBox.addEventListener("change", () => this.run(this.setHideWhitespace(this.wsBox.checked)));
+    ws.append(this.wsBox, document.createTextNode("Hide whitespace"));
+    ws.title = "Hide hunks that change only whitespace";
     // Both labels share one grid cell, so the button keeps the longer label's width in either mode.
-    this.modeButton = h("button", "btn mode-toggle");
-    this.modeButton.title = "Toggle unified or split view (s)";
-    this.modeButton.addEventListener("click", () => this.toggleMode());
+    this.layoutButton = h("button", "btn mode-toggle");
+    this.layoutButton.title = "Toggle unified or split view (s)";
+    this.layoutButton.addEventListener("click", () => this.toggleLayout());
     const finish = h("button", "btn primary finish-btn", "Finish…");
     finish.title = "⌘↵";
     finish.addEventListener("click", () => this.run(this.openFinish()));
-    header.append(brand(), source, files, progress, h("span", "spacer"), search, this.modeButton, finish);
+    header.append(brand(), source, files, progress, h("span", "spacer"), ws, search, this.layoutButton, finish);
+    this.round = h("div", "round-banner");
 
     this.banners = h("div", "banners");
     const renames = renameNotice(state.renameDetection);
@@ -140,11 +156,20 @@ class Page {
     matchMedia("(max-width: 900px)").addEventListener("change", () => this.showFiles(false));
     this.toast = h("div", "toast");
     this.toast.hidden = true;
-    app.replaceChildren(header, this.banners, body, this.toast);
+    app.replaceChildren(header, this.round, this.banners, body, this.toast);
 
     const failed = (err: unknown): void => this.failed(err);
-    this.view = new FileView(fileHeader, diffEl, state, api, { failed });
-    this.tree = new FileTree(treeEl, state, (i) => this.run(this.select(i)));
+    this.fileView = new FileView(fileHeader, diffEl, state, api, {
+      failed,
+      since: (i) => this.scope === "since" && this.sinceOffered() && this.state.changedSince(i),
+      showAll: () => this.chooseScope("all"),
+    });
+    this.tree = new FileTree(
+      treeEl,
+      state,
+      (i) => this.run(this.select(i)),
+      (files, viewed) => this.run(this.state.setViewed(files, viewed)),
+    );
     this.strip.draw();
     this.finish = new FinishDialog(state, api, {
       failed,
@@ -158,7 +183,7 @@ class Page {
     });
     this.palette = new Palette(state, api, {
       go: (t) => this.run(this.goTo(t)),
-      current: () => this.view.file,
+      current: () => this.fileView.file,
       order: () => this.tree.fullOrder(),
       failed,
     });
@@ -169,7 +194,7 @@ class Page {
         case "draft":
           this.strip.draw();
           this.tree.refresh();
-          this.view.refresh();
+          this.fileView.refresh();
           this.finish.refresh();
           this.renderTotals();
           break;
@@ -185,6 +210,17 @@ class Page {
         case "head":
           this.banners.append(h("div", "banner info", "HEAD has moved since this review started. The review still shows the original snapshot."));
           break;
+        case "whitespace":
+          if (this.state.hideWhitespace && this.state.whitespace.size > 0) this.regroup();
+          this.renderRound();
+          this.renderTotals();
+          break;
+        case "hide":
+          this.wsBox.checked = this.state.hideWhitespace;
+          this.regroup();
+          this.renderRound();
+          this.run(this.fileView.reload());
+          break;
       }
     });
     // Once the human has engaged with the file picked at load, it is their choice: the generated
@@ -197,8 +233,9 @@ class Page {
       engaged();
       this.onKey(e);
     });
-    this.renderMode();
+    this.renderLayout();
     this.renderTotals();
+    this.renderRound();
     const order = this.tree.order();
     const first = order.find((i) => !this.tree.isFolded(i)) ?? order[0];
     if (first !== undefined) this.run(this.select(first, true));
@@ -233,11 +270,11 @@ class Page {
   private async select(i: number, auto = false): Promise<boolean> {
     this.autoSelected = auto;
     this.tree.select(i, false);
-    const shown = await this.view.show(i);
+    const shown = (await this.fileView.show(i)) === "shown";
     // show is refused while the editor cannot be left; the tree follows the shown file, and expands
     // directories only for a file actually shown.
-    this.tree.select(this.view.file);
-    this.strip.show(this.view.file);
+    this.tree.select(this.fileView.file);
+    this.strip.show(this.fileView.file);
     if (shown && !auto) this.showFiles(false);
     return shown;
   }
@@ -252,7 +289,7 @@ class Page {
     app.classList.toggle("files-open", open);
     this.filesButton.setAttribute("aria-expanded", String(open));
     if (open) {
-      if (this.view.file >= 0) this.tree.select(this.view.file);
+      if (this.fileView.file >= 0) this.tree.select(this.fileView.file);
       this.filter.focus();
     } else if (this.sidebar.contains(document.activeElement) && this.filesButton.offsetParent !== null) {
       // Above the breakpoint the button is hidden and the sidebar stays in view, so focus stays put.
@@ -266,13 +303,13 @@ class Page {
    */
   private async goTo(t: GoTarget): Promise<void> {
     if (this.ended) return;
-    if (t.file === this.view.file && this.view.loaded) {
-      if (!(await this.view.leaveEditor())) return;
+    if (t.file === this.fileView.file && this.fileView.loaded) {
+      if (!(await this.fileView.leaveEditor())) return;
     } else if (!(await this.select(t.file))) {
       return;
     }
     if (t.line === undefined || this.ended) return;
-    const shown = await this.view.revealLine(t.side ?? "new", t.line);
+    const shown = await this.fileView.revealLine(t.side ?? "new", t.line);
     if (shown === "absent") this.notify(`Line ${t.line} is not shown: the file has no such line; the file is open`);
     else if (shown === "hidden") this.notify(`Line ${t.line} is not shown: it is outside the lines this file shows; the file is open`);
   }
@@ -283,25 +320,105 @@ class Page {
    */
   private async openFinish(): Promise<void> {
     if (this.ended || this.finish.isOpen) return;
-    if (!(await this.view.leaveEditor())) return;
+    if (!(await this.fileView.leaveEditor())) return;
     if (this.ended || this.finish.isOpen) return;
     this.finish.open();
   }
 
-  private toggleMode(): void {
-    this.view.setMode(this.view.viewMode === "unified" ? "split" : "unified");
-    this.renderMode();
+  /** Saves the Hide whitespace setting; a failed save puts the checkbox back. */
+  private async setHideWhitespace(hide: boolean): Promise<void> {
+    try {
+      await this.state.setHideWhitespace(hide);
+    } finally {
+      this.wsBox.checked = this.state.hideWhitespace;
+    }
   }
 
-  private renderMode(): void {
-    const toSplit = this.view.viewMode === "unified";
+  /** Since last review is offered while some file is changed since review (REQ-RND-010). */
+  private sinceOffered(): boolean {
+    return this.state.lastReviewAt !== undefined && this.state.files.some((_, i) => this.state.changedSince(i));
+  }
+
+  /**
+   * Sets the scope and shows the shown file under it; true once it is shown. A refused
+   * reload leaves the file under the earlier scope, so the scope goes back with it; a superseded
+   * or failed one does not, since the file was already left.
+   */
+  private async chooseScope(scope: Scope): Promise<boolean> {
+    if (this.scope === scope) return true;
+    const prev = this.scope;
+    this.scope = scope;
+    this.renderRound();
+    const i = this.fileView.file;
+    // Only a file changed since review looks different under the other scope.
+    if (i < 0 || !this.state.changedSince(i)) return true;
+    const load = await this.fileView.reload();
+    // Only a refusal leaves the file as it was; a superseding show already uses the current scope.
+    if (load === "refused" && this.scope === scope) {
+      this.scope = prev;
+      this.renderRound();
+    }
+    return load === "shown";
+  }
+
+  /** The round strip: the scope and what changed since the last review (REQ-RND-010, REQ-RND-011). */
+  private renderRound(): void {
+    const s = this.state;
+    const at = s.lastReviewAt;
+    this.round.replaceChildren();
+    this.round.hidden = at === undefined;
+    if (at === undefined) return;
+    if (this.sinceOffered()) {
+      const seg = h("div", "seg");
+      seg.setAttribute("role", "group");
+      seg.setAttribute("aria-label", "Changes shown");
+      const option = (scope: Scope, label: string): HTMLButtonElement => {
+        const b = h("button", scope === this.scope ? "on" : "", label);
+        b.setAttribute("aria-pressed", String(scope === this.scope));
+        b.addEventListener("click", () => this.run(this.chooseScope(scope)));
+        return b;
+      };
+      seg.append(option("since", "Since last review"), option("all", "All changes"));
+      this.round.append(seg);
+    }
+    let changed = 0;
+    let fresh = 0;
+    let same = 0;
+    let ws = 0;
+    s.files.forEach((f, i) => {
+      if (s.changedSince(i)) changed++;
+      else if (f.round === undefined) fresh++;
+      if (s.reviewedUnchanged(i)) same++;
+      else if (s.hideWhitespace && s.whitespace.has(i)) ws++;
+    });
+    // Changed and new files are the ones to read, so their counts stand out.
+    const items: Parameters<HTMLElement["append"]>[] = [];
+    const item = (n: number, rest: string, strong: boolean): void => {
+      if (n > 0) items.push(strong ? [h("b", "", count(n)), ` ${rest}`] : [`${count(n)} ${rest}`]);
+    };
+    item(changed, "changed since", true);
+    item(fresh, "new", true);
+    item(same, "reviewed unchanged", false);
+    item(ws, "whitespace only", false);
+    const text = h("span", "round-text", `Your last review was at ${clock(at)}`);
+    items.forEach((parts, k) => text.append(k === 0 ? ": " : ", ", ...parts));
+    this.round.append(text);
+  }
+
+  private toggleLayout(): void {
+    this.fileView.setLayout(this.fileView.layout === "unified" ? "split" : "unified");
+    this.renderLayout();
+  }
+
+  private renderLayout(): void {
+    const toSplit = this.fileView.layout === "unified";
     const label = (text: string, shown: boolean): HTMLElement => {
       const el = h("span", "", text);
       if (!shown) el.setAttribute("aria-hidden", "true");
       el.style.visibility = shown ? "" : "hidden";
       return el;
     };
-    this.modeButton.replaceChildren(label("Split view", toSplit), label("Unified view", !toSplit));
+    this.layoutButton.replaceChildren(label("Split view", toSplit), label("Unified view", !toSplit));
   }
 
   private renderTotals(): void {
@@ -316,13 +433,14 @@ class Page {
     if (this.state.counts.size > 0) parts.push(`+${count(added)} −${count(deleted)}${this.state.countsDone ? "" : "…"}`);
     if (this.state.countsError) parts.push("line counts unavailable");
     if (this.state.generatedError) parts.push("generated files not grouped");
+    if (this.state.whitespaceError) parts.push("whitespace-only files not grouped");
     this.totals.textContent = parts.join(" · ");
   }
 
   /** Moves by dir through the tree order from the shown file. */
-  private moveFile(dir: 1 | -1, pick?: (i: number) => boolean): void {
+  private moveFile(dir: Step, pick?: (i: number) => boolean): void {
     const order = this.tree.order();
-    const at = order.indexOf(this.view.file);
+    const at = order.indexOf(this.fileView.file);
     for (let k = 1; k <= order.length; k++) {
       const n = at + dir * k;
       if (n < 0 || n >= order.length) return;
@@ -336,10 +454,10 @@ class Page {
   }
 
   private async toggleViewed(): Promise<void> {
-    const i = this.view.file;
+    const i = this.fileView.file;
     if (i < 0) return;
     const viewed = !this.state.viewed.has(i);
-    await this.view.setViewed(viewed);
+    await this.fileView.setViewed(viewed);
     if (viewed) this.moveFile(1, (j) => !this.state.viewed.has(j));
   }
 
@@ -357,8 +475,8 @@ class Page {
       if (this.finish.isOpen) {
         if (this.finish.hasEditor()) this.run(this.finish.saveEditor());
         else this.run(this.finish.finish());
-      } else if (this.view.hasEditor()) {
-        this.run(this.view.saveEditor());
+      } else if (this.fileView.hasEditor()) {
+        this.run(this.fileView.saveEditor());
       } else {
         this.run(this.openFinish());
       }
@@ -367,9 +485,9 @@ class Page {
     if (e.key === "Escape") {
       // The dialog handles its own Esc; the diff's editor closes here, else the file list overlay.
       if (this.finish.isOpen) return;
-      if (this.view.hasEditor()) {
+      if (this.fileView.hasEditor()) {
         e.preventDefault();
-        this.run(this.view.discardEditor());
+        this.run(this.fileView.discardEditor());
       } else if (app.classList.contains("files-open")) {
         e.preventDefault();
         this.showFiles(false);
@@ -386,10 +504,10 @@ class Page {
         this.moveFile(-1);
         break;
       case "n":
-        this.view.moveHunk(1);
+        this.fileView.moveHunk(1);
         break;
       case "p":
-        this.view.moveHunk(-1);
+        this.fileView.moveHunk(-1);
         break;
       case "]":
         this.run(this.moveComment(1));
@@ -398,18 +516,18 @@ class Page {
         this.run(this.moveComment(-1));
         break;
       case "c":
-        this.view.commentOnCurrent();
+        this.fileView.commentOnCurrent();
         break;
       case "v":
         this.run(this.toggleViewed());
         break;
       case "s":
-        this.toggleMode();
+        this.toggleLayout();
         break;
       case "ArrowLeft":
       case "ArrowRight":
         // Split code text moves only through FileView; unified keeps the browser's native scroll.
-        if (!this.view.scrollSideways(e.key === "ArrowRight" ? 1 : -1)) return;
+        if (!this.fileView.scrollSideways(e.key === "ArrowRight" ? 1 : -1)) return;
         break;
       case "/":
         // Below the breakpoint the filter is in the folded file list.
@@ -424,15 +542,15 @@ class Page {
   }
 
   /** Next or previous comment, continuing into the next or previous file that has one. */
-  private async moveComment(dir: 1 | -1): Promise<void> {
-    if (this.view.moveComment(dir)) return;
+  private async moveComment(dir: Step): Promise<void> {
+    if (await this.fileView.moveComment(dir)) return;
     const order = this.tree.order();
-    const at = order.indexOf(this.view.file);
+    const at = order.indexOf(this.fileView.file);
     for (let n = at + dir; n >= 0 && n < order.length; n += dir) {
       const i = order[n]!;
       if (this.state.commentCount(i) === 0) continue;
-      await this.select(i);
-      this.view.scrollToEdgeComment(dir === -1);
+      if (!(await this.select(i))) return;
+      await this.fileView.scrollToEdgeComment(dir === -1);
       return;
     }
   }
@@ -462,21 +580,26 @@ class Page {
       }
     }
     if (run !== this.pollRun || this.ended) return;
-    // While counts stream in, poll faster so the tree fills promptly.
-    this.poll = window.setTimeout(() => void this.pollStatus(run), this.state.countsDone ? this.state.statusIntervalMs : Math.min(1000, this.state.statusIntervalMs));
+    // While counts or marks stream in, poll faster so the tree fills promptly.
+    const settled = this.state.countsDone && this.state.whitespaceDone;
+    this.poll = window.setTimeout(() => void this.pollStatus(run), settled ? this.state.statusIntervalMs : Math.min(1000, this.state.statusIntervalMs));
   }
 
   /**
-   * Applies the generated marks to the tree. A file the human chose stays shown, expanding its group;
-   * the file picked at load is replaced by the first file outside a collapsed group, so groups still
-   * start collapsed.
+   * Applies the generated or whitespace-only marks, or the Hide whitespace setting, to the tree. A
+   * file the human chose stays shown, expanding its group; the file picked at load is replaced by
+   * the first file outside a collapsed group, so groups still start collapsed.
    */
   private regroup(): void {
-    if (!this.autoSelected || !this.state.generated.has(this.view.file)) {
+    if (!this.autoSelected) {
       this.tree.regroup(true);
       return;
     }
     this.tree.regroup(false);
+    if (!this.tree.isFolded(this.fileView.file)) {
+      this.tree.regroup(true);
+      return;
+    }
     const first = this.tree.order().find((i) => !this.tree.isFolded(i));
     // Every file folded: keep the shown one and reveal its row.
     if (first === undefined) this.tree.regroup(true);

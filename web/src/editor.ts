@@ -1,7 +1,7 @@
 // The comment editor shared by the diff view and the Finish dialog: one comment's text, its save
 // to the server, and the rules a save follows. Where the editor is shown is the caller's.
 
-import { type Comment, HttpError, NoReply, type Placement, ServerGone, type Target } from "./api";
+import { type Comment, type CommentSite, HttpError, NoReply, type Placement, ServerGone } from "./api";
 import { h } from "./dom";
 import { newCommentId, type SaveOutcome, type State } from "./state";
 
@@ -64,7 +64,7 @@ export class CommentEditor {
     /** Fixed when the editor opens, so every save of the comment is the same PUT. */
     readonly id: string,
     /** Where the comment is: a saved comment's target, or a new comment's placement. */
-    readonly target: Target | Placement,
+    readonly target: CommentSite,
     version: number | null,
     body: string,
     placeholder: string,
@@ -303,12 +303,12 @@ export class CommentEditor {
 }
 
 /** Whether at is a new comment's placement rather than a saved comment's target. */
-function isPlacement(at: Target | Placement): at is Placement {
+function isPlacement(at: CommentSite): at is Placement {
   return !("path" in at);
 }
 
 /** Whether the stored comment c is at at: the same kind, file and lines. */
-function placedAt(c: Comment, at: Target | Placement): boolean {
+function placedAt(c: Comment, at: CommentSite): boolean {
   const t = c.target;
   if (t.target !== at.target) return false;
   if (isPlacement(at)) {

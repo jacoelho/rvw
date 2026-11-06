@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "lint": "node scripts/check-unions.mjs",
     "build": "tsc --noEmit && esbuild src/main.ts src/app.css --bundle --loader:.svg=text --format=esm --target=es2022,safari16 --minify --outdir=dist && cp src/index.html src/favicon.svg src/favicon.png dist/"
   },
   "devDependencies": {

@@ -1,19 +1,21 @@
 // The page's copy of the review. The server is authoritative: State is the one writer of every
 // fact here, and applies a change only after the server has saved it.
 
-import { type Api, type ChangedFile, type Comment, compareOrder, HttpError, type LineCount, type Placement, type QuoteLimits, type RenameDetection, type SearchLimits, type Session, type Side, type Target } from "./api";
+import { type Api, type ChangedFile, type Comment, type CommentSite, compareOrder, type EarlierComment, type EarlierPlacement, type EarlierStatus, HttpError, type LineCount, type Placement, type QuoteLimits, type RenameDetection, type SearchLimits, type Session, type Side } from "./api";
 
 /**
  * What changed, for listeners to refresh only what shows it:
  * - draft: comments or viewed marks;
  * - counts: line counts, or their completion or error;
  * - generated: the generated-file marks arrived;
- * - head: HEAD moved since the review started.
+ * - head: HEAD moved since the review started;
+ * - whitespace: the whitespace-only marks arrived;
+ * - hide: the Hide whitespace setting changed.
  */
-export type Change = "draft" | "counts" | "generated" | "head";
+export type Change = "draft" | "counts" | "generated" | "head" | "whitespace" | "hide";
 
 /** The server calls State makes. */
-export type ReviewApi = Pick<Api, "session" | "createComment" | "editComment" | "deleteComment" | "setViewed" | "setSummary" | "status">;
+export type ReviewApi = Pick<Api, "session" | "createComment" | "editComment" | "deleteComment" | "setViewed" | "setSummary" | "status" | "setHideWhitespace" | "copyEarlier">;
 
 /**
  * How saving a comment ended. A refused save (412) reloads the comments from the server first.
@@ -31,6 +33,14 @@ export class State {
   readonly searchLimits: SearchLimits;
   /** The status poll interval in milliseconds, set by the server. */
   readonly statusIntervalMs: number;
+  /** When the last delivered review was delivered, or undefined when there was none. */
+  readonly lastReviewAt: Date | undefined;
+  readonly earlier: readonly EarlierComment[];
+  /**
+   * Files with a comment or an earlier comment when the page loaded. Round groups leave them out,
+   * and fix that at load so a file does not move between groups as the human comments.
+   */
+  readonly commentedAtStart: ReadonlySet<number>;
   private readonly commentById = new Map<string, Comment>();
   private readonly viewedFiles: Set<number>;
   private readonly countByFile = new Map<number, LineCount>();
@@ -42,6 +52,10 @@ export class State {
   private countsFailure = "";
   private generatedKnown = false;
   private generatedFailure = "";
+  private readonly whitespaceFiles = new Set<number>();
+  private whitespaceKnown = false;
+  private whitespaceFailure = "";
+  private hideWs: boolean;
   private readonly listeners = new Set<(c: Change) => void>();
   /** The last write in flight; writes run one at a time, so they apply in the order they were made. */
   private writing: Promise<unknown> = Promise.resolve();
@@ -58,7 +72,14 @@ export class State {
     this.statusIntervalMs = s.statusIntervalMs;
     this.viewedFiles = new Set(s.viewed);
     this.summaryValue = s.summary;
+    this.hideWs = s.hideWhitespace;
+    this.lastReviewAt = s.lastReviewAt;
+    this.earlier = s.earlier;
     for (const c of s.comments) this.commentById.set(c.id, c);
+    const commented = new Set<number>();
+    for (const c of s.comments) if (c.file !== null) commented.add(c.file);
+    for (const e of s.earlier) if (e.file !== null) commented.add(e.file);
+    this.commentedAtStart = commented;
   }
 
   get comments(): ReadonlyMap<string, Comment> {
@@ -88,6 +109,57 @@ export class State {
   }
   get generatedError(): string {
     return this.generatedFailure;
+  }
+  /** Files whose changes are only whitespace; empty until the server's marks arrive. */
+  get whitespace(): ReadonlySet<number> {
+    return this.whitespaceFiles;
+  }
+  get whitespaceDone(): boolean {
+    return this.whitespaceKnown;
+  }
+  get whitespaceError(): string {
+    return this.whitespaceFailure;
+  }
+  get hideWhitespace(): boolean {
+    return this.hideWs;
+  }
+
+  /**
+   * Whether file i is reviewed and unchanged since (REQ-RND-008). A file reviewed with whitespace
+   * hidden may differ from its reviewed version in whitespace, so it counts only while whitespace
+   * stays hidden.
+   */
+  reviewedUnchanged(i: number): boolean {
+    const r = this.files[i]?.round;
+    return r !== undefined && r.state === "same" && (!r.reviewedWs || this.hideWs);
+  }
+
+  /** Whether file i's new side differs from its reviewed version's (REQ-RND-008). */
+  changedSince(i: number): boolean {
+    const r = this.files[i]?.round;
+    return r?.state === "changed" || r?.state === "changed_base";
+  }
+
+  /** Whether file i's old side differs from its reviewed version's (REQ-RND-008). */
+  baseChanged(i: number): boolean {
+    const r = this.files[i]?.round;
+    return r?.state === "base" || r?.state === "changed_base";
+  }
+
+  /** Whether file i equals its reviewed version but is not reviewed unchanged: whitespace is shown now. */
+  reviewedWithWhitespaceHidden(i: number): boolean {
+    return this.files[i]?.round?.state === "same" && !this.reviewedUnchanged(i);
+  }
+
+  /** IDs of the earlier comments a draft comment was copied from. */
+  copiedEarlier(): Set<string> {
+    const out = new Set<string>();
+    for (const c of this.commentById.values()) if (c.copiedFrom !== undefined) out.add(c.copiedFrom);
+    return out;
+  }
+
+  earlierFor(i: number): EarlierComment[] {
+    return this.earlier.filter((e) => e.file === i);
   }
 
   onChange(fn: (c: Change) => void): void {
@@ -136,13 +208,31 @@ export class State {
     });
   }
 
-  setViewed(i: number, viewed: boolean): Promise<void> {
+  /** Sets the viewed mark of every file in files as one change. */
+  setViewed(files: readonly number[], viewed: boolean): Promise<void> {
     return this.write(async () => {
-      await this.api.setViewed(i, viewed);
-      if (viewed) this.viewedFiles.add(i);
-      else this.viewedFiles.delete(i);
+      await this.api.setViewed(files, viewed);
+      for (const i of files) {
+        if (viewed) this.viewedFiles.add(i);
+        else this.viewedFiles.delete(i);
+      }
       this.notify("draft");
     });
+  }
+
+  setHideWhitespace(hide: boolean): Promise<void> {
+    return this.write(async () => {
+      await this.api.setHideWhitespace(hide);
+      if (this.hideWs === hide) return;
+      this.hideWs = hide;
+      this.notify("hide");
+    });
+  }
+
+  /** Copies earlier comment eid into the draft (Still applies); a copy made before is returned as is. */
+  copyEarlier(eid: string): Promise<Comment> {
+    const id = newCommentId();
+    return this.write(async () => this.put(await this.api.copyEarlier(eid, id)));
   }
 
   setSummary(text: string): Promise<void> {
@@ -160,7 +250,7 @@ export class State {
 
   /** Fetches the server's status and applies what is new. */
   async syncStatus(): Promise<void> {
-    const s = await this.api.status(this.countsNext);
+    const s = await this.api.status(this.countsNext, this.whitespaceKnown);
     if (s.headMoved && !this.headHasMoved) {
       this.headHasMoved = true;
       this.notify("head");
@@ -171,6 +261,12 @@ export class State {
       this.generatedFailure = s.generatedError;
       for (const i of s.generated) this.generatedFiles.add(i);
       this.notify("generated");
+    }
+    if (!this.whitespaceKnown && s.whitespace !== null) {
+      this.whitespaceKnown = true;
+      this.whitespaceFailure = s.whitespaceError;
+      for (const i of s.whitespace) this.whitespaceFiles.add(i);
+      this.notify("whitespace");
     }
     if (!this.countsComplete) {
       for (const [i, c] of s.counts) this.countByFile.set(i, c);
@@ -246,7 +342,7 @@ export function newCommentId(): string {
   return `h-${crypto.randomUUID()}`;
 }
 
-export function targetLabel(t: Target | Placement): string {
+export function targetLabel(t: CommentSite): string {
   switch (t.target) {
     case "review":
       return "review";
@@ -265,6 +361,31 @@ export function lineTarget(file: number, side: Side, start: number, end: number)
 }
 
 /** The last line a line or range target covers, or 0. */
-export function targetEnd(t: Target | Placement): number {
+export function targetEnd(t: CommentSite): number {
   return t.target === "line" ? t.line : t.target === "range" ? t.end : 0;
+}
+
+/** A review time as the UI shows it: HH:MM, with the date when it is not today. */
+export function clock(d: Date): string {
+  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+  if (d.toDateString() === new Date().toDateString()) return time;
+  return `${d.toLocaleDateString([], { month: "short", day: "numeric" })} ${time}`;
+}
+
+/** An earlier comment's status: its file request's placement, else the session's, else unplaced. */
+export function earlierStatus(e: EarlierComment, p: EarlierPlacement | undefined): EarlierStatus {
+  return p?.status ?? e.status ?? "unplaced";
+}
+
+/**
+ * Where an earlier comment points. A current comment names its placed lines; any other names its
+ * lines in the version it was written on.
+ */
+export function earlierTargetLabel(e: EarlierComment, p: EarlierPlacement | undefined): string {
+  const t = e.target;
+  if (t.target === "review" || t.target === "file") return t.target;
+  const lines = (a: number, b: number): string => (a === b ? `line ${a}` : `lines ${a}–${b}`);
+  if (p?.status === "current") return `${lines(p.start, p.end)} (${p.side})`;
+  const start = p?.start ?? (t.target === "line" ? t.line : t.start);
+  return `${lines(start, p?.end ?? targetEnd(t))} (reviewed version)`;
 }

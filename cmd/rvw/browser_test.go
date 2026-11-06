@@ -1693,8 +1693,8 @@ func TestBrowserUnchangedEditor(t *testing.T) {
 	})
 }
 
-// pageClosedLine starts the stderr line of the page-closed outcome.
-const pageClosedLine = "rvw: the review page was closed; saved draft changes are kept at "
+// pageClosedMsg is the stderr record of the page-closed outcome.
+const pageClosedMsg = "the review page was closed; saved draft changes are kept"
 
 // TestBrowserPageClosed: closing the only review tab ends rvw with status 4 after the close grace,
 // and a rerun resumes the saved comment.
@@ -1720,8 +1720,8 @@ func TestBrowserPageClosed(t *testing.T) {
 	if out := p.stdout.String(); out != "" {
 		t.Errorf("stdout after closing the tab: %q", out)
 	}
-	if !strings.Contains(p.stderr.String(), pageClosedLine) {
-		t.Errorf("stderr lacks %q:\n%s", pageClosedLine, p.stderr)
+	if _, ok := logRecord(p.stderr.String(), pageClosedMsg); !ok {
+		t.Errorf("stderr lacks %q:\n%s", pageClosedMsg, p.stderr)
 	}
 	resumed, s := w.inspectDraft("last")
 	if !resumed || len(s.Comments) != 1 || s.Comments[0].Body != "kept after close" {
@@ -2714,6 +2714,43 @@ func TestBrowserNewFileShowsItsTop(t *testing.T) {
 	pg.frames()
 	if got := pg.text(`String(` + diffScroller + `.scrollTop)`); got != "0" {
 		t.Errorf("short.go shown at scrollTop %s, want 0", got)
+	}
+	pg.noPageErrors()
+}
+
+// topComment is the body of the comment card in the diff's first visible row, or "".
+const topComment = `(() => { const top = ` + diffScroller + `.getBoundingClientRect().top; const r = [...document.querySelectorAll(".diff .vl-row")].filter((e) => e.getBoundingClientRect().bottom > top + 1).sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top)[0]; return r?.querySelector(".c-body")?.textContent ?? ""; })()`
+
+// TestBrowserCommentSteps: ] and [ step through a file's comments in order, one at a
+// time, even when the next comment is already in view below the one shown.
+func TestBrowserCommentSteps(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	// Every line changes, so the diff is one hunk far taller than the view.
+	edited := map[int]string{}
+	for k := 1; k <= 200; k++ {
+		edited[k] = fmt.Sprintf("line %d edited", k)
+	}
+	w.write("a.go", numberedLines(200, nil))
+	w.commit("base")
+	w.write("a.go", numberedLines(200, edited))
+	w.commit("edit")
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	for id, line := range map[string]int{"c10": 10, "c12": 12, "c150": 150} {
+		p.createComment(id, fmt.Sprintf(`{"target":{"target":"line","file":0,"side":"new","line":%d},"body":"at %d"}`, line, line))
+	}
+	pg := openPage(t, p)
+	pg.ready()
+	pg.waitTrue("a.go shown", shownPath+` === "a.go" && `+fileLoaded)
+
+	for _, want := range []string{"at 10", "at 12", "at 150"} {
+		pg.press("]", "BracketRight", 221, 0)
+		pg.waitTrue("] to the comment "+want, topComment+` === `+jsString(want))
+	}
+	for _, want := range []string{"at 12", "at 10"} {
+		pg.press("[", "BracketLeft", 219, 0)
+		pg.waitTrue("[ to the comment "+want, topComment+` === `+jsString(want))
 	}
 	pg.noPageErrors()
 }

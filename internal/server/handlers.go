@@ -9,20 +9,23 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jacoelho/rvw/internal/highlight"
 	"github.com/jacoelho/rvw/internal/review"
+	"github.com/jacoelho/rvw/internal/round"
 	"github.com/jacoelho/rvw/internal/source"
 )
 
-type fileJSON struct {
-	Status      string `json:"status"`
-	OldPath     string `json:"old_path,omitzero"`
-	NewPath     string `json:"new_path,omitzero"`
-	OldMode     string `json:"old_mode,omitzero"`
-	NewMode     string `json:"new_mode,omitzero"`
-	VendoredDir string `json:"vendored_dir,omitzero"`
-	Commentable bool   `json:"commentable"`
+type fileJSON struct { //nolint:govet // fieldalignment: field order is the JSON member order.
+	Status      string    `json:"status"`
+	OldPath     string    `json:"old_path,omitzero"`
+	NewPath     string    `json:"new_path,omitzero"`
+	OldMode     string    `json:"old_mode,omitzero"`
+	NewMode     string    `json:"new_mode,omitzero"`
+	VendoredDir string    `json:"vendored_dir,omitzero"`
+	Commentable bool      `json:"commentable"`
+	Round       roundJSON `json:"round,omitzero"`
 }
 
 // commentJSON is a comment as the UI shows it. File is the changed-file index, null for a review
@@ -36,6 +39,8 @@ type commentJSON struct { //nolint:govet // fieldalignment: field order is the J
 	Body    string        `json:"body"`
 	File    *int          `json:"file"`
 	Order   [4]int64      `json:"order"`
+	// CopiedFrom is the earlier comment this one was copied from (REQ-CMT-011).
+	CopiedFrom string `json:"copied_from,omitzero"`
 }
 
 // targetJSON is a comment's target as the UI shows it. Path is review's choice for the target's
@@ -64,6 +69,7 @@ func toTargetJSON(t review.Target) targetJSON {
 func toCommentJSON(c review.Comment) commentJSON {
 	j := commentJSON{
 		ID: c.ID, Version: c.Version, Author: c.Author, Target: toTargetJSON(c.Target), Body: c.Body, Order: c.SortKey(),
+		CopiedFrom: c.CopiedFrom,
 	}
 	if c.File >= 0 {
 		j.File = &c.File
@@ -71,7 +77,7 @@ func toCommentJSON(c review.Comment) commentJSON {
 	return j
 }
 
-type sessionJSON struct {
+type sessionJSON struct { //nolint:govet // fieldalignment: field order is the JSON member order.
 	Source          string        `json:"source"`
 	RenameDetection string        `json:"rename_detection"`
 	Files           []fileJSON    `json:"files"`
@@ -82,6 +88,10 @@ type sessionJSON struct {
 	Search          searchLimits  `json:"search"`
 	// StatusIntervalMs is how often the UI polls GET /api/status, in milliseconds.
 	StatusIntervalMs int64 `json:"status_interval_ms"`
+	HideWhitespace   bool  `json:"hide_whitespace"`
+	// LastReviewAt is when the last round was delivered; absent when the ledger has none.
+	LastReviewAt time.Time     `json:"last_review_at,omitzero"`
+	Earlier      []earlierJSON `json:"earlier"`
 }
 
 // quoteLimits tells the Finish dialog how much of a target a quote shows, so it can size a row
@@ -182,13 +192,32 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
 			OldMode: f.OldMode, NewMode: f.NewMode, Commentable: commentable,
 			VendoredDir: displayPath(snap.VendoredDir(i), commentable),
 		}
+		if out.Files[i].Round, err = toRoundJSON(s.prior, i); err != nil {
+			s.fail(w, r, err)
+			return
+		}
 	}
-	v := s.cfg.Session.View()
+	prior := s.prior
+	out.LastReviewAt = prior.LastAt()
+	out.Earlier = make([]earlierJSON, 0, len(prior.Earlier()))
+	for _, c := range prior.Earlier() {
+		j, err := toEarlierJSON(prior.EarlierAt(), c)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		out.Earlier = append(out.Earlier, j)
+	}
+	v := s.cfg.Session.Draft()
 	out.Comments = make([]commentJSON, len(v.Comments))
 	for k, c := range v.Comments {
 		out.Comments[k] = toCommentJSON(c)
 	}
-	out.Summary, out.Viewed = v.Summary, v.Viewed
+	out.Viewed = make([]int, len(v.Viewed))
+	for k, m := range v.Viewed {
+		out.Viewed[k] = m.File
+	}
+	out.Summary, out.HideWhitespace = v.Summary, v.HideWhitespace
 	s.writeJSON(w, out)
 }
 
@@ -206,10 +235,24 @@ type fileDiffJSON struct { //nolint:govet // fieldalignment: field order is the 
 	New         sideJSON   `json:"new"`
 	Hunks       []hunkJSON `json:"hunks"`
 	GapAfter    *gapJSON   `json:"gap_after,omitzero"`
+	// Scope is "since" when Hunks are the interdiff, else "all".
+	Scope            string `json:"scope"`
+	SinceUnavailable string `json:"since_unavailable,omitzero"`
+	// WsOnly has one entry per hunk; present only when asked for and computed.
+	WsOnly     []bool             `json:"ws_only,omitzero"`
+	SinceAdded [][2]int           `json:"since_added,omitzero"`
+	Earlier    []placementOutJSON `json:"earlier"`
 }
 
+// getFile returns file i's diff. With scope=since it is the interdiff when the file has one
+// (REQ-RND-010), else the snapshot diff with the reason; ws=1 adds the whitespace-only hunks.
 func (s *Server) getFile(w http.ResponseWriter, r *http.Request) {
-	i, ok := s.fileIndex(w, r.URL.Query().Get("i"))
+	q := r.URL.Query()
+	i, ok := s.fileIndex(w, q.Get("i"))
+	if !ok {
+		return
+	}
+	since, ws, ok := fileQuery(w, q.Get("scope"), q.Get("ws"))
 	if !ok {
 		return
 	}
@@ -218,7 +261,8 @@ func (s *Server) getFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.release()
-	d, err := s.snap.Diff(r.Context(), i)
+	ctx := r.Context()
+	d, scope, unavailable, err := s.fileDiff(ctx, i, since)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -231,15 +275,95 @@ func (s *Server) getFile(w http.ResponseWriter, r *http.Request) {
 	facts := d.Facts
 	out := fileDiffJSON{
 		Kind: kind, Large: facts.Large,
-		Old: sideJSON{facts.Old.Present, facts.Old.Lines, facts.Old.Size},
-		New: sideJSON{facts.New.Present, facts.New.Lines, facts.New.Size},
+		Old:   sideJSON{facts.Old.Present, facts.Old.Lines, facts.Old.Size},
+		New:   sideJSON{facts.New.Present, facts.New.Lines, facts.New.Size},
+		Scope: scope, SinceUnavailable: unavailable,
 	}
 	var oldSpans, newSpans [][]highlight.Span
 	if facts.Kind == source.KindText && !facts.Large {
-		oldSpans, newSpans, out.Highlighted = highlightSides(r.Context(), s.highlighter(i), d)
+		oldSpans, newSpans, out.Highlighted = highlightSides(ctx, s.highlighter(i), d)
 	}
 	out.Hunks, out.GapAfter = buildHunks(d, oldSpans, newSpans)
+	if ws && facts.Kind == source.KindText {
+		// Whitespace hiding degrades to showing every hunk, so a failure is logged, not fatal.
+		if out.WsOnly, err = s.snap.WhitespaceOnly(ctx, d); err != nil {
+			s.log.Warn("whitespace-only hunks not computed", "path", s.snap.File(i).Path(), "err", err)
+			out.WsOnly = nil
+		}
+	}
+	if scope == scopeAll {
+		if out.SinceAdded, err = s.prior.AddedSince(ctx, i); err != nil {
+			if ctx.Err() != nil {
+				s.fail(w, r, err)
+				return
+			}
+			// Per-file decorations degrade: the file is served without them (Failure behaviour).
+			s.log.Warn("lines added since review not computed", "path", s.snap.File(i).Path(), "err", err)
+			out.SinceAdded = nil
+		}
+	}
+	// Place degrades per comment and fails only when the request ends.
+	placed, err := s.prior.Place(ctx, i)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	for _, pl := range placed {
+		if pl.Cause != nil {
+			s.log.Warn("earlier comment not placed", "id", pl.ID, "path", s.snap.File(i).Path(), "err", pl.Cause)
+		}
+	}
+	if out.Earlier, err = s.placementsJSON(placed); err != nil {
+		s.fail(w, r, err)
+		return
+	}
 	s.writeJSON(w, out)
+}
+
+// The file scopes: the snapshot diff, or the interdiff since the last review.
+const (
+	scopeAll   = "all"
+	scopeSince = "since"
+)
+
+// fileQuery reads a file request's scope and ws parameters.
+func fileQuery(w http.ResponseWriter, scope, ws string) (since, wsOnly, ok bool) {
+	switch scope {
+	case "", scopeAll:
+	case scopeSince:
+		since = true
+	default:
+		http.Error(w, `scope must be "all" or "since"`, http.StatusBadRequest)
+		return false, false, false
+	}
+	switch ws {
+	case "", "0":
+	case "1":
+		wsOnly = true
+	default:
+		http.Error(w, `ws must be "0" or "1"`, http.StatusBadRequest)
+		return false, false, false
+	}
+	return since, wsOnly, true
+}
+
+// fileDiff returns file i's diff to show: the interdiff when since is set and the file has one,
+// else the snapshot diff, with the scope shown and why the interdiff is not.
+func (s *Server) fileDiff(ctx context.Context, i int, since bool) (d source.FileDiff, scope, unavailable string, err error) {
+	if since {
+		var fb round.Fallback
+		if d, fb, err = s.prior.Since(ctx, i); err != nil {
+			return source.FileDiff{}, "", "", err
+		}
+		if fb == round.NoFallback {
+			return d, scopeSince, "", nil
+		}
+		if unavailable, err = fallbackName(fb); err != nil {
+			return source.FileDiff{}, "", "", err
+		}
+	}
+	d, err = s.snap.Diff(ctx, i)
+	return d, scopeAll, unavailable, err
 }
 
 // highlighter tokenizes file i's text. Its language is decided once, from the file's shown path,
@@ -263,7 +387,7 @@ func (h highlighter) lines(ctx context.Context, data []byte) ([][]highlight.Span
 	defer cancel()
 	spans, err := highlight.Lines(ctx, h.lang, validText(data))
 	if err != nil {
-		h.s.logf("rvw: highlight %s: %v", h.path, err)
+		h.s.log.Warn("highlight failed", "path", h.path, "err", err)
 	}
 	return spans, err
 }
@@ -301,6 +425,10 @@ func (s *Server) getContext(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	since, _, ok := fileQuery(w, q.Get("scope"), "")
+	if !ok {
+		return
+	}
 	from, errFrom := strconv.Atoi(q.Get("from"))
 	to, errTo := strconv.Atoi(q.Get("to"))
 	if errFrom != nil || errTo != nil || from < 1 || to < from {
@@ -312,9 +440,14 @@ func (s *Server) getContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.release()
-	d, err := s.snap.Diff(r.Context(), i)
+	d, scope, _, err := s.fileDiff(r.Context(), i, since)
 	if err != nil {
 		s.fail(w, r, err)
+		return
+	}
+	if since && scope != scopeSince {
+		// The interdiff the page expanded is gone, as when its blob was pruned since.
+		http.Error(w, "the file has no interdiff", http.StatusConflict)
 		return
 	}
 	lines, err := d.Context(from, to)
@@ -487,24 +620,6 @@ func (s *Server) deleteComment(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) putViewed(w http.ResponseWriter, r *http.Request) {
-	i, ok := s.fileIndex(w, r.PathValue("i"))
-	if !ok {
-		return
-	}
-	var req struct {
-		Viewed bool `json:"viewed"`
-	}
-	if !readJSON(w, r, &req) {
-		return
-	}
-	if err := s.cfg.Session.SetViewed(i, req.Viewed); err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
 func (s *Server) putSummary(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Summary string `json:"summary"`
@@ -575,7 +690,7 @@ func (s *Server) getResult(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 	if _, err := w.Write(review.RenderMarkdown(res)); err != nil {
-		s.logf("rvw: write %s: %v", r.URL.Path, err)
+		s.log.Warn("write response", "path", r.URL.Path, "err", err)
 	}
 }
 
@@ -591,7 +706,7 @@ func (s *Server) postFinish(w http.ResponseWriter, r *http.Request) {
 	// Delivery must not depend on the browser staying connected.
 	d, err := s.cfg.Session.Finish(context.WithoutCancel(r.Context()), s.cfg.Deliver)
 	if deliveryErr, ok := errors.AsType[*review.DeliveryError](err); ok {
-		s.logf("rvw: %v", deliveryErr)
+		s.log.Error("review result not delivered", "err", deliveryErr)
 		s.writeJSON(w, finishJSON{Error: "the review result was not delivered: " + deliveryErr.Err.Error()})
 		s.end(DeliveryFailed)
 		return
@@ -602,7 +717,7 @@ func (s *Server) postFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	if d.DraftErr != nil {
 		// The result was delivered; the draft expires later.
-		s.logf("rvw: %v", d.DraftErr)
+		s.log.Warn("delete draft after delivery", "err", d.DraftErr)
 	}
 	s.writeJSON(w, finishJSON{Delivered: true, Markdown: string(review.RenderMarkdown(d.Result))})
 	s.end(Finished)
@@ -616,7 +731,7 @@ func (s *Server) postCancel(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		// The session has ended; a draft that could not be deleted expires later.
-		s.logf("rvw: %v", err)
+		s.log.Warn("delete draft after cancel", "err", err)
 	}
 	w.WriteHeader(http.StatusNoContent)
 	s.end(Cancelled)
@@ -645,6 +760,10 @@ type statusJSON struct { //nolint:govet // fieldalignment: field order is the JS
 	Generated      []int       `json:"generated,omitzero"`
 	GeneratedDone  bool        `json:"generated_done"`
 	GeneratedError string      `json:"generated_error,omitzero"`
+	// The whitespace-only marks, absent when the poll sent ws_known=1.
+	Whitespace      []int  `json:"whitespace,omitzero"`
+	WhitespaceDone  bool   `json:"whitespace_done,omitzero"`
+	WhitespaceError string `json:"whitespace_error,omitzero"`
 }
 
 // getStatus reports line counts found since index `since` and whether HEAD moved.
@@ -657,15 +776,25 @@ func (s *Server) getStatus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	var wsKnown bool
+	switch r.URL.Query().Get("ws_known") {
+	case "", "0":
+	case "1":
+		wsKnown = true
+	default:
+		http.Error(w, `ws_known must be "0" or "1"`, http.StatusBadRequest)
+		return
+	}
 	moved, err := s.head.movedSince(r.Context(), s.snap)
 	if err != nil {
-		s.logf("rvw: %v", err)
+		s.log.Warn("check whether HEAD moved", "err", err)
 	}
-	v := s.facts.since(since)
+	v := s.facts.since(since, wsKnown)
 	out := statusJSON{
 		HeadMoved: moved, Counts: make([]countJSON, len(v.counts)),
 		Next: v.next, CountsDone: v.countDone, CountsError: v.countErr,
 		Generated: v.generated, GeneratedDone: v.genDone, GeneratedError: v.genErr,
+		Whitespace: v.ws, WhitespaceDone: v.wsDone, WhitespaceError: v.wsErr,
 	}
 	for k, fc := range v.counts {
 		out.Counts[k] = countJSON{I: fc.i, Added: fc.c.Added, Deleted: fc.c.Deleted, Binary: fc.c.Binary}
@@ -701,14 +830,8 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		// The client went away, or the session ended and the server is stopping.
 		http.Error(w, "the request was cancelled", http.StatusServiceUnavailable)
 	default:
-		s.logf("rvw: %s %s: %v", r.Method, r.URL.Path, err)
+		s.log.Error("request failed", "method", r.Method, "path", r.URL.Path, "err", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
-}
-
-func (s *Server) logf(format string, args ...any) {
-	if s.cfg.Log != nil {
-		s.cfg.Log.Printf(format, args...)
 	}
 }
 
@@ -734,6 +857,6 @@ func (s *Server) writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.MarshalWrite(w, v, jsontext.AllowInvalidUTF8(true)); err != nil {
 		// The status is sent; the client sees a truncated body that fails to parse.
-		s.logf("rvw: encode response: %v", err)
+		s.log.Warn("encode response", "err", err)
 	}
 }

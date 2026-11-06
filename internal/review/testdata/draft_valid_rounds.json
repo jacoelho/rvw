@@ -1,0 +1,3 @@
+{"version":2,"comments":[
+{"id":"l1","author":"human","target":{"kind":"line","path":"a.go","side":"new","start":2,"end":2},"body":"still applies","seq":0,"copied_from":"e-123"}
+],"summary":"","viewed":[{"old_path":"a.go","new_path":"a.go","whitespace":true},{"old_path":"del.go","new_path":""}],"hide_whitespace":true}
