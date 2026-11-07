@@ -3,6 +3,7 @@
 package source
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -85,14 +87,33 @@ type Snapshot struct {
 	baseTree   string
 	headTree   string
 	headCommit string
-	files      []ChangedFile
+	// baseCommit is what a branch source's base ref resolved to; "" for other sources.
+	baseCommit string
+	// index is the private index the uncommitted tree was written from, kept for Changed; nil
+	// unless the head is the uncommitted tree.
+	index *privateIndex
+	files []ChangedFile
 	// records[i] is files[i]'s raw record from the listing. Patches and counts are computed from
 	// these records, so the listing alone decides how a file's sides are paired.
 	records []string
 	// sizes is the size of every non-submodule blob of files, -1 when absent locally.
-	sizes    map[string]int64
+	sizes map[string]int64
+	// missing lists, sorted, the blobs of files absent locally when they were listed: the ones
+	// Changed asks about.
+	missing  []string
 	vendored []string // vendored directory per file, see VendoredDir
 	renames  RenameDetection
+}
+
+// SameFiles reports whether s and o list the same changed files in the same order, paired the same
+// way (the raw records that decide how patches pair the sides) and with the same blobs present
+// locally (ChangedFile.Missing), so a file index names the same file, with the same readable
+// content, in both. It compares only the listing; trees and commits are not compared (DraftKey
+// covers them). It works after Close, since files and records are retained. In a partial clone,
+// a blob arriving that leaves a file with none missing makes it false, even when no rename
+// pairing changes.
+func (s *Snapshot) SameFiles(o *Snapshot) bool {
+	return s.renames == o.renames && slices.Equal(s.files, o.files) && slices.Equal(s.records, o.records)
 }
 
 // Source returns the source that produced the snapshot.
@@ -123,25 +144,92 @@ func (s *Snapshot) CommonDir() string { return s.repo.commonDir }
 // TopLevel is the top-level directory of the worktree the snapshot was resolved in.
 func (s *Snapshot) TopLevel() string { return s.repo.topLevel }
 
-// HeadMoved reports whether HEAD now resolves to a commit other than HeadCommit, including an
-// unborn HEAD gaining a commit.
-func (s *Snapshot) HeadMoved(ctx context.Context) (bool, error) {
+// Changed reports whether resolving the snapshot's source now could give other trees or another
+// file list (REQ-SES-010): HEAD resolves to another commit, including an unborn HEAD gaining one; a
+// branch source's base ref resolves to another commit or to none; when the head is the uncommitted
+// tree, a worktree file differs from the snapshot's private index or a file that is neither in it
+// nor ignored appears; or, in a partial clone, a blob absent when the files were listed is now
+// present, which changes the listing (SameFiles) though not the trees. A true answer is a reason
+// to resolve again, not a promise that anything differs: a file edited and changed back, or a
+// commit of the same tree, reads as changed.
+//
+// It runs git but writes no object, fetches none, and touches neither the real index nor the
+// worktree: the worktree is compared with the private index, whose stat data it refreshes, and the
+// absent blobs are asked about in one `cat-file --batch-check` run. Index-only changes, such as
+// untracking a file, and ignore rules outside the worktree changing are not seen. It fails after
+// Close of an uncommitted snapshot.
+func (s *Snapshot) Changed(ctx context.Context) (bool, error) {
 	head, err := s.repo.headCommit(ctx)
 	if err != nil {
 		return false, err
 	}
-	return head != s.headCommit, nil
+	if head != s.headCommit {
+		return true, nil
+	}
+	if s.source.kind == KindBranch {
+		base, err := s.repo.commitOf(ctx, s.source.baseRef)
+		if err != nil {
+			return false, err
+		}
+		if base != s.baseCommit {
+			return true, nil
+		}
+	}
+	if s.index != nil {
+		if changed, err := s.index.changed(ctx, s.repo.run); err != nil || changed {
+			return changed, err
+		}
+	}
+	return s.blobsArrived(ctx)
 }
 
-// Repo is one repository's git boundary. It owns a long-lived object reader; Close stops it for
-// good, so a blob read after Close fails.
+// blobsArrived reports whether a file listed with a blob absent locally (ChangedFile.Missing) now
+// has every blob present, which changes the listing: one blob of two arriving changes nothing.
+func (s *Snapshot) blobsArrived(ctx context.Context) (bool, error) {
+	if len(s.missing) == 0 {
+		return false, nil
+	}
+	now := make(map[string]int64, len(s.missing))
+	if err := s.repo.sizeBlobs(ctx, s.missing, now); err != nil {
+		return false, err
+	}
+	present := func(id string) bool {
+		n, listed := s.sizes[id]
+		_, arrived := now[id]
+		return !listed || n >= 0 || arrived
+	}
+	for _, f := range s.files {
+		if f.Missing && present(f.OldBlob) && present(f.NewBlob) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// Close deletes the snapshot's private index, after which Changed fails. Every other method still
+// works: the trees and blobs are in the object database. It is idempotent, and Repo.Close does it
+// for every snapshot still open.
+func (s *Snapshot) Close() error {
+	if s.index == nil {
+		return nil
+	}
+	err := s.index.close()
+	s.repo.forget(s.index)
+	return err
+}
+
+// Repo is one repository's git boundary. It owns a long-lived object reader and the private
+// indexes of its open snapshots; Close stops the reader and deletes the indexes for good, so a
+// blob read after Close fails.
 type Repo struct {
 	objects   *objectReader
+	indexes   map[*privateIndex]struct{} // the open snapshots' private indexes
 	topLevel  string
 	commonDir string
 	emptyTree string
 	run       runner
 	objMu     sync.Mutex // guards objects and closed
+	indexMu   sync.Mutex // guards indexes
 	closed    bool
 }
 
@@ -176,17 +264,52 @@ func Open(ctx context.Context, dir string) (*Repo, error) {
 	return r, nil
 }
 
-// Close stops the object reader. Later blob reads fail with ErrClosed.
+// Close stops the object reader and deletes the private index of every snapshot still open. Later
+// blob reads fail with ErrClosed.
 func (r *Repo) Close() error {
+	// closed is set under indexMu, which keep holds while it checks closed, so no index is kept
+	// after the swap below.
+	r.indexMu.Lock()
+	r.objMu.Lock()
+	r.closed = true
+	r.objMu.Unlock()
+	indexes := r.indexes
+	r.indexes = nil
+	r.indexMu.Unlock()
+	var errs []error
+	for x := range indexes {
+		errs = append(errs, x.close())
+	}
 	r.objMu.Lock()
 	defer r.objMu.Unlock()
-	r.closed = true
-	if r.objects == nil {
-		return nil
+	if r.objects != nil {
+		errs = append(errs, r.objects.close())
+		r.objects = nil
 	}
-	err := r.objects.close()
-	r.objects = nil
-	return err
+	return errors.Join(errs...)
+}
+
+// keep records x as an open snapshot's index, for Close to delete. It fails after Close.
+func (r *Repo) keep(x *privateIndex) error {
+	r.indexMu.Lock()
+	defer r.indexMu.Unlock()
+	r.objMu.Lock()
+	closed := r.closed
+	r.objMu.Unlock()
+	if closed {
+		return ErrClosed
+	}
+	if r.indexes == nil {
+		r.indexes = map[*privateIndex]struct{}{}
+	}
+	r.indexes[x] = struct{}{}
+	return nil
+}
+
+func (r *Repo) forget(x *privateIndex) {
+	r.indexMu.Lock()
+	defer r.indexMu.Unlock()
+	delete(r.indexes, x)
 }
 
 // headCommit returns the commit HEAD resolves to, or "" when HEAD is unborn.
@@ -222,7 +345,8 @@ func (r *Repo) OriginHead(ctx context.Context) (string, error) {
 }
 
 // Resolve builds the snapshot for src. progress receives what Resolve is doing while it runs.
-func (r *Repo) Resolve(ctx context.Context, src Source, progress *slog.Logger) (*Snapshot, error) {
+// err is named so the deferred cleanup below can add a failed index deletion to it.
+func (r *Repo) Resolve(ctx context.Context, src Source, progress *slog.Logger) (_ *Snapshot, err error) {
 	if src.kind == "" {
 		return nil, errors.New("source not set")
 	}
@@ -234,70 +358,100 @@ func (r *Repo) Resolve(ctx context.Context, src Source, progress *slog.Logger) (
 		return nil, errors.New("HEAD is unborn; " + src.String() + " needs a commit")
 	}
 	snap := &Snapshot{repo: r, source: src, headCommit: head}
-	if snap.baseTree, err = r.baseTree(ctx, src, head); err != nil {
+	if snap.baseCommit, snap.baseTree, err = r.base(ctx, src, head); err != nil {
 		return nil, err
 	}
 	if src.uncommitted {
 		progress.Info("snapshotting uncommitted changes", "how", "git add -A into a private index")
-		snap.headTree, err = r.uncommittedTree(ctx)
+		snap.headTree, snap.index, err = r.uncommittedTree(ctx)
 	} else {
 		snap.headTree, err = r.treeOf(ctx, head)
 	}
 	if err != nil {
 		return nil, err
 	}
+	// A snapshot that is not returned deletes its private index here.
+	ok := false
+	defer func() {
+		if !ok {
+			err = errors.Join(err, snap.Close())
+		}
+	}()
 	list, err := r.changedFiles(ctx, snap.baseTree, snap.headTree)
 	if err != nil {
 		return nil, err
 	}
 	snap.files, snap.records, snap.sizes, snap.renames = list.files, list.records, list.sizes, list.renames
+	for id, n := range snap.sizes {
+		if n < 0 {
+			snap.missing = append(snap.missing, id)
+		}
+	}
+	slices.Sort(snap.missing)
 	if len(snap.files) == 0 {
 		return nil, errors.New("nothing to review: " + src.String() + " has no changes")
 	}
 	if snap.vendored, err = snap.vendoredDirs(ctx); err != nil {
 		return nil, err
 	}
+	ok = true
 	return snap, nil
 }
 
-func (r *Repo) baseTree(ctx context.Context, src Source, head string) (string, error) {
+// base returns the base tree of src, and for a branch source the commit its base ref resolves to.
+func (r *Repo) base(ctx context.Context, src Source, head string) (baseCommit, tree string, err error) {
 	switch src.kind {
 	case KindLast:
 		parent, err := r.run.output(ctx, 4<<10, nil, "rev-parse", "--verify", "--quiet", head+"^1^{commit}")
 		if err != nil {
 			var ge *gitError
 			if errors.As(err, &ge) && ge.exitCode() == 1 {
-				return r.emptyTree, nil // root commit
+				return "", r.emptyTree, nil // root commit
 			}
-			return "", err
+			return "", "", err
 		}
-		return r.treeOf(ctx, strings.TrimSpace(string(parent)))
+		tree, err := r.treeOf(ctx, strings.TrimSpace(string(parent)))
+		return "", tree, err
 	case KindUncommitted:
 		if head == "" {
-			return r.emptyTree, nil
+			return "", r.emptyTree, nil
 		}
-		return r.treeOf(ctx, head)
+		tree, err := r.treeOf(ctx, head)
+		return "", tree, err
 	case KindBranch:
-		base, err := r.run.line(ctx, "rev-parse", "--verify", "--quiet", "--end-of-options", src.baseRef+"^{commit}")
+		base, err := r.commitOf(ctx, src.baseRef)
 		if err != nil {
-			// --verify --quiet exits 1, silently, exactly when the name does not resolve.
-			if ge, ok := errors.AsType[*gitError](err); ok && ge.exitCode() == 1 {
-				return "", fmt.Errorf("base ref %q does not resolve to a commit", src.baseRef)
-			}
-			return "", fmt.Errorf("resolve base ref %q: %w", src.baseRef, err)
+			return "", "", err
+		}
+		if base == "" {
+			return "", "", fmt.Errorf("base ref %q does not resolve to a commit", src.baseRef)
 		}
 		mb, err := r.run.line(ctx, "merge-base", base, head)
 		if err != nil {
 			var ge *gitError
 			if errors.As(err, &ge) && ge.exitCode() == 1 {
-				return "", fmt.Errorf("no merge base between %q and HEAD", src.baseRef)
+				return "", "", fmt.Errorf("no merge base between %q and HEAD", src.baseRef)
 			}
-			return "", err
+			return "", "", err
 		}
-		return r.treeOf(ctx, mb)
+		tree, err := r.treeOf(ctx, mb)
+		return base, tree, err
 	default:
-		return "", fmt.Errorf("unknown source kind %q", src.kind)
+		return "", "", fmt.Errorf("unknown source kind %q", src.kind)
 	}
+}
+
+// commitOf returns the commit ref resolves to, or "" when it resolves to none.
+func (r *Repo) commitOf(ctx context.Context, ref string) (string, error) {
+	c, err := r.run.line(ctx, "rev-parse", "--verify", "--quiet", "--end-of-options", ref+"^{commit}")
+	if err != nil {
+		// --verify --quiet exits 1, silently, exactly when the name does not resolve.
+		if ge, ok := errors.AsType[*gitError](err); ok && ge.exitCode() == 1 {
+			return "", nil
+		}
+		return "", fmt.Errorf("resolve base ref %q: %w", ref, err)
+	}
+	return c, nil
 }
 
 func (r *Repo) treeOf(ctx context.Context, commit string) (string, error) {
@@ -305,38 +459,101 @@ func (r *Repo) treeOf(ctx context.Context, commit string) (string, error) {
 }
 
 // uncommittedTree writes the uncommitted tree from a private copy of the index, so the real index
-// is never written.
-func (r *Repo) uncommittedTree(ctx context.Context) (tree string, err error) {
+// is never written. The private index is returned for Changed; the caller owns it.
+func (r *Repo) uncommittedTree(ctx context.Context) (tree string, _ *privateIndex, err error) {
 	realIndex, err := r.run.line(ctx, "rev-parse", "--path-format=absolute", "--git-path", "index")
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	dir, err := os.MkdirTemp("", "rvw-index-")
 	if err != nil {
-		return "", fmt.Errorf("private index: %w", err)
+		return "", nil, fmt.Errorf("private index: %w", err)
 	}
+	x := &privateIndex{dir: dir, path: filepath.Join(dir, "index")}
 	defer func() {
-		if rmErr := os.RemoveAll(dir); rmErr != nil {
-			err = errors.Join(err, fmt.Errorf("remove private index: %w", rmErr))
+		if err != nil {
+			err = errors.Join(err, x.close())
 		}
 	}()
 	if within(dir, r.topLevel) {
-		return "", fmt.Errorf("temporary directory %s is inside the worktree; set TMPDIR elsewhere", dir)
+		return "", nil, fmt.Errorf("temporary directory %s is inside the worktree; set TMPDIR elsewhere", dir)
 	}
-	private := filepath.Join(dir, "index")
 	// A repository without an index (nothing staged yet) starts from an empty private index.
-	if err = copyFile(realIndex, private); err != nil && !errors.Is(err, errNoSource) {
-		return "", fmt.Errorf("copy index: %w", err)
+	if err = copyFile(realIndex, x.path); err != nil && !errors.Is(err, errNoSource) {
+		return "", nil, fmt.Errorf("copy index: %w", err)
 	}
-	env := []string{"GIT_INDEX_FILE=" + private}
+	env := x.env()
 	if _, err = r.run.output(ctx, 1<<20, env, "-c", "core.splitIndex=false", "add", "-A"); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	out, err := r.run.output(ctx, 4<<10, env, "-c", "core.splitIndex=false", "write-tree")
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return strings.TrimSpace(string(out)), nil
+	if err = r.keep(x); err != nil {
+		return "", nil, err
+	}
+	return strings.TrimSpace(string(out)), x, nil
+}
+
+// privateIndex is a private index file outside the worktree holding the uncommitted tree's entries
+// and their stat data, as git add -A left them (REQ-SRC-005).
+type privateIndex struct {
+	dir, path string
+	mu        sync.Mutex // serialises checks and close
+	closed    bool
+}
+
+func (x *privateIndex) env() []string { return []string{"GIT_INDEX_FILE=" + x.path} }
+
+// errFound stops a listing at its first byte: a check needs only to know that there is output.
+var errFound = errors.New("found")
+
+// changed reports whether the worktree differs from x: a tracked file's content or mode differs or
+// it is gone, or a file that is not ignored is not in x. Refreshing x's stat data first keeps a
+// file touched but unchanged from counting; refreshing hashes such files without writing objects.
+// Dirty submodule worktrees are ignored, as git add -A records only a submodule's commit.
+func (x *privateIndex) changed(ctx context.Context, run runner) (bool, error) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if x.closed {
+		return false, ErrClosed
+	}
+	env := x.env()
+	// -q: files that need an update are reported by diff-files, not here.
+	if _, err := run.output(ctx, 1<<20, env, "-c", "core.splitIndex=false", "update-index", "-q", "--refresh"); err != nil {
+		return false, err
+	}
+	if _, err := run.output(ctx, 4<<10, env, "diff-files", "--quiet", "--ignore-submodules=dirty"); err != nil {
+		if ge, ok := errors.AsType[*gitError](err); ok && ge.exitCode() == 1 {
+			return true, nil
+		}
+		return false, err
+	}
+	_, err := run.stream(ctx, 1, env, nil, func(br *bufio.Reader) error {
+		if _, err := br.ReadByte(); err == nil {
+			return errFound
+		}
+		return nil
+	}, "ls-files", "-z", "--others", "--exclude-standard", "--directory", "--no-empty-directory")
+	if errors.Is(err, errFound) {
+		return true, nil
+	}
+	return false, err
+}
+
+// close deletes x's directory; it is idempotent.
+func (x *privateIndex) close() error {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if x.closed {
+		return nil
+	}
+	x.closed = true
+	if err := os.RemoveAll(x.dir); err != nil {
+		return fmt.Errorf("remove private index: %w", err)
+	}
+	return nil
 }
 
 func within(path, dir string) bool {

@@ -47,13 +47,20 @@ your default browser. If the browser cannot be opened, paste the URL yourself.
 - Vendored directories (`node_modules/`, and `vendor/` beside a `go.sum`) start collapsed. Generated Go files
   (`// Code generated … DO NOT EDIT.`) are grouped per directory, collapsed. Neither gets line counts.
 - A pure rename has no line changes; its whole content can be expanded as context and commented on.
-- The diff is shown unified or side by side, with changed words highlighted and Go, TypeScript,
-  shell and Makefile syntax highlighting.
+- The diff is shown unified or side by side, with changed words highlighted and syntax highlighting
+  for Go, Go templates, JavaScript/JSX, TypeScript/TSX, shell, Makefile, Markdown (including fenced code and YAML front matter), Rust,
+  Terraform/HCL, JSON, YAML, TOML, Python, Dockerfile, CSS and SQL. Wrap lines wraps long lines instead of scrolling sideways.
 - Click a line number to comment on it; shift-click, or drag across line numbers, to select a
   range. Comment on a whole file from its header, or on the whole review from the Finish dialog.
 - **Finish** opens the Finish dialog: write a summary, curate every comment (including the
   agent's), each shown with the code it is on and edited in place, copy the review as Markdown,
   and send it, or copy and send in one step with Copy and finish. Cancel is in the same dialog.
+- While the page is visible, `rvw` checks every 10 s whether the change under review changed: a new
+  commit, a moved base ref, or edited, added or deleted uncommitted files. A notice then offers
+  **Refresh**, which is also in the header. Refresh takes a new snapshot of the same source and
+  carries your comments over: a line or range comment whose lines changed becomes a file comment,
+  and one whose file left the change becomes a review comment, with its text kept; the page lists
+  the moved comments. Other open tabs reload.
 
 Keys:
 
@@ -65,6 +72,7 @@ Keys:
 | `c` | comment on the current line or selection |
 | `v` | toggle viewed and go to the next unviewed file |
 | `s` | toggle unified / split view |
+| `w` | toggle Wrap lines |
 | `←` / `→` | scroll the split view sideways |
 | `/` | focus the file filter |
 | `⌘K` | search: files, `path:line`, `:line`, `#text` |
@@ -92,8 +100,9 @@ Everything other than the review goes to stderr.
 
 Every change you make is saved before the UI acknowledges it, under
 `~/Library/Application Support/rvw/drafts`. Running the same command on the same change resumes
-the draft; any different content starts a new review. Only one session can review a given change
-at a time. Drafts unused for 30 days are deleted.
+the draft; any different content starts a new review. A refresh saves the draft under the new
+snapshot and deletes the old one. Only one session can review a given change at a time. Drafts
+unused for 30 days are deleted.
 
 ### Seeding agent comments
 
@@ -149,7 +158,8 @@ review, how to run `rvw` in the background, and how to act on the result.
 ## Guarantees
 
 - `git` is only run as a subprocess; `rvw` never changes refs, the index, worktree files or
-  configuration. Uncommitted changes are snapshotted through a private copy of the index.
+  configuration. Uncommitted changes are snapshotted through a private copy of the index, which
+  the change check also uses and which is deleted when the snapshot is released.
 - The only network connection is the loopback listener. API requests need a random token from the
   URL fragment; the Host header, cross-origin writes (Sec-Fetch-Site and Origin) and a content
   security policy are enforced.

@@ -1,18 +1,19 @@
 // The page's copy of the review. The server is authoritative: State is the one writer of every
 // fact here, and applies a change only after the server has saved it.
 
-import { type Api, type ChangedFile, type Comment, type CommentSite, compareOrder, type EarlierComment, type EarlierPlacement, type EarlierStatus, HttpError, type LineCount, type Placement, type QuoteLimits, type RenameDetection, type SearchLimits, type Session, type Side } from "./api";
+import { type Api, type ChangedFile, type Comment, type CommentSite, compareOrder, type EarlierComment, type EarlierPlacement, type EarlierStatus, HttpError, type LineCount, type MovedComment, type Placement, type QuoteLimits, type RenameDetection, type SearchLimits, type Session, type Side } from "./api";
 
 /**
  * What changed, for listeners to refresh only what shows it:
  * - draft: comments or viewed marks;
  * - counts: line counts, or their completion or error;
  * - generated: the generated-file marks arrived;
- * - head: HEAD moved since the review started;
+ * - changed: whether the change under review changed since this generation's snapshot;
+ * - superseded: the review moved to another generation; the page must reload;
  * - whitespace: the whitespace-only marks arrived;
  * - hide: the Hide whitespace setting changed.
  */
-export type Change = "draft" | "counts" | "generated" | "head" | "whitespace" | "hide";
+export type Change = "draft" | "counts" | "generated" | "changed" | "superseded" | "whitespace" | "hide";
 
 /** The server calls State makes. */
 export type ReviewApi = Pick<Api, "session" | "createComment" | "editComment" | "deleteComment" | "setViewed" | "setSummary" | "status" | "setHideWhitespace" | "copyEarlier">;
@@ -33,6 +34,10 @@ export class State {
   readonly searchLimits: SearchLimits;
   /** The status poll interval in milliseconds, set by the server. */
   readonly statusIntervalMs: number;
+  /** The generation the page shows (REQ-SES-015). */
+  readonly generation: number;
+  /** The comments the refresh that made this generation moved (REQ-DRF-006). */
+  readonly moved: readonly MovedComment[];
   /** When the last delivered review was delivered, or undefined when there was none. */
   readonly lastReviewAt: Date | undefined;
   readonly earlier: readonly EarlierComment[];
@@ -46,7 +51,7 @@ export class State {
   private readonly countByFile = new Map<number, LineCount>();
   private readonly generatedFiles = new Set<number>();
   private summaryValue: string;
-  private headHasMoved = false;
+  private sourceChanged = false;
   private countsNext = 0;
   private countsComplete = false;
   private countsFailure = "";
@@ -70,6 +75,8 @@ export class State {
     this.quoteLimits = s.quoteLimits;
     this.searchLimits = s.searchLimits;
     this.statusIntervalMs = s.statusIntervalMs;
+    this.generation = s.generation;
+    this.moved = s.moved;
     this.viewedFiles = new Set(s.viewed);
     this.summaryValue = s.summary;
     this.hideWs = s.hideWhitespace;
@@ -98,8 +105,9 @@ export class State {
   get summary(): string {
     return this.summaryValue;
   }
-  get headMoved(): boolean {
-    return this.headHasMoved;
+  /** The change under review changed since this generation's snapshot (REQ-SES-010). */
+  get changed(): boolean {
+    return this.sourceChanged;
   }
   get countsDone(): boolean {
     return this.countsComplete;
@@ -248,12 +256,19 @@ export class State {
     await this.writing;
   }
 
-  /** Fetches the server's status and applies what is new. */
-  async syncStatus(): Promise<void> {
-    const s = await this.api.status(this.countsNext, this.whitespaceKnown);
-    if (s.headMoved && !this.headHasMoved) {
-      this.headHasMoved = true;
-      this.notify("head");
+  /**
+   * Fetches the server's status and applies what is new; check asks for the change check. A reply
+   * for another generation applies nothing: its facts are another snapshot's.
+   */
+  async syncStatus(check: boolean): Promise<void> {
+    const s = await this.api.status(this.countsNext, this.whitespaceKnown, check);
+    if (s.generation !== this.generation) {
+      this.notify("superseded");
+      return;
+    }
+    if (s.changed !== this.sourceChanged) {
+      this.sourceChanged = s.changed;
+      this.notify("changed");
     }
     // The marks come with the first reply that has them done; counts never precede them.
     if (!this.generatedKnown && s.generated !== null) {

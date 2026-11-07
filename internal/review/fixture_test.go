@@ -118,8 +118,14 @@ func (fx *fixture) key(snap *source.Snapshot) string {
 // and returns a func that puts it back. The fixture's objects are loose: gc is off.
 func (fx *fixture) hideBlob(t *testing.T, rev string) (restore func()) {
 	t.Helper()
-	id := strings.TrimSpace(git(t, fx.dir, "rev-parse", rev))
-	obj := strings.TrimSpace(git(t, fx.dir, "rev-parse", "--path-format=absolute", "--git-path", "objects/"+id[:2]+"/"+id[2:]))
+	return hideBlob(t, fx.dir, rev)
+}
+
+// hideBlob is fixture.hideBlob for the repository in dir.
+func hideBlob(t *testing.T, dir, rev string) (restore func()) {
+	t.Helper()
+	id := strings.TrimSpace(git(t, dir, "rev-parse", rev))
+	obj := strings.TrimSpace(git(t, dir, "rev-parse", "--path-format=absolute", "--git-path", "objects/"+id[:2]+"/"+id[2:]))
 	aside := filepath.Join(t.TempDir(), id)
 	if err := os.Rename(obj, aside); err != nil {
 		t.Fatal(err)

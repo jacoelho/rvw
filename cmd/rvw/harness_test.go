@@ -317,6 +317,8 @@ func (p *proc) holdShutdown() {
 		"Host: " + p.addr + "\r\n" +
 		"Authorization: Bearer " + p.token + "\r\n" +
 		"Origin: http://" + p.addr + "\r\n" +
+		"Rvw-Generation: 1\r\n" +
+		"Rvw-Page: " + testPage + "\r\n" +
 		"Content-Type: application/json\r\n" +
 		"Expect: 100-continue\r\n" +
 		"Content-Length: 100\r\n\r\n"
@@ -397,6 +399,9 @@ func (p *proc) createComment(id, body string) {
 	}
 }
 
+// testPage is the page id the test client sends on every request.
+const testPage = "test-client"
+
 func (p *proc) doWith(method, path, body string, header http.Header) (int, []byte) {
 	p.t.Helper()
 	var rd io.Reader
@@ -408,6 +413,10 @@ func (p *proc) doWith(method, path, body string, header http.Header) (int, []byt
 		p.t.Fatal(err)
 	}
 	req.Header.Set("Authorization", "Bearer "+p.token)
+	// Requests name the first generation: these tests refresh only through a page.
+	req.Header.Set("Rvw-Generation", "1")
+	// The test client is one page; tests of page presence go through Chrome.
+	req.Header.Set("Rvw-Page", testPage)
 	if method != http.MethodGet {
 		req.Header.Set("Origin", "http://"+p.addr)
 	}

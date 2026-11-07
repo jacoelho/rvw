@@ -254,8 +254,19 @@ func TestUncommittedSnapshotLeavesRepositoryUnchanged(t *testing.T) {
 			tmp := t.TempDir()
 			t.Setenv("TMPDIR", tmp)
 			before := r.state(worktree)
+			// Resolving, then checking for changes (REQ-SES-010), writes nothing but objects; closing
+			// the snapshot deletes its private index.
+			resolveAndCheck := func(src source.Source) {
+				snap := resolve(t, worktree, src)
+				if changed, err := snap.Changed(t.Context()); err != nil || changed {
+					t.Errorf("%s: Changed = %v, %v; want false", src, changed, err)
+				}
+				if err := snap.Close(); err != nil {
+					t.Errorf("%s: Close: %v", src, err)
+				}
+			}
 			for _, src := range []source.Source{source.Uncommitted(), branchSource(t, "main", true)} {
-				resolve(t, worktree, src)
+				resolveAndCheck(src)
 				if after := r.state(worktree); !reflect.DeepEqual(after, before) {
 					t.Errorf("%s changed the repository:\nbefore %+v\n after %+v", src, before, after)
 				}
@@ -264,7 +275,7 @@ func TestUncommittedSnapshotLeavesRepositoryUnchanged(t *testing.T) {
 			if err != nil {
 				t.Fatalf("OriginHead: %v", err)
 			}
-			resolve(t, worktree, branchSource(t, ref, true))
+			resolveAndCheck(branchSource(t, ref, true))
 			if after := r.state(worktree); !reflect.DeepEqual(after, before) {
 				t.Errorf("OriginHead and resolving its target changed the repository:\nbefore %+v\n after %+v", before, after)
 			}

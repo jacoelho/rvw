@@ -13,20 +13,38 @@ import (
 )
 
 // Session is the one writer of a snapshot's draft. Every mutation is validated, persisted, and only
-// then applied. Once Finish starts, or after Cancel or End, it rejects all mutations.
+// then applied. Once Finish starts, or after Cancel or End, it rejects all mutations. Refresh moves
+// it, draft and all, to a new snapshot of the same source.
 type Session struct {
-	snap  *source.Snapshot
+	cur   *view
 	store *Store
 	// abort cancels the result being built while the session is finishing.
 	abort   context.CancelFunc
-	paths   pathIndex
 	state   state
 	nextSeq int64
 	// version is the last Comment.Version assigned.
 	version int64
-	mu      sync.Mutex // guards state, nextSeq, version, phase and abort
-	phase   phase
+	// rev counts the states committed, so Refresh can tell that the state it carried over is
+	// still the current one.
+	rev   uint64
+	mu    sync.Mutex // guards cur, store, state, nextSeq, version, rev, phase, abort and closed
+	phase phase
+	// closed is set by Close, which released store.
+	closed bool
 }
+
+// view is the snapshot the session reviews and its path index. It is immutable and replaced whole
+// by Refresh, so an operation that reads it without the lock reads one snapshot throughout.
+type view struct {
+	snap  *source.Snapshot
+	paths pathIndex
+}
+
+func newView(snap *source.Snapshot) *view { return &view{snap: snap, paths: newPathIndex(snap)} }
+
+// ErrRefreshed reports an operation that read the snapshot a refresh then replaced: its file
+// indexes and lines refer to a snapshot the session no longer reviews.
+var ErrRefreshed = errors.New("the review moved to a new snapshot")
 
 // phase is the session's lifecycle. open accepts mutations. finishing builds the result from a
 // fixed state and rejects mutations, but End or Abandon still interrupts it, or a failed build
@@ -87,8 +105,21 @@ func (o Opening) MovedAside() (path string, ok bool, reason error) {
 }
 
 // Snapshot returns the snapshot the session reviews; every file index the session accepts or
-// reports refers to it.
-func (s *Session) Snapshot() *source.Snapshot { return s.snap }
+// reports refers to it until a Refresh replaces it.
+func (s *Session) Snapshot() *source.Snapshot { return s.view().snap }
+
+func (s *Session) view() *view {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cur
+}
+
+// DraftPath is the path of the current snapshot's draft file.
+func (s *Session) DraftPath() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.store.Path()
+}
 
 // Fresh is what a new draft starts with when no draft is restored.
 type Fresh struct {
@@ -109,8 +140,16 @@ type Fresh struct {
 //
 // Restoring and seeding read each commented file's facts: one patch run, plus a line count of
 // each side for a file with line comments.
-func Start(ctx context.Context, store *Store, snap *source.Snapshot, fresh Fresh) (*Session, Opening, error) {
-	s := &Session{snap: snap, store: store, paths: newPathIndex(snap), state: emptyState()}
+//
+// The session owns store from the call on: Start closes it when it fails, and Close closes it, or
+// the store a Refresh replaced it with, otherwise.
+func Start(ctx context.Context, store *Store, snap *source.Snapshot, fresh Fresh) (_ *Session, _ Opening, err error) {
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, store.Close())
+		}
+	}()
+	s := &Session{cur: newView(snap), store: store, state: emptyState()}
 	seed := fresh.Seed
 	seeded, err := s.seeded(ctx, seed)
 	if err != nil {
@@ -167,7 +206,7 @@ func Start(ctx context.Context, store *Store, snap *source.Snapshot, fresh Fresh
 // Sequence numbers only order comments, so restored ones are renumbered 0..n-1 in their saved
 // order: numbering never grows across restarts, and stays exact in the UI's JavaScript numbers.
 func (s *Session) restore(ctx context.Context, d draftFile) (state, int64, error) {
-	v := validator{snap: s.snap, paths: s.paths}
+	v := validator{snap: s.cur.snap, paths: s.cur.paths}
 	next := emptyState()
 	seqs := make(map[int64]bool, len(d.Comments))
 	for _, dc := range d.Comments {
@@ -246,21 +285,21 @@ func (s *Session) fileByPaths(vf viewedFile) (int, bool) {
 	var i int
 	var ok bool
 	if vf.NewPath != "" {
-		i, ok = s.paths.new[vf.NewPath]
+		i, ok = s.cur.paths.new[vf.NewPath]
 	} else {
-		i, ok = s.paths.old[vf.OldPath]
+		i, ok = s.cur.paths.old[vf.OldPath]
 	}
 	if !ok {
 		return 0, false
 	}
-	f := s.snap.File(i)
+	f := s.cur.snap.File(i)
 	return i, f.OldPath == vf.OldPath && f.NewPath == vf.NewPath
 }
 
 // seeded validates every seed comment against the snapshot and the limits, and returns the
 // state holding them, numbered from 0. It reports every problem at once.
 func (s *Session) seeded(ctx context.Context, seed Seed) (state, error) {
-	v := validator{snap: s.snap, paths: s.paths}
+	v := validator{snap: s.cur.snap, paths: s.cur.paths}
 	var problems []string
 	next := emptyState()
 	for k, e := range seed.entries {
@@ -295,20 +334,22 @@ func (s *Session) seeded(ctx context.Context, seed Seed) (state, error) {
 	return next, nil
 }
 
-// commit persists next and makes it current.
+// commit persists next and makes it current. The caller holds mu, or is Start.
 func (s *Session) commit(next state) error {
-	if err := s.store.save(s.encode(next)); err != nil {
+	if err := s.store.save(encode(s.cur.snap, next)); err != nil {
 		return err
 	}
 	s.state = next
+	s.rev++
 	return nil
 }
 
-func (s *Session) encode(st state) draftFile {
+// encode is st, whose file indexes refer to snap, as a draft file.
+func encode(snap *source.Snapshot, st state) draftFile {
 	viewed := []viewedFile{}
-	for i := range s.snap.FileCount() {
+	for i := range snap.FileCount() {
 		if ws, ok := st.viewed[i]; ok {
-			f := s.snap.File(i)
+			f := snap.File(i)
 			viewed = append(viewed, viewedFile{OldPath: f.OldPath, NewPath: f.NewPath, Whitespace: ws})
 		}
 	}
@@ -337,8 +378,9 @@ func (s *Session) nextVersion() int64 {
 // and writes nothing; when id is taken otherwise it fails with ErrCommentExists.
 //
 // Validating a line or range reads the file's facts, which may run git, so it runs without the
-// session lock; it reads only the snapshot, which never changes. A validation that outlasts the
-// session is then rejected by the phase check under the lock.
+// session lock on the snapshot current when it starts. A validation that outlasts the session is
+// then rejected by the phase check under the lock, and one that a refresh outlasted fails with
+// ErrRefreshed.
 func (s *Session) CreateComment(ctx context.Context, id string, p Placement, body string) (Comment, error) {
 	if err := checkID(id); err != nil {
 		return Comment{}, err
@@ -347,17 +389,18 @@ func (s *Session) CreateComment(ctx context.Context, id string, p Placement, bod
 	if err != nil {
 		return Comment{}, err
 	}
-	if !s.isOpen() {
-		return Comment{}, ErrEnded
+	v, err := s.openView()
+	if err != nil {
+		return Comment{}, err
 	}
-	t, file, err := s.place(ctx, p)
+	t, file, err := v.place(ctx, p)
 	if err != nil {
 		return Comment{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.phase != open {
-		return Comment{}, ErrEnded
+	if err := s.stillOpenLocked(v); err != nil {
+		return Comment{}, err
 	}
 	if old, exists := s.state.comments[id]; exists {
 		if old.Target == t && old.Body == body {
@@ -408,12 +451,13 @@ func (s *Session) CopyComment(ctx context.Context, id, from string, author Autho
 	if err != nil {
 		return Comment{}, err
 	}
-	if !s.isOpen() {
-		return Comment{}, ErrEnded
+	v, err := s.openView()
+	if err != nil {
+		return Comment{}, err
 	}
 	t, file := ReviewTarget(), -1
 	for _, p := range places {
-		pt, pf, perr := s.place(ctx, p)
+		pt, pf, perr := v.place(ctx, p)
 		if perr == nil {
 			t, file = pt, pf
 			break
@@ -424,8 +468,8 @@ func (s *Session) CopyComment(ctx context.Context, id, from string, author Autho
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.phase != open {
-		return Comment{}, ErrEnded
+	if err := s.stillOpenLocked(v); err != nil {
+		return Comment{}, err
 	}
 	for _, c := range s.state.comments {
 		if c.CopiedFrom == from {
@@ -438,12 +482,34 @@ func (s *Session) CopyComment(ctx context.Context, id, from string, author Autho
 	return s.addLocked(Comment{ID: id, Author: author, Target: t, File: file, Body: body, CopiedFrom: from})
 }
 
+// openView returns the current view of an open session.
+func (s *Session) openView() (*view, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.phase != open {
+		return nil, ErrEnded
+	}
+	return s.cur, nil
+}
+
+// stillOpenLocked checks, after work done without the lock on v, that the session is open and
+// still reviews v. The caller holds mu.
+func (s *Session) stillOpenLocked(v *view) error {
+	switch {
+	case s.phase != open:
+		return ErrEnded
+	case s.cur != v:
+		return ErrRefreshed
+	}
+	return nil
+}
+
 // place checks p against the snapshot and returns its target and file index (-1 for the review).
-func (s *Session) place(ctx context.Context, p Placement) (Target, int, error) {
+func (v *view) place(ctx context.Context, p Placement) (Target, int, error) {
 	if p.Kind() == TargetReview {
 		return ReviewTarget(), -1, nil
 	}
-	if p.file < 0 || p.file >= s.snap.FileCount() {
+	if p.file < 0 || p.file >= v.snap.FileCount() {
 		return Target{}, 0, invalid("file index %d out of range", p.file)
 	}
 	if p.kind == TargetLine || p.kind == TargetRange {
@@ -452,7 +518,7 @@ func (s *Session) place(ctx context.Context, p Placement) (Target, int, error) {
 			return Target{}, 0, err
 		}
 	}
-	f := s.snap.File(p.file)
+	f := v.snap.File(p.file)
 	path := targetPath(f, p.kind, p.side)
 	if path == "" {
 		return Target{}, 0, invalid("%q has no %s side", f.Path(), p.side)
@@ -471,8 +537,8 @@ func (s *Session) place(ctx context.Context, p Placement) (Target, int, error) {
 	if err != nil {
 		return Target{}, 0, err
 	}
-	v := validator{snap: s.snap, paths: s.paths}
-	if err := v.checkAt(ctx, p.file, t); err != nil {
+	val := validator{snap: v.snap, paths: v.paths}
+	if err := val.checkAt(ctx, p.file, t); err != nil {
 		return Target{}, 0, err
 	}
 	return t, p.file, nil
@@ -520,12 +586,6 @@ func (s *Session) EditComment(id string, version int64, body string) (Comment, e
 	return c, nil
 }
 
-func (s *Session) isOpen() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.phase == open
-}
-
 // DeleteComment removes comment id at version. A comment saved since version is not deleted
 // (ErrStale), so a stale page cannot discard a newer edit (Q-27). Deleting an absent id succeeds,
 // so retries are idempotent.
@@ -550,12 +610,12 @@ func (s *Session) DeleteComment(id string, version int64) error {
 // SetViewed sets or clears the viewed marks of files in one draft change (REQ-NAV-010). A mark it
 // sets records the current Hide whitespace setting, also when it was already set.
 func (s *Session) SetViewed(files []int, viewed bool) error {
-	for _, i := range files {
-		if i < 0 || i >= s.snap.FileCount() {
-			return invalid("file index %d out of range", i)
-		}
-	}
 	return s.mutate(func(next *state) error {
+		for _, i := range files {
+			if i < 0 || i >= s.cur.snap.FileCount() {
+				return invalid("file index %d out of range", i)
+			}
+		}
 		for _, i := range files {
 			if viewed {
 				next.viewed[i] = next.hideWhitespace
@@ -598,6 +658,7 @@ func normalizeSummary(summary string) (string, error) {
 	return summary, nil
 }
 
+// mutate applies fn to a copy of the state and commits it. fn runs under mu.
 func (s *Session) mutate(fn func(*state) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -632,7 +693,7 @@ func (s *Session) Draft() Draft {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	v := Draft{Comments: sorted(s.state), Summary: s.state.summary, Viewed: []Mark{}, HideWhitespace: s.state.hideWhitespace}
-	for i := range s.snap.FileCount() {
+	for i := range s.cur.snap.FileCount() {
 		if ws, ok := s.state.viewed[i]; ok {
 			v.Viewed = append(v.Viewed, Mark{File: i, Whitespace: ws})
 		}
@@ -644,9 +705,9 @@ func (s *Session) Draft() Draft {
 // reads blobs, so it runs on a copy of the state without holding the lock.
 func (s *Session) Result(ctx context.Context) (Result, error) {
 	s.mu.Lock()
-	st := s.state
+	v, st := s.cur, s.state
 	s.mu.Unlock()
-	return s.result(ctx, st)
+	return v.result(ctx, st)
 }
 
 // Delivery is what Finish delivered. DraftErr is a warning only: the result was delivered but
@@ -754,12 +815,12 @@ func (s *Session) finish(ctx context.Context) (Result, error) {
 		s.mu.Unlock()
 		return Result{}, ErrEnded
 	}
-	st := s.state
+	v, st := s.cur, s.state
 	ctx, s.abort = context.WithCancel(ctx)
 	s.phase = finishing
 	s.mu.Unlock()
 
-	r, err := s.result(ctx, st)
+	r, err := v.result(ctx, st)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -817,6 +878,21 @@ func (s *Session) End() Ending {
 	case open, finishing, interrupted:
 	}
 	return EndedByEnd
+}
+
+// Close ends the session as End does, unless it has ended, and releases its draft store's lock.
+// Call it once nothing else uses the session: a method running meanwhile may save or delete the
+// draft without the lock. Later calls return nil. A Refresh in progress fails with ErrEnded and
+// closes the store it opened.
+func (s *Session) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.endLocked()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	return s.store.Close()
 }
 
 // endLocked interrupts a session that is open or building its result, cancelling the build; it

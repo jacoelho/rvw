@@ -24,7 +24,7 @@ type finishDTO struct {
 
 func draftExists(t *testing.T, f *fixture) bool {
 	t.Helper()
-	_, err := os.Stat(f.store.Path())
+	_, err := os.Stat(f.draftPath)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)
 	}
@@ -466,24 +466,24 @@ func waitStoppedListening(t *testing.T, f *fixture) {
 // and returns its summary.
 func resumedSummary(t *testing.T, f *fixture) string {
 	t.Helper()
-	data, err := os.ReadFile(f.store.Path())
+	data, err := os.ReadFile(f.draftPath)
 	if err != nil {
 		t.Fatalf("read the kept draft: %v", err)
 	}
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, filepath.Base(f.store.Path())), data, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, filepath.Base(f.draftPath)), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	key := strings.TrimSuffix(filepath.Base(f.store.Path()), ".json")
+	key := strings.TrimSuffix(filepath.Base(f.draftPath), ".json")
 	store, err := review.OpenStore(dir, key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = store.Close() })
 	s, o, err := review.Start(t.Context(), store, f.snap, review.Fresh{Seed: review.Seed{}})
 	if err != nil {
 		t.Fatalf("start from the kept draft: %v", err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	if !o.Resumed() {
 		t.Fatal("the next run did not resume the kept draft")
 	}
@@ -617,15 +617,53 @@ func TestPageClosedEndsRun(t *testing.T) {
 	}
 }
 
-// TestRequestAfterPageClosedKeepsSession: a request after the close notice, such as a reload's or
-// another tab's, keeps the session.
+// TestRequestAfterPageClosedKeepsSession: a request from another page after the close notice,
+// such as a reload's, a restored page's or another tab's, keeps the session.
 func TestRequestAfterPageClosedKeepsSession(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t, smallRepo(t), fixtureOptions{closeGrace: longGrace})
 	done, _ := f.serveRun()
 	f.postPageClosed()
-	f.mustStatus(f.do(http.MethodGet, "/api/status", ""), http.StatusOK, "status")
-	assertStillRunning(t, done, 3*longGrace, "a request followed the notice")
+	f.mustStatus(f.do(http.MethodGet, "/api/status", "", withPage("page-b")), http.StatusOK, "status")
+	assertStillRunning(t, done, 3*longGrace, "another page's request followed the notice")
+}
+
+// TestClosedPageRequestIsNoPresence: a request from the page that sent the close notice, such as
+// a poll it had in flight, is answered but does not keep the session (Q-42).
+func TestClosedPageRequestIsNoPresence(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, smallRepo(t), fixtureOptions{closeGrace: shortGrace})
+	done, _ := f.serveRun()
+	f.postPageClosed()
+	f.mustStatus(f.do(http.MethodGet, "/api/status", ""), http.StatusOK, "the closed page's status")
+	if res := waitRun(t, done); res.outcome != server.PageClosed || res.err != nil {
+		t.Errorf("Run = %v, %v; want PageClosed", res.outcome, res.err)
+	}
+}
+
+// TestRequestWithoutPageIsRefused: a request without a valid page id is refused with 400 and is no
+// page's presence; a notice without one starts no grace.
+func TestRequestWithoutPageIsRefused(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, smallRepo(t), fixtureOptions{closeGrace: shortGrace})
+	done, _ := f.serveRun()
+	for _, c := range []struct {
+		name string
+		opt  reqOption
+	}{
+		{"without a page id", withPage("")},
+		{"with a malformed page id", withPage("a b")},
+	} {
+		f.mustStatus(f.do(http.MethodPost, "/api/page-closed", "", c.opt), http.StatusBadRequest, "notice "+c.name)
+		assertStillRunning(t, done, 5*shortGrace, "notice "+c.name)
+	}
+	f.postPageClosed()
+	for _, c := range []reqOption{withPage(""), withPage("a b")} {
+		f.mustStatus(f.do(http.MethodGet, "/api/status", "", c), http.StatusBadRequest, "status without a valid page id")
+	}
+	if res := waitRun(t, done); res.outcome != server.PageClosed || res.err != nil {
+		t.Errorf("Run = %v, %v; want PageClosed", res.outcome, res.err)
+	}
 }
 
 // TestPageClosedDuringAStuckDelivery: a close notice during a delivery that does not complete

@@ -143,10 +143,10 @@ const exitInterrupted = -1
 // live is the running review a second signal settles. report writes the outcome to stderr once,
 // whether main or the second signal gets there first, and returns the exit status.
 type live struct {
-	srv   *server.Server
-	draft string
-	once  sync.Once
-	code  int
+	srv  *server.Server
+	sess *review.Session // its draft path follows a refresh
+	once sync.Once
+	code int
 }
 
 func (l *live) report(o server.Outcome, cause string, msg *slog.Logger) int {
@@ -154,7 +154,7 @@ func (l *live) report(o server.Outcome, cause string, msg *slog.Logger) int {
 		if cause != "" {
 			msg.Error(cause)
 		}
-		l.code = exitFor(o, l.draft, msg)
+		l.code = exitFor(o, l.sess.DraftPath(), msg)
 	})
 	return l.code
 }
@@ -211,24 +211,25 @@ func session(ctx context.Context, cmd command, stdin io.Reader, stdout io.Writer
 	if err != nil {
 		return fail(err)
 	}
-	defer func() {
-		if closeErr := store.Close(); closeErr != nil {
-			msg.Warn("close draft store", "err", closeErr)
-		}
-	}()
-
 	ledgerStore, ledger := openLedger(snap, msg)
 	prior := round.NewPrior(snap, ledger)
+	// The session owns the store from here, failed or not; main only records the URL in it below,
+	// before serving.
 	sess, opening, err := review.Start(ctx, store, snap, review.Fresh{
 		Seed: seed, Viewed: prior.PresetMarks(), HideWhitespace: prior.HideWhitespace(),
 	})
 	if err != nil {
 		return fail(err)
 	}
+	defer func() {
+		if closeErr := sess.Close(); closeErr != nil {
+			msg.Warn("close draft store", "err", closeErr)
+		}
+	}()
 	if path, moved, reason := opening.MovedAside(); moved {
 		msg.Warn("the saved draft could not be restored and was moved aside", "path", path, "reason", reason)
 	} else if opening.Resumed() {
-		msg.Info("resuming the saved draft", "path", store.Path())
+		msg.Info("resuming the saved draft", "path", sess.DraftPath())
 		if cmd.seedPath != "" {
 			msg.Info("the seed was ignored because a draft exists")
 		}
@@ -244,11 +245,13 @@ func session(ctx context.Context, cmd command, stdin io.Reader, stdout io.Writer
 	if err = store.SetURL(url); err != nil {
 		return fail(errors.Join(err, ln.Close()))
 	}
+	drafts := &drafts{repo: repo, sess: sess, src: src, dir: dir, url: url, msg: msg}
 	srv := server.New(server.Config{
 		Session: sess, Ledger: ledger, Token: token, Assets: web.Assets(), Log: msg,
 		Deliver: func(r review.Result) error { return deliver(stdout, r, cmd.json) },
+		Refresh: drafts.refresh,
 	})
-	l := &live{srv: srv, draft: store.Path()}
+	l := &live{srv: srv, sess: sess}
 	current.Store(l)
 	msg.Info("review at", "url", url)
 	stopOpener := startOpener(ctx, url, msg)
@@ -260,7 +263,7 @@ func session(ctx context.Context, cmd command, stdin io.Reader, stdout io.Writer
 	if outcome == server.Finished && ledgerStore != nil {
 		// The result is already delivered: a ledger failure costs the next round its history,
 		// never this round its result (REQ-RND-006).
-		d := round.Delivered(snap, sess.Draft(), time.Now())
+		d := round.Delivered(sess.Snapshot(), sess.Draft(), time.Now())
 		// Recording runs after a signal too, but bounded, so a stuck git cannot hold the exit.
 		recCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 		recErr := ledgerStore.Record(recCtx, repo, d)
@@ -270,6 +273,56 @@ func session(ctx context.Context, cmd command, stdin io.Reader, stdout io.Writer
 		}
 	}
 	return l.report(outcome, "", msg)
+}
+
+// drafts refreshes the session: it resolves the source again and opens the store of a new draft
+// key (REQ-SES-013). The session owns every store it is given.
+type drafts struct {
+	repo *source.Repo
+	sess *review.Session
+	msg  *slog.Logger
+	dir  string
+	url  string // the review URL, recorded in every store so another rvw can name it
+	src  source.Source
+}
+
+// refresh resolves the session's source again and moves the session to it. On failure the
+// session is unchanged and what refresh opened is closed.
+func (d *drafts) refresh(ctx context.Context) (review.Refreshed, error) {
+	snap, err := d.repo.Resolve(ctx, d.src, d.msg)
+	if err != nil {
+		return review.Refreshed{}, err
+	}
+	opener := func(key string) (*review.Store, error) {
+		st, openErr := review.OpenStore(d.dir, key)
+		if openErr != nil {
+			return nil, openErr
+		}
+		if urlErr := st.SetURL(d.url); urlErr != nil {
+			return nil, errors.Join(urlErr, st.Close())
+		}
+		return st, nil
+	}
+	res, err := d.sess.Refresh(ctx, snap, opener)
+	if err != nil {
+		return review.Refreshed{}, errors.Join(err, snap.Close())
+	}
+	if res.Unchanged {
+		d.msg.Info("refreshed: nothing changed")
+	} else {
+		d.msg.LogAttrs(ctx, slog.LevelInfo, "refreshed", append(review.SourceAttrs(snap), slog.Int("moved", len(res.Moved)))...)
+	}
+	if res.MovedAside != "" {
+		d.msg.Warn("a draft saved for the new snapshot was moved aside", "path", res.MovedAside)
+	}
+	if res.OldDraftErr != nil {
+		d.msg.Warn("release the replaced draft", "err", res.OldDraftErr)
+	}
+	if err := res.OldSnapshot.Close(); err != nil {
+		// The refresh happened; what it replaced is released by exit at the latest.
+		d.msg.Warn("release the replaced snapshot", "err", err)
+	}
+	return res, nil
 }
 
 // newLogger writes rvw's records to stderr as text, one line each. Records carry no time: they are

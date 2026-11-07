@@ -5,7 +5,9 @@
    Colour budget: the chrome is neutral. The accent marks only the shown file (in the review strip
    and the tree), focus, links and the line selection; the one filled button is near-black (white on
    dark). Diff, syntax, file status and line counts are data and keep their own colours; author
-   chips are identity tints, not data. Every text token is at least 4.5:1 on the fills it sits on.
+   chips and file-type icons are identity tints, not data. The icons are Catppuccin's
+   (web/src/icons): Latte's accents on light, Mocha's on dark, and the chrome's muted grey for their
+   neutral strokes, so a plain file or folder reads as chrome. Every text token is at least 4.5:1 on the fills it sits on.
 
    The face is the platform's own (SF Pro and SF Mono): rvw runs on macOS only, so the page loads no
    font file and still renders in the face it was designed in. */
@@ -62,6 +64,22 @@
   --hl-f: #8250df;
   --hl-t: #953800;
   --hl-o: #cf222e;
+  --ctp-text: var(--muted);
+  --ctp-overlay1: #8c8fa1;
+  --ctp-rosewater: #dc8a78;
+  --ctp-flamingo: #dd7878;
+  --ctp-pink: #ea76cb;
+  --ctp-mauve: #8839ef;
+  --ctp-red: #d20f39;
+  --ctp-maroon: #e64553;
+  --ctp-peach: #fe640b;
+  --ctp-yellow: #df8e1d;
+  --ctp-green: #40a02b;
+  --ctp-teal: #179299;
+  --ctp-sky: #04a5e5;
+  --ctp-sapphire: #209fb5;
+  --ctp-blue: #1e66f5;
+  --ctp-lavender: #7287fd;
   --backdrop: #11141640;
   --float-shadow: 0 12px 32px #0f121424, 0 2px 6px #0f121414;
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
@@ -128,6 +146,21 @@
     --hl-f: #d2a8ff;
     --hl-t: #ffa657;
     --hl-o: #ff7b72;
+    --ctp-overlay1: #7f849c;
+    --ctp-rosewater: #f5e0dc;
+    --ctp-flamingo: #f2cdcd;
+    --ctp-pink: #f5c2e7;
+    --ctp-mauve: #cba6f7;
+    --ctp-red: #f38ba8;
+    --ctp-maroon: #eba0ac;
+    --ctp-peach: #fab387;
+    --ctp-yellow: #f9e2af;
+    --ctp-green: #a6e3a1;
+    --ctp-teal: #94e2d5;
+    --ctp-sky: #89dceb;
+    --ctp-sapphire: #74c7ec;
+    --ctp-blue: #89b4fa;
+    --ctp-lavender: #b4befe;
     --backdrop: #000000a6;
     --float-shadow: 0 12px 32px #00000080;
   }
@@ -465,6 +498,23 @@ kbd {
   text-align: center;
 }
 
+/* The sprite only defines symbols; out of flow, its empty box adds no line above the app. */
+.icon-sprite {
+  position: absolute;
+}
+
+.ficon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+}
+
+/* The icon sits close to the name it labels. */
+.tree-row .ficon,
+.fh-title .ficon {
+  margin-right: -2px;
+}
+
 .tree-name {
   flex: 1;
   overflow: hidden;
@@ -684,9 +734,38 @@ kbd {
   width: 100%;
 }
 
-/* A long hunk header or gap row must not widen the split list's scroll area. */
+/* Wrapped lines (REQ-DIFF-013) never scroll sideways: rows are the list's width and as tall as
+   their wrapped text, which the virtual list measures. The gutter cells stretch with the row, so
+   the line number and change mark sit on the first visual line. */
+.diff.wrap {
+  overflow-x: hidden;
+}
+
+.diff.wrap .vl-inner {
+  width: 100%;
+}
+
+.diff.wrap .d-line,
+.diff.wrap .d-split {
+  height: auto;
+}
+
+.diff.wrap .d-code {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.diff.split.wrap .d-text {
+  display: inline;
+  transform: none;
+}
+
+/* A long hunk header or gap row must not widen a list that does not scroll sideways. */
 .diff.split .d-hunk,
-.diff.split .d-gap {
+.diff.split .d-gap,
+.diff.wrap .d-hunk,
+.diff.wrap .d-gap {
   overflow: clip;
 }
 
@@ -1350,7 +1429,8 @@ kbd {
    tags in the tree, round labels, the since marks and hidden whitespace in the diff, and earlier
    comments. Earlier comments are read-only context, so they recede: no ground, neutral chips. */
 
-.ws-toggle {
+.ws-toggle,
+.wrap-toggle {
   flex: none;
   display: inline-flex;
   align-items: center;
@@ -1360,7 +1440,8 @@ kbd {
   user-select: none;
 }
 
-.ws-toggle input {
+.ws-toggle input,
+.wrap-toggle input {
   margin: 0;
   accent-color: var(--primary);
 }
@@ -1621,4 +1702,14 @@ kbd {
     order: 1;
     margin-right: auto;
   }
+}
+
+/* A banner's action sits after its text; the moved list follows on its own lines. */
+.banner > .btn {
+  margin-left: 8px;
+}
+
+.moved-list {
+  margin: 6px 0 0;
+  padding-left: 20px;
 }

@@ -44,16 +44,16 @@ type Quote struct {
 	OmittedBytes int
 }
 
-// result builds the review result for st. It reads only immutable session fields, so callers run
-// it without the lock on a state copied under it.
-func (s *Session) result(ctx context.Context, st state) (Result, error) {
+// result builds the review result for st, whose file indexes refer to v. It reads only v, so
+// callers run it without the lock on a state copied under it.
+func (v *view) result(ctx context.Context, st state) (Result, error) {
 	cs := sorted(st)
-	quotes, err := s.quote(ctx, cs)
+	quotes, err := v.quote(ctx, cs)
 	if err != nil {
 		return Result{}, err
 	}
 	r := Result{
-		Source: s.snap.Source(), BaseTree: s.snap.BaseTree(), HeadTree: s.snap.HeadTree(), Summary: st.summary,
+		Source: v.snap.Source(), BaseTree: v.snap.BaseTree(), HeadTree: v.snap.HeadTree(), Summary: st.summary,
 		Comments: make([]ResultComment, 0, len(cs)),
 	}
 	for k, c := range cs {
@@ -67,6 +67,7 @@ func (s *Session) result(ctx context.Context, st state) (Result, error) {
 // under the lock without holding it.
 func (s *Session) Quotes(ctx context.Context, ids []string) (map[string]Quote, error) {
 	s.mu.Lock()
+	v := s.cur
 	cs := make([]Comment, 0, len(ids))
 	for _, id := range ids {
 		if c, ok := s.state.comments[id]; ok {
@@ -74,7 +75,7 @@ func (s *Session) Quotes(ctx context.Context, ids []string) (map[string]Quote, e
 		}
 	}
 	s.mu.Unlock()
-	quotes, err := s.quote(ctx, cs)
+	quotes, err := v.quote(ctx, cs)
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +90,7 @@ func (s *Session) Quotes(ctx context.Context, ids []string) (map[string]Quote, e
 
 // quote reads the quote of each comment: out[k] is cs[k]'s. Each file side is read once, whatever
 // the number of comments on it.
-func (s *Session) quote(ctx context.Context, cs []Comment) ([]Quote, error) {
+func (v *view) quote(ctx context.Context, cs []Comment) ([]Quote, error) {
 	type sideKey struct {
 		side Side
 		file int
@@ -118,9 +119,9 @@ func (s *Session) quote(ctx context.Context, cs []Comment) ([]Quote, error) {
 		g.ranges = append(g.ranges, QuoteRange(start, end))
 	}
 	for _, g := range groups {
-		lines, err := s.snap.Lines(ctx, g.key.file, g.key.side == New, g.ranges, QuoteKeep)
+		lines, err := v.snap.Lines(ctx, g.key.file, g.key.side == New, g.ranges, QuoteKeep)
 		if err != nil {
-			f := s.snap.File(g.key.file)
+			f := v.snap.File(g.key.file)
 			return nil, fmt.Errorf("quote %s: %w", f.Path(), err)
 		}
 		for j, k := range g.comments {

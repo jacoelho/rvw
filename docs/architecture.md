@@ -15,7 +15,7 @@ agent ──runs──▶ cmd/rvw ─── lifecycle, signals, stdout
                   ├─ internal/source    git facts: snapshot, file list, patches, contents, gaps, content search
                   ├─ internal/review    the draft: comments, summary, viewed marks, lock, result
                   └─ internal/server    loopback HTTP: auth, translation, bounded file work
-                        ├─ internal/highlight  syntax spans
+                        ├─ internal/highlight  syntax spans: one linear scanner per language
                         ├─ internal/worddiff   word changes in paired lines
                         └─ web (embedded dist) ◀── browser
 ```
@@ -75,8 +75,41 @@ Inside a boundary, values are trusted; there is no re-validation.
 
 ## State and lifecycle
 
-- **Snapshot.** Resolved once at start and immutable afterwards. Line numbers in the draft and the result refer to it,
-  not to the live worktree.
+- **Snapshot.** Immutable once resolved. Line numbers in the draft and the result refer to the served snapshot, not to
+  the live worktree. A refresh replaces it; nothing else does.
+- **Change check and refresh** ([Q-57](decisions.md#q-57--change-notice-and-refresh), contract revision 10,
+  accepted). `source.Snapshot.Changed` decides whether resolving the source again could give other trees; an
+  uncommitted snapshot keeps its private index for it, which `Snapshot.Close` deletes, and `Repo.Close` deletes every
+  live snapshot's. The server holds the served snapshot and what it derived from it as one `generation` (snapshot,
+  round facts, content facts, the moved list, the sticky changed flag), replaced whole through an atomic pointer.
+  - Requests: every handler that reads or changes the review is `bound`: it holds `refreshMu` shared and checks the
+    `Rvw-Generation` header (400 when missing, 409 with the current id when another). The session document is served
+    for whichever generation is current and names it. Cancel, status and the close notice are not gated.
+  - Refresh: `POST /api/refresh` holds `refreshMu` exclusively, so it waits for bound requests in flight and holds new
+    ones until the next generation is stored. It calls `Config.Refresh`, which `cmd/rvw`'s `drafts` owns: resolve the
+    source again, `review.Session.Refresh` with an opener that opens and locks a store for a key, then close the
+    replaced snapshot. The session is the one owner of the draft store: `review.Start` takes the store (closing it on
+    failure), `Refresh` closes the store it replaces, and `Session.Close` closes the current one; `cmd/rvw` keeps no
+    store. `Session.Refresh` is the sole decider of "unchanged":
+    it keeps the generation only when the draft key and `source.Snapshot.SameFiles` both match. `SameFiles` includes
+    per-file blob presence, so in a partial clone a blob arriving that completes a file's blobs advances the generation and open pages reload. A
+    same key with a different listing is carried over in place into the current store and advances the generation; a
+    new key's store comes from the opener, which `Refresh` calls at most once and closes on failure. The server stores
+    `Refreshed.Snapshot`. Invariant: file indexes in session state and in a generation belong to exactly one listing
+    (contract revision 11, REQ-SES-013).
+    The change check also asks, for a listing built with blobs missing, whether any arrived (one `cat-file
+    --batch-check` run, lazy fetch off), so the notice shows before the human refreshes.
+    `Session.Refresh` carries the draft over without holding the
+    session's mutex while it diffs and fails with `ErrBusy` if the draft changed meanwhile; on any error the session,
+    its store and the generation are unchanged (a draft already under the new key may have been moved aside). The same draft key and the same file list keep the generation id, its facts and its moved list.
+  - Content facts: `factRuns` starts each generation's background reads under `Run`'s context; a refresh stops the
+    replaced generation's reads after the new one is stored, and `Run` waits for all of them before it returns.
+  - Check: a status request with `check=1`, which the page sends only while visible, runs `Changed` when no check is
+    running (`probeMu.TryLock`), no refresh holds the lock (`refreshMu.TryRLock`), the generation is still current and
+    the last check ended at least 10 s ago. The result sticks in the generation until a refresh.
+  - Page: a 409 naming a generation makes the page reload, or show a reload prompt while an editor or the Finish
+    dialog is open; a status reply naming another generation does the same, so other tabs follow a refresh. The moved
+    list shows until dismissed, per generation, in `sessionStorage`.
 - **Draft.** `review.Session` is its only writer. Each mutation is validated, written to a temporary file, fsynced and
   renamed into place, and only then applied in memory, so the draft on disk is never behind what the UI was told.
 - **Lock.** An exclusive `flock` per snapshot key makes one session the only writer. A second instance reports the
@@ -107,8 +140,11 @@ Inside a boundary, values are trusted; there is no re-validation.
     when they hold spaces, `=` or quotes, so the review URL and draft paths are quoted. `cmd/rvw` builds the one
     logger and passes it to `source.Resolve` and `server.Config.Log`; the `log` package is denied by depguard.
 - **Page presence** ([Q-42](decisions.md#q-42--closing-the-review-page-ends-the-session)). The page sends a close
-  notice on `pagehide`; `server.presence` then arms one timer for the 10 s close grace. Any request that passes the
-  Host, token and cross-origin checks disarms it, so a reload or another open tab keeps the session; when it fires,
+  notice on `pagehide`; `server.presence` then arms one timer for the 10 s close grace and marks the notice's page id
+  closed (the last 32 are kept). Every API request names its page in `Rvw-Page` (refused with 400 otherwise); one that
+  passes the Host, token and cross-origin checks and comes from a page not marked closed disarms the timer, so a reload
+  or another open tab keeps the session and a poll the closing page had in flight does not. A page restored from the
+  back/forward cache takes a new id; when it fires,
   `Run` ends the session as page closed (exit 4, draft kept). A later notice restarts the grace. The page has one
   status poll loop; a restore from the back/forward cache or a sibling's close asks it to poll at once. `Run` stops the
   presence when it returns; after that, notices and requests do nothing. Failure modes: a crashed browser sends no
@@ -132,7 +168,8 @@ Inside a boundary, values are trusted; there is no re-validation.
      `context.WithoutCancel`.
   2. `Shutdown` has a 5 s deadline; its error is returned and `Close` is the fallback. When the result was already
      delivered, the error goes only to stderr and the exit status stays the outcome's.
-  3. The deferred `store.Close` and `repo.Close` run after `Run` returns, so the draft lock and the `cat-file` process
+  3. The deferred `Session.Close` (the current store) and `repo.Close` (every live private index) run after `Run`
+     returns, so the draft lock and the `cat-file` process
      are released only after every request has ended, in reverse order of their creation.
   4. Handlers neither sleep nor use `context.Background`. `context.WithoutCancel` appears only in the finish delivery,
      the shutdown deadline and the `cat-file` process, which `Repo.Close` cancels; each `cat-file` exchange is
@@ -178,7 +215,7 @@ Inside a boundary, values are trusted; there is no re-validation.
   adopts a version only from its own reply or a 412 reload, and never keeps a create for an id `State` holds
   ([Q-41](decisions.md#q-41--a-refused-write-loads-the-stored-comment)). An edit whose text equals the base's text
   sends nothing ([Q-40](decisions.md#q-40--an-unchanged-editor-sends-nothing)).
-- **Server-side state.** The snapshot, the changed-file list, the draft and the background facts. Nothing per file is
+- **Server-side state.** The current generation (snapshot, changed-file list, background facts), the draft. Nothing per file is
   retained after a reply.
 
 ## Bounds
@@ -188,8 +225,9 @@ Designed for at least 1,000 changed files of 10,000 lines each and up to 4,096 c
 - A file's patch and contents are read only when the UI asks for it. Every request handler that runs `git` takes one of
   two file slots first: file and context views, line and range creates, quotes, content searches and the result preview. This bounds
   server memory to two files. A request still waiting for a slot when the session ends replies 503. Two paths take no
-  slot: Finish, which the session phase serializes and which must not wait behind UI reads, and the status HEAD check,
-  which is cached and runs at most once per interval. Quoting streams lines, so the quote limits bound its memory.
+  slot: Finish, which the session phase serializes and which must not wait behind UI reads, and the change check,
+  which runs one at a time and at most once per 10 s. A refresh takes no slot: it holds `refreshMu` exclusively, so no
+  slot holder runs beside it. Quoting streams lines, so the quote limits bound its memory.
 - Every one-shot `git` command runs through the runner's `stream`, which owns the stdout and stderr caps, stopping and
   reaping a process whose reader gave up, cancellation and the mapping of exit statuses to errors; every read of its
   output is therefore capped. The one exception is the long-lived `git cat-file --batch-command` (`objects.go`), which
@@ -199,9 +237,19 @@ Designed for at least 1,000 changed files of 10,000 lines each and up to 4,096 c
   most 64 KiB by one policy (`pathspecBatches`). Patches
   and line counts take no pathspecs: their records go to `git diff-pairs` on stdin.
 - The UI polls the status at the interval the server sends: half the close grace, at most 5 s. Deriving it from the
-  grace keeps a sibling tab's poll inside the grace, and the 5 s cap keeps the moved-HEAD notice within REQ-SES-010's
-  10 s. Page presence holds one timer.
-- Highlighting runs within a 2 s budget per side and falls back to plain text after it.
+  grace keeps a sibling tab's poll inside the grace, and the 5 s cap with the 10 s check interval keeps the change
+  notice within REQ-SES-010's 20 s. Page presence holds one timer.
+- Highlighting runs within a 2 s budget per side and falls back to plain text after it. The scanners in
+  `internal/highlight` are hand-written and linear in the side's size, with no regular expressions: a failed search
+  for a closer is not repeated, frame stacks hold at most 1,024 entries, fenced code embeds at most 4 levels deep,
+  and cancellation is checked every 1,024 lines. At the 1 MiB large-file limit a side takes about 5–16 ms, so the
+  budget guards against defects rather than routine input
+  ([Q-52](decisions.md#q-52--project-owned-highlighting-scanners)). Only the lines the reply sends get spans (a file's
+  hunk lines, or the requested context range), stored in chunks of at most 4,096 spans, so a side allocates O(spans
+  kept / 4,096) objects plus one slice of line headers
+  ([Q-53](decisions.md#q-53--json-yaml-and-toml-and-highlighting-only-the-lines-sent)). A line has at most 500 spans;
+  the rest of a longer line is one plain span, so a minified line's reply and DOM stay bounded
+  ([Q-56](decisions.md#q-56--markdown-front-matter-and-a-span-bound-per-line)).
 - Content search keeps at most 500 lines, reads at most 16 MiB of `git grep` output through `stream`'s limit, runs
   for at most 2 s, and keeps a 496-byte window per line; its text is 3 characters to 256 bytes. Reaching a bound
   returns the matches found first with a truncation flag.
@@ -213,7 +261,14 @@ Designed for at least 1,000 changed files of 10,000 lines each and up to 4,096 c
 - The UI renders only visible rows plus 50 rows of overscan, in every list. Replacing a list's rows keeps the
   rows in view in place: each row has an id that outlives content changes, such as a comment becoming its
   editor, and the list scrolls so the first shown row still present stays where it was drawn. Finding it
-  scans the new rows once, the same order of cost as laying them out.
+  scans the new rows once, the same order of cost as laying them out. A shown row partly above the view
+  that shrinks so far it would leave the view, such as a wrapped line when the window widens, keeps its
+  bottom in place instead of its top.
+- Diff rows are fixed-height unless Wrap lines is on (REQ-DIFF-013, Q-51). `fileview.ts` owns the setting, kept in
+  the browser under `rvw.wrap`. Wrapped code rows become measured rows of the virtual list: each starts at an estimate,
+  its widest half's width in columns divided by the code column's width in characters, and its measured height is
+  cached under a key holding that width, so a resize re-estimates every row not in view instead of trusting heights
+  measured at another width. While wrapping is on, neither view scrolls sideways and split's shared scrollbar is hidden.
 - Startup reads content only as `git` needs to list changes. Line counts and generated files are read in the
   background after the UI is served.
 
@@ -259,6 +314,11 @@ Designed for at least 1,000 changed files of 10,000 lines each and up to 4,096 c
   whose Origin host differs from Host when Sec-Fetch-Site is absent
   ([Q-44](decisions.md#q-44--cross-origin-checks-from-the-standard-library)).
 - `web/dist` is committed and embedded, so `go install` needs no Node. `make check` fails when `web/dist` is stale.
+- File-type icons are a curated subset of [Catppuccin's](https://github.com/catppuccin/vscode-icons) (MIT, licence
+  beside them), vendored as one sprite and two lookup tables under `web/src/icons/`. `web/scripts/icons.mjs` owns the
+  subset and regenerates all three from a checkout, at the commit it records in them; nothing else edits them.
+  `fileicon.ts` alone maps a path to an icon (file name, then longest extension), and `app.css` alone gives the icons
+  their colours. The sprite adds about 65 KB to the page, which loopback makes negligible.
 - `web/src/favicon.svg` is the product mark: the favicon, and inlined by the build as the page's
   brand so the end page shows it after the server has gone. `favicon.png` is the same mark
   rasterised at 32px for Safari before 26; re-render it when the SVG changes.
@@ -316,7 +376,7 @@ Designed for at least 1,000 changed files of 10,000 lines each and up to 4,096 c
 | Choice | Cost |
 | --- | --- |
 | Re-run `git diff-pairs -p` per file request instead of caching patches | Repeated Git work on revisits; buys flat memory |
-| Highlight the whole side, not the requested window | A large non-large file costs about a second per request; a multi-line token can span any window |
+| Highlight the whole side, not the requested window | Each request rescans both sides, up to about 16 ms at 1 MiB; a multi-line token can span any window. Spans are kept only for the lines sent |
 | Buffer a patch whole, up to 64 MiB | A huge rewrite's reply is large; streaming is the next step if it matters |
 | Seed validation reads each commented file's diff | A 300-comment seed over 150 files measured 6 s of startup |
 | Snapshot uncommitted changes with `git add -A` into a private index | A large unignored, untracked tree is slow and fills the object database; the fix is to ignore it |

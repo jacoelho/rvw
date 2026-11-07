@@ -1829,9 +1829,10 @@ func (pg *page) leave() int {
 }
 
 // TestBrowserBackForwardCache: leaving the review page sends the close notice, as the page may
-// never return. A page restored from the back/forward cache polls at once: back after 8 s, past
-// the point where the poll interrupted by leaving would land, rvw is still running 13 s after the
-// leave. Leaving again without returning ends rvw with status 4.
+// never return. A page restored from the back/forward cache takes a new page id and polls at once:
+// back after 6 s, past the 5 s poll interval, rvw is still running 13 s after the leave; a poll
+// under the closed id would not keep it (Q-42). Leaving again without returning ends rvw with
+// status 4.
 func TestBrowserBackForwardCache(t *testing.T) {
 	// Not parallel: while it ran beside other tests, their pages intermittently lost focus or
 	// stopped answering for 10 s in the shared Chrome (cause unconfirmed); run alone, none did.
@@ -1846,14 +1847,18 @@ func TestBrowserBackForwardCache(t *testing.T) {
 	n := pg.polls()
 	pg.waitTrue("the next regular status poll", fmt.Sprintf(statusPolls+` > %d`, n))
 
+	// The grace runs from the notice, which reaches rvw before leave returns: coming back at 6 s
+	// leaves the restored page's poll at least 4 s on a loaded machine.
 	back := pg.leave()
 	left := time.Now()
-	time.Sleep(8 * time.Second)
+	time.Sleep(6 * time.Second)
 	pg.send("Page.navigateToHistoryEntry", map[string]any{"entryId": back})
 	pg.waitTrue("the page restored from the back/forward cache", `window.rvwRestored === true`)
+	restored := time.Since(left)
 	select {
 	case <-p.done:
-		t.Fatalf("rvw exited (%d) although the page came back within the grace; stderr:\n%s", p.cmd.ProcessState.ExitCode(), p.stderr)
+		t.Fatalf("rvw exited (%d) although the page came back %v after leaving, within the grace; stderr:\n%s",
+			p.cmd.ProcessState.ExitCode(), restored.Round(time.Millisecond), p.stderr)
 	case <-time.After(time.Until(left.Add(13 * time.Second))):
 	}
 
@@ -2751,6 +2756,33 @@ func TestBrowserCommentSteps(t *testing.T) {
 	for _, want := range []string{"at 12", "at 10"} {
 		pg.press("[", "BracketLeft", 219, 0)
 		pg.waitTrue("[ to the comment "+want, topComment+` === `+jsString(want))
+	}
+	pg.noPageErrors()
+}
+
+// TestBrowserFileIconsIgnoreObjectMembers: a file named like an Object.prototype member (lookup
+// lower-cases, so constructor and __proto__ are the ones that could match), or with
+// such an extension, shows the plain file icon, while a known extension shows its own.
+func TestBrowserFileIconsIgnoreObjectMembers(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	w.write("README", "base\n")
+	w.commit("base")
+	for _, name := range []string{"constructor", "__proto__", "x.__proto__", "main.go"} {
+		w.write(name, "x\n")
+	}
+	w.commit("head")
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+	var got map[string]string
+	pg.eval(`Object.fromEntries([...document.querySelectorAll(".tree-row")].filter((r) => r.querySelector(".ficon")).map((r) => [r.querySelector(".tree-name").textContent, r.querySelector(".ficon use").getAttribute("href")]))`, &got)
+	want := map[string]string{"constructor": "#i-_file", "__proto__": "#i-_file", "x.__proto__": "#i-_file", "main.go": "#i-go"}
+	for name, href := range want {
+		if got[name] != href {
+			t.Errorf("%s's icon = %q; want %q (all: %v)", name, got[name], href, got)
+		}
 	}
 	pg.noPageErrors()
 }

@@ -5,6 +5,7 @@
 import type { Api, ChangedFile, Comment, CommentSite, EarlierComment, EarlierPlacement, FileDiff, FileReply, Gap, Placement, TextDiff, Line as WireLine, Range, Side, Span } from "./api";
 import { renderCode } from "./code";
 import { h } from "./dom";
+import { fileIcon } from "./fileicon";
 import { CommentEditor } from "./editor";
 import { LineDrag, type Selection } from "./linedrag";
 import { type Align, VirtualList } from "./scroller";
@@ -18,6 +19,8 @@ const REVEAL_MARGIN = 3;
 const MAX_CODE_COLUMNS = 4000;
 /** Columns before split code text: line number (6ch) and change mark (2ch). */
 const SPLIT_GUTTER_COLUMNS = 8;
+/** Columns before unified code text: two line numbers and the change mark. */
+const UNIFIED_GUTTER_COLUMNS = 14;
 /** Columns an arrow key moves split code text sideways. */
 const SPLIT_KEY_STEP = 8;
 
@@ -79,8 +82,9 @@ type DRow =
   | { k: "info"; lines: string[] }
   | { k: "hunk"; text: string }
   | { k: "gap"; gap: ShownGap }
-  | { k: "line"; line: Line }
-  | { k: "split"; left: Line | null; right: Line | null }
+  // cols: the character columns of the line, or of the split row's wider half.
+  | { k: "line"; line: Line; cols: number }
+  | { k: "split"; left: Line | null; right: Line | null; cols: number }
   | { k: "hidden"; h: HiddenHunk }
   | { k: "comment"; c: Comment; at: string }
   | { k: "earlier"; e: EarlierComment; p: EarlierPlacement | undefined; at: string }
@@ -171,8 +175,15 @@ export class FileView {
   /** Measures the mono character width the split range is computed in. */
   private readonly probe: HTMLElement;
   private codeCols = 0;
-  /** Mono character width in px, measured when the split range is computed. */
+  /** Mono character width in px, measured whenever the list's width changes. */
   private ch = 7;
+  /** Wrap lines (REQ-DIFF-013): code rows wrap within their column and are measured rows. */
+  private wrapped: boolean;
+  /**
+   * Characters a wrapped line's code column holds. It is part of a wrapped row's height key, so a
+   * width change drops every height measured at the old width.
+   */
+  private wrapCols = 80;
 
   constructor(
     headerEl: HTMLElement,
@@ -184,6 +195,7 @@ export class FileView {
     this.header = headerEl;
     this.list = new VirtualList(listEl, ROW_HEIGHT, 90);
     this.chosenLayout = localStorage.getItem("rvw.mode") === "split" ? "split" : "unified";
+    this.wrapped = localStorage.getItem("rvw.wrap") === "1";
     listEl.addEventListener("click", (e) => this.onClick(e));
     this.drag = new LineDrag(listEl, {
       start: (e) => this.gutterAt(e.target),
@@ -219,7 +231,12 @@ export class FileView {
     listEl.addEventListener("scroll", () => {
       if (this.chosenLayout === "split" && listEl.scrollLeft !== 0) listEl.scrollLeft = 0;
     }, { passive: true });
-    new ResizeObserver(() => this.updateSplitRange()).observe(listEl);
+    new ResizeObserver(() => {
+      this.measure();
+      this.updateSplitRange();
+      // Re-keying wrapped rows replaces the rows, which waits for the frame, outside the observer.
+      if (this.wrapped && this.updateWrapCols()) requestAnimationFrame(() => this.setRows());
+    }).observe(listEl);
     this.applyLayout();
   }
 
@@ -235,9 +252,14 @@ export class FileView {
     if (dy !== 0) this.list.el.scrollTop += dy * unit;
   };
 
-  /** Moves split code text sideways by dir steps; false in unified view, where rows scroll natively. */
+  /** Split view scrolls its code text through the strip; unified and wrapped lines do not. */
+  private get stripped(): boolean {
+    return this.chosenLayout === "split" && !this.wrapped;
+  }
+
+  /** Moves split code text sideways by dir steps; false otherwise, where rows scroll natively or not at all. */
   scrollSideways(dir: Step): boolean {
-    if (this.chosenLayout !== "split") return false;
+    if (!this.stripped) return false;
     this.setSplitX(this.strip.scrollLeft + dir * SPLIT_KEY_STEP * this.ch);
     return true;
   }
@@ -252,7 +274,7 @@ export class FileView {
    * rounded up to whole characters so no glyph is cut in half at the code box's edge.
    */
   private publishSplitX(): void {
-    const x = this.chosenLayout === "split" ? Math.ceil(this.strip.scrollLeft / this.ch) * this.ch : 0;
+    const x = this.stripped ? Math.ceil(this.strip.scrollLeft / this.ch) * this.ch : 0;
     this.list.el.style.setProperty("--split-x", `${x}px`);
   }
 
@@ -262,24 +284,46 @@ export class FileView {
    * box. The strip keeps its height whenever split is on, so showing it never changes the list's size.
    */
   private updateSplitRange(): void {
-    if (this.chosenLayout !== "split") return;
-    const ch = (this.ch = this.probe.getBoundingClientRect().width / 100 || 7);
-    // The old half is the narrower code box: it also holds the 1px divider.
-    const box = this.list.el.clientWidth / 2 - SPLIT_GUTTER_COLUMNS * ch - 1;
-    const range = Math.max(0, Math.ceil(this.codeCols * ch - box));
+    if (!this.stripped) return;
+    const range = Math.max(0, Math.ceil(this.codeCols * this.ch - this.codeBox()));
     this.stripSpacer.style.width = `${this.strip.clientWidth + range}px`;
     this.strip.style.visibility = range > 0 ? "" : "hidden";
     this.publishSplitX();
   }
 
-  /** Applies the layout: split owns the horizontal offset, unified scrolls natively. */
+  private measure(): void {
+    this.ch = this.probe.getBoundingClientRect().width / 100 || 7;
+  }
+
+  /** The px width of one code column: unified's, or split's old half, which also holds the 1px divider. */
+  private codeBox(): number {
+    const w = this.list.el.clientWidth;
+    return this.chosenLayout === "split" ? w / 2 - SPLIT_GUTTER_COLUMNS * this.ch - 1 : w - UNIFIED_GUTTER_COLUMNS * this.ch;
+  }
+
+  /** Recomputes wrapCols; true when it changed. */
+  private updateWrapCols(): boolean {
+    const cols = Math.max(1, Math.floor(this.codeBox() / this.ch));
+    if (cols === this.wrapCols) return false;
+    this.wrapCols = cols;
+    return true;
+  }
+
+  /**
+   * Applies the layout and wrapping: unwrapped split owns the horizontal offset through the strip,
+   * unwrapped unified scrolls natively, and wrapped lines never scroll sideways.
+   */
   private applyLayout(): void {
-    const split = this.chosenLayout === "split";
-    this.list.el.classList.toggle("split", split);
-    this.strip.hidden = !split;
-    if (split) this.list.el.addEventListener("wheel", this.onWheel, { passive: false });
-    else this.list.el.removeEventListener("wheel", this.onWheel);
+    const el = this.list.el;
+    el.classList.toggle("split", this.chosenLayout === "split");
+    el.classList.toggle("wrap", this.wrapped);
+    this.strip.hidden = !this.stripped;
+    if (this.stripped) el.addEventListener("wheel", this.onWheel, { passive: false });
+    else el.removeEventListener("wheel", this.onWheel);
+    this.measure();
+    this.updateWrapCols();
     this.resetHorizontal();
+    this.updateSplitRange();
   }
 
   /** Returns both horizontal offsets to the start, synchronously. */
@@ -296,6 +340,23 @@ export class FileView {
 
   get layout(): Layout {
     return this.chosenLayout;
+  }
+
+  get wrap(): boolean {
+    return this.wrapped;
+  }
+
+  /**
+   * Turns Wrap lines on or off. The rows stay the same rows, so replacing them keeps the row in
+   * view in place while its height changes.
+   */
+  setWrap(on: boolean): void {
+    if (on === this.wrapped) return;
+    this.drag.cancel();
+    this.wrapped = on;
+    localStorage.setItem("rvw.wrap", on ? "1" : "0");
+    this.applyLayout();
+    this.setRows();
   }
 
   /** The shown file's diff has loaded. */
@@ -644,7 +705,7 @@ export class FileView {
     this.header.replaceChildren();
     if (!f) return;
     const title = h("div", "fh-title");
-    title.append(h("span", `tree-status st-${f.status}`, f.status));
+    title.append(h("span", `tree-status st-${f.status}`, f.status), fileIcon(f.path));
     if (f.renamedFrom !== undefined) {
       title.append(h("span", "fh-path old", f.renamedFrom), h("span", "fh-arrow", " → "));
     }
@@ -713,14 +774,26 @@ export class FileView {
   }
 
   private setRows(): void {
+    // The list asks for every row's key on each layout; each is built once per source.
+    const keys: (string | undefined)[] = new Array(this.rows.length);
+    const wrapped = this.wrapped;
+    const wrapCols = this.wrapCols;
     this.list.setSource({
       count: () => this.rows.length,
       variable: (n) => {
         const k = this.rows[n]?.k;
-        return k === "comment" || k === "editor" || k === "info" || k === "earlier";
+        return k === "comment" || k === "editor" || k === "info" || k === "earlier" || (wrapped && (k === "line" || k === "split"));
       },
-      key: (n) => rowKey(this.rows[n]!),
+      key: (n) => {
+        const r = this.rows[n]!;
+        return (keys[n] ??= wrapped && (r.k === "line" || r.k === "split") ? `${rowId(r)}|${wrapCols}` : rowKey(r));
+      },
       id: (n) => rowId(this.rows[n]!),
+      // A wrapped row's estimate is its longest half in visual lines; measurement corrects it.
+      estimate: (n) => {
+        const r = this.rows[n]!;
+        return r.k === "line" || r.k === "split" ? Math.max(1, Math.ceil(r.cols / wrapCols)) * ROW_HEIGHT : 90;
+      },
       render: (n) => this.renderRow(this.rows[n]!),
     });
   }
@@ -810,10 +883,10 @@ export class FileView {
         continue;
       }
       if ("line" in item) {
-        body.push({ k: "line", line: item.line });
+        body.push({ k: "line", line: item.line, cols: width(item.line) });
         emitLineAnchors(item.line, null);
       } else {
-        body.push({ k: "split", left: item.left, right: item.right });
+        body.push({ k: "split", left: item.left, right: item.right, cols: Math.max(width(item.left), width(item.right)) });
         emitLineAnchors(item.left, "old");
         emitLineAnchors(item.right, "new");
       }
@@ -834,10 +907,7 @@ export class FileView {
     this.rows = rows;
 
     let cols = 0;
-    for (const item of lines) {
-      if ("line" in item) cols = Math.max(cols, width(item.line));
-      else if ("left" in item) cols = Math.max(cols, width(item.left), width(item.right));
-    }
+    for (const r of body) if (r.k === "line" || r.k === "split") cols = Math.max(cols, r.cols);
     // Unified sizes its scroll width from --code-cols, capped; split's range uses the full width,
     // since its clipped code boxes add nothing to any scroll width.
     this.codeCols = cols;

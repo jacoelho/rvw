@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -160,16 +161,20 @@ func (d *deliveries) count() int {
 
 // fixture is a server over a real snapshot and a real session whose draft lives in a temp dir.
 type fixture struct {
-	t         *testing.T
-	repo      *testRepo
-	git       *source.Repo // the session's repository, also the retention refs' writer
-	snap      *source.Snapshot
-	sess      *review.Session
-	store     *review.Store
+	t    *testing.T
+	repo *testRepo
+	git  *source.Repo // the session's repository, also the retention refs' writer
+	snap *source.Snapshot
+	sess *review.Session
+	// draftPath is the path of the draft the session started with.
+	draftPath string
 	srv       *server.Server
 	delivered *deliveries
 	addr      string
 	token     string
+	// gen is the generation requests name unless an option replaces it; a test that refreshes
+	// sets it from the reply.
+	gen uint64
 }
 
 const testToken = "test-token-0123456789"
@@ -192,6 +197,8 @@ type fixtureOptions struct {
 	ledger *round.Store
 	// log, when set, receives the server's log lines.
 	log io.Writer
+	// checkInterval is Config.CheckInterval.
+	checkInterval time.Duration
 }
 
 // seedOf parses a seed document the way rvw's --seed does.
@@ -227,15 +234,11 @@ func newFixture(t *testing.T, repo *testRepo, opts fixtureOptions) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := review.OpenStore(t.TempDir(), "fixture")
+	draftDir := t.TempDir()
+	store, err := review.OpenStore(draftDir, review.DraftKey(snap))
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		if err := store.Close(); err != nil {
-			t.Errorf("close store: %v", err)
-		}
-	})
 	var ledger round.Ledger
 	if opts.ledger != nil {
 		if ledger, err = opts.ledger.Load(time.Now()); err != nil {
@@ -248,8 +251,13 @@ func newFixture(t *testing.T, repo *testRepo, opts fixtureOptions) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := sess.Close(); err != nil {
+			t.Errorf("close session: %v", err)
+		}
+	})
 	token := fmt.Sprintf("%s-%d", testToken, fixtureSeq.Add(1))
-	f := &fixture{t: t, repo: repo, git: r, snap: snap, sess: sess, store: store, token: token,
+	f := &fixture{t: t, repo: repo, git: r, snap: snap, sess: sess, draftPath: store.Path(), token: token, gen: 1,
 		delivered: &deliveries{err: opts.deliverErr, hook: opts.deliverHook}}
 	logOut := io.Discard
 	if opts.log != nil {
@@ -259,8 +267,31 @@ func newFixture(t *testing.T, repo *testRepo, opts fixtureOptions) *fixture {
 		Assets:  fstest.MapFS{"index.html": {Data: []byte(indexHTML)}},
 		Session: sess, Ledger: ledger, Token: token, Deliver: f.delivered.deliver,
 		Log: slog.New(slog.NewTextHandler(logOut, nil)), FinishWait: opts.finishWait, CloseGrace: opts.closeGrace,
+		Refresh: refresher(t, r, src, sess, draftDir), CheckInterval: opts.checkInterval,
 	})
 	return f
+}
+
+// refresher refreshes sess as rvw does: it resolves src again, opens the new draft key's store
+// when the key changed, and closes the replaced snapshot.
+func refresher(t *testing.T, r *source.Repo, src source.Source, sess *review.Session, dir string) func(context.Context) (review.Refreshed, error) {
+	t.Helper()
+	return func(ctx context.Context) (review.Refreshed, error) {
+		snap, err := r.Resolve(ctx, src, slog.New(slog.DiscardHandler))
+		if err != nil {
+			return review.Refreshed{}, err
+		}
+		res, err := sess.Refresh(ctx, snap, func(key string) (*review.Store, error) { return review.OpenStore(dir, key) })
+		if err != nil {
+			return review.Refreshed{}, errors.Join(err, snap.Close())
+		}
+		// The session has moved, so these are warnings, as rvw logs them; a test fails on them
+		// rather than the refresh.
+		if err := errors.Join(res.OldDraftErr, res.OldSnapshot.Close()); err != nil {
+			t.Errorf("release what the refresh replaced: %v", err)
+		}
+		return res, nil
+	}
 }
 
 // serveHandler serves the handler without Run: the session never shuts the server down.
@@ -321,6 +352,20 @@ func waitRun(t *testing.T, done <-chan runResult) runResult {
 // reqOption adjusts a request before it is sent.
 type reqOption func(*http.Request)
 
+// testPage is the page id requests send unless withPage replaces it.
+const testPage = "page-a"
+
+// withPage sends the request as page id, or without a page id when id is empty.
+func withPage(id string) reqOption {
+	return func(r *http.Request) {
+		if id == "" {
+			r.Header.Del("Rvw-Page")
+			return
+		}
+		r.Header.Set("Rvw-Page", id)
+	}
+}
+
 func withoutToken() reqOption { return func(r *http.Request) { r.Header.Del("Authorization") } }
 
 func withToken(tok string) reqOption {
@@ -380,6 +425,8 @@ func (f *fixture) send(method, path, body string, opts ...reqOption) (response, 
 		return response{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+f.token)
+	req.Header.Set("Rvw-Generation", fmt.Sprint(f.gen))
+	req.Header.Set("Rvw-Page", testPage)
 	if method != http.MethodGet && method != http.MethodHead {
 		req.Header.Set("Origin", "http://"+f.addr)
 	}
@@ -416,8 +463,16 @@ type sessionDTO struct {
 	Files    []fileDTO    `json:"files"`
 	Comments []commentDTO `json:"comments"`
 
-	RenameDetection  string `json:"rename_detection"`
-	StatusIntervalMs int64  `json:"status_interval_ms"`
+	RenameDetection  string     `json:"rename_detection"`
+	Moved            []movedDTO `json:"moved"`
+	StatusIntervalMs int64      `json:"status_interval_ms"`
+	Generation       uint64     `json:"generation"`
+}
+
+type movedDTO struct {
+	ID   string    `json:"id"`
+	From targetDTO `json:"from"`
+	To   targetDTO `json:"to"`
 }
 
 type fileDTO struct {

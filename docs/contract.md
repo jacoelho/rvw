@@ -33,6 +33,41 @@ their acceptance checks (AC-RND-001 to AC-RND-003, AC-DIFF-004, AC-CMT-004, AC-N
 REQ-NAV-005, AC-SRC-002, AC-PERF-001, the Draft and Viewed mark definitions and the Excluded list. **It changes
 INV-PLAT-004 and REQ-DIFF-001, which revision 1 accepted**: rvw may write refs under `refs/rvw/`, and a
 shown diff may be an interdiff or omit whitespace-only hunks.
+
+Contract revision: 4, 2026-11-06, against workspace `main` at 4e6e2bc. The repository owner accepted it on 2026-11-06: it adds line
+wrapping (Q-51: new REQ-DIFF-013 and AC-DIFF-005, a change to REQ-PERF-001's basis and the Excluded list).
+
+Contract revision: 5, 2026-11-07, against workspace `main` at 4e6e2bc. The repository owner accepted it on 2026-11-07:
+it widens the highlighted languages to Go templates, JavaScript and JSX, TSX, Markdown with fenced code, Rust and
+Terraform/HCL, and replaces Chroma with project-owned scanners (Q-52), changing REQ-HL-001 and AC-HL-001.
+
+Contract revision: 6, 2026-11-07, against workspace `main` at 4e6e2bc. The repository owner accepted it on 2026-11-07:
+it adds JSON (with comments), YAML and TOML to the highlighted languages (Q-53), changing REQ-HL-001 and AC-HL-001.
+
+Contract revision: 7, 2026-11-07, against workspace `main` at 4e6e2bc. The repository owner accepted it on 2026-11-07:
+it adds Python and Dockerfile to the highlighted languages (Q-54), changing REQ-HL-001 and AC-HL-001.
+
+Contract revision: 8, 2026-11-07, against workspace `main` at 4e6e2bc. The repository owner accepted it on 2026-11-07:
+it adds CSS and SQL to the highlighted languages (Q-55), changing REQ-HL-001 and AC-HL-001.
+
+Contract revision: 9, 2026-11-07, against workspace `main` at 4e6e2bc. The repository owner accepted it on 2026-11-07:
+it highlights Markdown YAML front matter as YAML and bounds a line's highlighting to 500 spans (Q-56), changing
+REQ-HL-001 and AC-HL-001.
+
+Contract revision: 10, 2026-11-07, against workspace `main` at ea63831. The repository owner accepted it on 2026-11-07: it adds a change
+notice for worktree edits and a refresh from the page (Q-57): new REQ-SES-013 to REQ-SES-015, REQ-DRF-006 and
+AC-SES-004, and a change to AC-SES-001. **It changes REQ-SES-010 and REQ-SRC-005, which revision 1 accepted**: the
+notice also covers the base ref and uncommitted changes, within 20 s instead of 10 s, and the private index is kept
+for the change check until the snapshot is released.
+
+Contract revision: 11, 2026-11-07, against workspace `main` at 65abb56. The repository owner accepted it on 2026-11-07: a refresh that finds the
+same trees but another changed-file list (a blob arriving in a partial clone changes rename pairing and which files are
+readable) is no longer "unchanged": it carries the draft over and advances the generation, and the change notice shows
+when such a blob arrives (Q-58). It changes REQ-SES-010, REQ-SES-013, REQ-SES-015 and AC-SES-004.
+
+Contract revision: 12, 2026-11-07, against workspace `main` at 25d66e5. The repository owner accepted it on 2026-11-07: a request from the
+page that sent the close notice, such as a poll it had in flight, no longer keeps the session (Q-42). It changes
+REQ-SES-012, which revision 2 proposed; the rest of REQ-SES-012 remains proposed with revision 2.
 Decision owner: repository owner (jacoelho)
 Effective scope: target version only. No deployed contract, persisted data or compatibility promise binds this
 replacement (Q-03 in [decisions.md](decisions.md)).
@@ -63,7 +98,6 @@ Excluded:
 - placing an earlier comment by searching for its text, carrying comments for more than one round, and listing files
   reviewed earlier that are no longer changed (Q-49);
 - treating formatting that moves code across lines, such as `gofmt` joining lines, as whitespace-only (Q-49);
-- line wrapping in the diff (Q-11);
 - Linux, Windows and WebAssembly (Q-14);
 - an MCP server (Q-05);
 - symbol search; regular-expression, fuzzy or Unicode case-folding content search; searching removed lines (Q-47).
@@ -244,8 +278,8 @@ Basis: Repository owner, 2026-11-05 (Q-01, Q-38).
 #### REQ-SRC-005 — Uncommitted tree construction
 
 Status: accepted
-Statement: When the rvw command builds an uncommitted tree, the rvw command shall copy the file named by `git rev-parse --git-path index` to a private file outside the worktree, or create a new private file when that index does not exist, run `git -c core.splitIndex=false add -A` and `git write-tree` against the private file only, and delete it before the review UI is served.
-Basis: Proposed (Q-07). Copying the index lets `git add -A` reuse its stat cache, so only changed files are hashed. Executed observation: on Apple Git 2.54 this left the real index unchanged and excluded ignored files. A copy placed inside the worktree was itself included in the tree, so the copy must live outside it. With `core.splitIndex=true`, the temp-index add wrote a `sharedindex` file into the real Git directory unless split index was disabled. `--git-path` resolves a linked worktree's own index; an unborn repository may have no index file.
+Statement: When the rvw command builds an uncommitted tree, the rvw command shall copy the file named by `git rev-parse --git-path index` to a private file outside the worktree, or create a new private file when that index does not exist, run `git -c core.splitIndex=false add -A` and `git write-tree` against the private file only, and delete it when the snapshot is released or the rvw command exits.
+Basis: Proposed (Q-07). Revision 1 accepted deleting the private file before serving; revision 10, which the owner accepted on 2026-11-07, keeps it for the change check (REQ-SES-010, Q-57), which compares the worktree against it without writing objects. Copying the index lets `git add -A` reuse its stat cache, so only changed files are hashed. Executed observation: on Apple Git 2.54 this left the real index unchanged and excluded ignored files. A copy placed inside the worktree was itself included in the tree, so the copy must live outside it. With `core.splitIndex=true`, the temp-index add wrote a `sharedindex` file into the real Git directory unless split index was disabled. `--git-path` resolves a linked worktree's own index; an unborn repository may have no index file.
 
 #### REQ-SRC-007 — Unresolvable source
 
@@ -303,11 +337,11 @@ Status: accepted
 Statement: If another session holds the draft lock of the same snapshot, then the rvw command shall exit with status 1 and write the other session's review URL to stderr.
 Basis: Proposed (Q-13). A draft has one writer.
 
-#### REQ-SES-010 — Moved HEAD notice
+#### REQ-SES-010 — Change notice
 
 Status: accepted
-Statement: While a session is open, the review UI shall show a notice within 10 seconds after `HEAD` resolves to a different commit than at session start.
-Basis: Proposed (Q-17). Polling `git rev-parse HEAD` is cheap. Worktree edits are not detected, because detecting them means rebuilding the uncommitted tree.
+Statement: While a session is open and a review page is visible, the review UI shall show a notice within 20 seconds after `HEAD` resolves to a different commit than when the snapshot was taken, the base ref of a `branch` source resolves to a different commit or to none, or, for a source with uncommitted changes, a worktree file's content differs from the uncommitted tree or an untracked, unignored file is added, or a changed file that had a blob absent from the local object database when the snapshot was taken has every blob present, since the changed-file list then differs (REQ-SES-013).
+Basis: Proposed (Q-17, Q-57). Revision 1 accepted a moved-`HEAD` notice within 10 s. Revision 10, which the owner accepted on 2026-11-07, adds the base ref and worktree edits, which the repository owner asked for on 2026-11-07, and widens the bound to fit a check that runs at most every 10 s (REQ-SES-014). A change to the index alone, or to ignore rules outside the worktree, is not detected (Q-57). Revision 11, which the owner accepted on 2026-11-07, adds a file's absent blobs all arriving (Q-58).
 
 #### REQ-SES-011 — Finish acknowledgement
 
@@ -315,11 +349,29 @@ Status: accepted
 Statement: When the review UI requests finish, the rvw command shall write the review result to stdout and only then reply to that request, stating whether the write succeeded and, if it did, including the Markdown review result.
 Basis: Proposed (Q-20). The human must not see "Review sent" when the agent got nothing (REQ-SES-007), and the page after Finish needs the Markdown once the server has stopped. The server stops after this reply is flushed.
 
+#### REQ-SES-013 — Refresh
+
+Status: accepted
+Statement: When the human asks the review UI to refresh, the rvw command shall resolve the session's source again as at start and, if the new snapshot's draft key or changed-file list differs, serve the review from the new snapshot with the draft carried over (REQ-DRF-006); otherwise the rvw command shall keep the snapshot's draft unchanged and the review UI shall say that nothing changed.
+Basis: The repository owner asked for a notice and a manual refresh, for all sources, 2026-11-07 (Q-57). If the source cannot be resolved again, or another session holds the new snapshot's draft lock, the refresh is refused with the reason and the session keeps its snapshot. Round facts (REQ-RND-008 to REQ-RND-014) are derived again for the new snapshot. Revision 11, which the owner accepted on 2026-11-07, adds the changed-file list, which in a partial clone can differ for the same trees (Q-58).
+
+#### REQ-SES-014 — Change check bounds
+
+Status: accepted
+Statement: The rvw command shall run the change check of REQ-SES-010 only for a status request from a visible review page, at most one at a time, at most once per 10 seconds per snapshot, never while a refresh runs, and without writing objects or changing the repository; once the check finds a change, the rvw command shall report it until a refresh.
+Basis: Proposed (Q-57). Checking only for a visible page costs nothing while the human is away; reporting a change until a refresh keeps the notice from flickering when an edit is undone, since the human cannot tell an undo from a different edit.
+
+#### REQ-SES-015 — Snapshot generation
+
+Status: accepted
+Statement: If a request that reads or changes the review names a different snapshot generation than the one served, then the rvw command shall refuse it and name the served generation, and the review UI shall reload, or, while an editor or the Finish dialog is open, offer to reload.
+Basis: Proposed (Q-57). File indices, line numbers and comment versions belong to one snapshot; a page showing another must not write against the current one. A refresh that finds the same trees and the same file list keeps the generation, so open pages keep working; revision 11, which the owner accepted on 2026-11-07, adds the file list (Q-58).
+
 #### REQ-SES-012 — Page closed
 
 Status: proposed
-Statement: When the review page sends a close notice and no review page of the session makes an authenticated request within 10 seconds, the rvw command shall keep the saved draft, write nothing to stdout, write to stderr that the review page was closed and the saved draft changes are kept, and exit with status 4.
-Basis: Proposed (Q-42). A human who closes the tab has left the review; the agent should not wait until someone notices. A reload or another open tab makes a request within the grace and keeps the session.
+Statement: When the review page sends a close notice and no review page of the session makes an authenticated request within 10 seconds, the page that sent the notice not counting and a page restored from the back/forward cache counting as another page, the rvw command shall keep the saved draft, write nothing to stdout, write to stderr that the review page was closed and the saved draft changes are kept, and exit with status 4.
+Basis: Proposed (Q-42). A human who closes the tab has left the review; the agent should not wait until someone notices. A reload or another open tab makes a request within the grace and keeps the session. Revision 12, which the owner accepted on 2026-11-07, leaves out the closing page's own requests, such as a poll in flight when it closed.
 
 #### REQ-SES-009 — Usage errors
 
@@ -474,6 +526,12 @@ Basis: Proposed (Q-13). The draft already holds the earlier seed as curated by t
 Status: accepted
 Statement: While a session is running, the rvw command shall hold an exclusive lock on a lock file beside its draft that is never renamed.
 Basis: Proposed (Q-13). An atomic rename would replace a locked draft file, so the lock sits on a separate file.
+
+#### REQ-DRF-006 — Draft carried over by a refresh
+
+Status: accepted
+Statement: When a refresh serves a new snapshot, the rvw command shall carry every comment over with its ID, author, body and order: a review comment as it is; a file comment to the file with the same path, else to the file with its new or old path, else to the review; a line or range comment to the same lines of the file with the same path on its side when the diff between the two versions of that side leaves them unchanged, else to that file as a file comment, else to the review; it shall keep the summary, the Hide whitespace setting and each viewed mark whose file has the same paths, modes and blobs, save the draft under the new key, moving any draft already there aside as REQ-DRF-005 does, delete the replaced draft, and list the comments moved to a wider target on the review page until the human dismisses the list.
+Basis: The repository owner chose that a comment whose lines changed becomes a file comment, or a review comment if its file left the change, keeping body and author, and that the page lists the moved comments, 2026-11-07 (Q-57). Nothing the human wrote is lost or silently reattached to different code. The draft already under the new key belonged to an earlier session; restoring it (REQ-DRF-003) would drop this session's work, so it is moved aside.
 
 #### REQ-DRF-005 — Unrestorable draft
 
@@ -641,6 +699,12 @@ Status: proposed
 Statement: The review UI shall offer a Hide whitespace setting, kept in the draft, which a new draft takes from the review ledger's last recorded round, or off when there is none.
 Basis: Proposed (Q-49). The human who hides whitespace in one round usually wants it hidden in the next.
 
+#### REQ-DIFF-013 — Line wrapping
+
+Status: accepted
+Statement: The review UI shall offer a Wrap lines setting which, while on, wraps each shown line's code text within its column in the unified and split views, shows its line number and change mark on its first visual line only, and keeps the same file and the nearest line in view when it is toggled.
+Basis: The repository owner asked for wrapping after comparing rvw with diffshub, 2026-11-06 (Q-51). Q-11 deferred wrapping until rows could be measured; the virtual list has measured rows since Finish-dialog comments needed them. The setting is a presentation choice kept in the browser, like the diff view, not in the draft.
+
 ### File navigation
 
 #### REQ-NAV-001 — File tree
@@ -708,8 +772,8 @@ Basis: The repository owner asked for an easier way to mark files reviewed, "per
 #### REQ-HL-001 — Highlighted languages
 
 Status: accepted
-Statement: When a file that is not a large file and is Go, TypeScript, shell or Makefile source is shown, the review UI shall show syntax highlighting computed from the whole of each side's file content.
-Basis: The repository owner chose these four languages if no low-impact tokenizer exists, 2026-11-05 (Q-19). Using Chroma as the tokenizer is proposed. Tokenizing whole files keeps multi-line strings and comments correct.
+Statement: When a file that is not a large file and is Go, Go template, JavaScript or JSX, TypeScript or TSX, shell, Makefile, Markdown, Rust, Terraform/HCL, JSON (with comments), YAML, TOML, Python, Dockerfile, CSS or SQL source is shown, the review UI shall show syntax highlighting computed from the whole of each side's file content; in Markdown, a fenced code block naming one of these languages is highlighted as that language, and YAML front matter is highlighted as YAML. A line's highlighting has at most 500 spans; the rest of a line past that is shown unhighlighted.
+Basis: The repository owner chose Go, TypeScript, shell and Makefile, 2026-11-05 (Q-19), which revision 1 accepted; revision 5, which the owner accepted on 2026-11-07, adds Go templates, JavaScript and JSX, TSX, Markdown, Rust and Terraform/HCL (Q-52). Revision 6, which the owner accepted on 2026-11-07, adds JSON, YAML and TOML (Q-53). Revision 7, which the owner accepted on 2026-11-07, adds Python and Dockerfile (Q-54). Revision 8, which the owner accepted on 2026-11-07, adds CSS and SQL (Q-55). Revision 9, which the owner accepted on 2026-11-07, adds Markdown front matter and the 500-span bound per line (Q-56). The bound keeps a minified line's reply and rendering work fixed. Tokenizing whole files keeps multi-line strings and comments correct. The project-owned scanners run in time linear in the file's size, so the 2 s budget holds at the large-file limit.
 
 #### REQ-HL-002 — Highlighting never blocks review
 
@@ -723,7 +787,7 @@ Basis: Proposed (Q-19).
 
 Status: accepted
 Statement: The review UI shall keep the number of diff rows, file tree rows and Finish-dialog comment rows in the document at most the visible rows plus 50 overscan rows per scrolling region.
-Basis: Proposed. AGENTS.md requires presentation work proportional to the viewport. With no wrapping, diff and file tree rows have a fixed height (Q-11); Finish-dialog comment rows vary with the body and use measured heights.
+Basis: Proposed. AGENTS.md requires presentation work proportional to the viewport. While lines are not wrapped, diff and file tree rows have a fixed height (Q-11); Finish-dialog comment rows and wrapped diff rows (REQ-DIFF-013, Q-51) vary with their text and use measured heights.
 
 #### REQ-PERF-002 — Large-file limit
 
@@ -891,9 +955,16 @@ Verification: Planned process test.
 ### AC-SES-001 — Exit status distinguishes the outcomes
 
 Covers: REQ-SES-003, REQ-SES-004, REQ-SES-005, REQ-SES-006, REQ-SES-007, REQ-SES-010, REQ-SES-012
-Expected: Finish exits 0 with the result on stdout. Cancel exits 3 with empty stdout. SIGINT exits 130 and SIGTERM 143, each with empty stdout and the draft kept. A closed stdout exits 1 and keeps the draft. Closing the only review page exits 4 after the 10-second grace, with empty stdout, the page-closed line and the draft path on stderr, and the saved draft resumed by a rerun. Reloading the page, or closing one of two open pages, keeps the session running. Before any of these, stdout is empty. A commit made during the session shows the notice within 10 seconds.
+Expected: Finish exits 0 with the result on stdout. Cancel exits 3 with empty stdout. SIGINT exits 130 and SIGTERM 143, each with empty stdout and the draft kept. A closed stdout exits 1 and keeps the draft. Closing the only review page exits 4 after the 10-second grace, with empty stdout, the page-closed line and the draft path on stderr, and the saved draft resumed by a rerun. Reloading the page, or closing one of two open pages, keeps the session running. Before any of these, stdout is empty. A commit made during the session shows the notice within 20 seconds.
 Verification: Planned process test that drives the HTTP API.
 Counterexample: Exiting 0 on cancel fails.
+
+### AC-SES-004 — Change notice and refresh
+
+Covers: REQ-SES-010, REQ-SES-013, REQ-SES-014, REQ-SES-015, REQ-DRF-006, REQ-SRC-005
+Expected: For `rvw uncommitted`, editing a tracked file, adding an untracked file, deleting an untracked file or committing shows the notice within 20 seconds; touching a file without changing it, adding an ignored file or staging a file unchanged does not, and no check writes an object. For `rvw last` and `rvw branch`, only a new commit or a moved or deleted base ref shows it. A status request without the visible flag never runs the check; a failing check leaves the status working and is logged once. After a worktree edit that inserts a line above a line comment and changes the line of another, Refresh moves the first down one line, makes the second a file comment with its body and author, lists it on the page, keeps the summary, saves the new draft and deletes the old one; a request naming the old generation is refused with the new one, and a second open page reloads by itself. Refresh with nothing changed keeps the page and the draft. After a refresh, Finish delivers the carried comments with the new snapshot's code. In a partial clone, the last missing blob of a changed file arriving shows the notice without fetching anything, and Refresh then advances the generation with the same trees, and comments keep their paths and quote their own file's lines.
+Verification: Go tests in `internal/source`, `internal/review` and `internal/server`; browser tests in `cmd/rvw`.
+Counterexample: Moving a comment by searching for its original text reattaches it to a duplicated line and fails the line check.
 
 ### AC-SES-002 — Browser open failure is not fatal
 
@@ -995,6 +1066,12 @@ Expected: With whitespace hidden, a hunk that only reindents is replaced by one 
 Verification: Go tests for whitespace-only hunks and files at the HTTP API; planned browser test.
 Counterexample: Showing the `git diff-pairs -w -p` patch puts new-side text on old-side context lines and fails the line-text check.
 
+### AC-DIFF-005 — Line wrapping
+
+Covers: REQ-DIFF-013, REQ-PERF-001
+Expected: With Wrap lines on, a 2,000-character line shows whole without horizontal scrolling in the unified and split views, its number and change mark on its first visual line only, and a split row is as tall as its taller half. Toggling Wrap lines, and toggling the view while it is on, keeps the nearest line in view. In a 10,000-line file of long lines, the document holds at most the visible rows plus 50 overscan rows, and jumping to the last hunk and back leaves the first row in place. The setting survives a reload.
+Verification: Browser tests in `cmd/rvw`.
+
 ### AC-NAV-001 — Vendored directories
 
 Covers: REQ-NAV-001, REQ-NAV-004
@@ -1022,8 +1099,8 @@ Verification: Planned Go test of the draft write and browser test of the tree.
 ### AC-HL-001 — Highlighting
 
 Covers: REQ-HL-001, REQ-HL-002
-Expected: A Go file whose hunk sits inside a multi-line raw string highlights the hunk lines as string. A file in another language is shown without highlighting and without an error.
-Verification: Planned Go test of the token API plus a browser check.
+Expected: A Go file whose hunk sits inside a multi-line raw string highlights the hunk lines as string. A Go fence in a Markdown file highlights its keywords, and a Markdown file's YAML front matter highlights its keys apart from its values; without a closing `---` or `...` line, the opening `---` stays a thematic break. A JSON or YAML key, and a TOML key and table header, are classed apart from string values. A Python triple-quoted string highlights every line it spans as string. A Dockerfile `RUN` instruction highlights its shell command, here-document bodies included, as shell, and its exec form as JSON. A CSS property inside a nested rule is classed apart from the nested rule's selector. A SQL keyword is highlighted in any case, but not after a dot. A file in another language is shown without highlighting and without an error. A line with more tokens than the bound gets at most 500 spans, the last one the plain rest of the line, and the next line is highlighted afresh. For each language, an adversarial file just under the large-file size limit is highlighted within 2 s.
+Verification: Go tests of the token API (`internal/highlight`) plus a browser check.
 
 ### AC-PERF-001 — Bounded work at the target workload
 

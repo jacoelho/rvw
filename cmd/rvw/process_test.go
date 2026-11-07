@@ -501,6 +501,8 @@ func TestSignalDuringDelivery(t *testing.T) {
 		}
 		req.Header.Set("Authorization", "Bearer "+p.token)
 		req.Header.Set("Origin", "http://"+p.addr)
+		req.Header.Set("Rvw-Generation", "1")
+		req.Header.Set("Rvw-Page", testPage)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			finished <- -1
@@ -636,6 +638,8 @@ func TestSecondSignalDuringDelivery(t *testing.T) {
 		}
 		req.Header.Set("Authorization", "Bearer "+p.token)
 		req.Header.Set("Origin", "http://"+p.addr)
+		req.Header.Set("Rvw-Generation", "1")
+		req.Header.Set("Rvw-Page", testPage)
 		if resp, err := http.DefaultClient.Do(req); err == nil {
 			_ = resp.Body.Close()
 		}
