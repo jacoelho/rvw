@@ -2,6 +2,7 @@
 // round groups (reviewed unchanged, whitespace only) last. Rows are virtual.
 
 import { count as fmt, h } from "./dom";
+import { fileIcon, folderIcon } from "./fileicon";
 import { VirtualList } from "./scroller";
 import type { State } from "./state";
 
@@ -331,7 +332,7 @@ export class FileTree {
         row.append(twisty, h("span", "tree-name tree-hidden-label", row.title));
       } else {
         row.title = r.vendored ? `${r.key}/ · ${label("vendored")}` : `${r.key}/`;
-        row.append(twisty, h("span", "tree-name", r.name + "/"));
+        row.append(twisty, folderIcon(!r.collapsed), h("span", "tree-name", r.name + "/"));
         if (r.vendored) row.append(h("span", "tree-meta tree-hidden-label", label("vendored")));
       }
       // A collapsed row shows its hidden files' comments in the file rows' comment column. The
@@ -357,7 +358,7 @@ export class FileTree {
     if (r.i === this.selected) row.classList.add("selected");
     if (this.state.viewed.has(r.i)) row.classList.add("viewed");
     row.title = f.renamedFrom !== undefined ? `${f.renamedFrom} → ${f.path}` : f.path;
-    row.append(h("span", `tree-status st-${f.status}`, f.status), h("span", "tree-name", r.name));
+    row.append(h("span", `tree-status st-${f.status}`, f.status), fileIcon(f.path), h("span", "tree-name", r.name));
     // Every slot is always rendered, empty when it has nothing to show, so columns line up across rows.
     const meta = h("span", "tree-meta");
     const add = h("span", "cnt add");

@@ -96,6 +96,9 @@ Rejected:
 
 Sub-question resolved 2026-11-05: the owner accepted the +5.8 MB.
 
+Superseded 2026-11-07 for the tokenizer: Q-52 replaces Chroma with project-owned scanners, accepted with contract
+revision 5. The four languages and the server-side, whole-file design stand.
+
 ## Proposed, then accepted 2026-11-05
 
 ### Q-03 — No compatibility obligations
@@ -1081,3 +1084,244 @@ draft and ledger requirements naming a path and a reason), not how a line is lai
 - Usage help stays plain text after the `invalid command line` record, since it is meant for a person.
 - Rejected: keeping the `rvw: …` prose lines through `*log.Logger`. Each message had its own sentence shape, so a
   reader had to match each sentence to find a path or the URL inside it.
+
+### Q-51 — Line wrapping
+
+Proposed on 2026-11-06 for contract revision 4, which the repository owner accepted on 2026-11-06. The owner compared rvw with diffshub
+(`@pierre/diffs`, whose `overflow` option wraps or scrolls) and asked for its options, 2026-11-06. REQ-DIFF-013
+records the behaviour; it lifts the Q-11 exclusion.
+
+- Wrapped code rows become measured rows of the virtual list. Before a row is measured its height is estimated from
+  its text length and the column's width in characters, so a long jump lands close to its target before
+  measurement corrects it; REQ-DIFF-010's anchoring keeps the topmost row in place while rows ahead are measured.
+- A split row is one row with two halves, so its height is the taller half's and the halves stay aligned.
+- Wrapping removes split view's shared horizontal scrollbar; unwrapped split keeps it.
+- The setting is kept in the browser, like the unified or split choice, because it changes no review fact.
+- Rejected: wrapping by CSS alone with fixed-height rows. Wrapped rows would overflow their slots and overlap.
+- Rejected: wrapping only the unified view. Split halves are half as wide, so long lines hurt most there.
+- Rejected: keeping it in the draft, as Hide whitespace is. Hide whitespace changes what a viewed mark means
+  (Q-49); wrapping does not.
+
+Comparison with diffshub, recorded for the options it raises (from the `@pierre/diffs` and `@pierre/trees`
+documentation; the live page renders client-side and was not observed):
+
+- Adopted: file-type icons (Catppuccin's, see [architecture.md](architecture.md#platform-and-isolation)); visual
+  design needs no contract change.
+- Adopted here: line wrapping.
+- Not proposed: rendering every file in one scroll region, browser-side highlighting in a worker pool, and the
+  `@pierre/diffs` renderer itself. The contract requires a project-owned renderer (Intent and boundary), and
+  REQ-PERF-003 reads a file only when the UI asks for it, which bounds server memory to two files at 1,000 files of
+  10,000 lines.
+- Not proposed: character-level line diffs and alternative change-marker styles; word diff (REQ-DIFF-003) covers the
+  review need.
+
+### Q-52 — Project-owned highlighting scanners
+
+Proposed on 2026-11-07 for contract revision 5, which the repository owner accepted on 2026-11-07. The owner asked for a highlighter without regular
+expressions, "performance centric", covering Go, Go templates, TypeScript/TSX, JavaScript, shell, Makefile,
+Markdown, Rust and Terraform/HCL, starting from the architecture of Pierre's highlighter (the one diffshub uses),
+2026-11-07.
+
+Evidence against Chroma (executed observation, chroma v2.27.0): about 233 ms for a 10,000-line Go file, and up to
+4.4 s on crafted Makefiles below the large-file limit, which is past the 2 s budget, so such a file showed as plain
+text. Its lexers are regular-expression state machines on `regexp2`, which backtracks, so no input size bounds the
+time.
+
+Design, in `internal/highlight`:
+
+- One hand-written scanner per language, in plain Go, over the whole side. A token is a substring of the input with
+  one of the 7 classes the UI renders; adjacent tokens of a class merge. Every token boundary falls on an ASCII byte,
+  so a span is valid UTF-8 whenever the text is.
+- Linear time: each scanner advances on every step, and a search for a closer that fails is not repeated (a failed
+  regular expression or link destination marks the rest of its line; a missing closer ends the token at the end of
+  the input). Nesting is bounded: 1,024 frames, 4 levels of fenced-code embedding, 32 nested make function calls.
+- Embedding by range: a Markdown fence calls its language's scanner on the fence body; a Makefile recipe calls the
+  shell scanner in make mode, where `$(...)` is a make reference; an HCL here-document is a template scanned up to its
+  closing line.
+- Cancellation is checked every 1,024 lines, so the server's 2 s budget stops the work.
+
+Measured on this machine (executed observation, Go 1.27, the test corpus repeated to about 1 MiB, the large-file
+limit):
+
+| Input | Time | Throughput |
+| --- | --- | --- |
+| Go | 13 ms | 79 MB/s |
+| Go template | 15 ms | 69 MB/s |
+| TypeScript | 21 ms | 50 MB/s |
+| JavaScript | 22 ms | 48 MB/s |
+| Shell | 19 ms | 55 MB/s |
+| Makefile | 13 ms | 79 MB/s |
+| Markdown with fences | 8 ms | 126 MB/s |
+| Rust | 16 ms | 65 MB/s |
+| HCL | 17 ms | 63 MB/s |
+
+Adversarial inputs of about 1 MiB per language (unclosed strings, regexes, templates, heredocs, fences, deep nesting)
+finish within the 2 s budget in `TestLinesPathological`. Two were quadratic until fixed: HCL here-documents inside
+interpolations inside here-documents (a here-document no longer opens another), and many quoted shell here-document
+delimiters on one line (each searched to the line's end for its closing quote). The command binary went from 15.2 MB to
+11.5 MB, and the module has no dependencies left.
+
+Taken from Pierre: hand-written lexers rather than grammars, and leaving what cannot be lexed cheaply unstyled.
+Changed: Pierre compiles WebAssembly for the browser, keeps about 70 token types and per-line lexer state for
+incremental edits. rvw lexes on the server, whole files once per request, so it needs neither the line state nor
+a WASM payload under the strict CSP, and it keeps the 7 classes the UI renders.
+
+Rejected:
+
+- **Keep Chroma and add a timeout per lexer.** The budget already exists; the defect is that legitimate files exceed it.
+- **Port Pierre's lexers or a TextMate grammar engine.** TextMate grammars are regular expressions, with the same
+  backtracking; a port of WASM lexers adds a browser payload and moves highlighting off the server, which the file
+  reply design (REQ-HL-001, REQ-PERF-003) relies on.
+- **Tree-sitter.** Accurate, but it needs cgo or WASM and per-language grammars far larger than the scanners.
+
+Known limits: the scanners class tokens, not syntax trees. A JavaScript `/` after `)` is read as division, so
+`if (x) /re/.test(y)` misses the regex; Markdown emphasis is not classed, since no class renders it.
+Languages not listed are shown plain; Protobuf is a candidate (JSON, YAML and TOML: Q-53; Python and Dockerfile:
+Q-54; CSS and SQL: Q-55). The measurements above predate Q-53's output change, which makes every row faster.
+
+### Q-53 — JSON, YAML and TOML, and highlighting only the lines sent
+
+Proposed on 2026-11-07 for contract revision 6, which the repository owner accepted on 2026-11-07. The owner asked for JSON, YAML and TOML, and for the
+scanners to share their lexical helpers and to cut memory where an iterator or similar would, 2026-11-07.
+
+Languages (REQ-HL-001): JSON with JSONC comments (`.json`, `.jsonc`), YAML (`.yaml`, `.yml`) and TOML (`.toml`), also as
+Markdown fence words. A key is a type in all three: a JSON string or YAML scalar followed by a colon, a TOML name before
+`=`; a TOML table header is a keyword. YAML block scalars are strings by indentation; the core schema's booleans, nulls
+and numbers are classed, so `10GB` stays a string. `.json5` is not JSON and stays plain. Each has adversarial inputs in
+`TestLinesPathological`.
+
+Output (`internal/highlight.Lines`): the scanners still read the whole side, since a token may span lines, but the
+server sends only a file's hunk lines, or one context range, so it now passes a `keep(line)` predicate and only kept
+lines get spans. Spans are cut into chunks of 64 to 4,096 spans that grow geometrically, so a line no longer
+allocates its own slice; each line's spans are a capacity-clipped sub-slice, so a caller that appends to one cannot
+overwrite the next. The short-lived scanners (a shell scanner per Makefile recipe line, an HCL scanner per
+here-document) are reused per file instead of allocated per use.
+
+Measured on this machine (executed observation, Go 1.27, `BenchmarkLines`, corpus repeated to about 1 MiB, 5 to 6
+runs against the Q-52 code with JSON, YAML and TOML): time per side −30 % (geometric mean), memory −41 %,
+allocations from 23k–342k per side to 8–113. Examples: Go 8.7 → 6.0 ms, TypeScript 17.6 → 13.3 ms, Makefile 11.5 →
+7.2 ms, TOML 18.6 → 8.2 ms. Keeping 1 % of a Go file's lines costs 4.9 ms and 2.2 MiB against 6.0 ms and 8.8 MiB for
+all of them; the scan itself dominates the time. A side that is only empty lines (1 MiB of LF) got slower, 12.2 → 15.4
+ms, from the per-line bookkeeping, still far inside the 2 s budget.
+
+Shared helpers in `scan.go`: `commentEnd` (`//` and `/* */`: Go, JavaScript, JSON, HCL), `nextIs` (a call's `(` or a
+key's `:` after blanks), `isASCIIIdentByte` (shell and TOML names).
+
+Rejected:
+
+- **An `iter.Seq2` of lines with a final error check.** Highlighting is all or nothing (REQ-HL-002: a side whose budget
+  ends is shown plain), so the server must buffer the kept lines before replying anyway; an iterator would add a
+  borrowed-slice lifetime and an error check the caller can forget, and save nothing.
+- **A fixed-size array for the scanners' first frames.** Escape analysis moved it to the heap, through the recursion
+  between the HCL scanner's methods and the frame pointer the shell scanner returns, which made a Makefile cost 52k
+  allocations per side instead of 71.
+- **Scanning only the lines kept.** A line's classes depend on every earlier line (an open string, a here-document);
+  the whole side is read either way.
+
+### Q-54 — Python and Dockerfile
+
+Proposed on 2026-11-07 for contract revision 7, which the repository owner accepted on 2026-11-07. The owner asked for Python and Dockerfile, 2026-11-07.
+
+Languages (REQ-HL-001): Python 3 (`.py`, `.pyi`, `.pyw`; fence words `py`, `python`, `python3`, `pyi`) and Dockerfile
+(`Dockerfile`, `Containerfile`, either lower case, `Dockerfile.<suffix>`, `.dockerfile`, `.containerfile`; fence words
+`dockerfile`, `docker`, `containerfile`).
+
+Design:
+
+- Python: a string's prefix (`r`, `b`, `f`, `u`, `t` and pairs, any case) belongs to the string; triple-quoted strings
+  span lines through `tripleQuoteEnd`, now shared with TOML's multi-line strings. A decorator is a function, a name after
+  `def` a function, after `class` or `type` a type. The soft keywords `match`, `case` and `type` are keywords only at
+  the start of a line with a name, literal, `[`, `-` or `*` after them, so `match = len(x)` stays a name.
+- Dockerfile: instructions are keywords in any case; `ONBUILD` and `HEALTHCHECK` go on to the instruction they hold.
+  `RUN`, `CMD`, `ENTRYPOINT` and `SHELL` scan their argument with the shell scanner over the instruction's logical line,
+  so a quote left open ends with the instruction as Docker ends it, and then read the bodies of the here-documents it
+  opens; the exec form (`[`) is scanned as JSON. A backslash before CRLF continues the line, as before LF, in shell
+  and Dockerfile alike (`escapeEnd`). Other
+  instructions class `--flag`s, `ENV`, `ARG` and `LABEL` keys, `$variables`, quotes and numbers, and `AS` in `FROM`.
+
+Measured on this machine (executed observation, Go 1.27, `BenchmarkLines`, corpus repeated to about 1 MiB): Python 7.0
+ms (150 MB/s) and 75 allocations per side; Dockerfile 6.4 ms (160 MB/s) and 63 allocations, after upper-casing
+instruction words into a stack buffer instead of `strings.ToUpper`, which allocated for every word not already upper
+case (3,238 allocations). Adversarial inputs for both are in `TestLinesPathological`.
+
+Known limits: an f-string is classed whole, its replacement fields included, except that a replacement field holding
+the string's own quote (allowed since Python 3.12, PEP 701) ends the string there; the rest of that line is misclassed. The `escape` parser directive is not read,
+so a Windows Dockerfile using a backtick escape is classed as if the escape were a backslash. A comment line inside a
+continued `RUN` ends the shell command early, and a `COPY` here-document body is not classed as a string.
+
+Rejected:
+
+- **Classing f-string replacement fields as code.** It needs a nested Python scanner per string with its own quote and
+  brace rules; the gain is colour on short expressions.
+- **A separate scanner for `RUN` arguments.** Shell syntax, here-documents included, already has one owner.
+- **A shell mode that stops at the first unescaped line break.** A quote left open (`RUN echo it's`) or `\` before
+  CRLF made the scan run past the instruction, misclassing the rest of the file or the continued lines; bounding the
+  scan by the logical line Docker already computes removes both.
+
+### Q-55 — CSS and SQL
+
+Proposed on 2026-11-07 for contract revision 8, which the repository owner accepted on 2026-11-07. The owner asked for CSS and SQL, 2026-11-07.
+
+Languages (REQ-HL-001): CSS (`.css`; fence word `css`) and SQL (`.sql`; fence words `sql`, `pgsql`, `postgresql`,
+`postgres`, `mysql`, `sqlite`, `plpgsql`). SCSS and Less (`//` comments, `$` variables, mixins) are not CSS and stay
+plain.
+
+Design:
+
+- CSS: a statement inside a block is a rule when `{` ends it and a declaration when `;` or `}` does, found by one read
+  ahead to the statement's end that skips strings, comments and unquoted `url(…)` arguments (a data URI holds `;`); the statement is then classed within that range, so
+  each byte is read at most twice. This tells native nesting (`.card { padding: 0; &:hover { … } }`) apart without
+  tracking which at-rule opened a block. The top level holds only rules and at-rules. In a selector, element names,
+  `*` and `&` are keywords, `.class` and `#id` types, pseudo-classes and pseudo-elements functions, combinators
+  operators. In a declaration or at-rule prelude, a name before `:` is a type (as a JSON key is), numbers with their
+  unit or `%` and hex colours are numbers, a name before `(` is a function, an unquoted `url(…)` argument is a
+  string, `!important` is a keyword, and `and`, `or`, `not` and `only` are keywords in a prelude.
+- SQL: keywords and types ignore case, looked up by `lookupFold`, which upper-cases into a stack buffer and is now
+  shared with the Dockerfile instructions. A string doubles its quote and may span lines; `E''` also takes backslash
+  escapes, and `N''`, `B''` and `X''` prefixes belong to the string. `"name"` and `` `name` `` are names, not strings.
+  PostgreSQL dollar-quoted strings (`$$ … $$`, `$tag$ … $tag$`) are strings; `$1`, `:name` and `@name` parameters are
+  types; `::` is an operator. A name after a dot is never a keyword or type, so `u.select` is a column, but `s.f(x)` is a function. A name before `(`
+  that is not a keyword or type is a function.
+
+Measured on this machine (executed observation, Go 1.27, `BenchmarkLines`, corpus repeated to about 1 MiB): CSS 7.1
+ms (147 MB/s) and 68 allocations per side; SQL 7.6 ms (137 MB/s) and 71 allocations. Adversarial inputs for both are
+in `TestLinesPathological`.
+
+Known limits: an unquoted keyword used as a name (a column called `key` or `date`) is classed as a keyword or type.
+Dialect-specific syntax outside the common set (T-SQL `[name]`, MySQL `#` comments and backslash escapes in plain
+strings, nested PostgreSQL block comments) is not read. A CSS declaration whose value holds `{` (a custom property
+holding a block) is read as a rule.
+
+Rejected:
+
+- **Tracking the block kind from the at-rule that opened it.** `@media` holds rules and `@font-face` declarations, but
+  native nesting mixes both in one block, so the kind must come from each statement anyway.
+- **One SQL dialect.** Files rarely name their dialect; the common lexical set covers PostgreSQL, MySQL and SQLite
+  schema and query files, and a dialect's extra syntax degrades to plain text.
+
+### Q-56 — Markdown front matter and a span bound per line
+
+Proposed on 2026-11-07 for contract revision 9, which the repository owner accepted on 2026-11-07. The owner asked for both after a comparison with Pierre's
+highlighter (`@pierre/diffs`), 2026-11-07.
+
+Front matter (REQ-HL-001): a Markdown document, or a Markdown fence's body, whose first line is `---` (trailing blanks
+allowed) opens YAML front matter, closed by the first later line of `---` or `...`. The delimiters are keywords, as
+fence delimiters are, and the body is read by the YAML scanner. Without a closing line the opening `---` is a thematic
+break and the document is Markdown. The search for the closer runs once per document, so the scan stays linear. TOML
+front matter (`+++`) is not read.
+
+Span bound (REQ-HL-001): `out` gives a line at most 500 spans. When a line reaches 499, the rest of the line becomes one
+plain span, so the spans still join to the line's text, which the UI requires before it uses them. Scanning continues
+over the rest of the line, so state that crosses it (a string or comment opened later on the line) stays correct for
+the lines after. A minified line could otherwise make a span every byte or two, up to hundreds of thousands for one
+line; the bound caps the reply's spans and the DOM nodes for such a line, and leaves ordinary code untouched. Measured on this
+machine (executed observation, `BenchmarkLines`): no change against Q-55's figures (CSS 7.1 ms, SQL 7.6 ms, Go 6.2 ms
+per 1 MiB side; same allocation counts).
+
+Rejected:
+
+- **Pierre's rule: a line over a length limit becomes one plain token.** It drops the highlighting a reviewer sees at
+  the start of a long line, and a length limit does not bound spans: a 2,000-byte line of one-byte tokens still makes
+  1,000. Bounding spans directly bounds the cost, and the highlighted prefix keeps the visible part useful.
+- **Stopping the scan at the bound.** Skipping the rest of the line would lose a string or comment it opens, so the
+  following lines would be classed wrongly.

@@ -3,6 +3,7 @@
 
 import { type Api, BadReply, HttpError, isGone, type SearchMatch, type Side } from "./api";
 import { h } from "./dom";
+import { fileIcon } from "./fileicon";
 import { type Ranked, rankFiles } from "./fuzzy";
 import { VirtualList } from "./scroller";
 import type { State } from "./state";
@@ -296,7 +297,7 @@ export class Palette {
     el.dataset["row"] = String(n);
     if (row.k === "file") {
       const f = this.state.files[row.r.i]!;
-      el.append(marked("pal-path", f.path, row.r.on === "path" ? row.r.positions : []));
+      el.append(fileIcon(f.path), marked("pal-path", f.path, row.r.on === "path" ? row.r.positions : []));
       if (f.renamedFrom !== undefined) {
         el.append(h("span", "pal-from", " ← "), marked("pal-path old", f.renamedFrom, row.r.on === "oldPath" ? row.r.positions : []));
       }
@@ -304,7 +305,7 @@ export class Palette {
     }
     const m = row.m;
     const f = this.state.files[m.file]!;
-    el.append(h("span", "pal-loc", `${f.path}:${m.line}`));
+    el.append(fileIcon(f.path), h("span", "pal-loc", `${f.path}:${m.line}`));
     const code = h("span", "pal-code");
     code.append(`${m.cutStart ? "…" : ""}${m.before}`, h("mark", "", m.match), `${m.after}${m.cutEnd ? "…" : ""}`);
     el.append(code);

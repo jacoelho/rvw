@@ -1,7 +1,7 @@
 // A virtual list: it keeps only the visible rows plus OVERSCAN rows in the document, so its cost
 // stays bounded however long the list is. Fixed rows have rowHeight; variable rows (comments,
-// editors) are measured when mounted and again whenever their size changes while mounted, and
-// their heights are cached by key.
+// editors, wrapped lines) are estimated until mounted, measured when mounted and again whenever
+// their size changes while mounted, and their heights are cached by key.
 // A shown row's size change keeps the first visible row in place; replacing the rows keeps a row
 // in view with the same id in place.
 
@@ -22,11 +22,14 @@ export interface ListSource {
    * row's index anchors by position.
    */
   id(i: number): string;
+  /** A variable row's height before it is measured; the list's default estimate when absent. */
+  estimate?(i: number): number;
   render(i: number): HTMLElement;
 }
 
-/** A row and its top relative to the viewport. */
-type Pin = { i: number; y: number };
+/** A row with its top and bottom relative to the viewport, where it was drawn. */
+type Pin = { i: number; y: number; bottom: number };
+type Shown = { rank: number; y: number; bottom: number };
 
 export class VirtualList {
   readonly el: HTMLElement;
@@ -86,7 +89,7 @@ export class VirtualList {
    * element that a row renders again (an open editor's textarea) gets its focus and selection back:
    * the human keeps typing, and their keys never reach the page's shortcuts.
    */
-  private remount(shown: Map<string, { rank: number; y: number }> | null): void {
+  private remount(shown: Map<string, Shown> | null): void {
     const active = document.activeElement;
     const focused = active instanceof HTMLElement && this.inner.contains(active) ? active : null;
     const text = focused instanceof HTMLTextAreaElement || focused instanceof HTMLInputElement ? focused : null;
@@ -105,18 +108,19 @@ export class VirtualList {
    * anchoring ranks them: the partly hidden top row first, then the rows below it. Positions are
    * where the rows were drawn: the offsets may already hold heights measured since.
    */
-  private shownRows(): Map<string, { rank: number; y: number }> {
+  private shownRows(): Map<string, Shown> {
     const top = this.el.scrollTop;
     const view = this.el.clientHeight;
-    const rows: { id: string; y: number }[] = [];
+    const rows: { id: string; y: number; bottom: number }[] = [];
     for (const [i, el] of this.mounted) {
       const id = this.mountedIds.get(i);
       const y = el.offsetTop - top;
-      if (id !== undefined && y < view && y + el.offsetHeight > 0) rows.push({ id, y });
+      const bottom = y + el.offsetHeight;
+      if (id !== undefined && y < view && bottom > 0) rows.push({ id, y, bottom });
     }
     rows.sort((a, b) => a.y - b.y);
-    const shown = new Map<string, { rank: number; y: number }>();
-    for (const r of rows) if (!shown.has(r.id)) shown.set(r.id, { rank: shown.size, y: r.y });
+    const shown = new Map<string, Shown>();
+    for (const r of rows) if (!shown.has(r.id)) shown.set(r.id, { rank: shown.size, y: r.y, bottom: r.bottom });
     return shown;
   }
 
@@ -124,20 +128,33 @@ export class VirtualList {
    * Scrolls so the best-ranked shown row that the new rows still have is where it was drawn, and
    * returns it with that position.
    */
-  private keepShown(shown: Map<string, { rank: number; y: number }>): Pin | null {
+  private keepShown(shown: Map<string, Shown>): Pin | null {
     const src = this.source;
     if (!src || shown.size === 0) return null;
-    let best: { i: number; rank: number; y: number } | null = null;
+    let best: (Shown & { i: number }) | null = null;
     for (let i = 0, n = this.count(); i < n; i++) {
       const s = shown.get(src.id(i));
       if (s && (!best || s.rank < best.rank)) {
-        best = { i, rank: s.rank, y: s.y };
+        best = { i, ...s };
         if (s.rank === 0) break;
       }
     }
     if (!best) return null;
-    this.el.scrollTop = Math.max(0, (this.offsets[best.i] ?? 0) - best.y);
-    return { i: best.i, y: best.y };
+    const pin = { i: best.i, y: best.y, bottom: best.bottom };
+    this.el.scrollTop = this.scrollFor(pin);
+    return pin;
+  }
+
+  /**
+   * The scroll position that puts pin's row where it was drawn: its top stays put, unless the row
+   * shrank so much that it would then lie wholly above the view (a wrapped line mostly scrolled past
+   * when the window widens); its bottom then stays put, but its top never drops below the view's top.
+   */
+  private scrollFor(pin: Pin): number {
+    const top = this.offsets[pin.i] ?? 0;
+    const height = (this.offsets[pin.i + 1] ?? top) - top;
+    const y = pin.y + height > 0 ? pin.y : Math.min(0, pin.bottom - height);
+    return Math.max(0, top - y);
   }
 
   /** Forgets a variable row's measured height, e.g. after its content changed. */
@@ -202,7 +219,7 @@ export class VirtualList {
   private heightOf(i: number): number {
     const src = this.source;
     if (!src || !src.variable(i)) return this.rowHeight;
-    return this.heights.get(src.key(i)) ?? this.estimate;
+    return this.heights.get(src.key(i)) ?? src.estimate?.(i) ?? this.estimate;
   }
 
   private layout(): void {
@@ -225,10 +242,14 @@ export class VirtualList {
    * at the same place on screen, so a row above it that grows or shrinks does not move what is shown.
    */
   private relayout(pin: Pin | null = null): void {
-    const at = pin ?? { i: this.indexAt(this.el.scrollTop), y: 0 };
-    if (!pin) at.y = (this.offsets[at.i] ?? 0) - this.el.scrollTop;
+    let at = pin;
+    if (!at) {
+      const i = this.indexAt(this.el.scrollTop);
+      const y = (this.offsets[i] ?? 0) - this.el.scrollTop;
+      at = { i, y, bottom: y + (this.offsets[i + 1] ?? 0) - (this.offsets[i] ?? 0) };
+    }
     this.layout();
-    const to = Math.max(0, (this.offsets[at.i] ?? 0) - at.y);
+    const to = this.scrollFor(at);
     if (to !== this.el.scrollTop) this.el.scrollTop = to;
   }
 

@@ -1,5 +1,10 @@
-// Package highlight tokenizes Go, TypeScript, shell and Makefile source into per-line spans.
-// The language list is a product decision, not whatever Chroma ships.
+// Package highlight tokenizes source into per-line spans with hand-written scanners, one per
+// language. The language list is a product decision (REQ-HL-001).
+//
+// Every scanner runs in time linear in its input: it reads each byte a bounded number of times,
+// never backtracks, and remembers failed searches for a closing delimiter so that it does not
+// repeat them. Scanners use no regular expressions. Span texts are substrings of the input, so
+// output costs no copies.
 package highlight
 
 import (
@@ -7,9 +12,6 @@ import (
 	"fmt"
 	"path"
 	"strings"
-
-	"github.com/alecthomas/chroma/v2"
-	"github.com/alecthomas/chroma/v2/lexers"
 )
 
 // Span is a run of one line's text with one highlight class. Class "" is plain text.
@@ -29,125 +31,218 @@ const (
 	ClassOperator = "o"
 )
 
-// lexerMakefile is Chroma's lexer name for Makefiles.
-const lexerMakefile = "makefile"
-
 // Language is a highlighted language. The zero Language is not highlighted.
-type Language struct{ lexer string }
+type Language struct{ id langID }
+
+type langID uint8
+
+const (
+	langNone langID = iota
+	langGo
+	langGoTemplate
+	langJavaScript // JavaScript with JSX
+	langTypeScript
+	langTSX
+	langShell
+	langMakefile
+	langMarkdown
+	langRust
+	langHCL
+	langJSON // JSON with comments
+	langYAML
+	langTOML
+	langPython
+	langDockerfile
+	langCSS
+	langSQL
+)
+
+var langNames = [...]string{
+	langNone:       "",
+	langGo:         "go",
+	langGoTemplate: "go-template",
+	langJavaScript: "javascript",
+	langTypeScript: "typescript",
+	langTSX:        "tsx",
+	langShell:      "shell",
+	langMakefile:   "makefile", //nolint:goconst // the name, a file name and a fence word only happen to match
+	langMarkdown:   "markdown",
+	langRust:       "rust",
+	langHCL:        "hcl",
+	langJSON:       "json",
+	langYAML:       "yaml",
+	langTOML:       "toml",
+	langPython:     "python",
+	langDockerfile: "dockerfile", //nolint:goconst // as for makefile
+	langCSS:        "css",
+	langSQL:        "sql",
+}
+
+// String returns the language's name, or "" for the zero Language.
+func (l Language) String() string { return langNames[l.id] }
 
 // LanguageOf returns the language of a file at path p.
 func LanguageOf(p string) Language {
 	base := path.Base(p)
 	switch base {
 	case "Makefile", "makefile", "GNUmakefile":
-		return Language{lexerMakefile}
+		return Language{langMakefile}
+	case ".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".profile":
+		return Language{langShell}
+	case "Dockerfile", "dockerfile", "Containerfile", "containerfile":
+		return Language{langDockerfile}
+	}
+	// Dockerfile.dev and similar name a Dockerfile by their prefix.
+	if strings.HasPrefix(base, "Dockerfile.") || strings.HasPrefix(base, "Containerfile.") {
+		return Language{langDockerfile}
 	}
 	switch strings.ToLower(path.Ext(base)) {
 	case ".go":
-		return Language{"go"}
+		return Language{langGo}
+	case ".tmpl", ".gotmpl", ".gohtml":
+		return Language{langGoTemplate}
+	case ".js", ".mjs", ".cjs", ".jsx":
+		return Language{langJavaScript}
 	case ".ts", ".mts", ".cts":
-		return Language{"typescript"}
+		return Language{langTypeScript}
 	case ".tsx":
-		return Language{"tsx"}
+		return Language{langTSX}
 	case ".sh", ".bash", ".zsh":
-		return Language{"bash"}
+		return Language{langShell}
 	case ".mk":
-		return Language{lexerMakefile}
+		return Language{langMakefile}
+	case ".md", ".markdown":
+		return Language{langMarkdown}
+	case ".rs":
+		return Language{langRust}
+	case ".tf", ".tfvars", ".hcl":
+		return Language{langHCL}
+	case ".json", ".jsonc":
+		return Language{langJSON}
+	case ".yaml", ".yml":
+		return Language{langYAML}
+	case ".toml":
+		return Language{langTOML}
+	case ".py", ".pyi", ".pyw":
+		return Language{langPython}
+	case ".dockerfile", ".containerfile":
+		return Language{langDockerfile}
+	case ".css":
+		return Language{langCSS}
+	case ".sql":
+		return Language{langSQL}
 	default:
 		return Language{}
 	}
 }
 
-// checkEvery is how many tokens pass between context checks.
-const checkEvery = 512
-
-// Lines tokenizes the whole of text as lang and returns one span list per line. Highlighting is
-// all or nothing: it returns nil with no error for the zero Language, and an error when
-// tokenizing fails or ctx ends first.
-func Lines(ctx context.Context, lang Language, text string) (lines [][]Span, err error) {
-	if lang.lexer == "" {
-		return nil, nil
+// fenceLanguage returns the language a Markdown fence's info word names, or langNone.
+func fenceLanguage(word string) langID {
+	switch strings.ToLower(word) {
+	case "go", "golang":
+		return langGo
+	case "gotmpl", "go-template", "gotemplate", "tmpl":
+		return langGoTemplate
+	case "js", "javascript", "jsx", "mjs", "cjs":
+		return langJavaScript
+	case "ts", "typescript", "mts", "cts":
+		return langTypeScript
+	case "tsx":
+		return langTSX
+	case "sh", "bash", "zsh", "shell":
+		return langShell
+	case "make", "makefile", "mk":
+		return langMakefile
+	case "md", "markdown":
+		return langMarkdown
+	case "rust", "rs":
+		return langRust
+	case "hcl", "terraform", "tf", "tfvars":
+		return langHCL
+	case "json", "jsonc":
+		return langJSON
+	case "yaml", "yml":
+		return langYAML
+	case "toml":
+		return langTOML
+	case "py", "python", "python3", "pyi":
+		return langPython
+	case "dockerfile", "docker", "containerfile":
+		return langDockerfile
+	case "css":
+		return langCSS
+	case "sql", "pgsql", "postgresql", "postgres", "mysql", "sqlite", "plpgsql":
+		return langSQL
+	default:
+		return langNone
 	}
-	lexer := lexers.Get(lang.lexer)
-	if lexer == nil {
-		return nil, fmt.Errorf("no lexer for %s", lang.lexer)
-	}
-	defer func() {
-		// Chroma reports tokenizer errors by panicking from the iterator.
-		if r := recover(); r != nil {
-			lines, err = nil, fmt.Errorf("highlight %s: %v", lang.lexer, r)
-		}
-	}()
-	it, err := lexer.Tokenise(&chroma.TokeniseOptions{State: "root"}, text)
-	if err != nil {
-		return nil, fmt.Errorf("highlight %s: %w", lang.lexer, err)
-	}
-	want := strings.Count(text, "\n") + 1
-	lines = make([][]Span, 1, want)
-	// Adjacent tokens of one class merge into one span. The span being built is accumulated in a
-	// builder, so a long line of same-class tokens costs linear, not quadratic, time.
-	var pending strings.Builder
-	pendingClass := ""
-	flush := func() {
-		if pending.Len() > 0 {
-			last := len(lines) - 1
-			lines[last] = append(lines[last], Span{Class: pendingClass, Text: pending.String()})
-			pending.Reset()
-		}
-	}
-	n := 0
-	for tok := it(); tok != chroma.EOF; tok = it() {
-		if n++; n%checkEvery == 0 {
-			if err := ctx.Err(); err != nil {
-				return nil, fmt.Errorf("highlight %s: %w", lang.lexer, err)
-			}
-		}
-		class := classOf(tok.Type)
-		for part, rest, more := strings.Cut(tok.Value, "\n"); ; part, rest, more = strings.Cut(rest, "\n") {
-			if part != "" {
-				if class != pendingClass {
-					flush()
-					pendingClass = class
-				}
-				pending.WriteString(part)
-			}
-			if !more {
-				break
-			}
-			flush()
-			if len(lines) == want {
-				break // a lexer-added trailing newline
-			}
-			lines = append(lines, nil)
-		}
-	}
-	flush()
-	for len(lines) < want {
-		lines = append(lines, nil)
-	}
-	return lines, nil
 }
 
-func classOf(t chroma.TokenType) string {
-	switch {
-	case t.InCategory(chroma.Comment):
-		return ClassComment
-	case t.InCategory(chroma.Keyword):
-		if t == chroma.KeywordType {
-			return ClassType
-		}
-		return ClassKeyword
-	case t.InSubCategory(chroma.LiteralString):
-		return ClassString
-	case t.InSubCategory(chroma.LiteralNumber):
-		return ClassNumber
-	case t == chroma.NameFunction || t == chroma.NameFunctionMagic:
-		return ClassFunction
-	case t == chroma.NameBuiltin || t == chroma.NameClass || t == chroma.KeywordType:
-		return ClassType
-	case t.InCategory(chroma.Operator):
-		return ClassOperator
-	default:
-		return ""
+// Lines tokenizes the whole of text as lang and returns one span list per line, split on LF.
+// The whole text is read, since a token may span lines, but only the lines keep accepts get
+// spans: keep is called with each 1-based line number, once, in increasing order, and a nil keep
+// keeps every line. A line that is not kept, or is empty, has nil spans. Spans are substrings of
+// text and do not alias each other; the caller may keep them.
+//
+// Highlighting is all or nothing: it returns nil with no error for the zero Language, and an
+// error when ctx ends first.
+func Lines(ctx context.Context, lang Language, text string, keep func(line int) bool) ([][]Span, error) {
+	if lang.id == langNone {
+		return nil, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("highlight %s: %w", lang, err)
+	}
+	o := newOut(ctx, text, keep)
+	scan(o, lang.id, text, 0, 0)
+	if o.err != nil {
+		return nil, fmt.Errorf("highlight %s: %w", lang, o.err)
+	}
+	return o.finish(), nil
+}
+
+// maxNesting bounds embedding: a Markdown fence inside a Markdown fence, and so on.
+const maxNesting = 4
+
+// scan classes s[i:] as id. Scanners read no byte at or past len(s), so a caller embeds one
+// language in another by passing s cut at the embedded range's end. nesting counts the
+// embeddings around this one.
+func scan(o *out, id langID, s string, i, nesting int) {
+	switch id {
+	case langGo:
+		scanGo(o, s, i)
+	case langGoTemplate:
+		scanGoTemplate(o, s, i)
+	case langJavaScript:
+		scanJS(o, s, i, jsOptions{jsx: true})
+	case langTypeScript:
+		scanJS(o, s, i, jsOptions{ts: true})
+	case langTSX:
+		scanJS(o, s, i, jsOptions{ts: true, jsx: true})
+	case langShell:
+		scanShell(o, s, i)
+	case langMakefile:
+		scanMakefile(o, s, i)
+	case langMarkdown:
+		scanMarkdown(o, s, i, nesting)
+	case langRust:
+		scanRust(o, s, i)
+	case langHCL:
+		scanHCL(o, s, i)
+	case langJSON:
+		scanJSON(o, s, i)
+	case langYAML:
+		scanYAML(o, s, i)
+	case langTOML:
+		scanTOML(o, s, i)
+	case langPython:
+		scanPython(o, s, i)
+	case langDockerfile:
+		scanDockerfile(o, s, i)
+	case langCSS:
+		scanCSS(o, s, i)
+	case langSQL:
+		scanSQL(o, s, i)
+	case langNone:
 	}
 }

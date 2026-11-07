@@ -33,6 +33,26 @@ their acceptance checks (AC-RND-001 to AC-RND-003, AC-DIFF-004, AC-CMT-004, AC-N
 REQ-NAV-005, AC-SRC-002, AC-PERF-001, the Draft and Viewed mark definitions and the Excluded list. **It changes
 INV-PLAT-004 and REQ-DIFF-001, which revision 1 accepted**: rvw may write refs under `refs/rvw/`, and a
 shown diff may be an interdiff or omit whitespace-only hunks.
+
+Contract revision: 4, 2026-11-06, against workspace `main` at 4e6e2bc. The repository owner accepted it on 2026-11-06: it adds line
+wrapping (Q-51: new REQ-DIFF-013 and AC-DIFF-005, a change to REQ-PERF-001's basis and the Excluded list).
+
+Contract revision: 5, 2026-11-07, against workspace `main` at 4e6e2bc. The repository owner accepted it on 2026-11-07:
+it widens the highlighted languages to Go templates, JavaScript and JSX, TSX, Markdown with fenced code, Rust and
+Terraform/HCL, and replaces Chroma with project-owned scanners (Q-52), changing REQ-HL-001 and AC-HL-001.
+
+Contract revision: 6, 2026-11-07, against workspace `main` at 4e6e2bc. The repository owner accepted it on 2026-11-07:
+it adds JSON (with comments), YAML and TOML to the highlighted languages (Q-53), changing REQ-HL-001 and AC-HL-001.
+
+Contract revision: 7, 2026-11-07, against workspace `main` at 4e6e2bc. The repository owner accepted it on 2026-11-07:
+it adds Python and Dockerfile to the highlighted languages (Q-54), changing REQ-HL-001 and AC-HL-001.
+
+Contract revision: 8, 2026-11-07, against workspace `main` at 4e6e2bc. The repository owner accepted it on 2026-11-07:
+it adds CSS and SQL to the highlighted languages (Q-55), changing REQ-HL-001 and AC-HL-001.
+
+Contract revision: 9, 2026-11-07, against workspace `main` at 4e6e2bc. The repository owner accepted it on 2026-11-07:
+it highlights Markdown YAML front matter as YAML and bounds a line's highlighting to 500 spans (Q-56), changing
+REQ-HL-001 and AC-HL-001.
 Decision owner: repository owner (jacoelho)
 Effective scope: target version only. No deployed contract, persisted data or compatibility promise binds this
 replacement (Q-03 in [decisions.md](decisions.md)).
@@ -63,7 +83,6 @@ Excluded:
 - placing an earlier comment by searching for its text, carrying comments for more than one round, and listing files
   reviewed earlier that are no longer changed (Q-49);
 - treating formatting that moves code across lines, such as `gofmt` joining lines, as whitespace-only (Q-49);
-- line wrapping in the diff (Q-11);
 - Linux, Windows and WebAssembly (Q-14);
 - an MCP server (Q-05);
 - symbol search; regular-expression, fuzzy or Unicode case-folding content search; searching removed lines (Q-47).
@@ -641,6 +660,12 @@ Status: proposed
 Statement: The review UI shall offer a Hide whitespace setting, kept in the draft, which a new draft takes from the review ledger's last recorded round, or off when there is none.
 Basis: Proposed (Q-49). The human who hides whitespace in one round usually wants it hidden in the next.
 
+#### REQ-DIFF-013 — Line wrapping
+
+Status: accepted
+Statement: The review UI shall offer a Wrap lines setting which, while on, wraps each shown line's code text within its column in the unified and split views, shows its line number and change mark on its first visual line only, and keeps the same file and the nearest line in view when it is toggled.
+Basis: The repository owner asked for wrapping after comparing rvw with diffshub, 2026-11-06 (Q-51). Q-11 deferred wrapping until rows could be measured; the virtual list has measured rows since Finish-dialog comments needed them. The setting is a presentation choice kept in the browser, like the diff view, not in the draft.
+
 ### File navigation
 
 #### REQ-NAV-001 — File tree
@@ -707,9 +732,9 @@ Basis: The repository owner asked for an easier way to mark files reviewed, "per
 
 #### REQ-HL-001 — Highlighted languages
 
-Status: accepted
-Statement: When a file that is not a large file and is Go, TypeScript, shell or Makefile source is shown, the review UI shall show syntax highlighting computed from the whole of each side's file content.
-Basis: The repository owner chose these four languages if no low-impact tokenizer exists, 2026-11-05 (Q-19). Using Chroma as the tokenizer is proposed. Tokenizing whole files keeps multi-line strings and comments correct.
+Status: proposed
+Statement: When a file that is not a large file and is Go, Go template, JavaScript or JSX, TypeScript or TSX, shell, Makefile, Markdown, Rust, Terraform/HCL, JSON (with comments), YAML, TOML, Python, Dockerfile, CSS or SQL source is shown, the review UI shall show syntax highlighting computed from the whole of each side's file content; in Markdown, a fenced code block naming one of these languages is highlighted as that language, and YAML front matter is highlighted as YAML. A line's highlighting has at most 500 spans; the rest of a line past that is shown unhighlighted.
+Basis: The repository owner chose Go, TypeScript, shell and Makefile, 2026-11-05 (Q-19), which revision 1 accepted; revision 5, which the owner accepted on 2026-11-07, adds Go templates, JavaScript and JSX, TSX, Markdown, Rust and Terraform/HCL (Q-52). Revision 6, which the owner accepted on 2026-11-07, adds JSON, YAML and TOML (Q-53). Revision 7, which the owner accepted on 2026-11-07, adds Python and Dockerfile (Q-54). Revision 8, which the owner accepted on 2026-11-07, adds CSS and SQL (Q-55). Revision 9, which the owner accepted on 2026-11-07, adds Markdown front matter and the 500-span bound per line (Q-56). The bound keeps a minified line's reply and rendering work fixed. Tokenizing whole files keeps multi-line strings and comments correct. The project-owned scanners run in time linear in the file's size, so the 2 s budget holds at the large-file limit.
 
 #### REQ-HL-002 — Highlighting never blocks review
 
@@ -723,7 +748,7 @@ Basis: Proposed (Q-19).
 
 Status: accepted
 Statement: The review UI shall keep the number of diff rows, file tree rows and Finish-dialog comment rows in the document at most the visible rows plus 50 overscan rows per scrolling region.
-Basis: Proposed. AGENTS.md requires presentation work proportional to the viewport. With no wrapping, diff and file tree rows have a fixed height (Q-11); Finish-dialog comment rows vary with the body and use measured heights.
+Basis: Proposed. AGENTS.md requires presentation work proportional to the viewport. While lines are not wrapped, diff and file tree rows have a fixed height (Q-11); Finish-dialog comment rows and wrapped diff rows (REQ-DIFF-013, Q-51) vary with their text and use measured heights.
 
 #### REQ-PERF-002 — Large-file limit
 
@@ -995,6 +1020,12 @@ Expected: With whitespace hidden, a hunk that only reindents is replaced by one 
 Verification: Go tests for whitespace-only hunks and files at the HTTP API; planned browser test.
 Counterexample: Showing the `git diff-pairs -w -p` patch puts new-side text on old-side context lines and fails the line-text check.
 
+### AC-DIFF-005 — Line wrapping
+
+Covers: REQ-DIFF-013, REQ-PERF-001
+Expected: With Wrap lines on, a 2,000-character line shows whole without horizontal scrolling in the unified and split views, its number and change mark on its first visual line only, and a split row is as tall as its taller half. Toggling Wrap lines, and toggling the view while it is on, keeps the nearest line in view. In a 10,000-line file of long lines, the document holds at most the visible rows plus 50 overscan rows, and jumping to the last hunk and back leaves the first row in place. The setting survives a reload.
+Verification: Browser tests in `cmd/rvw`.
+
 ### AC-NAV-001 — Vendored directories
 
 Covers: REQ-NAV-001, REQ-NAV-004
@@ -1022,8 +1053,8 @@ Verification: Planned Go test of the draft write and browser test of the tree.
 ### AC-HL-001 — Highlighting
 
 Covers: REQ-HL-001, REQ-HL-002
-Expected: A Go file whose hunk sits inside a multi-line raw string highlights the hunk lines as string. A file in another language is shown without highlighting and without an error.
-Verification: Planned Go test of the token API plus a browser check.
+Expected: A Go file whose hunk sits inside a multi-line raw string highlights the hunk lines as string. A Go fence in a Markdown file highlights its keywords, and a Markdown file's YAML front matter highlights its keys apart from its values; without a closing `---` or `...` line, the opening `---` stays a thematic break. A JSON or YAML key, and a TOML key and table header, are classed apart from string values. A Python triple-quoted string highlights every line it spans as string. A Dockerfile `RUN` instruction highlights its shell command, here-document bodies included, as shell, and its exec form as JSON. A CSS property inside a nested rule is classed apart from the nested rule's selector. A SQL keyword is highlighted in any case, but not after a dot. A file in another language is shown without highlighting and without an error. A line with more tokens than the bound gets at most 500 spans, the last one the plain rest of the line, and the next line is highlighted afresh. For each language, an adversarial file just under the large-file size limit is highlighted within 2 s.
+Verification: Go tests of the token API (`internal/highlight`) plus a browser check.
 
 ### AC-PERF-001 — Bounded work at the target workload
 

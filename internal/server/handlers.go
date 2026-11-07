@@ -381,11 +381,12 @@ func (s *Server) highlighter(i int) highlighter {
 
 func (h highlighter) enabled() bool { return h.lang != (highlight.Language{}) }
 
-// lines tokenizes one side within highlightBudget, logging a failure.
-func (h highlighter) lines(ctx context.Context, data []byte) ([][]highlight.Span, error) {
+// lines tokenizes one side within highlightBudget, logging a failure. Only the lines keep accepts
+// get spans.
+func (h highlighter) lines(ctx context.Context, data []byte, keep func(line int) bool) ([][]highlight.Span, error) {
 	ctx, cancel := context.WithTimeout(ctx, highlightBudget)
 	defer cancel()
-	spans, err := highlight.Lines(ctx, h.lang, validText(data))
+	spans, err := highlight.Lines(ctx, h.lang, validText(data), keep)
 	if err != nil {
 		h.s.log.Warn("highlight failed", "path", h.path, "err", err)
 	}
@@ -400,16 +401,35 @@ func highlightSides(ctx context.Context, h highlighter, d source.FileDiff) (oldS
 	}
 	var err error
 	if d.Old != nil {
-		if oldSpans, err = h.lines(ctx, d.Old); err != nil {
+		if oldSpans, err = h.lines(ctx, d.Old, hunkLines(d.Hunks, true)); err != nil {
 			return nil, nil, false
 		}
 	}
 	if d.New != nil {
-		if newSpans, err = h.lines(ctx, d.New); err != nil {
+		if newSpans, err = h.lines(ctx, d.New, hunkLines(d.Hunks, false)); err != nil {
 			return nil, nil, false
 		}
 	}
 	return oldSpans, newSpans, true
+}
+
+// hunkLines returns a keep function for highlight.Lines accepting the lines inside the hunks on
+// the old side, or else the new side. It relies on Lines asking in increasing line order and on
+// hunks being in file order, so each call costs amortised constant time.
+func hunkLines(hunks []source.Hunk, old bool) func(line int) bool {
+	k := 0
+	return func(n int) bool {
+		for ; k < len(hunks); k++ {
+			start, count := hunks[k].NewStart, hunks[k].NewCount
+			if old {
+				start, count = hunks[k].OldStart, hunks[k].OldCount
+			}
+			if n < start+count {
+				return n >= start
+			}
+		}
+		return false
+	}
 }
 
 type contextJSON struct {
@@ -458,7 +478,7 @@ func (s *Server) getContext(w http.ResponseWriter, r *http.Request) {
 	out := contextJSON{Lines: make([]lineJSON, 0, len(lines))}
 	var spans [][]highlight.Span
 	if h := s.highlighter(i); h.enabled() {
-		spans, err = h.lines(r.Context(), d.New)
+		spans, err = h.lines(r.Context(), d.New, func(n int) bool { return n >= from && n <= to })
 		out.Highlighted = err == nil
 	}
 	for _, l := range lines {

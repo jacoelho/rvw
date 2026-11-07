@@ -741,7 +741,8 @@ func TestBrowserPaletteSupersession(t *testing.T) {
 	pg.noPageErrors()
 }
 
-// TestBrowserPaletteTextOnly: file text and paths render as text, never markup.
+// TestBrowserPaletteTextOnly: file text and paths render as text, never markup; a row's only
+// elements besides text spans are its file-type icon.
 func TestBrowserPaletteTextOnly(t *testing.T) {
 	t.Parallel()
 	_, pg := startSearch(t)
@@ -752,7 +753,7 @@ func TestBrowserPaletteTextOnly(t *testing.T) {
 	pg.waitTrue("the img line", `JSON.parse(`+palRows+`)[0] === "xss.txt:1<img src=x onerror=window.pwn=1>"`)
 	pg.palType("odd/")
 	pg.waitTrue("the odd path", `JSON.parse(`+palRows+`)[0] === "odd/<a&b>.txt"`)
-	if !pg.bool(`[...document.querySelectorAll(".pal-row *")].every((e) => e.tagName === "SPAN" || e.tagName === "MARK")`) || pg.bool(`window.pwn !== undefined`) {
+	if !pg.bool(`[...document.querySelectorAll(".pal-row *")].every((e) => e.tagName === "SPAN" || e.tagName === "MARK" || (e.tagName === "svg" && e.classList.contains("ficon")) || (e.tagName === "use" && e.parentElement.classList.contains("ficon")))`) || pg.bool(`window.pwn !== undefined`) {
 		pg.fatalf("a result row holds markup from file text or a path")
 	}
 	pg.noPageErrors()

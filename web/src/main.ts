@@ -4,6 +4,7 @@
 import { Api, type Scope, HttpError, isGone, type RenameDetection } from "./api";
 import { count, h } from "./dom";
 import mark from "./favicon.svg";
+import { mountIcons } from "./fileicon";
 import { FileView, type Step } from "./fileview";
 import { FinishDialog } from "./finish";
 import { type GoTarget, Palette } from "./palette";
@@ -42,6 +43,7 @@ async function main(): Promise<void> {
     else endPage("Could not load the review", err instanceof Error ? err.message : String(err));
     return;
   }
+  mountIcons();
   new Page(api, state);
 }
 
@@ -59,6 +61,7 @@ class Page {
   private readonly totals: HTMLElement;
   private readonly strip: ReviewStrip;
   private readonly wsBox: HTMLInputElement;
+  private readonly wrapBox: HTMLInputElement;
   /** The round strip under the top bar; empty when there was no earlier review. */
   private readonly round: HTMLElement;
   /**
@@ -107,6 +110,12 @@ class Page {
     this.wsBox.addEventListener("change", () => this.run(this.setHideWhitespace(this.wsBox.checked)));
     ws.append(this.wsBox, document.createTextNode("Hide whitespace"));
     ws.title = "Hide hunks that change only whitespace";
+    const wrap = h("label", "wrap-toggle");
+    this.wrapBox = h("input");
+    this.wrapBox.type = "checkbox";
+    this.wrapBox.addEventListener("change", () => this.fileView.setWrap(this.wrapBox.checked));
+    wrap.append(this.wrapBox, document.createTextNode("Wrap lines"));
+    wrap.title = "Wrap long lines instead of scrolling sideways (w)";
     // Both labels share one grid cell, so the button keeps the longer label's width in either mode.
     this.layoutButton = h("button", "btn mode-toggle");
     this.layoutButton.title = "Toggle unified or split view (s)";
@@ -114,7 +123,7 @@ class Page {
     const finish = h("button", "btn primary finish-btn", "Finish…");
     finish.title = "⌘↵";
     finish.addEventListener("click", () => this.run(this.openFinish()));
-    header.append(brand(), source, files, progress, h("span", "spacer"), ws, search, this.layoutButton, finish);
+    header.append(brand(), source, files, progress, h("span", "spacer"), wrap, ws, search, this.layoutButton, finish);
     this.round = h("div", "round-banner");
 
     this.banners = h("div", "banners");
@@ -234,6 +243,7 @@ class Page {
       this.onKey(e);
     });
     this.renderLayout();
+    this.wrapBox.checked = this.fileView.wrap;
     this.renderTotals();
     this.renderRound();
     const order = this.tree.order();
@@ -523,6 +533,10 @@ class Page {
         break;
       case "s":
         this.toggleLayout();
+        break;
+      case "w":
+        this.fileView.setWrap(!this.fileView.wrap);
+        this.wrapBox.checked = this.fileView.wrap;
         break;
       case "ArrowLeft":
       case "ArrowRight":

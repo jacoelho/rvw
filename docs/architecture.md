@@ -15,7 +15,7 @@ agent ──runs──▶ cmd/rvw ─── lifecycle, signals, stdout
                   ├─ internal/source    git facts: snapshot, file list, patches, contents, gaps, content search
                   ├─ internal/review    the draft: comments, summary, viewed marks, lock, result
                   └─ internal/server    loopback HTTP: auth, translation, bounded file work
-                        ├─ internal/highlight  syntax spans
+                        ├─ internal/highlight  syntax spans: one linear scanner per language
                         ├─ internal/worddiff   word changes in paired lines
                         └─ web (embedded dist) ◀── browser
 ```
@@ -201,7 +201,17 @@ Designed for at least 1,000 changed files of 10,000 lines each and up to 4,096 c
 - The UI polls the status at the interval the server sends: half the close grace, at most 5 s. Deriving it from the
   grace keeps a sibling tab's poll inside the grace, and the 5 s cap keeps the moved-HEAD notice within REQ-SES-010's
   10 s. Page presence holds one timer.
-- Highlighting runs within a 2 s budget per side and falls back to plain text after it.
+- Highlighting runs within a 2 s budget per side and falls back to plain text after it. The scanners in
+  `internal/highlight` are hand-written and linear in the side's size, with no regular expressions: a failed search
+  for a closer is not repeated, frame stacks hold at most 1,024 entries, fenced code embeds at most 4 levels deep,
+  and cancellation is checked every 1,024 lines. At the 1 MiB large-file limit a side takes about 5–16 ms, so the
+  budget guards against defects rather than routine input
+  ([Q-52](decisions.md#q-52--project-owned-highlighting-scanners)). Only the lines the reply sends get spans (a file's
+  hunk lines, or the requested context range), stored in chunks of at most 4,096 spans, so a side allocates O(spans
+  kept / 4,096) objects plus one slice of line headers
+  ([Q-53](decisions.md#q-53--json-yaml-and-toml-and-highlighting-only-the-lines-sent)). A line has at most 500 spans;
+  the rest of a longer line is one plain span, so a minified line's reply and DOM stay bounded
+  ([Q-56](decisions.md#q-56--markdown-front-matter-and-a-span-bound-per-line)).
 - Content search keeps at most 500 lines, reads at most 16 MiB of `git grep` output through `stream`'s limit, runs
   for at most 2 s, and keeps a 496-byte window per line; its text is 3 characters to 256 bytes. Reaching a bound
   returns the matches found first with a truncation flag.
@@ -213,7 +223,14 @@ Designed for at least 1,000 changed files of 10,000 lines each and up to 4,096 c
 - The UI renders only visible rows plus 50 rows of overscan, in every list. Replacing a list's rows keeps the
   rows in view in place: each row has an id that outlives content changes, such as a comment becoming its
   editor, and the list scrolls so the first shown row still present stays where it was drawn. Finding it
-  scans the new rows once, the same order of cost as laying them out.
+  scans the new rows once, the same order of cost as laying them out. A shown row partly above the view
+  that shrinks so far it would leave the view, such as a wrapped line when the window widens, keeps its
+  bottom in place instead of its top.
+- Diff rows are fixed-height unless Wrap lines is on (REQ-DIFF-013, Q-51). `fileview.ts` owns the setting, kept in
+  the browser under `rvw.wrap`. Wrapped code rows become measured rows of the virtual list: each starts at an estimate,
+  its widest half's width in columns divided by the code column's width in characters, and its measured height is
+  cached under a key holding that width, so a resize re-estimates every row not in view instead of trusting heights
+  measured at another width. While wrapping is on, neither view scrolls sideways and split's shared scrollbar is hidden.
 - Startup reads content only as `git` needs to list changes. Line counts and generated files are read in the
   background after the UI is served.
 
@@ -259,6 +276,11 @@ Designed for at least 1,000 changed files of 10,000 lines each and up to 4,096 c
   whose Origin host differs from Host when Sec-Fetch-Site is absent
   ([Q-44](decisions.md#q-44--cross-origin-checks-from-the-standard-library)).
 - `web/dist` is committed and embedded, so `go install` needs no Node. `make check` fails when `web/dist` is stale.
+- File-type icons are a curated subset of [Catppuccin's](https://github.com/catppuccin/vscode-icons) (MIT, licence
+  beside them), vendored as one sprite and two lookup tables under `web/src/icons/`. `web/scripts/icons.mjs` owns the
+  subset and regenerates all three from a checkout, at the commit it records in them; nothing else edits them.
+  `fileicon.ts` alone maps a path to an icon (file name, then longest extension), and `app.css` alone gives the icons
+  their colours. The sprite adds about 65 KB to the page, which loopback makes negligible.
 - `web/src/favicon.svg` is the product mark: the favicon, and inlined by the build as the page's
   brand so the end page shows it after the server has gone. `favicon.png` is the same mark
   rasterised at 32px for Safari before 26; re-render it when the SVG changes.
@@ -316,7 +338,7 @@ Designed for at least 1,000 changed files of 10,000 lines each and up to 4,096 c
 | Choice | Cost |
 | --- | --- |
 | Re-run `git diff-pairs -p` per file request instead of caching patches | Repeated Git work on revisits; buys flat memory |
-| Highlight the whole side, not the requested window | A large non-large file costs about a second per request; a multi-line token can span any window |
+| Highlight the whole side, not the requested window | Each request rescans both sides, up to about 16 ms at 1 MiB; a multi-line token can span any window. Spans are kept only for the lines sent |
 | Buffer a patch whole, up to 64 MiB | A huge rewrite's reply is large; streaming is the next step if it matters |
 | Seed validation reads each commented file's diff | A 300-comment seed over 150 files measured 6 s of startup |
 | Snapshot uncommitted changes with `git add -A` into a private index | A large unignored, untracked tree is slow and fills the object database; the fix is to ignore it |

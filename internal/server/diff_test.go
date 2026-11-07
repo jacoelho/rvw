@@ -739,16 +739,23 @@ func TestWordRangesPerPair(t *testing.T) {
 	}
 }
 
-// TestHighlighting covers highlighting at the API: a Go file is highlighted and its spans cover
-// each line; a file in an unsupported language is served without spans.
+// TestHighlighting covers highlighting at the API: a Go file is highlighted, and every non-empty
+// line of each of its hunks, on both sides, and of an expanded gap carries spans that cover it; a
+// file in an unsupported language is served without spans.
 func TestHighlighting(t *testing.T) {
 	t.Parallel()
 	repo := newTestRepo(t)
-	goSrc := "package a\n\nfunc A() int {\n\treturn 1\n}\n"
+	var src strings.Builder
+	src.WriteString("package a\n\nfunc A() int {\n\treturn 1\n}\n")
+	for n := range 20 {
+		fmt.Fprintf(&src, "\nvar v%d = %d\n", n, n)
+	}
+	src.WriteString("\nfunc B() int {\n\treturn 3\n}\n")
+	goSrc := src.String()
 	repo.write("a.go", goSrc)
 	repo.write("a.txt", "plain\n")
 	repo.commit("base")
-	repo.write("a.go", strings.Replace(goSrc, "return 1", "return 2", 1))
+	repo.write("a.go", strings.NewReplacer("return 1", "return 2", "return 3", "return 4").Replace(goSrc))
 	repo.write("a.txt", "plain changed\n")
 	repo.commit("head")
 	f := newFixture(t, repo, fixtureOptions{})
@@ -759,7 +766,6 @@ func TestHighlighting(t *testing.T) {
 	if !d.Highlighted {
 		t.Error("a.go is not highlighted")
 	}
-	spans := 0
 	for _, h := range d.Hunks {
 		for _, b := range h.Blocks {
 			for _, l := range slices.Concat(b.Ctx, b.Del, b.Add) {
@@ -767,15 +773,31 @@ func TestHighlighting(t *testing.T) {
 				for _, sp := range l.S {
 					joined.WriteString(sp.Text)
 				}
-				if len(l.S) > 0 && joined.String() != l.T {
+				if l.T != "" && joined.String() != l.T {
 					t.Errorf("a.go line %q: spans cover %q", l.T, joined.String())
 				}
-				spans += len(l.S)
 			}
 		}
 	}
-	if spans == 0 {
-		t.Error("a.go hunks carry no spans")
+	if len(d.Hunks) != 2 || d.Hunks[1].GapBefore == nil {
+		t.Fatalf("a.go: want two hunks with a gap between them, got %+v", d.Hunks)
+	}
+	g := *d.Hunks[1].GapBefore
+	r := f.contextLines(s.fileIndex(t, "a.go"), g.From, g.To)
+	f.mustStatus(r, http.StatusOK, "context")
+	var ctx contextDTO
+	decode(t, r.body, &ctx)
+	if !ctx.Highlighted || len(ctx.Lines) == 0 {
+		t.Fatalf("a.go context: highlighted %v with %d lines", ctx.Highlighted, len(ctx.Lines))
+	}
+	for _, l := range ctx.Lines {
+		var joined strings.Builder
+		for _, sp := range l.S {
+			joined.WriteString(sp.Text)
+		}
+		if l.T != "" && joined.String() != l.T {
+			t.Errorf("a.go context line %q: spans cover %q", l.T, joined.String())
+		}
 	}
 
 	d = f.fileDiff(s.fileIndex(t, "a.txt"))
