@@ -74,10 +74,10 @@ export class FileTree {
       if (!row) return;
       const r = this.rows[Number(row.dataset["row"])];
       if (!r || r.kind === "sep") return;
-      if (r.kind !== "file" && e.target instanceof HTMLInputElement) {
+      if (e.target instanceof HTMLInputElement) {
         // The box shows the state the server saved; it changes when the save lands.
         e.preventDefault();
-        const files = this.members.get(r.key) ?? [];
+        const files = r.kind === "file" ? [r.i] : (this.members.get(r.key) ?? []);
         const anyClear = files.some((i) => !this.state.viewed.has(i));
         if (files.length > 0) this.onViewed(files, anyClear);
         return;
@@ -319,7 +319,7 @@ export class FileTree {
     row.style.paddingLeft = `${8 + r.depth * 14}px`;
     if (r.kind !== "file") {
       row.classList.add("tree-dir");
-      const twisty = h("span", "tree-twisty", r.collapsed ? "▸" : "▾");
+      const twisty = h("span", r.collapsed ? "tree-twisty collapsed" : "tree-twisty");
       const label = (kind: string): string => `${kind} · ${r.count} ${r.count === 1 ? "file" : "files"}`;
       // The title carries the full text of a name or label truncated by a narrow sidebar.
       if (r.kind === "generated") {
@@ -340,17 +340,10 @@ export class FileTree {
       let n = 0;
       if (r.collapsed) for (const i of this.members.get(r.key) ?? []) n += this.comments.get(i) ?? 0;
       const files = this.members.get(r.key) ?? [];
-      const box = document.createElement("input");
-      box.type = "checkbox";
-      box.className = "dir-check";
-      box.checked = files.length > 0 && files.every((i) => this.state.viewed.has(i));
-      box.title = box.checked ? "Clear viewed below" : "Mark viewed below";
-      box.setAttribute("aria-label", `${box.title}: ${row.title}`);
-      const viewed = h("span", "tree-viewed");
-      viewed.append(box);
+      const all = files.length > 0 && files.every((i) => this.state.viewed.has(i));
       const meta = h("span", "tree-meta");
       if (this.state.lastReviewAt !== undefined) meta.append(h("span", "rtag"));
-      meta.append(commentSlot(n), viewed);
+      meta.append(commentSlot(n), viewedBox(all, all ? "Clear viewed below" : "Mark viewed below", row.title));
       row.append(meta);
       return row;
     }
@@ -374,10 +367,24 @@ export class FileTree {
     // The state-tag column shows only once there was an earlier review.
     if (this.state.lastReviewAt !== undefined) meta.append(roundTag(this.state, r.i));
     meta.append(add, del, commentSlot(this.comments.get(r.i) ?? 0));
-    meta.append(h("span", "tree-viewed", this.state.viewed.has(r.i) ? "✓" : ""));
+    const viewed = this.state.viewed.has(r.i);
+    meta.append(viewedBox(viewed, viewed ? "Clear viewed" : "Mark viewed", row.title));
     row.append(meta);
     return row;
   }
+}
+
+/** A row's viewed checkbox; one control for file and directory rows, so both read alike. */
+function viewedBox(checked: boolean, title: string, name: string): HTMLElement {
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.className = "view-check";
+  box.checked = checked;
+  box.title = title;
+  box.setAttribute("aria-label", `${title}: ${name}`);
+  const slot = h("span", "tree-viewed");
+  slot.append(box);
+  return slot;
 }
 
 /** File i's round tag: what changed since the last review, or why it is grouped as it is. */

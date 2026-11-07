@@ -51,7 +51,7 @@ func rowTag(name string) string {
 }
 
 // dirDCheck is the viewed checkbox of the d/ directory row.
-var dirDCheck = `(` + treeRow("d/") + `)?.querySelector(".dir-check") ?? null`
+var dirDCheck = `(` + treeRow("d/") + `)?.querySelector(".view-check") ?? null`
 
 // TestBrowserRoundSinceView (AC-RND-003, AC-CMT-004): round 1 marks a.go and b.go viewed and
 // comments on a.go's line 10; the agent then inserts two lines after a.go's line 1 and edits its
@@ -180,8 +180,9 @@ func TestBrowserRoundSinceView(t *testing.T) {
 // re-indent-only hunk is one row that shows it when activated, a re-indent-only hunk holding a
 // comment and a hunk mixing re-indentation with an edit are shown, a palette jump into a hidden
 // hunk shows it, and a file changed only in indentation is in the whitespace-only row until
-// whitespace is shown again. A directory's viewed
-// box marks all its files, clears them, and reflects a file cleared from its own header.
+// whitespace is shown again. A directory's viewed box marks all its files, clears them, and
+// reflects a file cleared from its own header. A file row's viewed box marks that file without
+// selecting it.
 func TestBrowserHideWhitespaceAndDirectoryMarks(t *testing.T) {
 	t.Parallel()
 	w := newWorld(t)
@@ -259,6 +260,11 @@ func TestBrowserHideWhitespaceAndDirectoryMarks(t *testing.T) {
 	pg.waitTrue("d/y.go shown", shownPath+` === "d/y.go" && `+fileLoaded)
 	pg.click("y.go's Viewed", `document.querySelector(".fh-viewed input")`, 0)
 	waitViewed("y.go cleared from its header", []int{0, 2})
+	pg.click("x.go viewed", `(`+treeRow("x.go")+`)?.querySelector(".view-check") ?? null`, 0)
+	waitViewed("x.go cleared from its row", []int{2})
+	if got := pg.text(shownPath); got != "d/y.go" {
+		pg.fatalf("after x.go's row box, %q is shown, want d/y.go", got)
+	}
 	pg.noPageErrors()
 }
 
@@ -438,7 +444,7 @@ func TestBrowserDirectoryMarksAtScale(t *testing.T) {
 		pg.eval(`window.rvwViewedPuts`, &n)
 		return n
 	}
-	dirCheck := func(name string) string { return `(` + treeRow(name) + `)?.querySelector(".dir-check") ?? null` }
+	dirCheck := func(name string) string { return `(` + treeRow(name) + `)?.querySelector(".view-check") ?? null` }
 
 	before := puts()
 	pg.click("big/ viewed", dirCheck("big/"), 0)

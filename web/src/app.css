@@ -412,23 +412,19 @@ kbd {
   overflow: hidden;
 }
 
-/* The filter bar and the file header share one height, so the tree and the diff start level. */
-.sidebar-head,
-.file-header {
-  flex: none;
-  height: var(--subbar-h);
-  display: flex;
-  align-items: center;
-}
-
+/* The filter box spans the sheet's header band edge to edge: its top on the sheet's top border,
+   its bottom on the header's rule. The band is the header plus the sheet's 1px top border. The tree
+   then starts level with the diff. */
 .sidebar-head {
+  flex: none;
+  display: flex;
+  height: calc(var(--subbar-h) + 1px);
   padding: 0 8px;
 }
 
 .filter {
   flex: 1;
   min-width: 0;
-  height: var(--control-h);
   margin: 0;
   padding: 0 10px;
   border: 1px solid var(--control);
@@ -491,11 +487,35 @@ kbd {
   color: var(--muted);
 }
 
+/* A drawn chevron: a text glyph renders too small and thin to read at row size. Borders, not an
+   image, because the page's CSP allows no data: images. */
 .tree-twisty {
+  flex: none;
+  position: relative;
   width: 12px;
+  height: 12px;
   color: var(--muted);
-  font-size: 10px;
-  text-align: center;
+  transition: transform 0.1s;
+}
+
+.tree-twisty::before {
+  content: "";
+  position: absolute;
+  left: 3.5px;
+  top: 2px;
+  width: 5px;
+  height: 5px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg);
+}
+
+.tree-twisty.collapsed {
+  transform: rotate(-90deg);
+}
+
+.tree-row:hover .tree-twisty {
+  color: var(--fg);
 }
 
 /* The sprite only defines symbols; out of flow, its empty box adds no line above the app. */
@@ -616,7 +636,7 @@ kbd {
   stroke-linejoin: round;
 }
 
-/* A directory row's viewed checkbox sits in this column, so it is the checkbox's width. */
+/* Every row's viewed checkbox sits in this column, so it is the checkbox's width. */
 .tree-viewed {
   display: inline-flex;
   justify-content: center;
@@ -639,6 +659,10 @@ kbd {
 }
 
 .file-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  height: var(--subbar-h);
   gap: 12px;
   padding: 0 8px 0 16px;
   border-bottom: 1px solid var(--rule);
@@ -1497,12 +1521,46 @@ kbd {
   font-weight: 500;
 }
 
-.dir-check {
+/* File and directory rows share this box. It is drawn rather than native so a checked box stays
+   as quiet as the muted name beside it; a native box in the primary colour outshouts the tree. */
+.view-check {
+  appearance: none;
+  flex: none;
   width: 12px;
   height: 12px;
   margin: 0;
-  accent-color: var(--primary);
+  border: 1px solid var(--control);
+  border-radius: 3px;
+  background: transparent;
   cursor: pointer;
+}
+
+.view-check:hover {
+  border-color: var(--muted);
+}
+
+.view-check:checked {
+  position: relative;
+  border-color: var(--muted);
+  background: var(--muted);
+}
+
+/* The check mark; a border-drawn tick in the frame colour, so it inverts with the theme. */
+.view-check:checked::after {
+  content: "";
+  position: absolute;
+  left: 3.5px;
+  top: 0.5px;
+  width: 3px;
+  height: 6.5px;
+  border-right: 1.5px solid var(--frame);
+  border-bottom: 1.5px solid var(--frame);
+  transform: rotate(45deg);
+}
+
+.view-check:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 /* Not a tree-row: it is a rule between the tree and the round groups, never selected. */
