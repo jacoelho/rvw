@@ -700,7 +700,7 @@ The presence rule is that any authenticated request after the notice keeps the s
 page that sent the notice. Every request names its page in an `Rvw-Page` header: a random id each page load picks,
 and a page restored from the back/forward cache replaces; a request without a valid one is refused with 400. A
 notice marks its id closed, and the server keeps the last 32 closed ids, so a request the closing page had in flight
-does not keep the session (added 2026-11-07 for contract revision 12, proposed: this request reaching the server
+does not keep the session (added 2026-11-07 as contract revision 12, which the owner accepted that day: this request reaching the server
 just after the notice left `rvw` running, and failed `TestBrowserBackForwardCache` in CI). A reload sends the notice
 and then loads the session again under a new id. Another open tab polls the status. Two things keep that tab's request inside the
 grace:

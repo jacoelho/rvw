@@ -65,9 +65,9 @@ same trees but another changed-file list (a blob arriving in a partial clone cha
 readable) is no longer "unchanged": it carries the draft over and advances the generation, and the change notice shows
 when such a blob arrives (Q-58). It changes REQ-SES-010, REQ-SES-013, REQ-SES-015 and AC-SES-004.
 
-Contract revision: 12, 2026-11-07, against workspace `main` at 25d66e5. Proposed, not accepted: a request from the
+Contract revision: 12, 2026-11-07, against workspace `main` at 25d66e5. The repository owner accepted it on 2026-11-07: a request from the
 page that sent the close notice, such as a poll it had in flight, no longer keeps the session (Q-42). It changes
-REQ-SES-012, which revision 2 proposed. Revision 11 stays the accepted revision.
+REQ-SES-012, which revision 2 proposed; the rest of REQ-SES-012 remains proposed with revision 2.
 Decision owner: repository owner (jacoelho)
 Effective scope: target version only. No deployed contract, persisted data or compatibility promise binds this
 replacement (Q-03 in [decisions.md](decisions.md)).
@@ -370,9 +370,8 @@ Basis: Proposed (Q-57). File indices, line numbers and comment versions belong t
 #### REQ-SES-012 — Page closed
 
 Status: proposed
-Statement: When the review page sends a close notice and no review page of the session makes an authenticated request within 10 seconds, the rvw command shall keep the saved draft, write nothing to stdout, write to stderr that the review page was closed and the saved draft changes are kept, and exit with status 4.
-Proposed (revision 12): a request from the page that sent the close notice is not a review page's request; a page restored from the back/forward cache counts as another page.
-Basis: Proposed (Q-42). A human who closes the tab has left the review; the agent should not wait until someone notices. A reload or another open tab makes a request within the grace and keeps the session.
+Statement: When the review page sends a close notice and no review page of the session makes an authenticated request within 10 seconds, the page that sent the notice not counting and a page restored from the back/forward cache counting as another page, the rvw command shall keep the saved draft, write nothing to stdout, write to stderr that the review page was closed and the saved draft changes are kept, and exit with status 4.
+Basis: Proposed (Q-42). A human who closes the tab has left the review; the agent should not wait until someone notices. A reload or another open tab makes a request within the grace and keeps the session. Revision 12, which the owner accepted on 2026-11-07, leaves out the closing page's own requests, such as a poll in flight when it closed.
 
 #### REQ-SES-009 — Usage errors
 
