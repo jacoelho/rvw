@@ -18,8 +18,9 @@ import (
 const generationHeader = "Rvw-Generation"
 
 // generation is one snapshot the review is served from and what the server derived from it. A
-// refresh that gives other trees replaces it with the next id; one that gives the same trees keeps
-// the id and the facts, so pages showing it keep working.
+// refresh that gives another draft key or another file list replaces it with the next id; one with
+// the same draft key and the same file list (source.Snapshot.SameFiles) keeps the id and the facts,
+// so pages showing it keep working.
 type generation struct {
 	// checked is when the last change check ended; logged is set once a failed check was logged.
 	// Both are guarded by Server.probeMu.
@@ -126,10 +127,10 @@ func (s *Server) postRefresh(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	snap := s.cfg.Session.Snapshot()
+	snap := res.Snapshot
 	next := &generation{snap: snap, prior: round.NewPrior(snap, s.cfg.Ledger)}
 	if res.Unchanged {
-		// The same trees: the same files and facts. The check starts again on the new snapshot.
+		// The same draft key and the same files (SameFiles): the same indexes and facts. The check starts again on the new snapshot.
 		next.id, next.facts, next.stopFacts, next.moved = old.id, old.facts, old.stopFacts, old.moved
 	} else {
 		next.id, next.facts, next.moved = old.id+1, newContentFacts(snap), res.Moved

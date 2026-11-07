@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -174,8 +175,8 @@ func TestRefreshCarriesTheDraftToANewGeneration(t *testing.T) {
 	if !bytes.Contains(draft, []byte("on five")) {
 		t.Errorf("the new draft does not hold the carried comments:\n%s", draft)
 	}
-	if _, err := os.Stat(f.store.Path()); !os.IsNotExist(err) {
-		t.Errorf("the replaced draft %s: stat err = %v; want it deleted", f.store.Path(), err)
+	if _, err := os.Stat(f.draftPath); !os.IsNotExist(err) {
+		t.Errorf("the replaced draft %s: stat err = %v; want it deleted", f.draftPath, err)
 	}
 
 	for _, req := range []struct{ method, path, body string }{
@@ -214,8 +215,101 @@ func TestRefreshToTheSameTrees(t *testing.T) {
 		t.Errorf("after an unchanged refresh: generation %d, comments %+v; want 1, %+v",
 			after.Generation, after.Comments, before.Comments)
 	}
-	if _, err := os.Stat(f.store.Path()); err != nil {
+	if _, err := os.Stat(f.draftPath); err != nil {
 		t.Errorf("the draft after an unchanged refresh: %v; want it kept", err)
+	}
+}
+
+// hideBlob moves the loose object of rev:path out of the object database and returns a func that
+// puts it back.
+func (r *testRepo) hideBlob(rev, path string) (restore func()) {
+	r.t.Helper()
+	id := r.git("rev-parse", rev+":"+path)
+	obj := filepath.Join(r.dir, ".git", "objects", id[:2], id[2:])
+	aside := filepath.Join(r.t.TempDir(), id)
+	if err := os.Rename(obj, aside); err != nil {
+		r.t.Fatal(err)
+	}
+	return func() {
+		if err := os.Rename(aside, obj); err != nil {
+			r.t.Fatal(err)
+		}
+	}
+}
+
+// TestRefreshToAnotherListingOfTheSameTrees covers REQ-DRF-006 and the basis of REQ-SES-015 (file
+// indices belong to one snapshot) over HTTP: a blob arriving changes the listing but not the
+// trees. That the refresh is not unchanged and advances the generation encodes contract revision
+// 11 (proposed); that comments keep their paths and files keep their own content does not.
+func TestRefreshToAnotherListingOfTheSameTrees(t *testing.T) {
+	t.Parallel()
+	repo := newTestRepo(t)
+	repo.write("a.txt", numberedLines("a", 20))
+	repo.write("c.txt", numberedLines("c", 10))
+	repo.commit("one")
+	repo.git("mv", "a.txt", "b.txt")
+	repo.write("b.txt", strings.Replace(numberedLines("a", 20), "a 7\n", "a 7 edited\n", 1))
+	repo.write("c.txt", numberedLines("c", 10)+"c extra\n")
+	repo.commit("two")
+	restore := repo.hideBlob("HEAD~1", "a.txt")
+
+	f := newFixture(t, repo, fixtureOptions{src: source.Last()})
+	f.serveRun()
+	if s := f.session(); len(s.Files) != 3 {
+		t.Fatalf("before the refresh: %d files; want 3", len(s.Files))
+	}
+	f.mustStatus(f.createComment("cb", targetDTO{Target: "line", Path: "b.txt", Side: "new", Line: 3}, "on b"),
+		http.StatusOK, "create cb")
+	f.mustStatus(f.createComment("cc", targetDTO{Target: "line", Path: "c.txt", Side: "new", Line: 11}, "on c"),
+		http.StatusOK, "create cc")
+	oldGen := f.gen
+
+	restore()
+	got := f.refresh()
+	// Contract revision 11: another file list advances the generation.
+	if got.Unchanged || got.Generation != oldGen+1 {
+		t.Fatalf("refresh: unchanged %v, generation %d; want false, %d", got.Unchanged, got.Generation, oldGen+1)
+	}
+	for _, req := range []struct{ method, path, body string }{
+		{http.MethodGet, "/api/file?i=0", ""},
+		{http.MethodPut, "/api/summary", `{"summary":"x"}`},
+		{http.MethodPost, "/api/refresh", ""},
+	} {
+		r := f.do(req.method, req.path, req.body, withHeader("Rvw-Generation", strconv.FormatUint(oldGen, 10)))
+		if r.status != http.StatusConflict || r.header.Get("Rvw-Generation") != strconv.FormatUint(got.Generation, 10) {
+			t.Errorf("%s %s naming the old generation: status %d, Rvw-Generation %q; want 409, %d",
+				req.method, req.path, r.status, r.header.Get("Rvw-Generation"), got.Generation)
+		}
+	}
+	s := f.session()
+	if len(s.Files) != 2 {
+		t.Fatalf("after the refresh: %d files; want 2", len(s.Files))
+	}
+	bi := -1
+	for i, file := range s.Files {
+		if file.NewPath == "b.txt" {
+			bi = i
+		}
+	}
+	if bi < 0 || s.Files[bi].Status != "R" || s.Files[bi].OldPath != "a.txt" {
+		t.Fatalf("files = %+v; want b.txt renamed from a.txt", s.Files)
+	}
+	want := map[string]targetDTO{
+		"cb": {Target: "line", Path: "b.txt", Side: "new", Line: 3},
+		"cc": {Target: "line", Path: "c.txt", Side: "new", Line: 11},
+	}
+	for _, c := range s.Comments {
+		if w, ok := want[c.ID]; !ok || c.Target != w {
+			t.Errorf("comment %s on %+v; want %+v", c.ID, c.Target, w)
+		}
+		delete(want, c.ID)
+	}
+	if len(want) != 0 {
+		t.Errorf("comments missing after refresh: %v", want)
+	}
+	f.mustStatus(f.do(http.MethodGet, "/api/file?i="+strconv.Itoa(bi), ""), http.StatusOK, "GET /api/file for the rename")
+	if d := f.fileDiff(bi); d.Kind != "text" || len(d.Hunks) == 0 {
+		t.Errorf("rename diff: kind %q, %d hunks; want the rename's text diff", d.Kind, len(d.Hunks))
 	}
 }
 

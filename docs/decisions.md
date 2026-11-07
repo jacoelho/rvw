@@ -1346,7 +1346,8 @@ refresh holds the lock, so the notice shows within about 15 s, inside the 20 s b
 and is logged once per snapshot. A found change is sticky until a refresh: an undone edit cannot be told from another.
 
 The refresh (REQ-SES-013, REQ-DRF-006, `review.Session.Refresh`) resolves the source again. The same draft key keeps
-the draft and the generation, so open pages keep working and the page says nothing changed. A new key opens and locks the
+the draft and the generation, so open pages keep working and the page says nothing changed (revision 10 wording; the
+same key with another file list is carried over and advances the generation, see [Q-58](#q-58--listing-identity-on-refresh)). A new key opens and locks the
 new draft, carries the draft over, moves aside any draft already under that key, deletes the old one, and moves the
 server to the next generation, whose facts (line counts, generated and whitespace-only files, round facts) are derived
 again. Line comments move only by the diff between the two versions of their side's file: an unchanged line follows
@@ -1370,3 +1371,44 @@ Rejected:
   file comment loses the line but never points at the wrong code.
 - **Restoring a draft already saved for the new snapshot.** It belongs to an earlier session; restoring it would drop
   this session's work, so it is moved aside as an unrestorable draft is.
+
+### Q-58 — Listing identity on refresh
+
+Accepted on 2026-11-07 as contract revision 11.
+
+Cause: in a partial clone, which blobs are present locally decides the listing. `source` lists without rename
+detection when a blob is missing and with it otherwise, and `ChangedFile.Missing` is per file. A refresh after blobs
+arrive gives the same trees, hence the same draft key (REQ-DRF-002), but another file list. Treating it as unchanged kept
+the draft's file indexes while the new snapshot numbered files differently, so a comment quoted another file's lines and
+viewed marks followed an index to another file.
+
+Decision: `source.Snapshot.SameFiles` compares the file list, the raw records that pair the sides, the rename detection
+mode and each file's `Missing`. `review.Session.Refresh` is the single decider: "unchanged" means the same draft key and
+`SameFiles`. The same key with another listing is carried over in place into the current store (no move-aside, no
+delete) and the server advances the generation; a new key opens its store through an opener passed to `Refresh`, which
+closes it on failure. The server stores the snapshot `Refresh` installed. A blob arriving that completes a file's blobs advances the generation, even
+when no rename pairing changes, because `Missing` changes what a file index can show.
+
+The periodic check (REQ-SES-010, REQ-SES-014) notices blobs arriving: a snapshot listed with blobs missing keeps their
+ids, and `Snapshot.Changed`, after the tree and private-index checks find nothing, asks one `cat-file --batch-check` run
+whether they are now present, and reports a change when some file has none missing any more (one side of two arriving
+changes no `Missing` flag, so it is not a change). Lazy fetching is off for every git run, so the question fetches nothing. A full listing has
+no missing blob and pays nothing; a degraded one pays one process per check, at most every 10 s, with stdin bounded by
+two ids per changed file.
+
+The draft store has one owner, the session: `review.Start` takes the store and closes it if it fails, `Refresh` closes
+the store it replaces, and `Session.Close` closes the current one and ends the session, so a refresh still carrying the
+draft over then fails and closes the store it opened. `cmd/rvw` keeps no store of its own.
+
+Rejected:
+
+- **Adding the listing mode to the draft key.** It changes the accepted persisted identity (REQ-DRF-002) to fix an
+  in-memory index problem, and it misses per-file `Missing` changes.
+- **Reusing the previous snapshot's listing when the trees match.** It keeps the degraded listing and stale `Missing`
+  flags after blobs arrive, and `Resolve` would depend on session history.
+- **Leaving blob arrival to a manual refresh.** The page would keep serving a listing that resolving again no longer
+  gives, with nothing to prompt the human; the extra check costs one `cat-file` run only for degraded listings.
+- **Asking the long-lived `cat-file` reader one blob at a time.** It holds the reader's lock for up to two round trips per
+  changed file, stalling content reads; one batch run holds nothing shared.
+- **Returning the replaced and the opened stores to the caller.** `cmd/rvw` then kept a second copy of the current store
+  to close at exit, two owners of one lock; it was safe only because refreshes run one at a time.

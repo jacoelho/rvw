@@ -2754,3 +2754,30 @@ func TestBrowserCommentSteps(t *testing.T) {
 	}
 	pg.noPageErrors()
 }
+
+// TestBrowserFileIconsIgnoreObjectMembers: a file named like an Object.prototype member (lookup
+// lower-cases, so constructor and __proto__ are the ones that could match), or with
+// such an extension, shows the plain file icon, while a known extension shows its own.
+func TestBrowserFileIconsIgnoreObjectMembers(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	w.write("README", "base\n")
+	w.commit("base")
+	for _, name := range []string{"constructor", "__proto__", "x.__proto__", "main.go"} {
+		w.write(name, "x\n")
+	}
+	w.commit("head")
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+	var got map[string]string
+	pg.eval(`Object.fromEntries([...document.querySelectorAll(".tree-row")].filter((r) => r.querySelector(".ficon")).map((r) => [r.querySelector(".tree-name").textContent, r.querySelector(".ficon use").getAttribute("href")]))`, &got)
+	want := map[string]string{"constructor": "#i-_file", "__proto__": "#i-_file", "x.__proto__": "#i-_file", "main.go": "#i-go"}
+	for name, href := range want {
+		if got[name] != href {
+			t.Errorf("%s's icon = %q; want %q (all: %v)", name, got[name], href, got)
+		}
+	}
+	pg.noPageErrors()
+}

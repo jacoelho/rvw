@@ -318,6 +318,47 @@ func TestStoreLock(t *testing.T) {
 	openStore(t, dir, "k")
 }
 
+// TestSessionOwnsItsStore: the session releases the store it was given, when Start fails and at
+// Close, and an ended session refuses a refresh without calling the opener.
+func TestSessionOwnsItsStore(t *testing.T) {
+	t.Parallel()
+	fx := newFixture(t)
+	dir := t.TempDir()
+	key := fx.key(fx.last)
+
+	st := openStore(t, dir, key)
+	if _, _, err := review.Start(t.Context(), st, fx.last, review.Fresh{Viewed: []review.Mark{{File: -1}}}); err == nil {
+		t.Fatal("Start with an out-of-range viewed mark succeeded")
+	}
+	st = openStore(t, dir, key) // the failed Start released the lock
+
+	s, _, err := review.Start(t.Context(), st, fx.last, review.Fresh{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustCreate(t, s, "c", reviewTarget, "kept")
+	for k := range 2 {
+		if err := s.Close(); err != nil {
+			t.Fatalf("Close (call %d): %v", k+1, err)
+		}
+	}
+	if _, err := s.Refresh(t.Context(), fx.last, func(string) (*review.Store, error) {
+		t.Error("the opener was called after Close")
+		return nil, errors.New("closed")
+	}); !errors.Is(err, review.ErrEnded) {
+		t.Errorf("Refresh after Close: err = %v; want ErrEnded", err)
+	}
+	if err := s.SetSummary("late"); !errors.Is(err, review.ErrEnded) {
+		t.Errorf("SetSummary after Close: err = %v; want ErrEnded", err)
+	}
+	// Close kept the draft and released the lock: the next session resumes it.
+	again, o, err := review.Start(t.Context(), openStore(t, dir, key), fx.last, review.Fresh{})
+	if err != nil || !o.Resumed() || len(again.Draft().Comments) != 1 {
+		t.Fatalf("restart after Close = resumed %v, %v; want the kept draft", o.Resumed(), err)
+	}
+	t.Cleanup(func() { _ = again.Close() })
+}
+
 const holdLockEnv = "RVW_REVIEW_TEST_HOLD_LOCK"
 
 // TestHoldLockHelper is the child process of TestKilledSessionLeavesNoStaleURL.

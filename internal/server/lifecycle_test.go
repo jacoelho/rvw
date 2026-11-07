@@ -24,7 +24,7 @@ type finishDTO struct {
 
 func draftExists(t *testing.T, f *fixture) bool {
 	t.Helper()
-	_, err := os.Stat(f.store.Path())
+	_, err := os.Stat(f.draftPath)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)
 	}
@@ -466,24 +466,24 @@ func waitStoppedListening(t *testing.T, f *fixture) {
 // and returns its summary.
 func resumedSummary(t *testing.T, f *fixture) string {
 	t.Helper()
-	data, err := os.ReadFile(f.store.Path())
+	data, err := os.ReadFile(f.draftPath)
 	if err != nil {
 		t.Fatalf("read the kept draft: %v", err)
 	}
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, filepath.Base(f.store.Path())), data, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, filepath.Base(f.draftPath)), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	key := strings.TrimSuffix(filepath.Base(f.store.Path()), ".json")
+	key := strings.TrimSuffix(filepath.Base(f.draftPath), ".json")
 	store, err := review.OpenStore(dir, key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = store.Close() })
 	s, o, err := review.Start(t.Context(), store, f.snap, review.Fresh{Seed: review.Seed{}})
 	if err != nil {
 		t.Fatalf("start from the kept draft: %v", err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	if !o.Resumed() {
 		t.Fatal("the next run did not resume the kept draft")
 	}

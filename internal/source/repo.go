@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -96,9 +97,23 @@ type Snapshot struct {
 	// these records, so the listing alone decides how a file's sides are paired.
 	records []string
 	// sizes is the size of every non-submodule blob of files, -1 when absent locally.
-	sizes    map[string]int64
+	sizes map[string]int64
+	// missing lists, sorted, the blobs of files absent locally when they were listed: the ones
+	// Changed asks about.
+	missing  []string
 	vendored []string // vendored directory per file, see VendoredDir
 	renames  RenameDetection
+}
+
+// SameFiles reports whether s and o list the same changed files in the same order, paired the same
+// way (the raw records that decide how patches pair the sides) and with the same blobs present
+// locally (ChangedFile.Missing), so a file index names the same file, with the same readable
+// content, in both. It compares only the listing; trees and commits are not compared (DraftKey
+// covers them). It works after Close, since files and records are retained. In a partial clone,
+// a blob arriving that leaves a file with none missing makes it false, even when no rename
+// pairing changes.
+func (s *Snapshot) SameFiles(o *Snapshot) bool {
+	return s.renames == o.renames && slices.Equal(s.files, o.files) && slices.Equal(s.records, o.records)
 }
 
 // Source returns the source that produced the snapshot.
@@ -129,17 +144,20 @@ func (s *Snapshot) CommonDir() string { return s.repo.commonDir }
 // TopLevel is the top-level directory of the worktree the snapshot was resolved in.
 func (s *Snapshot) TopLevel() string { return s.repo.topLevel }
 
-// Changed reports whether resolving the snapshot's source now could give other trees (REQ-SES-010):
-// HEAD resolves to another commit, including an unborn HEAD gaining one; a branch source's base ref
-// resolves to another commit or to none; or, when the head is the uncommitted tree, a worktree file
-// differs from the snapshot's private index or a file that is neither in it nor ignored appears.
-// A true answer is a reason to resolve again, not a promise that the trees differ: a file edited
-// and changed back, or a commit of the same tree, reads as changed.
+// Changed reports whether resolving the snapshot's source now could give other trees or another
+// file list (REQ-SES-010): HEAD resolves to another commit, including an unborn HEAD gaining one; a
+// branch source's base ref resolves to another commit or to none; when the head is the uncommitted
+// tree, a worktree file differs from the snapshot's private index or a file that is neither in it
+// nor ignored appears; or, in a partial clone, a blob absent when the files were listed is now
+// present, which changes the listing (SameFiles) though not the trees. A true answer is a reason
+// to resolve again, not a promise that anything differs: a file edited and changed back, or a
+// commit of the same tree, reads as changed.
 //
-// It runs git but writes no object and touches neither the real index nor the worktree: the
-// worktree is compared with the private index, whose stat data it refreshes. Index-only changes,
-// such as untracking a file, and ignore rules outside the worktree changing are not seen. It fails
-// after Close.
+// It runs git but writes no object, fetches none, and touches neither the real index nor the
+// worktree: the worktree is compared with the private index, whose stat data it refreshes, and the
+// absent blobs are asked about in one `cat-file --batch-check` run. Index-only changes, such as
+// untracking a file, and ignore rules outside the worktree changing are not seen. It fails after
+// Close of an uncommitted snapshot.
 func (s *Snapshot) Changed(ctx context.Context) (bool, error) {
 	head, err := s.repo.headCommit(ctx)
 	if err != nil {
@@ -157,10 +175,35 @@ func (s *Snapshot) Changed(ctx context.Context) (bool, error) {
 			return true, nil
 		}
 	}
-	if s.index == nil {
+	if s.index != nil {
+		if changed, err := s.index.changed(ctx, s.repo.run); err != nil || changed {
+			return changed, err
+		}
+	}
+	return s.blobsArrived(ctx)
+}
+
+// blobsArrived reports whether a file listed with a blob absent locally (ChangedFile.Missing) now
+// has every blob present, which changes the listing: one blob of two arriving changes nothing.
+func (s *Snapshot) blobsArrived(ctx context.Context) (bool, error) {
+	if len(s.missing) == 0 {
 		return false, nil
 	}
-	return s.index.changed(ctx, s.repo.run)
+	now := make(map[string]int64, len(s.missing))
+	if err := s.repo.sizeBlobs(ctx, s.missing, now); err != nil {
+		return false, err
+	}
+	present := func(id string) bool {
+		n, listed := s.sizes[id]
+		_, arrived := now[id]
+		return !listed || n >= 0 || arrived
+	}
+	for _, f := range s.files {
+		if f.Missing && present(f.OldBlob) && present(f.NewBlob) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // Close deletes the snapshot's private index, after which Changed fails. Every other method still
@@ -339,6 +382,12 @@ func (r *Repo) Resolve(ctx context.Context, src Source, progress *slog.Logger) (
 		return nil, err
 	}
 	snap.files, snap.records, snap.sizes, snap.renames = list.files, list.records, list.sizes, list.renames
+	for id, n := range snap.sizes {
+		if n < 0 {
+			snap.missing = append(snap.missing, id)
+		}
+	}
+	slices.Sort(snap.missing)
 	if len(snap.files) == 0 {
 		return nil, errors.New("nothing to review: " + src.String() + " has no changes")
 	}

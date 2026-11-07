@@ -186,13 +186,23 @@ func (r *Repo) blobSizes(ctx context.Context, files []ChangedFile) (map[string]i
 		add(f.OldBlob, f.OldMode)
 		add(f.NewBlob, f.NewMode)
 	}
+	if err := r.sizeBlobs(ctx, ids, sizes); err != nil {
+		return nil, err
+	}
+	return sizes, nil
+}
+
+// sizeBlobs sets sizes[id] for every blob id in ids present in the local object database, and
+// leaves the others as they are. One `cat-file --batch-check` answers for every id; with lazy
+// fetching off, an absent blob is reported, not fetched.
+func (r *Repo) sizeBlobs(ctx context.Context, ids []string, sizes map[string]int64) error {
 	if len(ids) == 0 {
-		return sizes, nil
+		return nil
 	}
 	var in strings.Builder
 	for _, id := range ids {
 		if strings.ContainsAny(id, " \n") {
-			return nil, fmt.Errorf("invalid object id %q", id)
+			return fmt.Errorf("invalid object id %q", id)
 		}
 		in.WriteString(id)
 		in.WriteByte('\n')
@@ -200,12 +210,12 @@ func (r *Repo) blobSizes(ctx context.Context, files []ChangedFile) (map[string]i
 	// A reply is the id, a type and a size, or the id and "missing".
 	out, err := r.run.outputStdin(ctx, int64(len(ids))*(maxReplyLine+1), nil, strings.NewReader(in.String()), "cat-file", "--batch-check")
 	if err != nil {
-		return nil, err
+		return err
 	}
 	for _, id := range ids {
 		line, rest, ok := bytes.Cut(out, []byte{'\n'})
 		if !ok {
-			return nil, fmt.Errorf("cat-file: no reply for object %s", id)
+			return fmt.Errorf("cat-file: no reply for object %s", id)
 		}
 		out = rest
 		fields := strings.Fields(string(line))
@@ -214,17 +224,17 @@ func (r *Repo) blobSizes(ctx context.Context, files []ChangedFile) (map[string]i
 		case len(fields) == 3 && fields[0] == id:
 			size, err := strconv.ParseInt(fields[2], 10, 64)
 			if err != nil || size < 0 {
-				return nil, fmt.Errorf("cat-file: reply %q for object %s", truncate(line, 80), id)
+				return fmt.Errorf("cat-file: reply %q for object %s", truncate(line, 80), id)
 			}
 			sizes[id] = size
 		default:
-			return nil, fmt.Errorf("cat-file: reply %q for object %s", truncate(line, 80), id)
+			return fmt.Errorf("cat-file: reply %q for object %s", truncate(line, 80), id)
 		}
 	}
 	if len(out) > 0 {
-		return nil, errors.New("cat-file: unexpected output after the last reply")
+		return errors.New("cat-file: unexpected output after the last reply")
 	}
-	return sizes, nil
+	return nil
 }
 
 // maxReplyLine bounds one `cat-file --batch-check` reply: a SHA-256 id, the longest type name and

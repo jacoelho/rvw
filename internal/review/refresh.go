@@ -16,14 +16,13 @@ type Moved struct {
 	From, To Target
 }
 
-// Refreshed is what Refresh did. The caller closes Released and OldSnapshot once nothing reads
-// them.
+// Refreshed is what Refresh did. The caller closes OldSnapshot once nothing reads it.
 type Refreshed struct {
-	// OldDraftErr is a warning only: the replaced snapshot's draft could not be deleted, so it
-	// expires later.
+	// OldDraftErr is a warning only: when the draft key changed, the replaced draft could not be
+	// deleted, so it expires later, or its store could not be closed.
 	OldDraftErr error
-	// Released is the replaced snapshot's store; nil when Unchanged, as the store is kept.
-	Released *Store
+	// Snapshot is snap, the snapshot the session now serves.
+	Snapshot *source.Snapshot
 	// OldSnapshot is the replaced snapshot.
 	OldSnapshot *source.Snapshot
 	// MovedAside is where a draft already saved for the new snapshot was moved; "" when there was
@@ -31,8 +30,10 @@ type Refreshed struct {
 	MovedAside string
 	// Moved lists the comments moved to a wider target, in result order.
 	Moved []Moved
-	// Unchanged reports that the new snapshot has the current one's draft key: the same trees,
-	// so the same files, and the draft is kept as it is.
+	// Unchanged reports the same draft key and the same file list (source.Snapshot.SameFiles):
+	// only the snapshot was replaced, the draft is kept as it is, and file indexes still name the
+	// same files. In a partial clone, a blob arriving that leaves a file with none missing makes it
+	// false.
 	Unchanged bool
 }
 
@@ -40,21 +41,30 @@ type Refreshed struct {
 // changed; the refresh may be retried.
 var ErrBusy = errors.New("the draft changed during the refresh; try again")
 
-// Refresh moves the open session to snap, a new snapshot of the same source, and the draft to
-// store, which holds snap's draft key (DraftKey). When snap has the current snapshot's key, store
-// is nil and only the snapshot is replaced. Otherwise every comment is carried over: a review
-// comment as it is; a file comment to the file with the same display path, else the one with its
-// file's new or old path, else to the review; a line or range comment to the same lines of the file
-// with the same path on its side, as the diff from the old side's blob to the new side's maps them,
-// else to its file as a file comment would go. Comments keep ID, author, body and order and get a
-// new Version. A viewed mark is kept when a file has the same paths, modes and blobs. Summary and
-// Hide whitespace are kept. A draft already in store is moved aside, the new draft saved, and the
-// replaced draft deleted.
+// Refresh moves the open session to snap, a new snapshot of the same source. With the same draft
+// key (DraftKey) and the same file list (source.Snapshot.SameFiles) only the snapshot is replaced.
+// With the same key and a different file list, the draft is carried over in place into the current
+// store, with no move-aside and no delete. With a new key, the draft is carried over into the store
+// returned by opener; opener is called at most once, without the session lock, and only when
+// DraftKey(snap) differs from the current key. It must return a store locked for exactly that key.
+// From then on the session owns that store: Refresh closes it on any later error, including a key
+// mismatch, and otherwise closes the replaced store, so Close releases the new one.
+//
+// Carrying over: a review comment is kept as it is; a file comment goes to the file with the same
+// display path, else the one with its file's new or old path, else to the review; a line or range
+// comment goes to the same lines of the file with the same path on its side, as the diff from the
+// old side's blob to the new side's maps them, else to its file as a file comment would go.
+// Comments keep ID, author, body and order and get a new Version. A viewed mark is kept when a file
+// has the same paths, modes and blobs. Summary and Hide whitespace are kept. A draft already in the
+// new store is moved aside, the new draft saved, and the replaced draft deleted.
 //
 // Carrying over reads both snapshots and runs git without the lock; mutations meanwhile make it fail
 // with ErrBusy, and an end with ErrEnded. On any error the session is unchanged and the caller still
-// owns store and snap.
-func (s *Session) Refresh(ctx context.Context, snap *source.Snapshot, store *Store) (Refreshed, error) {
+// owns snap.
+func (s *Session) Refresh(ctx context.Context, snap *source.Snapshot, opener func(key string) (*Store, error)) (res Refreshed, err error) {
+	if opener == nil {
+		return Refreshed{}, errors.New("refresh needs a store opener")
+	}
 	key := DraftKey(snap)
 	s.mu.Lock()
 	if s.phase != open {
@@ -62,19 +72,31 @@ func (s *Session) Refresh(ctx context.Context, snap *source.Snapshot, store *Sto
 		return Refreshed{}, ErrEnded
 	}
 	from, st, rev := s.cur, s.state, s.rev
-	curKey := s.store.key
-	if key == curKey {
-		if store != nil {
-			s.mu.Unlock()
-			return Refreshed{}, errors.New("refresh to the same draft key takes no store")
-		}
+	sameKey := key == s.store.key
+	if sameKey && from.snap.SameFiles(snap) {
 		s.cur = newView(snap)
 		s.mu.Unlock()
-		return Refreshed{Unchanged: true, OldSnapshot: from.snap}, nil
+		return Refreshed{Unchanged: true, Snapshot: snap, OldSnapshot: from.snap}, nil
 	}
 	s.mu.Unlock()
-	if store == nil || store.key != key {
-		return Refreshed{}, errors.New("refresh needs the store of the new snapshot's draft key")
+
+	var store *Store
+	if !sameKey {
+		store, err = opener(key)
+		if err != nil {
+			return Refreshed{}, fmt.Errorf("open the new snapshot's draft: %w", err)
+		}
+		if store == nil {
+			return Refreshed{}, errors.New("the store opener returned no store")
+		}
+		if store.key != key {
+			return Refreshed{}, errors.Join(fmt.Errorf("opener returned the draft of key %s, want %s", store.key, key), store.Close())
+		}
+		defer func() {
+			if err != nil {
+				err = errors.Join(err, store.Close())
+			}
+		}()
 	}
 
 	to := newView(snap)
@@ -91,20 +113,29 @@ func (s *Session) Refresh(ctx context.Context, snap *source.Snapshot, store *Sto
 	case s.rev != rev:
 		return Refreshed{}, ErrBusy
 	}
-	aside, err := store.moveAsideIfAny()
-	if err != nil {
-		return Refreshed{}, err
+	var aside string
+	if store != nil {
+		if aside, err = store.moveAsideIfAny(); err != nil {
+			return Refreshed{}, err
+		}
 	}
 	for id, c := range next.comments {
 		c.Version = s.nextVersion()
 		next.comments[id] = c
 	}
-	if err := store.save(encode(snap, next)); err != nil {
+	target := s.store
+	if store != nil {
+		target = store
+	}
+	if err := target.save(encode(snap, next)); err != nil {
 		return Refreshed{}, err
 	}
-	old := s.store
-	r := Refreshed{OldDraftErr: old.delete(), Released: old, OldSnapshot: from.snap, MovedAside: aside, Moved: moved}
-	s.cur, s.store, s.state = to, store, next
+	r := Refreshed{Snapshot: snap, OldSnapshot: from.snap, MovedAside: aside, Moved: moved}
+	if store != nil {
+		r.OldDraftErr = errors.Join(s.store.delete(), s.store.Close())
+		s.store = store
+	}
+	s.cur, s.state = to, next
 	s.rev++
 	return r, nil
 }

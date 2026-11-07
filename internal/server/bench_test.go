@@ -68,11 +68,11 @@ func newBenchServer(b *testing.B, base, head map[string]string, seed string) *be
 	if err != nil {
 		b.Fatal(err)
 	}
-	b.Cleanup(func() { _ = store.Close() })
 	sess, _, err := review.Start(ctx, store, snap, review.Fresh{Seed: seedOf(b, seed)})
 	if err != nil {
 		b.Fatal(err)
 	}
+	b.Cleanup(func() { _ = sess.Close() })
 	srv := server.New(server.Config{
 		Assets:  fstest.MapFS{"index.html": {Data: []byte(indexHTML)}},
 		Session: sess, Token: testToken,

@@ -87,10 +87,21 @@ Inside a boundary, values are trusted; there is no re-validation.
     for whichever generation is current and names it. Cancel, status and the close notice are not gated.
   - Refresh: `POST /api/refresh` holds `refreshMu` exclusively, so it waits for bound requests in flight and holds new
     ones until the next generation is stored. It calls `Config.Refresh`, which `cmd/rvw`'s `drafts` owns: resolve the
-    source again, open and lock the new draft's store when the key differs, `review.Session.Refresh`, then swap the
-    store and close the replaced store and snapshot. `Session.Refresh` carries the draft over without holding the
+    source again, `review.Session.Refresh` with an opener that opens and locks a store for a key, then close the
+    replaced snapshot. The session is the one owner of the draft store: `review.Start` takes the store (closing it on
+    failure), `Refresh` closes the store it replaces, and `Session.Close` closes the current one; `cmd/rvw` keeps no
+    store. `Session.Refresh` is the sole decider of "unchanged":
+    it keeps the generation only when the draft key and `source.Snapshot.SameFiles` both match. `SameFiles` includes
+    per-file blob presence, so in a partial clone a blob arriving that completes a file's blobs advances the generation and open pages reload. A
+    same key with a different listing is carried over in place into the current store and advances the generation; a
+    new key's store comes from the opener, which `Refresh` calls at most once and closes on failure. The server stores
+    `Refreshed.Snapshot`. Invariant: file indexes in session state and in a generation belong to exactly one listing
+    (contract revision 11, REQ-SES-013).
+    The change check also asks, for a listing built with blobs missing, whether any arrived (one `cat-file
+    --batch-check` run, lazy fetch off), so the notice shows before the human refreshes.
+    `Session.Refresh` carries the draft over without holding the
     session's mutex while it diffs and fails with `ErrBusy` if the draft changed meanwhile; on any error the session,
-    its store and the generation are unchanged (a draft already under the new key may have been moved aside). The same draft key keeps the generation id, its facts and its moved list.
+    its store and the generation are unchanged (a draft already under the new key may have been moved aside). The same draft key and the same file list keep the generation id, its facts and its moved list.
   - Content facts: `factRuns` starts each generation's background reads under `Run`'s context; a refresh stops the
     replaced generation's reads after the new one is stored, and `Run` waits for all of them before it returns.
   - Check: a status request with `check=1`, which the page sends only while visible, runs `Changed` when no check is
@@ -154,7 +165,7 @@ Inside a boundary, values are trusted; there is no re-validation.
      `context.WithoutCancel`.
   2. `Shutdown` has a 5 s deadline; its error is returned and `Close` is the fallback. When the result was already
      delivered, the error goes only to stderr and the exit status stays the outcome's.
-  3. The deferred `drafts.close` (the current store) and `repo.Close` (every live private index) run after `Run`
+  3. The deferred `Session.Close` (the current store) and `repo.Close` (every live private index) run after `Run`
      returns, so the draft lock and the `cat-file` process
      are released only after every request has ended, in reverse order of their creation.
   4. Handlers neither sleep nor use `context.Background`. `context.WithoutCancel` appears only in the finish delivery,

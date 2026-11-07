@@ -162,7 +162,7 @@ func TestInvalidMutationsLeaveStateUnchanged(t *testing.T) {
 	version := f.session().version(t, "c1")
 	before := f.session()
 	draft := func() string {
-		data, err := os.ReadFile(f.store.Path())
+		data, err := os.ReadFile(f.draftPath)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -582,7 +582,7 @@ func TestCommentPreconditions(t *testing.T) {
 	if got := bodies(); len(got) != 0 {
 		t.Errorf("comments %v after an edit of a deleted comment, want none", got)
 	}
-	draft, err := os.ReadFile(f.store.Path())
+	draft, err := os.ReadFile(f.draftPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -626,7 +626,7 @@ func TestDeletePreconditions(t *testing.T) {
 		} else if len(bodies) != 1 || bodies[0] != want {
 			t.Errorf("session comments %q, want [%q]", bodies, want)
 		}
-		draft, err := os.ReadFile(f.store.Path())
+		draft, err := os.ReadFile(f.draftPath)
 		if err != nil {
 			t.Fatal(err)
 		}

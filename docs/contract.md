@@ -59,6 +59,11 @@ notice for worktree edits and a refresh from the page (Q-57): new REQ-SES-013 to
 AC-SES-004, and a change to AC-SES-001. **It changes REQ-SES-010 and REQ-SRC-005, which revision 1 accepted**: the
 notice also covers the base ref and uncommitted changes, within 20 s instead of 10 s, and the private index is kept
 for the change check until the snapshot is released.
+
+Contract revision: 11, 2026-11-07, against workspace `main` at 65abb56. The repository owner accepted it on 2026-11-07: a refresh that finds the
+same trees but another changed-file list (a blob arriving in a partial clone changes rename pairing and which files are
+readable) is no longer "unchanged": it carries the draft over and advances the generation, and the change notice shows
+when such a blob arrives (Q-58). It changes REQ-SES-010, REQ-SES-013, REQ-SES-015 and AC-SES-004.
 Decision owner: repository owner (jacoelho)
 Effective scope: target version only. No deployed contract, persisted data or compatibility promise binds this
 replacement (Q-03 in [decisions.md](decisions.md)).
@@ -331,8 +336,8 @@ Basis: Proposed (Q-13). A draft has one writer.
 #### REQ-SES-010 — Change notice
 
 Status: accepted
-Statement: While a session is open and a review page is visible, the review UI shall show a notice within 20 seconds after `HEAD` resolves to a different commit than when the snapshot was taken, the base ref of a `branch` source resolves to a different commit or to none, or, for a source with uncommitted changes, a worktree file's content differs from the uncommitted tree or an untracked, unignored file is added.
-Basis: Proposed (Q-17, Q-57). Revision 1 accepted a moved-`HEAD` notice within 10 s. Revision 10, which the owner accepted on 2026-11-07, adds the base ref and worktree edits, which the repository owner asked for on 2026-11-07, and widens the bound to fit a check that runs at most every 10 s (REQ-SES-014). A change to the index alone, or to ignore rules outside the worktree, is not detected (Q-57).
+Statement: While a session is open and a review page is visible, the review UI shall show a notice within 20 seconds after `HEAD` resolves to a different commit than when the snapshot was taken, the base ref of a `branch` source resolves to a different commit or to none, or, for a source with uncommitted changes, a worktree file's content differs from the uncommitted tree or an untracked, unignored file is added, or a changed file that had a blob absent from the local object database when the snapshot was taken has every blob present, since the changed-file list then differs (REQ-SES-013).
+Basis: Proposed (Q-17, Q-57). Revision 1 accepted a moved-`HEAD` notice within 10 s. Revision 10, which the owner accepted on 2026-11-07, adds the base ref and worktree edits, which the repository owner asked for on 2026-11-07, and widens the bound to fit a check that runs at most every 10 s (REQ-SES-014). A change to the index alone, or to ignore rules outside the worktree, is not detected (Q-57). Revision 11, which the owner accepted on 2026-11-07, adds a file's absent blobs all arriving (Q-58).
 
 #### REQ-SES-011 — Finish acknowledgement
 
@@ -343,8 +348,8 @@ Basis: Proposed (Q-20). The human must not see "Review sent" when the agent got 
 #### REQ-SES-013 — Refresh
 
 Status: accepted
-Statement: When the human asks the review UI to refresh, the rvw command shall resolve the session's source again as at start and, if the new snapshot's draft key differs, serve the review from the new snapshot with the draft carried over (REQ-DRF-006); otherwise the rvw command shall keep the snapshot's draft unchanged and the review UI shall say that nothing changed.
-Basis: The repository owner asked for a notice and a manual refresh, for all sources, 2026-11-07 (Q-57). If the source cannot be resolved again, or another session holds the new snapshot's draft lock, the refresh is refused with the reason and the session keeps its snapshot. Round facts (REQ-RND-008 to REQ-RND-014) are derived again for the new snapshot.
+Statement: When the human asks the review UI to refresh, the rvw command shall resolve the session's source again as at start and, if the new snapshot's draft key or changed-file list differs, serve the review from the new snapshot with the draft carried over (REQ-DRF-006); otherwise the rvw command shall keep the snapshot's draft unchanged and the review UI shall say that nothing changed.
+Basis: The repository owner asked for a notice and a manual refresh, for all sources, 2026-11-07 (Q-57). If the source cannot be resolved again, or another session holds the new snapshot's draft lock, the refresh is refused with the reason and the session keeps its snapshot. Round facts (REQ-RND-008 to REQ-RND-014) are derived again for the new snapshot. Revision 11, which the owner accepted on 2026-11-07, adds the changed-file list, which in a partial clone can differ for the same trees (Q-58).
 
 #### REQ-SES-014 — Change check bounds
 
@@ -356,7 +361,7 @@ Basis: Proposed (Q-57). Checking only for a visible page costs nothing while the
 
 Status: accepted
 Statement: If a request that reads or changes the review names a different snapshot generation than the one served, then the rvw command shall refuse it and name the served generation, and the review UI shall reload, or, while an editor or the Finish dialog is open, offer to reload.
-Basis: Proposed (Q-57). File indices, line numbers and comment versions belong to one snapshot; a page showing another must not write against the current one. A refresh that finds the same trees keeps the generation, so open pages keep working.
+Basis: Proposed (Q-57). File indices, line numbers and comment versions belong to one snapshot; a page showing another must not write against the current one. A refresh that finds the same trees and the same file list keeps the generation, so open pages keep working; revision 11, which the owner accepted on 2026-11-07, adds the file list (Q-58).
 
 #### REQ-SES-012 — Page closed
 
@@ -762,7 +767,7 @@ Basis: The repository owner asked for an easier way to mark files reviewed, "per
 
 #### REQ-HL-001 — Highlighted languages
 
-Status: proposed
+Status: accepted
 Statement: When a file that is not a large file and is Go, Go template, JavaScript or JSX, TypeScript or TSX, shell, Makefile, Markdown, Rust, Terraform/HCL, JSON (with comments), YAML, TOML, Python, Dockerfile, CSS or SQL source is shown, the review UI shall show syntax highlighting computed from the whole of each side's file content; in Markdown, a fenced code block naming one of these languages is highlighted as that language, and YAML front matter is highlighted as YAML. A line's highlighting has at most 500 spans; the rest of a line past that is shown unhighlighted.
 Basis: The repository owner chose Go, TypeScript, shell and Makefile, 2026-11-05 (Q-19), which revision 1 accepted; revision 5, which the owner accepted on 2026-11-07, adds Go templates, JavaScript and JSX, TSX, Markdown, Rust and Terraform/HCL (Q-52). Revision 6, which the owner accepted on 2026-11-07, adds JSON, YAML and TOML (Q-53). Revision 7, which the owner accepted on 2026-11-07, adds Python and Dockerfile (Q-54). Revision 8, which the owner accepted on 2026-11-07, adds CSS and SQL (Q-55). Revision 9, which the owner accepted on 2026-11-07, adds Markdown front matter and the 500-span bound per line (Q-56). The bound keeps a minified line's reply and rendering work fixed. Tokenizing whole files keeps multi-line strings and comments correct. The project-owned scanners run in time linear in the file's size, so the 2 s budget holds at the large-file limit.
 
@@ -953,7 +958,7 @@ Counterexample: Exiting 0 on cancel fails.
 ### AC-SES-004 — Change notice and refresh
 
 Covers: REQ-SES-010, REQ-SES-013, REQ-SES-014, REQ-SES-015, REQ-DRF-006, REQ-SRC-005
-Expected: For `rvw uncommitted`, editing a tracked file, adding an untracked file, deleting an untracked file or committing shows the notice within 20 seconds; touching a file without changing it, adding an ignored file or staging a file unchanged does not, and no check writes an object. For `rvw last` and `rvw branch`, only a new commit or a moved or deleted base ref shows it. A status request without the visible flag never runs the check; a failing check leaves the status working and is logged once. After a worktree edit that inserts a line above a line comment and changes the line of another, Refresh moves the first down one line, makes the second a file comment with its body and author, lists it on the page, keeps the summary, saves the new draft and deletes the old one; a request naming the old generation is refused with the new one, and a second open page reloads by itself. Refresh with nothing changed keeps the page and the draft. After a refresh, Finish delivers the carried comments with the new snapshot's code.
+Expected: For `rvw uncommitted`, editing a tracked file, adding an untracked file, deleting an untracked file or committing shows the notice within 20 seconds; touching a file without changing it, adding an ignored file or staging a file unchanged does not, and no check writes an object. For `rvw last` and `rvw branch`, only a new commit or a moved or deleted base ref shows it. A status request without the visible flag never runs the check; a failing check leaves the status working and is logged once. After a worktree edit that inserts a line above a line comment and changes the line of another, Refresh moves the first down one line, makes the second a file comment with its body and author, lists it on the page, keeps the summary, saves the new draft and deletes the old one; a request naming the old generation is refused with the new one, and a second open page reloads by itself. Refresh with nothing changed keeps the page and the draft. After a refresh, Finish delivers the carried comments with the new snapshot's code. In a partial clone, the last missing blob of a changed file arriving shows the notice without fetching anything, and Refresh then advances the generation with the same trees, and comments keep their paths and quote their own file's lines.
 Verification: Go tests in `internal/source`, `internal/review` and `internal/server`; browser tests in `cmd/rvw`.
 Counterexample: Moving a comment by searching for its original text reattaches it to a duplicated line and fails the line check.
 

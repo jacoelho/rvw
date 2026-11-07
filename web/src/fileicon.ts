@@ -13,11 +13,11 @@ const SVG_NS = "http://www.w3.org/2000/svg";
  */
 export function iconOf(path: string): string {
   const name = path.slice(path.lastIndexOf("/") + 1).toLowerCase();
-  const byName = FILE_NAMES[name];
+  const byName = FILE_NAMES.get(name);
   if (byName) return byName;
   // A leading dot starts a name (.env), not an extension; the name lookup above covers it.
   for (let at = name.indexOf(".", 1); at >= 0; at = name.indexOf(".", at + 1)) {
-    const icon = EXTENSIONS[name.slice(at + 1)];
+    const icon = EXTENSIONS.get(name.slice(at + 1));
     if (icon) return icon;
   }
   return "_file";

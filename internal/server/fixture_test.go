@@ -161,12 +161,13 @@ func (d *deliveries) count() int {
 
 // fixture is a server over a real snapshot and a real session whose draft lives in a temp dir.
 type fixture struct {
-	t         *testing.T
-	repo      *testRepo
-	git       *source.Repo // the session's repository, also the retention refs' writer
-	snap      *source.Snapshot
-	sess      *review.Session
-	store     *review.Store
+	t    *testing.T
+	repo *testRepo
+	git  *source.Repo // the session's repository, also the retention refs' writer
+	snap *source.Snapshot
+	sess *review.Session
+	// draftPath is the path of the draft the session started with.
+	draftPath string
 	srv       *server.Server
 	delivered *deliveries
 	addr      string
@@ -238,12 +239,6 @@ func newFixture(t *testing.T, repo *testRepo, opts fixtureOptions) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stores := &storeHolder{cur: store}
-	t.Cleanup(func() {
-		if err := stores.close(); err != nil {
-			t.Errorf("close store: %v", err)
-		}
-	})
 	var ledger round.Ledger
 	if opts.ledger != nil {
 		if ledger, err = opts.ledger.Load(time.Now()); err != nil {
@@ -256,8 +251,13 @@ func newFixture(t *testing.T, repo *testRepo, opts fixtureOptions) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := sess.Close(); err != nil {
+			t.Errorf("close session: %v", err)
+		}
+	})
 	token := fmt.Sprintf("%s-%d", testToken, fixtureSeq.Add(1))
-	f := &fixture{t: t, repo: repo, git: r, snap: snap, sess: sess, store: store, token: token, gen: 1,
+	f := &fixture{t: t, repo: repo, git: r, snap: snap, sess: sess, draftPath: store.Path(), token: token, gen: 1,
 		delivered: &deliveries{err: opts.deliverErr, hook: opts.deliverHook}}
 	logOut := io.Discard
 	if opts.log != nil {
@@ -267,51 +267,30 @@ func newFixture(t *testing.T, repo *testRepo, opts fixtureOptions) *fixture {
 		Assets:  fstest.MapFS{"index.html": {Data: []byte(indexHTML)}},
 		Session: sess, Ledger: ledger, Token: token, Deliver: f.delivered.deliver,
 		Log: slog.New(slog.NewTextHandler(logOut, nil)), FinishWait: opts.finishWait, CloseGrace: opts.closeGrace,
-		Refresh: refresher(r, src, sess, draftDir, stores), CheckInterval: opts.checkInterval,
+		Refresh: refresher(t, r, src, sess, draftDir), CheckInterval: opts.checkInterval,
 	})
 	return f
 }
 
-// storeHolder is the session's current store, which a refresh replaces.
-type storeHolder struct {
-	cur *review.Store
-	mu  sync.Mutex
-}
-
-func (h *storeHolder) close() error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.cur.Close()
-}
-
 // refresher refreshes sess as rvw does: it resolves src again, opens the new draft key's store
-// when the key changed, and closes what the refresh replaced.
-func refresher(r *source.Repo, src source.Source, sess *review.Session, dir string, stores *storeHolder) func(context.Context) (review.Refreshed, error) {
+// when the key changed, and closes the replaced snapshot.
+func refresher(t *testing.T, r *source.Repo, src source.Source, sess *review.Session, dir string) func(context.Context) (review.Refreshed, error) {
+	t.Helper()
 	return func(ctx context.Context) (review.Refreshed, error) {
 		snap, err := r.Resolve(ctx, src, slog.New(slog.DiscardHandler))
 		if err != nil {
 			return review.Refreshed{}, err
 		}
-		var store *review.Store
-		if key := review.DraftKey(snap); key != review.DraftKey(sess.Snapshot()) {
-			if store, err = review.OpenStore(dir, key); err != nil {
-				return review.Refreshed{}, errors.Join(err, snap.Close())
-			}
-		}
-		res, err := sess.Refresh(ctx, snap, store)
+		res, err := sess.Refresh(ctx, snap, func(key string) (*review.Store, error) { return review.OpenStore(dir, key) })
 		if err != nil {
-			if store != nil {
-				err = errors.Join(err, store.Close())
-			}
 			return review.Refreshed{}, errors.Join(err, snap.Close())
 		}
-		if res.Released != nil {
-			stores.mu.Lock()
-			stores.cur = store
-			stores.mu.Unlock()
-			err = res.Released.Close()
+		// The session has moved, so these are warnings, as rvw logs them; a test fails on them
+		// rather than the refresh.
+		if err := errors.Join(res.OldDraftErr, res.OldSnapshot.Close()); err != nil {
+			t.Errorf("release what the refresh replaced: %v", err)
 		}
-		return res, errors.Join(err, res.OldSnapshot.Close())
+		return res, nil
 	}
 }
 

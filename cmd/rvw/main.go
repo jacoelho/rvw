@@ -211,25 +211,25 @@ func session(ctx context.Context, cmd command, stdin io.Reader, stdout io.Writer
 	if err != nil {
 		return fail(err)
 	}
-	drafts := &drafts{repo: repo, src: src, dir: dir, msg: msg, store: store}
-	defer func() {
-		if closeErr := drafts.close(); closeErr != nil {
-			msg.Warn("close draft store", "err", closeErr)
-		}
-	}()
-
 	ledgerStore, ledger := openLedger(snap, msg)
 	prior := round.NewPrior(snap, ledger)
+	// The session owns the store from here, failed or not; main only records the URL in it below,
+	// before serving.
 	sess, opening, err := review.Start(ctx, store, snap, review.Fresh{
 		Seed: seed, Viewed: prior.PresetMarks(), HideWhitespace: prior.HideWhitespace(),
 	})
 	if err != nil {
 		return fail(err)
 	}
+	defer func() {
+		if closeErr := sess.Close(); closeErr != nil {
+			msg.Warn("close draft store", "err", closeErr)
+		}
+	}()
 	if path, moved, reason := opening.MovedAside(); moved {
 		msg.Warn("the saved draft could not be restored and was moved aside", "path", path, "reason", reason)
 	} else if opening.Resumed() {
-		msg.Info("resuming the saved draft", "path", store.Path())
+		msg.Info("resuming the saved draft", "path", sess.DraftPath())
 		if cmd.seedPath != "" {
 			msg.Info("the seed was ignored because a draft exists")
 		}
@@ -245,7 +245,7 @@ func session(ctx context.Context, cmd command, stdin io.Reader, stdout io.Writer
 	if err = store.SetURL(url); err != nil {
 		return fail(errors.Join(err, ln.Close()))
 	}
-	drafts.sess, drafts.url = sess, url
+	drafts := &drafts{repo: repo, sess: sess, src: src, dir: dir, url: url, msg: msg}
 	srv := server.New(server.Config{
 		Session: sess, Ledger: ledger, Token: token, Assets: web.Assets(), Log: msg,
 		Deliver: func(r review.Result) error { return deliver(stdout, r, cmd.json) },
@@ -275,17 +275,15 @@ func session(ctx context.Context, cmd command, stdin io.Reader, stdout io.Writer
 	return l.report(outcome, "", msg)
 }
 
-// drafts owns the session's draft store, which a refresh replaces when the snapshot's draft key
-// changes (REQ-SES-013).
+// drafts refreshes the session: it resolves the source again and opens the store of a new draft
+// key (REQ-SES-013). The session owns every store it is given.
 type drafts struct {
-	repo  *source.Repo
-	sess  *review.Session
-	msg   *slog.Logger
-	store *review.Store // guarded by mu
-	dir   string
-	url   string // the review URL, recorded in every store so another rvw can name it
-	src   source.Source
-	mu    sync.Mutex
+	repo *source.Repo
+	sess *review.Session
+	msg  *slog.Logger
+	dir  string
+	url  string // the review URL, recorded in every store so another rvw can name it
+	src  source.Source
 }
 
 // refresh resolves the session's source again and moves the session to it. On failure the
@@ -295,20 +293,18 @@ func (d *drafts) refresh(ctx context.Context) (review.Refreshed, error) {
 	if err != nil {
 		return review.Refreshed{}, err
 	}
-	var store *review.Store
-	if key := review.DraftKey(snap); key != review.DraftKey(d.sess.Snapshot()) {
-		if store, err = review.OpenStore(d.dir, key); err != nil {
-			return review.Refreshed{}, errors.Join(err, snap.Close())
+	opener := func(key string) (*review.Store, error) {
+		st, openErr := review.OpenStore(d.dir, key)
+		if openErr != nil {
+			return nil, openErr
 		}
-		if err = store.SetURL(d.url); err != nil {
-			return review.Refreshed{}, errors.Join(err, store.Close(), snap.Close())
+		if urlErr := st.SetURL(d.url); urlErr != nil {
+			return nil, errors.Join(urlErr, st.Close())
 		}
+		return st, nil
 	}
-	res, err := d.sess.Refresh(ctx, snap, store)
+	res, err := d.sess.Refresh(ctx, snap, opener)
 	if err != nil {
-		if store != nil {
-			err = errors.Join(err, store.Close())
-		}
 		return review.Refreshed{}, errors.Join(err, snap.Close())
 	}
 	if res.Unchanged {
@@ -320,26 +316,13 @@ func (d *drafts) refresh(ctx context.Context) (review.Refreshed, error) {
 		d.msg.Warn("a draft saved for the new snapshot was moved aside", "path", res.MovedAside)
 	}
 	if res.OldDraftErr != nil {
-		d.msg.Warn("delete the replaced draft", "err", res.OldDraftErr)
+		d.msg.Warn("release the replaced draft", "err", res.OldDraftErr)
 	}
-	var closeErr error
-	if res.Released != nil {
-		d.mu.Lock()
-		d.store = store
-		d.mu.Unlock()
-		closeErr = res.Released.Close()
-	}
-	if err := errors.Join(closeErr, res.OldSnapshot.Close()); err != nil {
+	if err := res.OldSnapshot.Close(); err != nil {
 		// The refresh happened; what it replaced is released by exit at the latest.
 		d.msg.Warn("release the replaced snapshot", "err", err)
 	}
 	return res, nil
-}
-
-func (d *drafts) close() error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.store.Close()
 }
 
 // newLogger writes rvw's records to stderr as text, one line each. Records carry no time: they are

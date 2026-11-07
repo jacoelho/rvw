@@ -72,7 +72,7 @@ type Config struct {
 	Session *review.Session
 	Deliver func(review.Result) error
 	// Refresh moves Session to a new snapshot of the same source (REQ-SES-013) and releases what
-	// it replaced before returning; the server reads Unchanged and Moved. Nil refuses refreshes.
+	// it replaced before returning; the server reads Snapshot, Unchanged and Moved. Nil refuses refreshes.
 	Refresh func(context.Context) (review.Refreshed, error)
 	Log     *slog.Logger // nil discards
 	Token   string

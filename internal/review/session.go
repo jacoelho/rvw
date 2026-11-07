@@ -27,8 +27,10 @@ type Session struct {
 	// rev counts the states committed, so Refresh can tell that the state it carried over is
 	// still the current one.
 	rev   uint64
-	mu    sync.Mutex // guards cur, store, state, nextSeq, version, rev, phase and abort
+	mu    sync.Mutex // guards cur, store, state, nextSeq, version, rev, phase, abort and closed
 	phase phase
+	// closed is set by Close, which released store.
+	closed bool
 }
 
 // view is the snapshot the session reviews and its path index. It is immutable and replaced whole
@@ -138,7 +140,15 @@ type Fresh struct {
 //
 // Restoring and seeding read each commented file's facts: one patch run, plus a line count of
 // each side for a file with line comments.
-func Start(ctx context.Context, store *Store, snap *source.Snapshot, fresh Fresh) (*Session, Opening, error) {
+//
+// The session owns store from the call on: Start closes it when it fails, and Close closes it, or
+// the store a Refresh replaced it with, otherwise.
+func Start(ctx context.Context, store *Store, snap *source.Snapshot, fresh Fresh) (_ *Session, _ Opening, err error) {
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, store.Close())
+		}
+	}()
 	s := &Session{cur: newView(snap), store: store, state: emptyState()}
 	seed := fresh.Seed
 	seeded, err := s.seeded(ctx, seed)
@@ -868,6 +878,21 @@ func (s *Session) End() Ending {
 	case open, finishing, interrupted:
 	}
 	return EndedByEnd
+}
+
+// Close ends the session as End does, unless it has ended, and releases its draft store's lock.
+// Call it once nothing else uses the session: a method running meanwhile may save or delete the
+// draft without the lock. Later calls return nil. A Refresh in progress fails with ErrEnded and
+// closes the store it opened.
+func (s *Session) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.endLocked()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	return s.store.Close()
 }
 
 // endLocked interrupts a session that is open or building its result, cancelling the build; it
