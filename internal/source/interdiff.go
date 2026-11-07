@@ -247,3 +247,31 @@ func (s *Snapshot) BlobLines(ctx context.Context, b Blob, ranges []LineRange, ke
 	}
 	return s.repo.blobLines(ctx, b.ID, ranges, keep)
 }
+
+// MapLines maps lines start to end of a side through hunks, the zero-context diff from that side
+// to another as ChangesFrom returns it. It fails when a hunk deletes one of the lines or adds a
+// line between two of them; otherwise the lines move by the line count the hunks before them
+// change.
+func MapLines(hunks []HunkRange, start, end int) (newStart, newEnd int, ok bool) {
+	shift := 0
+	for _, h := range hunks {
+		if h.OldCount == 0 {
+			// A pure addition after old line OldStart.
+			switch {
+			case h.OldStart < start:
+				shift += h.NewCount
+			case h.OldStart < end:
+				return 0, 0, false
+			}
+			continue
+		}
+		last := h.OldStart + h.OldCount - 1
+		switch {
+		case last < start:
+			shift += h.NewCount - h.OldCount
+		case h.OldStart <= end:
+			return 0, 0, false
+		}
+	}
+	return start + shift, end + shift, true
+}

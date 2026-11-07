@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -92,6 +93,10 @@ type sessionJSON struct { //nolint:govet // fieldalignment: field order is the J
 	// LastReviewAt is when the last round was delivered; absent when the ledger has none.
 	LastReviewAt time.Time     `json:"last_review_at,omitzero"`
 	Earlier      []earlierJSON `json:"earlier"`
+	// Generation is the generation this document shows; the page names it on every request.
+	Generation uint64 `json:"generation"`
+	// Moved lists the comments the refresh that made this generation moved (REQ-DRF-006).
+	Moved []movedJSON `json:"moved"`
 }
 
 // quoteLimits tells the Finish dialog how much of a target a quote shows, so it can size a row
@@ -161,8 +166,8 @@ func displayPath(p string, commentable bool) string {
 	return q[1 : len(q)-1]
 }
 
-func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
-	snap := s.snap
+func (s *Server) getSession(w http.ResponseWriter, r *http.Request, g *generation) {
+	snap := g.snap
 	renames, err := renameDetectionName(snap.RenameDetection())
 	if err != nil {
 		s.fail(w, r, err)
@@ -174,6 +179,7 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
 		Quotes:           quoteLimits{MaxLines: review.MaxQuoteLines, MaxIDs: maxQuoteIDs},
 		Search:           searchLimits{MinChars: source.MinSearchTextRunes, MaxBytes: source.MaxSearchTextBytes},
 		StatusIntervalMs: s.statusInterval.Milliseconds(),
+		Generation:       g.id, Moved: toMovedJSON(g.moved),
 	}
 	for i := range out.Files {
 		f := snap.File(i)
@@ -192,12 +198,12 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
 			OldMode: f.OldMode, NewMode: f.NewMode, Commentable: commentable,
 			VendoredDir: displayPath(snap.VendoredDir(i), commentable),
 		}
-		if out.Files[i].Round, err = toRoundJSON(s.prior, i); err != nil {
+		if out.Files[i].Round, err = toRoundJSON(g.prior, i); err != nil {
 			s.fail(w, r, err)
 			return
 		}
 	}
-	prior := s.prior
+	prior := g.prior
 	out.LastReviewAt = prior.LastAt()
 	out.Earlier = make([]earlierJSON, 0, len(prior.Earlier()))
 	for _, c := range prior.Earlier() {
@@ -246,9 +252,9 @@ type fileDiffJSON struct { //nolint:govet // fieldalignment: field order is the 
 
 // getFile returns file i's diff. With scope=since it is the interdiff when the file has one
 // (REQ-RND-010), else the snapshot diff with the reason; ws=1 adds the whitespace-only hunks.
-func (s *Server) getFile(w http.ResponseWriter, r *http.Request) {
+func (s *Server) getFile(w http.ResponseWriter, r *http.Request, g *generation) {
 	q := r.URL.Query()
-	i, ok := s.fileIndex(w, q.Get("i"))
+	i, ok := g.fileIndex(w, q.Get("i"))
 	if !ok {
 		return
 	}
@@ -262,7 +268,7 @@ func (s *Server) getFile(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.release()
 	ctx := r.Context()
-	d, scope, unavailable, err := s.fileDiff(ctx, i, since)
+	d, scope, unavailable, err := g.fileDiff(ctx, i, since)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -281,39 +287,39 @@ func (s *Server) getFile(w http.ResponseWriter, r *http.Request) {
 	}
 	var oldSpans, newSpans [][]highlight.Span
 	if facts.Kind == source.KindText && !facts.Large {
-		oldSpans, newSpans, out.Highlighted = highlightSides(ctx, s.highlighter(i), d)
+		oldSpans, newSpans, out.Highlighted = highlightSides(ctx, s.highlighter(g, i), d)
 	}
 	out.Hunks, out.GapAfter = buildHunks(d, oldSpans, newSpans)
 	if ws && facts.Kind == source.KindText {
 		// Whitespace hiding degrades to showing every hunk, so a failure is logged, not fatal.
-		if out.WsOnly, err = s.snap.WhitespaceOnly(ctx, d); err != nil {
-			s.log.Warn("whitespace-only hunks not computed", "path", s.snap.File(i).Path(), "err", err)
+		if out.WsOnly, err = g.snap.WhitespaceOnly(ctx, d); err != nil {
+			s.log.Warn("whitespace-only hunks not computed", "path", g.snap.File(i).Path(), "err", err)
 			out.WsOnly = nil
 		}
 	}
 	if scope == scopeAll {
-		if out.SinceAdded, err = s.prior.AddedSince(ctx, i); err != nil {
+		if out.SinceAdded, err = g.prior.AddedSince(ctx, i); err != nil {
 			if ctx.Err() != nil {
 				s.fail(w, r, err)
 				return
 			}
 			// Per-file decorations degrade: the file is served without them (Failure behaviour).
-			s.log.Warn("lines added since review not computed", "path", s.snap.File(i).Path(), "err", err)
+			s.log.Warn("lines added since review not computed", "path", g.snap.File(i).Path(), "err", err)
 			out.SinceAdded = nil
 		}
 	}
 	// Place degrades per comment and fails only when the request ends.
-	placed, err := s.prior.Place(ctx, i)
+	placed, err := g.prior.Place(ctx, i)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
 	for _, pl := range placed {
 		if pl.Cause != nil {
-			s.log.Warn("earlier comment not placed", "id", pl.ID, "path", s.snap.File(i).Path(), "err", pl.Cause)
+			s.log.Warn("earlier comment not placed", "id", pl.ID, "path", g.snap.File(i).Path(), "err", pl.Cause)
 		}
 	}
-	if out.Earlier, err = s.placementsJSON(placed); err != nil {
+	if out.Earlier, err = placementsJSON(g.prior, placed); err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -349,10 +355,10 @@ func fileQuery(w http.ResponseWriter, scope, ws string) (since, wsOnly, ok bool)
 
 // fileDiff returns file i's diff to show: the interdiff when since is set and the file has one,
 // else the snapshot diff, with the scope shown and why the interdiff is not.
-func (s *Server) fileDiff(ctx context.Context, i int, since bool) (d source.FileDiff, scope, unavailable string, err error) {
+func (g *generation) fileDiff(ctx context.Context, i int, since bool) (d source.FileDiff, scope, unavailable string, err error) {
 	if since {
 		var fb round.Fallback
-		if d, fb, err = s.prior.Since(ctx, i); err != nil {
+		if d, fb, err = g.prior.Since(ctx, i); err != nil {
 			return source.FileDiff{}, "", "", err
 		}
 		if fb == round.NoFallback {
@@ -362,7 +368,7 @@ func (s *Server) fileDiff(ctx context.Context, i int, since bool) (d source.File
 			return source.FileDiff{}, "", "", err
 		}
 	}
-	d, err = s.snap.Diff(ctx, i)
+	d, err = g.snap.Diff(ctx, i)
 	return d, scopeAll, unavailable, err
 }
 
@@ -374,8 +380,8 @@ type highlighter struct {
 	lang highlight.Language
 }
 
-func (s *Server) highlighter(i int) highlighter {
-	f := s.snap.File(i)
+func (s *Server) highlighter(g *generation, i int) highlighter {
+	f := g.snap.File(i)
 	return highlighter{s: s, path: f.Path(), lang: highlight.LanguageOf(f.Path())}
 }
 
@@ -439,9 +445,9 @@ type contextJSON struct {
 
 // getContext returns the unchanged lines from..to, numbered by the new side, for context expansion.
 // The range must lie inside one gap; source.FileFacts.Gaps decides which files have any.
-func (s *Server) getContext(w http.ResponseWriter, r *http.Request) {
+func (s *Server) getContext(w http.ResponseWriter, r *http.Request, g *generation) {
 	q := r.URL.Query()
-	i, ok := s.fileIndex(w, q.Get("i"))
+	i, ok := g.fileIndex(w, q.Get("i"))
 	if !ok {
 		return
 	}
@@ -460,7 +466,7 @@ func (s *Server) getContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.release()
-	d, scope, _, err := s.fileDiff(r.Context(), i, since)
+	d, scope, _, err := g.fileDiff(r.Context(), i, since)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -477,7 +483,7 @@ func (s *Server) getContext(w http.ResponseWriter, r *http.Request) {
 	}
 	out := contextJSON{Lines: make([]lineJSON, 0, len(lines))}
 	var spans [][]highlight.Span
-	if h := s.highlighter(i); h.enabled() {
+	if h := s.highlighter(g, i); h.enabled() {
 		spans, err = h.lines(r.Context(), d.New, func(n int) bool { return n >= from && n <= to })
 		out.Highlighted = err == nil
 	}
@@ -772,7 +778,10 @@ type countJSON struct {
 }
 
 type statusJSON struct { //nolint:govet // fieldalignment: field order is the JSON member order.
-	HeadMoved      bool        `json:"head_moved"`
+	// Generation is the review's current generation; a page showing another one reloads.
+	Generation uint64 `json:"generation"`
+	// Changed reports that the change under review has changed since the snapshot (REQ-SES-010).
+	Changed        bool        `json:"changed"`
 	Counts         []countJSON `json:"counts"`
 	Next           int         `json:"next"`
 	CountsDone     bool        `json:"counts_done"`
@@ -786,32 +795,35 @@ type statusJSON struct { //nolint:govet // fieldalignment: field order is the JS
 	WhitespaceError string `json:"whitespace_error,omitzero"`
 }
 
-// getStatus reports line counts found since index `since` and whether HEAD moved.
+// getStatus reports the current generation's line counts found since index `since` and whether
+// the change under review has changed. With check=1, from a visible page, it may run the change
+// check first (REQ-SES-014). It is not bound to a generation: the reply names the current one,
+// and its facts are that generation's.
 func (s *Server) getStatus(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
 	since := 0
-	if v := r.URL.Query().Get("since"); v != "" {
+	if v := q.Get("since"); v != "" {
 		var err error
 		if since, err = strconv.Atoi(v); err != nil {
 			http.Error(w, "since must be an integer", http.StatusBadRequest)
 			return
 		}
 	}
-	var wsKnown bool
-	switch r.URL.Query().Get("ws_known") {
-	case "", "0":
-	case "1":
-		wsKnown = true
-	default:
-		http.Error(w, `ws_known must be "0" or "1"`, http.StatusBadRequest)
+	wsKnown, ok := flag(w, q, "ws_known")
+	if !ok {
 		return
 	}
-	moved, err := s.head.movedSince(r.Context(), s.snap)
-	if err != nil {
-		s.log.Warn("check whether HEAD moved", "err", err)
+	check, ok := flag(w, q, "check")
+	if !ok {
+		return
 	}
-	v := s.facts.since(since, wsKnown)
+	g := s.gen.Load()
+	if check {
+		s.checkChanged(r.Context(), g)
+	}
+	v := g.facts.since(since, wsKnown)
 	out := statusJSON{
-		HeadMoved: moved, Counts: make([]countJSON, len(v.counts)),
+		Generation: g.id, Changed: g.changed.Load(), Counts: make([]countJSON, len(v.counts)),
 		Next: v.next, CountsDone: v.countDone, CountsError: v.countErr,
 		Generated: v.generated, GeneratedDone: v.genDone, GeneratedError: v.genErr,
 		Whitespace: v.ws, WhitespaceDone: v.wsDone, WhitespaceError: v.wsErr,
@@ -822,9 +834,22 @@ func (s *Server) getStatus(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, out)
 }
 
-func (s *Server) fileIndex(w http.ResponseWriter, v string) (int, bool) {
+// flag reads query parameter name as "0" or "1"; absent is false.
+func flag(w http.ResponseWriter, q url.Values, name string) (set, ok bool) {
+	switch q.Get(name) {
+	case "", "0":
+		return false, true
+	case "1":
+		return true, true
+	default:
+		http.Error(w, name+` must be "0" or "1"`, http.StatusBadRequest)
+		return false, false
+	}
+}
+
+func (g *generation) fileIndex(w http.ResponseWriter, v string) (int, bool) {
 	i, err := strconv.Atoi(v)
-	if err != nil || i < 0 || i >= s.snap.FileCount() {
+	if err != nil || i < 0 || i >= g.snap.FileCount() {
 		http.Error(w, "unknown file index", http.StatusNotFound)
 		return 0, false
 	}
@@ -840,6 +865,13 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		http.Error(w, invalid.Reason, http.StatusUnprocessableEntity)
 	case errors.Is(err, review.ErrEnded):
 		http.Error(w, err.Error(), http.StatusGone)
+	case errors.Is(err, review.ErrRefreshed):
+		stale(w, s.gen.Load().id)
+	case errors.Is(err, review.ErrBusy):
+		http.Error(w, err.Error(), http.StatusConflict)
+	case isLocked(err):
+		// A refresh to a snapshot another rvw session is reviewing.
+		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, review.ErrCommentExists), errors.Is(err, review.ErrNoComment), errors.Is(err, review.ErrStale):
 		http.Error(w, err.Error(), http.StatusPreconditionFailed)
 	case errors.Is(err, source.ErrNoContext):
@@ -853,6 +885,11 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		s.log.Error("request failed", "method", r.Method, "path", r.URL.Path, "err", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+func isLocked(err error) bool {
+	_, ok := errors.AsType[*review.LockedError](err)
+	return ok
 }
 
 func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {

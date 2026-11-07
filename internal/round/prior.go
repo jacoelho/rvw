@@ -355,7 +355,10 @@ func (p *Prior) Place(ctx context.Context, i int) ([]Placed, error) {
 			}
 			pl.Status, pl.Start, pl.End, pl.Cause = StatusUnplaced, 0, 0, ch.err
 			if ch.hunks != nil {
-				pl.Status, pl.Start, pl.End = mapLines(*ch.hunks, start, end)
+				pl.Status = StatusOutdated
+				if s, e, ok := source.MapLines(*ch.hunks, start, end); ok {
+					pl.Status, pl.Start, pl.End = StatusCurrent, s, e
+				}
 			}
 		}
 		if pl.Status == StatusOutdated {
@@ -382,33 +385,6 @@ func (p *Prior) quote(ctx context.Context, b source.Blob, start, end int) (revie
 		return review.Quote{}, fmt.Errorf("quote earlier comment: %w", err)
 	}
 	return review.CutQuote(start, end, lines[0]), nil
-}
-
-// mapLines maps lines start to end of a side through hunks, the zero-context diff from that side
-// to the snapshot's: outdated when a hunk deletes one of the lines or adds a line between two of
-// them, otherwise current and moved by the line count the hunks before them change.
-func mapLines(hunks []source.HunkRange, start, end int) (Status, int, int) {
-	shift := 0
-	for _, h := range hunks {
-		if h.OldCount == 0 {
-			// A pure addition after old line OldStart.
-			switch {
-			case h.OldStart < start:
-				shift += h.NewCount
-			case h.OldStart < end:
-				return StatusOutdated, 0, 0
-			}
-			continue
-		}
-		last := h.OldStart + h.OldCount - 1
-		switch {
-		case last < start:
-			shift += h.NewCount - h.OldCount
-		case h.OldStart <= end:
-			return StatusOutdated, 0, 0
-		}
-	}
-	return StatusCurrent, start + shift, end + shift
 }
 
 // StillApplies returns where a copy of earlier comment c goes (REQ-CMT-011), most specific first:

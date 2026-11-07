@@ -1,14 +1,14 @@
 // Page wiring: session token, layout, keyboard, status polling and
 // the page shown after the session ends.
 
-import { Api, type Scope, HttpError, isGone, type RenameDetection } from "./api";
+import { Api, type MovedComment, type Scope, HttpError, isGone, type RenameDetection, Superseded, type Target } from "./api";
 import { count, h } from "./dom";
 import mark from "./favicon.svg";
 import { mountIcons } from "./fileicon";
 import { FileView, type Step } from "./fileview";
 import { FinishDialog } from "./finish";
 import { type GoTarget, Palette } from "./palette";
-import { clock, State } from "./state";
+import { clock, State, targetLabel } from "./state";
 import { ReviewStrip } from "./strip";
 import { FileTree } from "./tree";
 
@@ -62,6 +62,12 @@ class Page {
   private readonly strip: ReviewStrip;
   private readonly wsBox: HTMLInputElement;
   private readonly wrapBox: HTMLInputElement;
+  private readonly refreshButton: HTMLButtonElement;
+  /** The notice that the change under review changed; null while it has not (REQ-SES-010). */
+  private changedBanner: HTMLElement | null = null;
+  /** The prompt to reload a page another page's refresh superseded; null until then. */
+  private supersededBanner: HTMLElement | null = null;
+  private refreshing = false;
   /** The round strip under the top bar; empty when there was no earlier review. */
   private readonly round: HTMLElement;
   /**
@@ -120,15 +126,20 @@ class Page {
     this.layoutButton = h("button", "btn mode-toggle");
     this.layoutButton.title = "Toggle unified or split view (s)";
     this.layoutButton.addEventListener("click", () => this.toggleLayout());
+    this.refreshButton = h("button", "btn refresh-btn", "Refresh");
+    this.refreshButton.title = "Take a new snapshot of the same changes and carry the draft over";
+    this.refreshButton.addEventListener("click", () => this.run(this.refresh()));
     const finish = h("button", "btn primary finish-btn", "Finish…");
     finish.title = "⌘↵";
     finish.addEventListener("click", () => this.run(this.openFinish()));
-    header.append(brand(), source, files, progress, h("span", "spacer"), wrap, ws, search, this.layoutButton, finish);
+    header.append(brand(), source, files, progress, h("span", "spacer"), wrap, ws, search, this.layoutButton, this.refreshButton, finish);
     this.round = h("div", "round-banner");
 
     this.banners = h("div", "banners");
     const renames = renameNotice(state.renameDetection);
     if (renames) this.banners.append(h("div", "banner warn", renames));
+    const moved = movedNotice(state.generation, state.moved);
+    if (moved) this.banners.append(moved);
 
     const sidebar = h("aside", "sidebar");
     sidebar.id = "files";
@@ -216,8 +227,11 @@ class Page {
           this.strip.draw();
           this.renderTotals();
           break;
-        case "head":
-          this.banners.append(h("div", "banner info", "HEAD has moved since this review started. The review still shows the original snapshot."));
+        case "changed":
+          this.renderChanged();
+          break;
+        case "superseded":
+          this.superseded();
           break;
         case "whitespace":
           if (this.state.hideWhitespace && this.state.whitespace.size > 0) this.regroup();
@@ -269,6 +283,10 @@ class Page {
     });
     window.addEventListener("pageshow", (e) => {
       if (e.persisted) this.pollNow();
+    });
+    // Only a visible page asks for the change check, so a page coming into view checks at once.
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") this.pollNow();
     });
     this.tabs.onmessage = (e: MessageEvent) => {
       if (e.data !== "closing" || this.ended) return;
@@ -584,7 +602,7 @@ class Page {
   private async pollStatus(run: number): Promise<void> {
     if (run !== this.pollRun || this.ended) return;
     try {
-      await this.state.syncStatus();
+      await this.state.syncStatus(document.visibilityState === "visible");
     } catch (err) {
       if (run !== this.pollRun || this.ended) return;
       // Other failures are transient: the next poll retries.
@@ -620,7 +638,79 @@ class Page {
     else this.run(this.select(first, true));
   }
 
+  /** Shows or removes the notice that the change under review changed, with its Refresh button. */
+  private renderChanged(): void {
+    if (!this.state.changed) {
+      this.changedBanner?.remove();
+      this.changedBanner = null;
+      return;
+    }
+    if (this.changedBanner) return;
+    const banner = h("div", "banner info changed-banner");
+    const button = h("button", "btn", "Refresh");
+    button.addEventListener("click", () => this.run(this.refresh()));
+    banner.append(h("span", "", "The changes under review have changed since this snapshot was taken. "), button);
+    this.changedBanner = banner;
+    this.banners.append(banner);
+  }
+
+  /**
+   * Refreshes the review (REQ-SES-013). The open comment is left first, as moving to another file
+   * leaves it, and every write is settled, so nothing unsaved is lost: the page then reloads.
+   */
+  private async refresh(): Promise<void> {
+    if (this.refreshing || this.ended || this.finish.isOpen) return;
+    if (!(await this.fileView.leaveEditor())) {
+      this.notify("Save or close the open comment, then refresh.", true);
+      return;
+    }
+    this.refreshing = true;
+    this.refreshButton.disabled = true;
+    try {
+      await this.state.settled();
+      const r = await this.api.refresh();
+      if (!r.unchanged) {
+        this.reload();
+        return;
+      }
+      this.notify("Nothing changed: the review already shows the current changes.");
+      this.pollNow();
+    } finally {
+      this.refreshing = false;
+      this.refreshButton.disabled = false;
+    }
+  }
+
+  /**
+   * The review moved to another generation (REQ-SES-015). The page reloads at once unless an
+   * editor or the Finish dialog may hold text the server has not saved: then it asks first.
+   */
+  private superseded(): void {
+    if (this.ended || this.supersededBanner) return;
+    if (!this.fileView.hasEditor() && !this.finish.isOpen) {
+      this.reload();
+      return;
+    }
+    const banner = h("div", "banner warn");
+    const button = h("button", "btn", "Reload");
+    button.addEventListener("click", () => this.reload());
+    banner.append(h("span", "", "The review was refreshed in another page, so changes here can no longer be saved. Copy any unsaved text, then reload. "), button);
+    this.supersededBanner = banner;
+    this.banners.append(banner);
+  }
+
+  /** Loads the current generation. The page is not closing, so no close notice is sent. */
+  private reload(): void {
+    this.ended = true;
+    window.clearTimeout(this.poll);
+    location.reload();
+  }
+
   private failed(err: unknown): void {
+    if (err instanceof Superseded) {
+      this.superseded();
+      return;
+    }
     if (isGone(err)) {
       if (!this.ended) this.end("rvw is no longer running", "This review session has ended. Saved changes are in the draft.");
       return;
@@ -689,6 +779,32 @@ function endPage(title: string, text: string, markdown?: string): void {
 }
 
 main().catch((err: unknown) => endPage("Could not load the review", err instanceof Error ? err.message : String(err)));
+
+const MOVED_KEY = "rvw.moved-dismissed";
+
+/**
+ * The dismissable list of the comments a refresh moved to a wider target (REQ-DRF-006), or null
+ * when there are none or this tab dismissed the list for this generation.
+ */
+function movedNotice(generation: number, moved: readonly MovedComment[]): HTMLElement | null {
+  if (moved.length === 0 || sessionStorage.getItem(MOVED_KEY) === String(generation)) return null;
+  const banner = h("div", "banner info moved-banner");
+  const close = h("button", "btn", "Dismiss");
+  close.addEventListener("click", () => {
+    sessionStorage.setItem(MOVED_KEY, String(generation));
+    banner.remove();
+  });
+  const list = h("ul", "moved-list");
+  for (const m of moved) list.append(h("li", "", `${where(m.from)} → ${where(m.to)}`));
+  const n = moved.length === 1 ? "1 comment" : `${moved.length} comments`;
+  banner.append(h("span", "", `The refresh moved ${n}: the lines they were on changed or left the change.`), close, list);
+  return banner;
+}
+
+function where(t: Target): string {
+  if (t.target === "review") return "the review";
+  return t.target === "file" ? t.path : `${t.path} · ${targetLabel(t)}`;
+}
 
 /** The banner for incomplete rename detection, or null when renames were fully detected. */
 function renameNotice(d: RenameDetection): string | null {

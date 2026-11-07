@@ -392,8 +392,9 @@ type statusDTO struct {
 	Counts      []countDTO `json:"counts"`
 	CountsError string     `json:"counts_error"`
 	Next        int        `json:"next"`
+	Generation  uint64     `json:"generation"`
 	CountsDone  bool       `json:"counts_done"`
-	HeadMoved   bool       `json:"head_moved"`
+	Changed     bool       `json:"changed"`
 }
 
 // gitNumStat parses `git diff --numstat -z -M` into path pair -> count.

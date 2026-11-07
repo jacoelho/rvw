@@ -31,7 +31,7 @@ type matchJSON struct { //nolint:govet // fieldalignment: field order is the JSO
 
 // getSearch searches the changed files' shown sides for the text q (REQ-NAV-007). q must be given
 // once and be valid search text; it is checked before a slot is taken.
-func (s *Server) getSearch(w http.ResponseWriter, r *http.Request) {
+func (s *Server) getSearch(w http.ResponseWriter, r *http.Request, g *generation) {
 	q := r.URL.Query()["q"]
 	if len(q) != 1 {
 		http.Error(w, "q must be given once", http.StatusBadRequest)
@@ -47,7 +47,7 @@ func (s *Server) getSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.release()
-	res, err := s.snap.Search(r.Context(), text)
+	res, err := g.snap.Search(r.Context(), text)
 	if err != nil {
 		s.fail(w, r, err)
 		return

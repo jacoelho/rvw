@@ -107,10 +107,10 @@ type placementOutJSON struct { //nolint:govet // fieldalignment: field order is 
 }
 
 // placementsJSON returns the earlier line and range comments of one file as placed in the snapshot.
-func (s *Server) placementsJSON(placed []round.Placed) ([]placementOutJSON, error) {
+func placementsJSON(prior *round.Prior, placed []round.Placed) ([]placementOutJSON, error) {
 	out := make([]placementOutJSON, 0, len(placed))
 	for _, pl := range placed {
-		c, ok := s.prior.Find(pl.ID)
+		c, ok := prior.Find(pl.ID)
 		if !ok {
 			return nil, fmt.Errorf("placed earlier comment %s is not listed", pl.ID)
 		}
@@ -151,7 +151,7 @@ func fallbackName(f round.Fallback) (string, error) {
 }
 
 // putViewed sets or clears the viewed marks of several files at once (REQ-NAV-010), all or none.
-func (s *Server) putViewed(w http.ResponseWriter, r *http.Request) {
+func (s *Server) putViewed(w http.ResponseWriter, r *http.Request, g *generation) {
 	var req struct {
 		Files  []int `json:"files"`
 		Viewed bool  `json:"viewed"`
@@ -159,8 +159,8 @@ func (s *Server) putViewed(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &req) {
 		return
 	}
-	if len(req.Files) == 0 || len(req.Files) > s.snap.FileCount() {
-		http.Error(w, fmt.Sprintf("give 1 to %d file indexes", s.snap.FileCount()), http.StatusBadRequest)
+	if len(req.Files) == 0 || len(req.Files) > g.snap.FileCount() {
+		http.Error(w, fmt.Sprintf("give 1 to %d file indexes", g.snap.FileCount()), http.StatusBadRequest)
 		return
 	}
 	if err := s.cfg.Session.SetViewed(req.Files, req.Viewed); err != nil {
@@ -186,14 +186,14 @@ func (s *Server) putHideWhitespace(w http.ResponseWriter, r *http.Request) {
 
 // postEarlierCopy copies earlier comment eid into the draft as comment id (REQ-CMT-011), at the
 // most specific target that still applies. Repeating it returns the comment already copied.
-func (s *Server) postEarlierCopy(w http.ResponseWriter, r *http.Request) {
+func (s *Server) postEarlierCopy(w http.ResponseWriter, r *http.Request, g *generation) {
 	var req struct {
 		ID string `json:"id"`
 	}
 	if !readJSON(w, r, &req) {
 		return
 	}
-	c, ok := s.prior.Find(r.PathValue("eid"))
+	c, ok := g.prior.Find(r.PathValue("eid"))
 	if !ok {
 		http.Error(w, "unknown earlier comment", http.StatusNotFound)
 		return
@@ -204,7 +204,7 @@ func (s *Server) postEarlierCopy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.release()
-	places, err := s.prior.StillApplies(r.Context(), c)
+	places, err := g.prior.StillApplies(r.Context(), c)
 	if err != nil {
 		s.fail(w, r, err)
 		return

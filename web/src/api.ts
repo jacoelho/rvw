@@ -132,6 +132,23 @@ export interface Session {
   /** The newest delivery the review ledger records, or undefined when it records none. */
   readonly lastReviewAt: Date | undefined;
   readonly earlier: readonly EarlierComment[];
+  /** The generation this document shows; every request names it (REQ-SES-015). */
+  readonly generation: number;
+  /** The comments the refresh that made this generation moved to a wider target (REQ-DRF-006). */
+  readonly moved: readonly MovedComment[];
+}
+
+/** A draft comment a refresh moved: its target did not survive the new snapshot. */
+export interface MovedComment {
+  readonly id: string;
+  readonly from: Target;
+  readonly to: Target;
+}
+
+/** What a refresh did: unchanged keeps the generation; otherwise the page loads the new one. */
+export interface RefreshReply {
+  readonly unchanged: boolean;
+  readonly generation: number;
 }
 
 /** How much of a target a quote shows, and how many IDs one quotes request takes. */
@@ -154,7 +171,10 @@ export interface LineCount {
 
 /** One reply of the status poll. */
 export interface StatusReply {
-  readonly headMoved: boolean;
+  /** The current generation; a page showing another reloads. */
+  readonly generation: number;
+  /** The change under review changed since this generation's snapshot (REQ-SES-010). */
+  readonly changed: boolean;
   /** Line counts by file index, published since the requested cursor. */
   readonly counts: ReadonlyMap<number, LineCount>;
   /** The cursor for the next poll. */
@@ -319,6 +339,16 @@ export class ServerGone extends Error {
  */
 export class NoReply extends ServerGone {}
 
+/**
+ * The request named a generation the review has left: another page refreshed it (REQ-SES-015).
+ * Nothing was done; the page reloads to show the current generation.
+ */
+export class Superseded extends Error {
+  constructor() {
+    super("The review moved to a new snapshot; reload the page.");
+  }
+}
+
 export function isGone(err: unknown): err is ServerGone {
   return err instanceof ServerGone;
 }
@@ -329,10 +359,25 @@ export function isGone(err: unknown): err is ServerGone {
  * this page and checking them would cost a pass over every shown line.
  */
 export class Api {
+  /** The generation the loaded session document shows; 0 until it is loaded. */
+  private generation = 0;
+
   constructor(private readonly token: string) {}
 
+  /** Loads the session document; every later request names its generation. */
   async session(): Promise<Session> {
-    return toSession(await this.json("GET", "/api/session"));
+    const s = toSession(await this.json("GET", "/api/session"));
+    this.generation = s.generation;
+    return s;
+  }
+
+  /**
+   * Takes a new snapshot of the same source and carries the draft over (REQ-SES-013). A reply that
+   * is not unchanged means the page shows a generation the review has left.
+   */
+  async refresh(): Promise<RefreshReply> {
+    const o = obj(await this.json("POST", "/api/refresh"), "refresh");
+    return { unchanged: bool(o["unchanged"], "unchanged"), generation: num(o["generation"], "generation") };
   }
 
   async file(i: number, q: FileQuery, signal?: AbortSignal): Promise<FileReply> {
@@ -416,9 +461,12 @@ export class Api {
     return toSearchReply(await this.json("GET", `/api/search?q=${encodeURIComponent(text)}`, undefined, signal), files);
   }
 
-  /** The status since the counts cursor; wsKnown leaves out the whitespace-only marks already received. */
-  async status(since: number, wsKnown: boolean): Promise<StatusReply> {
-    return toStatus(await this.json("GET", `/api/status?since=${since}${wsKnown ? "&ws_known=1" : ""}`));
+  /**
+   * The status since the counts cursor; wsKnown leaves out the whitespace-only marks already
+   * received. check asks for the change check, which only a visible page does (REQ-SES-014).
+   */
+  async status(since: number, wsKnown: boolean, check: boolean): Promise<StatusReply> {
+    return toStatus(await this.json("GET", `/api/status?since=${since}${wsKnown ? "&ws_known=1" : ""}${check ? "&check=1" : ""}`));
   }
 
   /**
@@ -442,6 +490,7 @@ export class Api {
 
   private async send(method: string, path: string, body?: unknown, signal?: AbortSignal, extra?: Record<string, string>): Promise<Response> {
     const headers: Record<string, string> = { ...extra, Authorization: `Bearer ${this.token}` };
+    if (this.generation > 0) headers["Rvw-Generation"] = String(this.generation);
     const init: RequestInit = { method, headers, cache: "no-store" };
     if (body !== undefined) {
       headers["Content-Type"] = "application/json";
@@ -459,6 +508,8 @@ export class Api {
     if (!res.ok) {
       const text = (await res.text()).trim();
       if (res.status === 410) throw new ServerGone(text || undefined);
+      // Only the generation check sends the header with 409.
+      if (res.status === 409 && res.headers.has("Rvw-Generation")) throw new Superseded();
       throw new HttpError(res.status, text || `${res.status} ${res.statusText}`);
     }
     return res;
@@ -632,7 +683,20 @@ function toSession(v: unknown): Session {
     hideWhitespace: bool(o["hide_whitespace"], "hide_whitespace"),
     lastReviewAt: o["last_review_at"] === undefined ? undefined : date(o["last_review_at"], "last_review_at"),
     earlier: o["earlier"] === undefined ? [] : arr(o["earlier"], "earlier").map((e) => toEarlier(e, files.length)),
+    generation: toGeneration(o["generation"]),
+    moved: arr(o["moved"], "moved").map(toMoved),
   };
+}
+
+function toGeneration(v: unknown): number {
+  const g = num(v, "generation");
+  if (g < 1) throw new BadReply(`generation ${g}`);
+  return g;
+}
+
+function toMoved(v: unknown): MovedComment {
+  const o = obj(v, "moved comment");
+  return { id: str(o["id"], "moved id"), from: toTarget(o["from"]), to: toTarget(o["to"]) };
 }
 
 function toStatusInterval(v: unknown): number {
@@ -678,7 +742,8 @@ function toStatus(v: unknown): StatusReply {
   const whitespaceDone = o["whitespace_done"] === undefined ? false : bool(o["whitespace_done"], "whitespace_done");
   const whitespace = o["whitespace"] === undefined ? [] : arr(o["whitespace"], "whitespace").map((i) => num(i, "whitespace index"));
   return {
-    headMoved: bool(o["head_moved"], "head_moved"),
+    generation: toGeneration(o["generation"]),
+    changed: bool(o["changed"], "changed"),
     counts,
     next: num(o["next"], "next"),
     countsDone: bool(o["counts_done"], "counts_done"),

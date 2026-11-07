@@ -247,9 +247,9 @@ accept only review comments; this avoids a byte-preserving path encoding for a r
 
 ### Q-17 — Out of scope for v1
 
-- Reloading the snapshot during a session. If `HEAD` moves, the UI shows a notice (REQ-SES-010); the human finishes or
-  cancels and the agent re-runs. Worktree edits are not detected: that would mean rebuilding the uncommitted tree
-  repeatedly, writing objects each time.
+- ~~Reloading the snapshot during a session.~~ Superseded by [Q-57](#q-57--change-notice-and-refresh) in contract
+  revision 10 (accepted 2026-11-07): the notice covers worktree edits without writing objects, and the human refreshes from the
+  page.
 - ~~Carrying comments into a second review round.~~ Superseded by [Q-49](#q-49--review-rounds) in contract revision 3
   (proposed): real use of `rvw branch --uncommitted` showed it is needed.
 
@@ -438,6 +438,9 @@ Line numbers have one owner: `source` numbers each patch line on both sides from
 them.
 
 ### Q-29 — HEAD checks for the moved-HEAD notice
+
+Superseded by [Q-57](#q-57--change-notice-and-refresh) in contract revision 10 (accepted 2026-11-07): the check covers the base
+ref and uncommitted changes, runs only for a visible page and at most every 10 s, and a found change stays reported.
 
 Decided on 2026-11-05 (implementation). The UI polls `/api/status` every 5 s and the server caches the HEAD check for
 2 s, so a move shows within 7 s, inside REQ-SES-010's 10 s. A failed check is cached like a successful one and logged
@@ -1325,3 +1328,45 @@ Rejected:
   1,000. Bounding spans directly bounds the cost, and the highlighted prefix keeps the visible part useful.
 - **Stopping the scan at the bound.** Skipping the rest of the line would lose a string or comment it opens, so the
   following lines would be classed wrongly.
+
+### Q-57 — Change notice and refresh
+
+Proposed on 2026-11-07 for contract revision 10, which the repository owner accepted on 2026-11-07. The owner asked for both a notice when the change under
+review changes and a manual refresh from the page, for every source, and chose a comment's fate and the check's cadence,
+2026-11-07.
+
+The check (REQ-SES-010, REQ-SES-014, `source.Snapshot.Changed`) asks whether resolving the same source again could give
+other trees, without building them: `HEAD` moved; the base ref's commit changed or the ref is gone; for uncommitted
+sources, `git update-index --refresh` then `git diff-files --quiet` against the snapshot's private index, then
+`git ls-files --others --exclude-standard` stopped after one path the index lacks. The private index already holds the
+uncommitted tree with its stat cache, so an unchanged worktree costs a stat per file and hashes nothing; an edit hashes
+only the touched files, writes no object, and changes nothing outside the private file. The page sends the visible flag
+on its 5 s status poll; the server runs one check at a time, at most once per 10 s per snapshot, and skips it while a
+refresh holds the lock, so the notice shows within about 15 s, inside the 20 s bound. A failed check counts as a check
+and is logged once per snapshot. A found change is sticky until a refresh: an undone edit cannot be told from another.
+
+The refresh (REQ-SES-013, REQ-DRF-006, `review.Session.Refresh`) resolves the source again. The same draft key keeps
+the draft and the generation, so open pages keep working and the page says nothing changed. A new key opens and locks the
+new draft, carries the draft over, moves aside any draft already under that key, deletes the old one, and moves the
+server to the next generation, whose facts (line counts, generated and whitespace-only files, round facts) are derived
+again. Line comments move only by the diff between the two versions of their side's file: an unchanged line follows
+its shift, a changed line makes the comment a file comment, and a missing file makes it a review comment. Body and author
+are kept, so the human or the agent still sees the point; the page lists what moved. Every bound request names its
+generation in `Rvw-Generation` (REQ-SES-015); the refresh holds the server's lock exclusively, so no request runs
+against a half-replaced snapshot, and a page left on an old generation is told to reload.
+
+Known misses: a change to the index alone (staging without editing) and a change to ignore rules outside the worktree
+(`core.excludesFile`, `.git/info/exclude`) are not detected; Refresh still picks them up.
+
+Rejected:
+
+- **Building the uncommitted tree on every check.** `git add -A` and `git write-tree` write objects each time, so a
+  10 s check would fill the object database during a long review; this is why Q-17 ruled detection out.
+- **Watching the filesystem (FSEvents).** It needs cgo or a resident watcher, sees writes to ignored and build output
+  files that do not change the review, and still needs Git to decide whether a change matters.
+- **Refreshing automatically.** Line numbers, open editors and the Finish dialog would change under the human; the
+  notice leaves the moment to them.
+- **Reattaching a changed line's comment by searching for its text.** A duplicated line would take it silently; a
+  file comment loses the line but never points at the wrong code.
+- **Restoring a draft already saved for the new snapshot.** It belongs to an earlier session; restoring it would drop
+  this session's work, so it is moved aside as an unrestorable draft is.

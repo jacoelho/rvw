@@ -1703,3 +1703,13 @@ kbd {
     margin-right: auto;
   }
 }
+
+/* A banner's action sits after its text; the moved list follows on its own lines. */
+.banner > .btn {
+  margin-left: 8px;
+}
+
+.moved-list {
+  margin: 6px 0 0;
+  padding-left: 20px;
+}

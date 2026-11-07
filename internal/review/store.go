@@ -69,6 +69,7 @@ func (e *LockedError) Error() string {
 type Store struct {
 	lock      *os.File
 	draftPath string
+	key       string
 }
 
 // OpenStore takes the exclusive lock for key in dir, creating dir if needed.
@@ -81,7 +82,7 @@ func OpenStore(dir, key string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Store{draftPath: filepath.Join(dir, key+".json"), lock: lock}, nil
+	return &Store{draftPath: filepath.Join(dir, key+".json"), lock: lock, key: key}, nil
 }
 
 // lockFile opens and flocks path. Expiry may unlink a lock file, so after locking it checks that
@@ -216,6 +217,15 @@ func (s *Store) moveAside() (string, error) {
 		return "", err
 	}
 	return to, nil
+}
+
+// moveAsideIfAny moves the draft aside as moveAside does and returns its new path, or "" when there
+// is no draft.
+func (s *Store) moveAsideIfAny() (string, error) {
+	if _, err := os.Lstat(s.draftPath); errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	return s.moveAside()
 }
 
 // readLimited reads at most limit bytes of the file at path.

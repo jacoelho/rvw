@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -170,6 +171,9 @@ type fixture struct {
 	delivered *deliveries
 	addr      string
 	token     string
+	// gen is the generation requests name unless an option replaces it; a test that refreshes
+	// sets it from the reply.
+	gen uint64
 }
 
 const testToken = "test-token-0123456789"
@@ -192,6 +196,8 @@ type fixtureOptions struct {
 	ledger *round.Store
 	// log, when set, receives the server's log lines.
 	log io.Writer
+	// checkInterval is Config.CheckInterval.
+	checkInterval time.Duration
 }
 
 // seedOf parses a seed document the way rvw's --seed does.
@@ -227,12 +233,14 @@ func newFixture(t *testing.T, repo *testRepo, opts fixtureOptions) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := review.OpenStore(t.TempDir(), "fixture")
+	draftDir := t.TempDir()
+	store, err := review.OpenStore(draftDir, review.DraftKey(snap))
 	if err != nil {
 		t.Fatal(err)
 	}
+	stores := &storeHolder{cur: store}
 	t.Cleanup(func() {
-		if err := store.Close(); err != nil {
+		if err := stores.close(); err != nil {
 			t.Errorf("close store: %v", err)
 		}
 	})
@@ -249,7 +257,7 @@ func newFixture(t *testing.T, repo *testRepo, opts fixtureOptions) *fixture {
 		t.Fatal(err)
 	}
 	token := fmt.Sprintf("%s-%d", testToken, fixtureSeq.Add(1))
-	f := &fixture{t: t, repo: repo, git: r, snap: snap, sess: sess, store: store, token: token,
+	f := &fixture{t: t, repo: repo, git: r, snap: snap, sess: sess, store: store, token: token, gen: 1,
 		delivered: &deliveries{err: opts.deliverErr, hook: opts.deliverHook}}
 	logOut := io.Discard
 	if opts.log != nil {
@@ -259,8 +267,52 @@ func newFixture(t *testing.T, repo *testRepo, opts fixtureOptions) *fixture {
 		Assets:  fstest.MapFS{"index.html": {Data: []byte(indexHTML)}},
 		Session: sess, Ledger: ledger, Token: token, Deliver: f.delivered.deliver,
 		Log: slog.New(slog.NewTextHandler(logOut, nil)), FinishWait: opts.finishWait, CloseGrace: opts.closeGrace,
+		Refresh: refresher(r, src, sess, draftDir, stores), CheckInterval: opts.checkInterval,
 	})
 	return f
+}
+
+// storeHolder is the session's current store, which a refresh replaces.
+type storeHolder struct {
+	cur *review.Store
+	mu  sync.Mutex
+}
+
+func (h *storeHolder) close() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.cur.Close()
+}
+
+// refresher refreshes sess as rvw does: it resolves src again, opens the new draft key's store
+// when the key changed, and closes what the refresh replaced.
+func refresher(r *source.Repo, src source.Source, sess *review.Session, dir string, stores *storeHolder) func(context.Context) (review.Refreshed, error) {
+	return func(ctx context.Context) (review.Refreshed, error) {
+		snap, err := r.Resolve(ctx, src, slog.New(slog.DiscardHandler))
+		if err != nil {
+			return review.Refreshed{}, err
+		}
+		var store *review.Store
+		if key := review.DraftKey(snap); key != review.DraftKey(sess.Snapshot()) {
+			if store, err = review.OpenStore(dir, key); err != nil {
+				return review.Refreshed{}, errors.Join(err, snap.Close())
+			}
+		}
+		res, err := sess.Refresh(ctx, snap, store)
+		if err != nil {
+			if store != nil {
+				err = errors.Join(err, store.Close())
+			}
+			return review.Refreshed{}, errors.Join(err, snap.Close())
+		}
+		if res.Released != nil {
+			stores.mu.Lock()
+			stores.cur = store
+			stores.mu.Unlock()
+			err = res.Released.Close()
+		}
+		return res, errors.Join(err, res.OldSnapshot.Close())
+	}
 }
 
 // serveHandler serves the handler without Run: the session never shuts the server down.
@@ -380,6 +432,7 @@ func (f *fixture) send(method, path, body string, opts ...reqOption) (response, 
 		return response{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+f.token)
+	req.Header.Set("Rvw-Generation", fmt.Sprint(f.gen))
 	if method != http.MethodGet && method != http.MethodHead {
 		req.Header.Set("Origin", "http://"+f.addr)
 	}
@@ -416,8 +469,16 @@ type sessionDTO struct {
 	Files    []fileDTO    `json:"files"`
 	Comments []commentDTO `json:"comments"`
 
-	RenameDetection  string `json:"rename_detection"`
-	StatusIntervalMs int64  `json:"status_interval_ms"`
+	RenameDetection  string     `json:"rename_detection"`
+	Moved            []movedDTO `json:"moved"`
+	StatusIntervalMs int64      `json:"status_interval_ms"`
+	Generation       uint64     `json:"generation"`
+}
+
+type movedDTO struct {
+	ID   string    `json:"id"`
+	From targetDTO `json:"from"`
+	To   targetDTO `json:"to"`
 }
 
 type fileDTO struct {

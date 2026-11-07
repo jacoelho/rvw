@@ -53,11 +53,12 @@ const (
 	// minCloseGrace keeps the status interval, half the grace in whole milliseconds, at least
 	// 1 ms; the UI rejects a session document with a smaller status_interval_ms.
 	minCloseGrace = 2 * time.Millisecond
-	// maxStatusInterval caps the UI's status poll; REQ-SES-010 bounds the moved-HEAD notice to 10
-	// s.
+	// maxStatusInterval caps the UI's status poll; with defaultCheckInterval it keeps the change
+	// notice within REQ-SES-010's 20 s.
 	maxStatusInterval = 5 * time.Second
-	headCacheTTL      = 2 * time.Second
-	readHeaderTimout  = 10 * time.Second
+	// defaultCheckInterval is Config.CheckInterval's default (REQ-SES-014).
+	defaultCheckInterval = 10 * time.Second
+	readHeaderTimout     = 10 * time.Second
 	// fileSlots bounds file and context requests in flight. Each holds a file's content, patch
 	// and rendered rows, so this bounds the server's memory to a fixed number of files.
 	fileSlots = 2
@@ -70,6 +71,9 @@ type Config struct {
 	Assets  fs.FS
 	Session *review.Session
 	Deliver func(review.Result) error
+	// Refresh moves Session to a new snapshot of the same source (REQ-SES-013) and releases what
+	// it replaced before returning; the server reads Unchanged and Moved. Nil refuses refreshes.
+	Refresh func(context.Context) (review.Refreshed, error)
 	Log     *slog.Logger // nil discards
 	Token   string
 	// Ledger is the worktree's review ledger, from which the server derives the round facts of
@@ -83,19 +87,27 @@ type Config struct {
 	// to poll at is derived from it. Non-zero values exist for tests and must be at least 2 ms;
 	// New panics on a smaller or negative value.
 	CloseGrace time.Duration
+	// CheckInterval is the least time between two change checks (REQ-SES-014); zero means 10
+	// seconds.
+	CheckInterval time.Duration
 }
 
 // Server is one session's HTTP server.
 type Server struct {
-	ended    chan Outcome
-	slots    chan struct{} // see fileSlots
-	facts    *contentFacts
-	snap     *source.Snapshot // cfg.Session's
-	prior    *round.Prior     // snap's round facts, from cfg.Ledger
-	log      *slog.Logger     // cfg.Log, or a discarding logger
+	ended chan Outcome
+	slots chan struct{} // see fileSlots
+	// gen is the current generation; only postRefresh stores it, holding refreshMu.
+	gen      atomic.Pointer[generation]
+	log      *slog.Logger // cfg.Log, or a discarding logger
 	presence *presence
-	head     headState
+	facts    *factRuns
 	cfg      Config
+	// refreshMu orders refreshes against the requests bound to a generation: they hold it shared,
+	// a refresh exclusively, so no bound request sees two snapshots (Q-57).
+	refreshMu sync.RWMutex
+	// probeMu runs one change check at a time; it also guards every generation's check fields.
+	probeMu       sync.Mutex
+	checkInterval time.Duration
 	// statusInterval is how often the UI polls the status. Half the close grace, so a sibling
 	// page's poll falls within the grace, and at most maxStatusInterval.
 	statusInterval time.Duration
@@ -119,12 +131,18 @@ func New(cfg Config) *Server {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	return &Server{
-		cfg: cfg, log: logger, snap: snap, prior: round.NewPrior(snap, cfg.Ledger), facts: newContentFacts(snap),
+	check := cfg.CheckInterval
+	if check == 0 {
+		check = defaultCheckInterval
+	}
+	s := &Server{
+		cfg: cfg, log: logger, facts: &factRuns{},
 		ended: make(chan Outcome, 1),
 		slots: make(chan struct{}, fileSlots), presence: newPresence(grace),
-		statusInterval: min(maxStatusInterval, grace/2),
+		statusInterval: min(maxStatusInterval, grace/2), checkInterval: check,
 	}
+	s.gen.Store(&generation{id: 1, snap: snap, prior: round.NewPrior(snap, cfg.Ledger), facts: newContentFacts(snap)})
+	return s
 }
 
 // Run serves on ln until the human finishes or cancels, the page closes, or ctx ends. It returns
@@ -142,16 +160,10 @@ func (s *Server) Run(ctx context.Context, ln net.Listener) (Outcome, error) {
 		BaseContext:       func(net.Listener) context.Context { return reqCtx },
 	}
 	// The content reads end before Run returns, so no git process outlives the session.
-	factsCtx, stopFacts := context.WithCancel(ctx)
-	factsDone := make(chan struct{})
-	go func() {
-		defer close(factsDone)
-		s.facts.run(factsCtx, s.snap)
-	}()
-	defer func() {
-		stopFacts()
-		<-factsDone
-	}()
+	s.facts.begin(ctx)
+	defer s.facts.end()
+	g := s.gen.Load()
+	g.stopFacts = s.facts.start(g.facts, g.snap) //nolint:contextcheck // factRuns holds Run's context from begin.
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
@@ -196,7 +208,7 @@ func (s *Server) Run(ctx context.Context, ln net.Listener) (Outcome, error) {
 		outcome = settle(PageClosed)
 	}
 	stopRequests()
-	stopFacts()
+	s.facts.cancel()
 	shutCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
 	defer cancel()
 	if err := srv.Shutdown(shutCtx); err != nil {
@@ -226,9 +238,9 @@ func (s *Server) Abandon() Outcome {
 }
 
 // acquire takes a file slot, or returns why it could not before ctx ended. Every handler that runs
-// git holds a slot while it does, with two exceptions: Finish, which the session phase serialises
-// and whose delivery must not wait behind UI reads, and the status HEAD check, which its cache
-// bounds to one run per interval.
+// git holds a slot while it does, with three exceptions: Finish, which the session phase serialises
+// and whose delivery must not wait behind UI reads; a refresh, which runs alone; and the change
+// check, which runs one at a time and at most once per check interval.
 func (s *Server) acquire(ctx context.Context) error {
 	select {
 	case s.slots <- struct{}{}:
@@ -252,19 +264,23 @@ func URL(addr, token string) string {
 // handler returns the HTTP handler for a listener bound to addr (host:port).
 func (s *Server) handler(addr string) http.Handler {
 	api := http.NewServeMux()
-	api.HandleFunc("GET /api/session", s.getSession)
-	api.HandleFunc("GET /api/file", s.getFile)
-	api.HandleFunc("GET /api/file/context", s.getContext)
-	api.HandleFunc("GET /api/quotes", s.getQuotes)
-	api.HandleFunc("GET /api/search", s.getSearch)
-	api.HandleFunc("PUT /api/comments/{id}", s.putComment)
-	api.HandleFunc("DELETE /api/comments/{id}", s.deleteComment)
-	api.HandleFunc("PUT /api/viewed", s.putViewed)
-	api.HandleFunc("PUT /api/hide-whitespace", s.putHideWhitespace)
-	api.HandleFunc("POST /api/earlier/{eid}/copy", s.postEarlierCopy)
-	api.HandleFunc("PUT /api/summary", s.putSummary)
-	api.HandleFunc("GET /api/result.md", s.getResult)
-	api.HandleFunc("POST /api/finish", s.postFinish)
+	// Requests that read a generation's file indexes or facts, or write the draft, are bound to the
+	// generation the page shows; the session document is the current one's. Status, cancel and the
+	// close notice are not: they work while a refresh runs and from a page showing any generation.
+	api.HandleFunc("GET /api/session", s.loading(s.getSession))
+	api.HandleFunc("GET /api/file", s.bound(s.getFile))
+	api.HandleFunc("GET /api/file/context", s.bound(s.getContext))
+	api.HandleFunc("GET /api/quotes", s.bound(draftOnly(s.getQuotes)))
+	api.HandleFunc("GET /api/search", s.bound(s.getSearch))
+	api.HandleFunc("PUT /api/comments/{id}", s.bound(draftOnly(s.putComment)))
+	api.HandleFunc("DELETE /api/comments/{id}", s.bound(draftOnly(s.deleteComment)))
+	api.HandleFunc("PUT /api/viewed", s.bound(s.putViewed))
+	api.HandleFunc("PUT /api/hide-whitespace", s.bound(draftOnly(s.putHideWhitespace)))
+	api.HandleFunc("POST /api/earlier/{eid}/copy", s.bound(s.postEarlierCopy))
+	api.HandleFunc("PUT /api/summary", s.bound(draftOnly(s.putSummary)))
+	api.HandleFunc("GET /api/result.md", s.bound(draftOnly(s.getResult)))
+	api.HandleFunc("POST /api/finish", s.bound(draftOnly(s.postFinish)))
+	api.HandleFunc("POST /api/refresh", s.postRefresh)
 	api.HandleFunc("POST /api/cancel", s.postCancel)
 	api.HandleFunc("GET /api/status", s.getStatus)
 	api.HandleFunc("POST /api/page-closed", s.postPageClosed)
@@ -320,35 +336,6 @@ func setSecurityHeaders(h http.Header) {
 	h.Set("Referrer-Policy", "no-referrer")
 	h.Set("Cross-Origin-Opener-Policy", "same-origin")
 	h.Set("Cross-Origin-Resource-Policy", "same-origin")
-}
-
-// headState caches whether HEAD moved, for the moved-HEAD notice. A failed check is cached like a
-// successful one, so a broken repository costs one git run per headCacheTTL, not one per poll; the
-// notice keeps its last known answer meanwhile.
-type headState struct {
-	checked time.Time
-	mu      sync.Mutex
-	moved   bool
-}
-
-// movedSince reports whether HEAD moved. The error is returned only by the check that observed
-// it, so the caller reports each failure once.
-func (h *headState) movedSince(ctx context.Context, snap *source.Snapshot) (bool, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if !h.checked.IsZero() && time.Since(h.checked) < headCacheTTL {
-		return h.moved, nil
-	}
-	moved, err := snap.HeadMoved(ctx)
-	if err != nil && ctx.Err() != nil {
-		return h.moved, nil // the request ended, not the check
-	}
-	h.checked = time.Now()
-	if err != nil {
-		return h.moved, fmt.Errorf("check whether HEAD moved: %w", err)
-	}
-	h.moved = moved
-	return moved, nil
 }
 
 // contentFacts owns the facts read from file contents after the UI is served, not before: which Go
