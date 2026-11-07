@@ -361,8 +361,18 @@ export function isGone(err: unknown): err is ServerGone {
 export class Api {
   /** The generation the loaded session document shows; 0 until it is loaded. */
   private generation = 0;
+  /**
+   * This page's id, sent on every request (Q-42). A close notice marks it closed, so a request it
+   * had in flight then is no presence; a page restored from the back/forward cache takes a new one.
+   */
+  private page = crypto.randomUUID();
 
   constructor(private readonly token: string) {}
+
+  /** Takes a new page id, for a page restored from the back/forward cache after its close notice. */
+  renewPage(): void {
+    this.page = crypto.randomUUID();
+  }
 
   /** Loads the session document; every later request names its generation. */
   async session(): Promise<Session> {
@@ -477,7 +487,7 @@ export class Api {
   pageClosed(): void {
     void fetch("/api/page-closed", {
       method: "POST",
-      headers: { Authorization: `Bearer ${this.token}` },
+      headers: { Authorization: `Bearer ${this.token}`, "Rvw-Page": this.page },
       cache: "no-store",
       keepalive: true,
     }).catch(() => undefined);
@@ -489,7 +499,7 @@ export class Api {
   }
 
   private async send(method: string, path: string, body?: unknown, signal?: AbortSignal, extra?: Record<string, string>): Promise<Response> {
-    const headers: Record<string, string> = { ...extra, Authorization: `Bearer ${this.token}` };
+    const headers: Record<string, string> = { ...extra, Authorization: `Bearer ${this.token}`, "Rvw-Page": this.page };
     if (this.generation > 0) headers["Rvw-Generation"] = String(this.generation);
     const init: RequestInit = { method, headers, cache: "no-store" };
     if (body !== undefined) {

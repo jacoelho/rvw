@@ -86,6 +86,7 @@ func newBenchServer(b *testing.B, base, head map[string]string, seed string) *be
 func (s *benchServer) get(path string) []byte {
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "http://"+benchAddr+path, nil)
 	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Rvw-Page", testPage)
 	rec := httptest.NewRecorder()
 	s.h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {

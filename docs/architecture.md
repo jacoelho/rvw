@@ -140,8 +140,11 @@ Inside a boundary, values are trusted; there is no re-validation.
     when they hold spaces, `=` or quotes, so the review URL and draft paths are quoted. `cmd/rvw` builds the one
     logger and passes it to `source.Resolve` and `server.Config.Log`; the `log` package is denied by depguard.
 - **Page presence** ([Q-42](decisions.md#q-42--closing-the-review-page-ends-the-session)). The page sends a close
-  notice on `pagehide`; `server.presence` then arms one timer for the 10 s close grace. Any request that passes the
-  Host, token and cross-origin checks disarms it, so a reload or another open tab keeps the session; when it fires,
+  notice on `pagehide`; `server.presence` then arms one timer for the 10 s close grace and marks the notice's page id
+  closed (the last 32 are kept). Every API request names its page in `Rvw-Page` (refused with 400 otherwise); one that
+  passes the Host, token and cross-origin checks and comes from a page not marked closed disarms the timer, so a reload
+  or another open tab keeps the session and a poll the closing page had in flight does not. A page restored from the
+  back/forward cache takes a new id; when it fires,
   `Run` ends the session as page closed (exit 4, draft kept). A later notice restarts the grace. The page has one
   status poll loop; a restore from the back/forward cache or a sibling's close asks it to poll at once. `Run` stops the
   presence when it returns; after that, notices and requests do nothing. Failure modes: a crashed browser sends no

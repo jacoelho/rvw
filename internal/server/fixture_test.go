@@ -352,6 +352,20 @@ func waitRun(t *testing.T, done <-chan runResult) runResult {
 // reqOption adjusts a request before it is sent.
 type reqOption func(*http.Request)
 
+// testPage is the page id requests send unless withPage replaces it.
+const testPage = "page-a"
+
+// withPage sends the request as page id, or without a page id when id is empty.
+func withPage(id string) reqOption {
+	return func(r *http.Request) {
+		if id == "" {
+			r.Header.Del("Rvw-Page")
+			return
+		}
+		r.Header.Set("Rvw-Page", id)
+	}
+}
+
 func withoutToken() reqOption { return func(r *http.Request) { r.Header.Del("Authorization") } }
 
 func withToken(tok string) reqOption {
@@ -412,6 +426,7 @@ func (f *fixture) send(method, path, body string, opts ...reqOption) (response, 
 	}
 	req.Header.Set("Authorization", "Bearer "+f.token)
 	req.Header.Set("Rvw-Generation", fmt.Sprint(f.gen))
+	req.Header.Set("Rvw-Page", testPage)
 	if method != http.MethodGet && method != http.MethodHead {
 		req.Header.Set("Origin", "http://"+f.addr)
 	}

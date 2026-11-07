@@ -1829,9 +1829,10 @@ func (pg *page) leave() int {
 }
 
 // TestBrowserBackForwardCache: leaving the review page sends the close notice, as the page may
-// never return. A page restored from the back/forward cache polls at once: back after 8 s, past
-// the point where the poll interrupted by leaving would land, rvw is still running 13 s after the
-// leave. Leaving again without returning ends rvw with status 4.
+// never return. A page restored from the back/forward cache takes a new page id and polls at once:
+// back after 6 s, past the 5 s poll interval, rvw is still running 13 s after the leave; a poll
+// under the closed id would not keep it (Q-42). Leaving again without returning ends rvw with
+// status 4.
 func TestBrowserBackForwardCache(t *testing.T) {
 	// Not parallel: while it ran beside other tests, their pages intermittently lost focus or
 	// stopped answering for 10 s in the shared Chrome (cause unconfirmed); run alone, none did.
@@ -1846,14 +1847,18 @@ func TestBrowserBackForwardCache(t *testing.T) {
 	n := pg.polls()
 	pg.waitTrue("the next regular status poll", fmt.Sprintf(statusPolls+` > %d`, n))
 
+	// The grace runs from the notice, which reaches rvw before leave returns: coming back at 6 s
+	// leaves the restored page's poll at least 4 s on a loaded machine.
 	back := pg.leave()
 	left := time.Now()
-	time.Sleep(8 * time.Second)
+	time.Sleep(6 * time.Second)
 	pg.send("Page.navigateToHistoryEntry", map[string]any{"entryId": back})
 	pg.waitTrue("the page restored from the back/forward cache", `window.rvwRestored === true`)
+	restored := time.Since(left)
 	select {
 	case <-p.done:
-		t.Fatalf("rvw exited (%d) although the page came back within the grace; stderr:\n%s", p.cmd.ProcessState.ExitCode(), p.stderr)
+		t.Fatalf("rvw exited (%d) although the page came back %v after leaving, within the grace; stderr:\n%s",
+			p.cmd.ProcessState.ExitCode(), restored.Round(time.Millisecond), p.stderr)
 	case <-time.After(time.Until(left.Add(13 * time.Second))):
 	}
 

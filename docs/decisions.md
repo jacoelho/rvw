@@ -696,8 +696,13 @@ session as page closed after a 10-second grace, unless some page makes an authen
 the saved draft, writes nothing to stdout, writes the record `msg="the review page was closed; saved draft changes
 are kept" draft=<path>` to stderr and exits 4.
 
-The presence rule is that any authenticated request after the notice keeps the session. A reload sends the notice
-and then loads the session again. Another open tab polls the status. Two things keep that tab's request inside the
+The presence rule is that any authenticated request after the notice keeps the session, unless it comes from the
+page that sent the notice. Every request names its page in an `Rvw-Page` header: a random id each page load picks,
+and a page restored from the back/forward cache replaces; a request without a valid one is refused with 400. A
+notice marks its id closed, and the server keeps the last 32 closed ids, so a request the closing page had in flight
+does not keep the session (added 2026-11-07 for contract revision 12, proposed: this request reaching the server
+just after the notice left `rvw` running, and failed `TestBrowserBackForwardCache` in CI). A reload sends the notice
+and then loads the session again under a new id. Another open tab polls the status. Two things keep that tab's request inside the
 grace:
 
 - The server sets the poll interval to half the grace, at most 5 s, and sends it in `GET /api/session` as
@@ -705,7 +710,7 @@ grace:
 - The closing tab posts `closing` on a `BroadcastChannel`, and each tab that receives it polls 1 s later.
 
 A notice sent while a page enters the back/forward cache counts as a close, because the page may never return. A
-page restored from the cache polls at once, inside the grace.
+page restored from the cache takes a new page id and polls at once, inside the grace.
 `TestBrowserBackForwardCache` restores a page from the cache in Chrome and checks both halves.
 
 A restore or a sibling's close asks the page's one poll loop for an immediate poll. `Page.pollRun` owns which run is
@@ -718,8 +723,6 @@ flight is still untested in Chrome.
 
 Known limits:
 
-- A request already in flight from the closing tab may count as presence. The session then keeps running until
-  Ctrl+C or the next notice.
 - A sibling tab that is frozen or in the back/forward cache gets no `BroadcastChannel` message and does not poll, so
   the session can end with exit 4 while that tab still exists. Its draft is kept.
 - Chrome under heavy load can tear the closing tab down before its `closing` message leaves, even though the
@@ -736,7 +739,9 @@ Rejected:
   end the session.
 - `navigator.sendBeacon`: it cannot set `Authorization`, so it would need a second way to authenticate.
 - A registry of page IDs that ends the session when the last page leaves: a crashed tab never deregisters, so the
-  session would never end.
+  session would never end. The page ids above only exclude closed pages from presence; the grace still decides.
+- Aborting the in-flight poll on `pagehide` instead of page ids: a request the server has already received still
+  counts, so it narrows the race without closing it.
 - Polling alone for several tabs: browsers may delay a hidden tab's timers beyond the grace. Chrome's intensive
   throttling allows one wake-up a minute for chained timers in a tab hidden for 5 minutes. Whether it applies to this
   poll, whose timer is set from a fetch continuation rather than from a timer callback, is not verified. The

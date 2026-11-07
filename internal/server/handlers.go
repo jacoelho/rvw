@@ -765,8 +765,8 @@ func (s *Server) postCancel(w http.ResponseWriter, r *http.Request) {
 
 // postPageClosed records a page's close notice. It always replies 204, also after the session has
 // ended: the page is going away and reads no reply.
-func (s *Server) postPageClosed(w http.ResponseWriter, _ *http.Request) {
-	s.presence.closed()
+func (s *Server) postPageClosed(w http.ResponseWriter, r *http.Request) {
+	s.presence.close(requestPage(r))
 	w.WriteHeader(http.StatusNoContent)
 }
 

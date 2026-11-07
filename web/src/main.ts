@@ -272,7 +272,7 @@ class Page {
    * unless some page makes a request within the close grace. A sibling tab told of the close polls
    * after 1 s rather than at its next regular poll, which may be most of an interval away. The
    * notice is also sent when the page may enter the back/forward cache: a page restored from it
-   * polls at once, inside the grace. Nothing is saved here: unsaved editor text is lost.
+   * takes a new page id and polls at once, inside the grace. Nothing is saved here: unsaved editor text is lost.
    */
   private watchPresence(): void {
     window.addEventListener("pagehide", () => {
@@ -282,7 +282,10 @@ class Page {
       this.api.pageClosed();
     });
     window.addEventListener("pageshow", (e) => {
-      if (e.persisted) this.pollNow();
+      if (!e.persisted) return;
+      // The close notice sent on entering the cache marked the old id closed.
+      this.api.renewPage();
+      this.pollNow();
     });
     // Only a visible page asks for the change check, so a page coming into view checks at once.
     document.addEventListener("visibilitychange", () => {

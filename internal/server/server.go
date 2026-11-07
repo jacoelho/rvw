@@ -313,9 +313,14 @@ func (s *Server) handler(addr string) http.Handler {
 			http.Error(w, "cross-origin request refused", http.StatusForbidden)
 			return
 		}
-		// Any request that passed the checks shows a page is still there, the close notice too:
-		// its handler then starts the grace.
-		s.presence.seen()
+		page, err := parsePageID(r.Header.Get(pageHeader))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// A request that passed the checks shows its page is still there, unless that page sent a
+		// close notice; the notice itself too: its handler then starts the grace.
+		s.presence.seen(page)
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 		api.ServeHTTP(w, r)
 	})
