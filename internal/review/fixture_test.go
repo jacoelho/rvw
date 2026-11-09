@@ -1,7 +1,6 @@
 package review_test
 
 import (
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -10,7 +9,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/jacoelho/rvw/internal/review"
 	"github.com/jacoelho/rvw/internal/source"
@@ -208,26 +206,14 @@ func gitEnv() []string {
 }
 
 // openStore opens the draft store for key in dir and closes it at cleanup unless the test has.
-//
-// A lock released by Store.Close in this process can stay held for a moment: flock belongs to the
-// open file description, and a git child forked by a parallel test shares it until its exec closes
-// it. So a LockedError is retried until a deadline. Separate rvw processes do not share
-// descriptions, so this is a property of the test process only.
 func openStore(t *testing.T, dir, key string) *review.Store {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		st, err := review.OpenStore(dir, key)
-		if _, locked := errors.AsType[*review.LockedError](err); locked && time.Now().Before(deadline) {
-			time.Sleep(10 * time.Millisecond)
-			continue
-		}
-		if err != nil {
-			t.Fatalf("open store: %v", err)
-		}
-		t.Cleanup(func() { _ = st.Close() })
-		return st
+	st, err := review.OpenStore(dir, key)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
 	}
+	t.Cleanup(func() { _ = st.Close() })
+	return st
 }
 
 // start opens a store in dir for the fixture's last snapshot and starts a session.

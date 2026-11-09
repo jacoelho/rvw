@@ -85,6 +85,15 @@ func OpenStore(dir, key string) (*Store, error) {
 	return &Store{draftPath: filepath.Join(dir, key+".json"), lock: lock, key: key}, nil
 }
 
+// unownedHoldWait bounds waiting for a held lock that records no URL. A git child forked by this
+// process shares an open lock file until its exec closes it, so a lock released just before the
+// fork stays held for that window with no session owning it. A session that records its URL is
+// refused at once.
+const (
+	unownedHoldWait = 500 * time.Millisecond
+	unownedHoldPoll = 5 * time.Millisecond
+)
+
 // lockFile opens and flocks path. Expiry may unlink a lock file, so after locking it checks that
 // the locked inode is still the one at path and retries otherwise.
 func lockFile(path string) (*os.File, error) {
@@ -93,15 +102,18 @@ func lockFile(path string) (*os.File, error) {
 		if err != nil {
 			return nil, fmt.Errorf("open draft lock: %w", err)
 		}
-		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-			if !errors.Is(err, syscall.EWOULDBLOCK) {
-				return nil, errors.Join(fmt.Errorf("lock draft: %w", err), f.Close())
+		if err := flockWithin(f, unownedHoldWait); err != nil {
+			var url string
+			if errors.Is(err, syscall.EWOULDBLOCK) {
+				url = lockedURL(f)
 			}
-			url := lockedURL(f)
-			if err := f.Close(); err != nil {
-				return nil, fmt.Errorf("close draft lock: %w", err)
+			if closeErr := f.Close(); closeErr != nil {
+				return nil, errors.Join(err, fmt.Errorf("close draft lock: %w", closeErr))
 			}
-			return nil, &LockedError{URL: url}
+			if errors.Is(err, syscall.EWOULDBLOCK) {
+				return nil, &LockedError{URL: url}
+			}
+			return nil, fmt.Errorf("lock draft: %w", err)
 		}
 		held, err1 := f.Stat()
 		current, err2 := os.Stat(path)
@@ -119,10 +131,23 @@ func lockFile(path string) (*os.File, error) {
 	return nil, errors.New("lock draft: lock file keeps changing")
 }
 
+// flockWithin takes f's exclusive flock, retrying for up to wait while the holder has recorded no
+// URL. It returns syscall.EWOULDBLOCK, unwrapped, when the lock stays held.
+func flockWithin(f *os.File, wait time.Duration) error {
+	deadline := time.Now().Add(wait)
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if !errors.Is(err, syscall.EWOULDBLOCK) || lockedURL(f) != "" || time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(unownedHoldPoll)
+	}
+}
+
 // lockedURL reads the URL another session recorded in its lock file. An unreadable URL reads as
 // empty, which reports that session as still starting.
 func lockedURL(f *os.File) string {
-	data, err := io.ReadAll(io.LimitReader(f, 4<<10))
+	data, err := io.ReadAll(io.NewSectionReader(f, 0, 4<<10))
 	if err != nil {
 		return ""
 	}

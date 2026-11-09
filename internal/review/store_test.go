@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -202,10 +203,8 @@ func lastIn(t *testing.T, dir string) *source.Snapshot {
 }
 
 // TestExpireDrafts checks that drafts unused for 30 days expire unless a session holds them.
-//
-// Not parallel: a git child forked by a parallel test briefly shares a closed store's lock (see
-// openStore), and expiry would then rightly skip the draft as held.
 func TestExpireDrafts(t *testing.T) {
+	t.Parallel()
 	fx := newFixture(t)
 	dir := t.TempDir()
 	s, st := fx.start(t, dir, review.NewSeed())
@@ -289,6 +288,33 @@ func TestExpireDraftsWithoutDirectory(t *testing.T) {
 	t.Parallel()
 	if err := review.ExpireDrafts(t.TempDir()+"/missing", time.Now()); err != nil {
 		t.Fatalf("ExpireDrafts on a missing directory: %v", err)
+	}
+}
+
+// TestStoreLockWaitsOutAnUnownedHold: a lock held with no URL recorded, as a git child forked
+// just before a store closed still holds it until its exec, is taken once released.
+func TestStoreLockWaitsOutAnUnownedHold(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// An open file description holding the lock and recording no URL, as the child's copy would.
+	child, err := os.Create(filepath.Join(dir, "k.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(child.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	released := make(chan error, 1)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		released <- child.Close()
+	}()
+	st, err := review.OpenStore(dir, "k")
+	if err != nil {
+		t.Fatalf("OpenStore while an unowned hold is released after 50ms: %v", err)
+	}
+	if err := errors.Join(<-released, st.Close()); err != nil {
+		t.Fatal(err)
 	}
 }
 
