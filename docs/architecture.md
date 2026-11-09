@@ -114,7 +114,9 @@ Inside a boundary, values are trusted; there is no re-validation.
   renamed into place, and only then applied in memory, so the draft on disk is never behind what the UI was told.
 - **Lock.** An exclusive `flock` per snapshot key makes one session the only writer. A second instance reports the
   first one's URL instead of starting. Startup runs in order: resolve the snapshot, parse the seed, take the lock,
-  load the draft, serve. The lock records the URL only once serving starts.
+  load the draft, serve. The lock records the URL only once serving starts. A lock held with no URL recorded is
+  retried for up to 0.5 s before it is reported as another session starting: a `git` child forked by rvw shares an
+  open lock file until its exec closes it, so a lock released just before a fork stays held for that window.
 - **Draft retention.** A resumed draft ignores the seed. A draft that cannot be restored is moved aside, not
   overwritten. At start, drafts unused for 30 days, and moved-aside drafts and temporary draft files older than
   30 days, are deleted.

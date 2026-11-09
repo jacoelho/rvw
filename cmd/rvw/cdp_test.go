@@ -117,6 +117,12 @@ func startBrowser(path string) (*browser, error) {
 		"--no-first-run",
 		"--no-default-browser-check",
 		"--disable-background-networking",
+		// Parallel tests share this browser, one tab each, and only one tab is in front. Chrome
+		// may stop drawing frames in background tabs and throttle their timers, which would time
+		// out a test waiting on requestAnimationFrame or a status poll.
+		"--disable-background-timer-throttling",
+		"--disable-renderer-backgrounding",
+		"--disable-backgrounding-occluded-windows",
 		"--disable-component-update",
 		"--disable-sync",
 		"--password-store=basic",
