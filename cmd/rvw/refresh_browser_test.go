@@ -102,3 +102,44 @@ func TestBrowserRefreshNothingChanged(t *testing.T) {
 	}
 	pg.noPageErrors()
 }
+
+// TestBrowserRefreshKeepsTextTypedMeanwhile: while this page's refresh is in flight, Refresh and
+// Finish are disabled, and a comment begun meanwhile is not lost when the refresh moves the review:
+// the page asks before it reloads (REQ-SES-015).
+func TestBrowserRefreshKeepsTextTypedMeanwhile(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	w.write("b/x.go", "package b\n\nvar Y = 1\n")
+	w.commit("base")
+	w.write("b/x.go", "package b\n\nvar Y = 2\n")
+	p := w.start(procOptions{}, "uncommitted")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+
+	w.write("b/x.go", "package b\n\nvar Y = 3\n")
+	pg.eval(`window.rvwBeforeReload = true`, nil)
+	pg.holdPosts("/api/refresh")
+	pg.click("Refresh", button("header", "Refresh"), 0)
+	pg.waitTrue("the held refresh", `window.rvwPosts["/api/refresh"] === 1`)
+	for _, label := range []string{"Refresh", "Finish…"} {
+		if !pg.bool(`(` + button("header", label) + `).disabled`) {
+			pg.fatalf("%s is enabled while the refresh is in flight", label)
+		}
+	}
+	pg.click("new line 3", newLine(3), 0)
+	pg.waitFocus("the diff editor", diffEditor)
+	pg.insertText("typed meanwhile")
+
+	pg.eval(`window.rvwRelease()`, nil)
+	pg.waitTrue("the reload prompt", `document.querySelector(".superseded-banner") !== null`)
+	if !pg.bool(`window.rvwBeforeReload === true`) {
+		pg.fatalf("the refresh reloaded the page over an open editor")
+	}
+	if got := pg.text(diffEditor + `.value`); got != "typed meanwhile" {
+		pg.fatalf("the editor holds %q, want the text typed during the refresh", got)
+	}
+	pg.click("Reload", button(".superseded-banner", "Reload"), 0)
+	pg.waitTrue("the reloaded page", `window.rvwBeforeReload === undefined && document.readyState === "complete" && document.querySelector(".tree-row") !== null`)
+	pg.noPageErrors()
+}

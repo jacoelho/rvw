@@ -108,8 +108,13 @@ Inside a boundary, values are trusted; there is no re-validation.
     running (`probeMu.TryLock`), no refresh holds the lock (`refreshMu.TryRLock`), the generation is still current and
     the last check ended at least 10 s ago. The result sticks in the generation until a refresh.
   - Page: a 409 naming a generation makes the page reload, or show a reload prompt while an editor or the Finish
-    dialog is open; a status reply naming another generation does the same, so other tabs follow a refresh. The moved
-    list shows until dismissed, per generation, in `sessionStorage`.
+    dialog is open; a status reply naming another generation does the same, so other tabs follow a refresh. The
+    page's own changed refresh follows the same rule, so an editor opened while it was in flight is not reloaded away.
+    The moved list shows until dismissed, per generation, in `sessionStorage`.
+  - Page lifecycle: `main.ts` holds one `Lifecycle` value, `live`, `refreshing`, `superseded`, `leaving` or `ended`,
+    and every page gate reads it. Refresh and Finish start only from `live`, and their buttons are disabled
+    otherwise; `leaving` and `ended` are final: nothing polls and no close notice is sent. `Page.leaveGeneration`
+    is the one decider between reloading and the reload prompt.
 - **Draft.** `review.Session` is its only writer. Each mutation is validated, written to a temporary file, fsynced and
   renamed into place, and only then applied in memory, so the draft on disk is never behind what the UI was told.
 - **Lock.** An exclusive `flock` per snapshot key makes one session the only writer. A second instance reports the
@@ -206,6 +211,9 @@ Inside a boundary, values are trusted; there is no re-validation.
   refused; the transition that started it decides what is shown next. A click on Edit while Finish is leaving the
   editor opens nothing, because that editor is still saving. A palette result in the shown file also goes through
   `leaveEditor`, then reveals its line without reloading the file.
+- **Finish outcome.** The Finish dialog has at most one outcome request in flight (`Outcome`: copying, sending
+  or cancelling). While one runs, every action that copies, ends, closes or edits the review is refused, including
+  Esc and Discard, so one click cannot cancel a review another is sending.
 - **Content search.** Each search's `git grep` runs belong to its request: they stop when the client goes away, the
   session ends, the match cap or output limit is reached or the 2 s budget is spent. The UI sends a search 200 ms after
   the last keystroke, aborts it on the next keystroke, close or mode change, and applies a reply only while it is the

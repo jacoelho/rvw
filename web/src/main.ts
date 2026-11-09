@@ -47,6 +47,18 @@ async function main(): Promise<void> {
   new Page(api, state);
 }
 
+/**
+ * Where the page is in its life. Every gate on the page reads this one value.
+ * - live: shows the current generation and accepts changes;
+ * - refreshing: this page's refresh is in flight; Refresh and Finish wait for it (REQ-SES-013);
+ * - superseded: the review moved to another generation while an editor or the Finish dialog was
+ *   open; the page waits for the human to reload (REQ-SES-015);
+ * - leaving: the page is reloading into the current generation;
+ * - ended: the session ended and the end page is shown.
+ * Leaving and ended are final: nothing polls, and closing the page sends no close notice.
+ */
+type Lifecycle = "live" | "refreshing" | "superseded" | "leaving" | "ended";
+
 class Page {
   private readonly tree: FileTree;
   private readonly fileView: FileView;
@@ -63,11 +75,10 @@ class Page {
   private readonly wsBox: HTMLInputElement;
   private readonly wrapBox: HTMLInputElement;
   private readonly refreshButton: HTMLButtonElement;
+  private readonly finishButton: HTMLButtonElement;
   /** The notice that the change under review changed; null while it has not (REQ-SES-010). */
   private changedBanner: HTMLElement | null = null;
-  /** The prompt to reload a page another page's refresh superseded; null until then. */
-  private supersededBanner: HTMLElement | null = null;
-  private refreshing = false;
+  private lifecycle: Lifecycle = "live";
   /** The round strip under the top bar; empty when there was no earlier review. */
   private readonly round: HTMLElement;
   /**
@@ -81,7 +92,6 @@ class Page {
   private poll = 0;
   /** The live poll run: a run whose number differs was superseded and stops. */
   private pollRun = 0;
-  private ended = false;
   /** Tells the other tabs of this session that one is closing, so they show presence at once (Q-42). */
   private readonly tabs = new BroadcastChannel("rvw");
   private toastTimer = 0;
@@ -129,10 +139,10 @@ class Page {
     this.refreshButton = h("button", "btn refresh-btn", "Refresh");
     this.refreshButton.title = "Take a new snapshot of the same changes and carry the draft over";
     this.refreshButton.addEventListener("click", () => this.run(this.refresh()));
-    const finish = h("button", "btn primary finish-btn", "Finish…");
-    finish.title = "⌘↵";
-    finish.addEventListener("click", () => this.run(this.openFinish()));
-    header.append(brand(), source, files, progress, h("span", "spacer"), wrap, ws, search, this.layoutButton, this.refreshButton, finish);
+    this.finishButton = h("button", "btn primary finish-btn", "Finish…");
+    this.finishButton.title = "⌘↵";
+    this.finishButton.addEventListener("click", () => this.run(this.openFinish()));
+    header.append(brand(), source, files, progress, h("span", "spacer"), wrap, ws, search, this.layoutButton, this.refreshButton, this.finishButton);
     this.round = h("div", "round-banner");
 
     this.banners = h("div", "banners");
@@ -231,7 +241,7 @@ class Page {
           this.renderChanged();
           break;
         case "superseded":
-          this.superseded();
+          this.leaveGeneration();
           break;
         case "whitespace":
           if (this.state.hideWhitespace && this.state.whitespace.size > 0) this.regroup();
@@ -276,7 +286,7 @@ class Page {
    */
   private watchPresence(): void {
     window.addEventListener("pagehide", () => {
-      if (this.ended) return;
+      if (this.over) return;
       // The message first: a closing page may be torn down before a later message leaves it.
       this.tabs.postMessage("closing");
       this.api.pageClosed();
@@ -292,7 +302,7 @@ class Page {
       if (document.visibilityState === "visible") this.pollNow();
     });
     this.tabs.onmessage = (e: MessageEvent) => {
-      if (e.data !== "closing" || this.ended) return;
+      if (e.data !== "closing" || this.over) return;
       window.setTimeout(() => this.pollNow(), 1000);
     };
   }
@@ -333,13 +343,13 @@ class Page {
    * file the line is revealed without reloading, so context expanded earlier stays.
    */
   private async goTo(t: GoTarget): Promise<void> {
-    if (this.ended) return;
+    if (this.over) return;
     if (t.file === this.fileView.file && this.fileView.loaded) {
       if (!(await this.fileView.leaveEditor())) return;
     } else if (!(await this.select(t.file))) {
       return;
     }
-    if (t.line === undefined || this.ended) return;
+    if (t.line === undefined || this.over) return;
     const shown = await this.fileView.revealLine(t.side ?? "new", t.line);
     if (shown === "absent") this.notify(`Line ${t.line} is not shown: the file has no such line; the file is open`);
     else if (shown === "hidden") this.notify(`Line ${t.line} is not shown: it is outside the lines this file shows; the file is open`);
@@ -350,9 +360,10 @@ class Page {
    * failed save keeps the editor, showing why, and the dialog closed.
    */
   private async openFinish(): Promise<void> {
-    if (this.ended || this.finish.isOpen) return;
+    if (!this.canStart()) return;
     if (!(await this.fileView.leaveEditor())) return;
-    if (this.ended || this.finish.isOpen) return;
+    // Leaving the editor awaited its save, during which the page may have moved on.
+    if (!this.canStart()) return;
     this.finish.open();
   }
 
@@ -493,7 +504,7 @@ class Page {
   }
 
   private onKey(e: KeyboardEvent): void {
-    if (this.ended) return;
+    if (this.over) return;
     if (e.key.toLowerCase() === "k" && e.metaKey && !e.ctrlKey && !e.altKey) {
       if (this.finish.isOpen || this.palette.isOpen) return;
       if (e.target instanceof Element && e.target.closest("textarea, [contenteditable]")) return;
@@ -595,7 +606,7 @@ class Page {
    * superseded run's fetch may still settle; State applies status replies idempotently.
    */
   private pollNow(): void {
-    if (this.ended) return;
+    if (this.over) return;
     window.clearTimeout(this.poll);
     const run = ++this.pollRun;
     void this.pollStatus(run);
@@ -603,18 +614,18 @@ class Page {
 
   /** Polls the server's status until the session ends or the run is superseded; it never rejects. */
   private async pollStatus(run: number): Promise<void> {
-    if (run !== this.pollRun || this.ended) return;
+    if (run !== this.pollRun || this.over) return;
     try {
       await this.state.syncStatus(document.visibilityState === "visible");
     } catch (err) {
-      if (run !== this.pollRun || this.ended) return;
+      if (run !== this.pollRun || this.over) return;
       // Other failures are transient: the next poll retries.
       if (isGone(err)) {
         this.failed(err);
         return;
       }
     }
-    if (run !== this.pollRun || this.ended) return;
+    if (run !== this.pollRun || this.over) return;
     // While counts or marks stream in, poll faster so the tree fills promptly.
     const settled = this.state.countsDone && this.state.whitespaceDone;
     this.poll = window.setTimeout(() => void this.pollStatus(run), settled ? this.state.statusIntervalMs : Math.min(1000, this.state.statusIntervalMs));
@@ -659,63 +670,87 @@ class Page {
 
   /**
    * Refreshes the review (REQ-SES-013). The open comment is left first, as moving to another file
-   * leaves it, and every write is settled, so nothing unsaved is lost: the page then reloads.
+   * leaves it, and every write is settled, so nothing unsaved is lost: the page then leaves the
+   * generation as for any refresh.
    */
   private async refresh(): Promise<void> {
-    if (this.refreshing || this.ended || this.finish.isOpen) return;
+    if (!this.canStart()) return;
     if (!(await this.fileView.leaveEditor())) {
       this.notify("Save or close the open comment, then refresh.", true);
       return;
     }
-    this.refreshing = true;
-    this.refreshButton.disabled = true;
+    if (!this.canStart()) return;
+    this.setLifecycle("refreshing");
+    let unchanged: boolean;
     try {
       await this.state.settled();
-      const r = await this.api.refresh();
-      if (!r.unchanged) {
-        this.reload();
-        return;
-      }
-      this.notify("Nothing changed: the review already shows the current changes.");
-      this.pollNow();
+      unchanged = (await this.api.refresh()).unchanged;
     } finally {
-      this.refreshing = false;
-      this.refreshButton.disabled = false;
+      // A status reply naming the new generation may already have moved the page on.
+      if (this.lifecycle === "refreshing") this.setLifecycle("live");
     }
+    if (!unchanged) {
+      this.leaveGeneration();
+      return;
+    }
+    this.notify("Nothing changed: the review already shows the current changes.");
+    this.pollNow();
   }
 
   /**
-   * The review moved to another generation (REQ-SES-015). The page reloads at once unless an
-   * editor or the Finish dialog may hold text the server has not saved: then it asks first.
+   * The review moved to another generation (REQ-SES-015), by this page's refresh or another's. The
+   * page reloads at once unless an editor or the Finish dialog may hold text the server has not
+   * saved, such as one opened while the refresh was in flight: then it asks first.
    */
-  private superseded(): void {
-    if (this.ended || this.supersededBanner) return;
+  private leaveGeneration(): void {
+    if (this.lifecycle !== "live" && this.lifecycle !== "refreshing") return;
     if (!this.fileView.hasEditor() && !this.finish.isOpen) {
       this.reload();
       return;
     }
-    const banner = h("div", "banner warn");
+    this.setLifecycle("superseded");
+    const banner = h("div", "banner warn superseded-banner");
     const button = h("button", "btn", "Reload");
     button.addEventListener("click", () => this.reload());
-    banner.append(h("span", "", "The review was refreshed in another page, so changes here can no longer be saved. Copy any unsaved text, then reload. "), button);
-    this.supersededBanner = banner;
+    banner.append(h("span", "", "The review was refreshed, so changes here can no longer be saved. Copy any unsaved text, then reload. "), button);
     this.banners.append(banner);
   }
 
   /** Loads the current generation. The page is not closing, so no close notice is sent. */
   private reload(): void {
-    this.ended = true;
-    window.clearTimeout(this.poll);
+    this.setLifecycle("leaving");
     location.reload();
+  }
+
+  /**
+   * Whether Refresh or Finish may start: the page is live and the dialog closed. A method, so a
+   * check after an await reads the lifecycle again instead of a narrowing from before it.
+   */
+  private canStart(): boolean {
+    return this.lifecycle === "live" && !this.finish.isOpen;
+  }
+
+  /** Whether the page has stopped serving this session: it is reloading or shows the end page. */
+  private get over(): boolean {
+    return this.lifecycle === "leaving" || this.lifecycle === "ended";
+  }
+
+  /** Moves the page to next and applies what follows from it to the controls and the poll loop. */
+  private setLifecycle(next: Lifecycle): void {
+    this.lifecycle = next;
+    // Refresh and Finish start only from live, so their buttons say so.
+    this.refreshButton.disabled = next !== "live";
+    this.finishButton.disabled = next !== "live";
+    if (this.over) window.clearTimeout(this.poll);
   }
 
   private failed(err: unknown): void {
     if (err instanceof Superseded) {
-      this.superseded();
+      this.leaveGeneration();
       return;
     }
     if (isGone(err)) {
-      if (!this.ended) this.end("rvw is no longer running", "This review session has ended. Saved changes are in the draft.");
+      if (!this.over) this.end("rvw is no longer running", "This review session has ended. Saved changes are in the draft.");
       return;
     }
     this.notify(err instanceof Error ? err.message : String(err), true);
@@ -735,9 +770,9 @@ class Page {
     task.catch((err: unknown) => this.failed(err));
   }
 
+  /** Shows the end page. A later call replaces it, so a delivered result outranks an earlier "no longer running". */
   private end(title: string, text: string, markdown?: string): void {
-    this.ended = true;
-    window.clearTimeout(this.poll);
+    this.setLifecycle("ended");
     this.tabs.close();
     sessionStorage.removeItem(TOKEN_KEY);
     endPage(title, text, markdown);
