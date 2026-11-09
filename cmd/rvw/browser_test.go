@@ -467,6 +467,49 @@ func TestBrowserCancel(t *testing.T) {
 	pg.noPageErrors()
 }
 
+// TestBrowserFinishOneOutcome: while Send is in flight, the dialog refuses every other action that
+// would end, copy or leave the review, so the review ends once, as sent, and is never cancelled.
+func TestBrowserFinishOneOutcome(t *testing.T) {
+	t.Parallel()
+	w := oneFileWorld(t)
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+
+	pg.click("Finish…", button("header", "Finish…"), 0)
+	pg.waitTrue("the dialog", `document.querySelector("dialog").open`)
+	pg.holdPosts("/api/finish")
+	pg.click("Send review", button("dialog", "Send review"), 0)
+	pg.waitTrue("the held finish", `window.rvwPosts["/api/finish"] === 1`)
+
+	for _, label := range []string{"Send review", "Copy and finish", "Copy as Markdown", "Close", "Cancel review…", "Add review comment"} {
+		if !pg.bool(`(` + button("dialog", label) + `).disabled`) {
+			pg.fatalf("%s is enabled while the review is being sent", label)
+		}
+	}
+	pg.click("Cancel review…", button("dialog", "Cancel review…"), 0)
+	pg.press("Escape", "Escape", 27, 0)
+	if !pg.bool(`document.querySelector("dialog").open`) {
+		pg.fatalf("Esc closed the dialog while the review was being sent")
+	}
+	if !pg.bool(`document.querySelector(".fin-cancel").hidden`) {
+		pg.fatalf("Cancel review… offered to discard the review while it was being sent")
+	}
+
+	pg.eval(`window.rvwRelease()`, nil)
+	pg.waitTrue("Review sent", endTitle+` === "Review sent"`)
+	if code := p.exitCode(); code != 0 {
+		t.Fatalf("exit %d, want 0; stderr:\n%s", code, p.stderr)
+	}
+	var posts map[string]int
+	pg.eval(`window.rvwPosts`, &posts)
+	if posts["/api/finish"] != 1 || posts["/api/cancel"] != 0 {
+		t.Errorf("POSTs %v; want one finish and no cancel", posts)
+	}
+	pg.noPageErrors()
+}
+
 // TestBrowserRejectedSave covers a save the server refuses: the editor stays open
 // with its text and the reason, the review goes on, and a valid save then succeeds.
 func TestBrowserRejectedSave(t *testing.T) {
@@ -930,6 +973,32 @@ func (pg *page) wrapCommentPuts() {
 				throw new TypeError("Failed to fetch");
 			}
 			return res;
+		};
+	})()`, nil)
+}
+
+// holdPosts wraps the page's fetch for POSTs: each is counted in window.rvwPosts by path, and one to
+// a path in held waits until window.rvwRelease() is called, as a slow server would make it.
+func (pg *page) holdPosts(held ...string) {
+	pg.t.Helper()
+	paths, err := json.Marshal(held)
+	if err != nil {
+		pg.fatalf("encode held paths: %v", err)
+	}
+	pg.eval(`(() => {
+		const real = window.fetch;
+		const held = new Set(`+string(paths)+`);
+		let release;
+		const gate = new Promise((r) => (release = r));
+		window.rvwRelease = () => release();
+		window.rvwPosts = {};
+		window.fetch = async (input, init) => {
+			if (init?.method === "POST") {
+				const path = new URL(String(input), location.href).pathname;
+				window.rvwPosts[path] = (window.rvwPosts[path] ?? 0) + 1;
+				if (held.has(path)) await gate;
+			}
+			return real(input, init);
 		};
 	})()`, nil)
 }

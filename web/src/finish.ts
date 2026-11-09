@@ -48,6 +48,13 @@ type QuoteState = Quote | "loading" | "failed";
 
 type QuoteEntry = { target: string; quote: QuoteState };
 
+/**
+ * The request the dialog has in flight to copy or end the review: none (idle), copying the result,
+ * sending it, or cancelling the review. One runs at a time; while one runs, every action that
+ * would copy, end, close or change the review is refused, so a second click can neither end the
+ * session twice nor race the first to the end page.
+ */
+type Outcome = "idle" | "copying" | "sending" | "cancelling";
 
 export class FinishDialog {
   readonly el: HTMLDialogElement;
@@ -59,11 +66,14 @@ export class FinishDialog {
   private readonly copy: HTMLButtonElement;
   private readonly copyAndSend: HTMLButtonElement;
   private readonly cancelBar: HTMLElement;
+  /** Every control an outcome request disables. */
+  private readonly controls: HTMLButtonElement[];
+  private readonly listEl: HTMLElement;
   private rows: Row[] = [];
   private edit: CommentEditor | null = null;
   /** An editor is being left so another can open; clicks meanwhile are ignored. */
   private leaving = false;
-  private busy = false;
+  private outcome: Outcome = "idle";
   /** Quotes read while the dialog is open; cleared when it closes, so it holds at most one per comment. */
   private readonly quotes = new Map<string, QuoteEntry>();
   /** The mounted quote element of each comment, to fill in place when its quote arrives. */
@@ -96,13 +106,14 @@ export class FinishDialog {
     listHead.append(filter, addReview);
 
     const listEl = h("div", "fin-list");
+    this.listEl = listEl;
     this.list = new VirtualList(listEl, 32, 90);
 
     this.status = h("div", "fin-status");
     this.copy = h("button", "btn", "Copy as Markdown");
-    this.copy.addEventListener("click", () => void this.copyMarkdown());
+    this.copy.addEventListener("click", () => void this.request("copying", () => this.copyMarkdown()));
     this.copyAndSend = h("button", "btn", "Copy and finish");
-    this.copyAndSend.addEventListener("click", () => void this.copyAndFinish());
+    this.copyAndSend.addEventListener("click", () => void this.request("copying", () => this.copyAndFinish()));
     this.sendButton = h("button", "btn primary", "Send review");
     this.sendButton.title = "⌘↵";
     this.sendButton.addEventListener("click", () => void this.finish());
@@ -114,16 +125,22 @@ export class FinishDialog {
     this.cancelBar = h("div", "fin-cancel");
     this.cancelBar.hidden = true;
     const yes = h("button", "btn danger", "Discard the review");
-    yes.addEventListener("click", () => this.run(this.cancelReview()));
+    yes.addEventListener("click", () => void this.request("cancelling", () => this.cancelReview()));
     const no = h("button", "btn", "Keep reviewing");
     no.addEventListener("click", () => (this.cancelBar.hidden = true));
     this.cancelBar.append(h("span", "", "Cancel deletes the draft and tells the agent the review was cancelled."), yes, no);
+    this.controls = [this.sendButton, this.copy, this.copyAndSend, close, cancel, yes, no, addReview];
 
     const actions = h("div", "fin-actions");
     actions.append(cancel, h("span", "spacer"), close, this.copy, this.copyAndSend, this.sendButton);
 
     this.el.append(h("h2", "", "Finish review"), this.summary, listHead, listEl, this.cancelBar, this.status, actions);
     this.el.addEventListener("cancel", (e) => {
+      // A request in flight keeps the dialog open: it shows how the request ends.
+      if (this.outcome !== "idle") {
+        e.preventDefault();
+        return;
+      }
       // Esc closes the inner editor first.
       if (this.edit) {
         e.preventDefault();
@@ -145,7 +162,7 @@ export class FinishDialog {
     // Only this dialog edits the summary, so its text is the saved summary or one whose save failed.
     this.cancelBar.hidden = true;
     this.status.textContent = "";
-    this.syncBusy();
+    this.syncControls();
     this.el.showModal();
     this.rebuild();
     this.summary.focus();
@@ -202,15 +219,31 @@ export class FinishDialog {
     await this.state.setSummary(text);
   }
 
-  private setBusy(busy: boolean): void {
-    this.busy = busy;
-    this.syncBusy();
+  /**
+   * Runs task as the dialog's one outcome request, kind, unless one is in flight; the dialog is
+   * idle again when it settles. A failure is reported by task itself.
+   */
+  private async request(kind: Exclude<Outcome, "idle">, task: () => Promise<void>): Promise<void> {
+    if (this.outcome !== "idle") return;
+    this.setOutcome(kind);
+    try {
+      await task();
+    } finally {
+      this.setOutcome("idle");
+    }
   }
 
-  private syncBusy(): void {
-    this.sendButton.disabled = this.busy;
-    this.copy.disabled = this.busy;
-    this.copyAndSend.disabled = this.busy;
+  private setOutcome(next: Outcome): void {
+    this.outcome = next;
+    this.syncControls();
+  }
+
+  private syncControls(): void {
+    const busy = this.outcome !== "idle";
+    for (const b of this.controls) b.disabled = busy;
+    // Text typed now would miss the result being built, so the summary and the comments wait.
+    this.summary.readOnly = busy;
+    this.listEl.inert = busy;
   }
 
   /**
@@ -267,34 +300,22 @@ export class FinishDialog {
   }
 
   /** Sends the review (Send, and ⌘↵ in the dialog). */
-  async finish(): Promise<void> {
-    if (this.busy) return;
-    this.setBusy(true);
-    try {
-      await this.send(null);
-    } finally {
-      this.setBusy(false);
-    }
+  finish(): Promise<void> {
+    return this.request("sending", () => this.send(null));
   }
 
   /** Copies the result and sends the review only once the clipboard holds it (REQ-OUT-008). */
   private async copyAndFinish(): Promise<void> {
-    // Busy from the click on, so a second click neither copies nor sends again.
-    if (this.busy) return;
-    this.setBusy(true);
+    let copied: string | null;
     try {
-      let copied: string | null;
-      try {
-        copied = await this.copyResult();
-      } catch (err) {
-        this.copyFailed(err);
-        return;
-      }
-      if (copied === null) return;
-      await this.send(copied);
-    } finally {
-      this.setBusy(false);
+      copied = await this.copyResult();
+    } catch (err) {
+      this.copyFailed(err);
+      return;
     }
+    if (copied === null) return;
+    this.setOutcome("sending");
+    await this.send(copied);
   }
 
   /**
