@@ -1765,9 +1765,8 @@ func (pg *page) polls() int {
 // its regular poll has just fired; either way rvw is still running 13 s after the close, and the
 // remaining tab finishes the review.
 func TestBrowserPageSurvivesReloadAndSiblingClose(t *testing.T) {
-	// Not parallel: with a second tab open beside other tests in the shared Chrome, a tab
-	// intermittently fails to answer within the wait, even with background throttling disabled
-	// (cause unconfirmed); run alone, none did.
+	// Not parallel: while it ran beside other tests, their pages intermittently lost focus or
+	// stopped answering for 10 s in the shared Chrome (cause unconfirmed); run alone, none did.
 	w := oneFileWorld(t)
 	p := w.start(procOptions{}, "last")
 	p.waitURL()
@@ -1835,7 +1834,8 @@ func (pg *page) leave() int {
 // under the closed id would not keep it (Q-42). Leaving again without returning ends rvw with
 // status 4.
 func TestBrowserBackForwardCache(t *testing.T) {
-	t.Parallel()
+	// Not parallel: while it ran beside other tests, their pages intermittently lost focus or
+	// stopped answering for 10 s in the shared Chrome (cause unconfirmed); run alone, none did.
 	w := oneFileWorld(t)
 	p := w.start(procOptions{}, "last")
 	p.waitURL()
@@ -1873,7 +1873,7 @@ func TestBrowserBackForwardCache(t *testing.T) {
 // arriving while a status poll is in flight, makes the page poll at once and leaves it one poll
 // loop: after the held poll is released, polls start one interval apart.
 func TestBrowserPollRestartKeepsOneLoop(t *testing.T) {
-	t.Parallel()
+	// Not parallel: see TestBrowserPageSurvivesReloadAndSiblingClose.
 	for _, tc := range []struct {
 		name, trigger string
 		within        time.Duration
@@ -1883,7 +1883,6 @@ func TestBrowserPollRestartKeepsOneLoop(t *testing.T) {
 		{"sibling closing", `new BroadcastChannel("rvw").postMessage("closing")`, 2 * time.Second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			w := oneFileWorld(t)
 			p := w.start(procOptions{}, "last")
 			p.waitURL()

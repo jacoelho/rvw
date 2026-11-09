@@ -19,7 +19,9 @@ const (
 // file and listed; a second tab still on the old snapshot reloads by itself; the result is the
 // refreshed review.
 func TestBrowserRefresh(t *testing.T) {
-	// Not parallel, like TestBrowserPageSurvivesReloadAndSiblingClose: it opens a second tab.
+	// Not parallel, like TestBrowserPageSurvivesReloadAndSiblingClose: with a second tab open
+	// beside other tests, their pages intermittently lost focus or stopped drawing frames in the
+	// shared Chrome; run alone, none did.
 	w := newWorld(t)
 	w.write("b/x.go", "package b\n\nvar Y = 1\n\nvar Z = 1\n")
 	w.commit("base")
