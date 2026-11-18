@@ -1816,8 +1816,8 @@ func (pg *page) polls() int {
 // its regular poll has just fired; either way rvw is still running 13 s after the close, and the
 // remaining tab finishes the review.
 func TestBrowserPageSurvivesReloadAndSiblingClose(t *testing.T) {
-	// Not parallel: while it ran beside other tests, their pages intermittently lost focus or
-	// stopped answering for 10 s in the shared Chrome (cause unconfirmed); run alone, none did.
+	// Not parallel: its timing bounds (a poll within 3 s) have not been shown to hold beside other
+	// tests in the shared Chrome.
 	w := oneFileWorld(t)
 	p := w.start(procOptions{}, "last")
 	p.waitURL()

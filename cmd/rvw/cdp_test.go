@@ -119,6 +119,10 @@ func startBrowser(path string) (*browser, error) {
 		"--disable-background-networking",
 		"--disable-component-update",
 		"--disable-sync",
+		// Every window of the headless browser sits at the same place, so each new one covers the
+		// earlier ones; Chrome would mark a covered window's pages hidden, throttling their timers
+		// and stopping their frames, while the tests drive them.
+		"--disable-backgrounding-occluded-windows",
 		"--password-store=basic",
 		"--use-mock-keychain",
 		fmt.Sprintf("--window-size=%d,%d", viewWidth, viewHeight),
@@ -252,6 +256,7 @@ type page struct {
 
 	mu       sync.Mutex
 	errors   []string
+	notes    []string        // what Chrome reported that is no page error but explains a failure
 	inflight map[string]bool // request IDs the page has sent and not yet seen end
 }
 
@@ -275,7 +280,15 @@ func openPage(t *testing.T, p *proc) *page {
 // would: the tabs share the origin, so a BroadcastChannel reaches both.
 func openTab(pg *page) *page {
 	pg.t.Helper()
-	return newTab(pg.t, pg.b, pg.proc, pg.context)
+	other := newTab(pg.t, pg.b, pg.proc, pg.context)
+	for _, p := range []*page{pg, other} {
+		var state string
+		p.eval(`document.visibilityState`, &state)
+		if state != "visible" {
+			p.fatalf("a page is %s after opening a second tab; every test page must stay visible", state)
+		}
+	}
+	return other
 }
 
 func newTab(t *testing.T, b *browser, p *proc, context string) *page {
@@ -283,7 +296,9 @@ func newTab(t *testing.T, b *browser, p *proc, context string) *page {
 	var target struct {
 		TargetID string `json:"targetId"`
 	}
-	if err := b.call("", "Target.createTarget", map[string]any{"url": "about:blank", "browserContextId": context}, &target); err != nil {
+	// A tab of its own window: a second tab in the opener's window would hide the opener, whose
+	// timers Chrome then throttles and which stops drawing frames and answering input.
+	if err := b.call("", "Target.createTarget", map[string]any{"url": "about:blank", "browserContextId": context, "newWindow": true}, &target); err != nil {
 		t.Fatal(err)
 	}
 	var att struct {
@@ -353,6 +368,21 @@ func (pg *page) event(m cdpMessage) {
 		} else {
 			delete(pg.inflight, e.RequestID)
 		}
+		pg.mu.Unlock()
+		return
+	case "Page.backForwardCacheNotUsed":
+		var e struct {
+			Explanations []struct {
+				Reason string `json:"reason"`
+			} `json:"notRestoredExplanations"`
+		}
+		_ = json.Unmarshal(m.Params, &e) // an undecodable event is still recorded, without reasons
+		reasons := make([]string, 0, len(e.Explanations))
+		for _, x := range e.Explanations {
+			reasons = append(reasons, x.Reason)
+		}
+		pg.mu.Lock()
+		pg.notes = append(pg.notes, "back/forward cache not used: "+strings.Join(reasons, ", "))
 		pg.mu.Unlock()
 		return
 	case "Runtime.exceptionThrown":
@@ -497,8 +527,9 @@ func (pg *page) waitIdle() {
 // fatalf ends the test with what the page shows, the server's session, and rvw's stderr.
 func (pg *page) fatalf(format string, args ...any) {
 	pg.t.Helper()
-	var body string
+	var body, state string
 	_ = pg.tryEval(`document.body ? document.body.innerText.slice(0, 2000) : ""`, &body) // best effort: the report is already a failure
+	_ = pg.tryEval(`document.visibilityState + ", focus " + document.hasFocus()`, &state)
 	var session string
 	if pg.proc != nil {
 		select {
@@ -518,9 +549,10 @@ func (pg *page) fatalf(format string, args ...any) {
 	}
 	pg.mu.Lock()
 	errs := strings.Join(pg.errors, "\n")
+	notes := strings.Join(pg.notes, "\n")
 	pg.mu.Unlock()
-	pg.t.Fatalf("%s\n--- %s\n--- page text:\n%s\n--- page errors:\n%s\n--- session:\n%s\n--- rvw stderr:\n%s",
-		fmt.Sprintf(format, args...), pg.b.version, body, errs, session, stderr)
+	pg.t.Fatalf("%s\n--- %s\n--- page state: %s\n--- page text:\n%s\n--- page errors:\n%s\n--- page notes:\n%s\n--- session:\n%s\n--- rvw stderr:\n%s",
+		fmt.Sprintf(format, args...), pg.b.version, state, body, errs, notes, session, stderr)
 }
 
 // Modifier bits for Input.dispatch*Event.
@@ -533,12 +565,43 @@ const (
 
 // click finds the element a JavaScript expression yields, scrolls it into view, and presses the
 // mouse at its centre. The element is found again on every call, since rows re-render.
+//
+// A re-render between the press and the release replaces the pressed element, so the click lands
+// on an ancestor of its replacement and no handler applies it. click then finds the element and
+// clicks again, at most clickAttempts times. A click that lands on the element, that a handler
+// stops, or whose element is gone afterwards is not repeated, since it may have been applied.
 func (pg *page) click(what, elementExpr string, modifiers int) {
 	pg.t.Helper()
-	x, y := pg.locate(what, elementExpr)
-	pg.send("Input.dispatchMouseEvent", map[string]any{"type": "mouseMoved", "x": x, "y": y, "modifiers": modifiers})
-	pg.press1(x, y, modifiers, 1)
+	for attempt := 1; ; attempt++ {
+		x, y := pg.locate(what, elementExpr)
+		pg.eval(`(() => {
+			window.__rvwClickWatch?.abort();
+			const watch = new AbortController();
+			window.__rvwClickWatch = watch;
+			window.__rvwClickMissed = false;
+			addEventListener("click", (ev) => {
+				watch.abort();
+				const e = (`+elementExpr+`);
+				window.__rvwClickMissed = e instanceof Element && ev.target instanceof Node && ev.target.isConnected &&
+					ev.target !== e && ev.target.contains(e);
+			}, { signal: watch.signal });
+		})()`, nil)
+		pg.send("Input.dispatchMouseEvent", map[string]any{"type": "mouseMoved", "x": x, "y": y, "modifiers": modifiers})
+		pg.press1(x, y, modifiers, 1)
+		var missed bool
+		// A click that navigated or reloaded the page leaves nothing to read, and is not repeated.
+		if err := pg.tryEval(`window.__rvwClickMissed === true`, &missed); err != nil || !missed {
+			return
+		}
+		if attempt == clickAttempts {
+			pg.fatalf("the click on %s landed on an ancestor %d times: the element kept re-rendering", what, clickAttempts)
+		}
+		pg.t.Logf("the click on %s landed on an ancestor of it after a re-render; clicking again", what)
+	}
 }
+
+// clickAttempts bounds click's retries of a click that a re-render made land on an ancestor.
+const clickAttempts = 3
 
 // doubleClick double-clicks the element as click finds it: two presses with no wait between them.
 func (pg *page) doubleClick(what, elementExpr string) {
