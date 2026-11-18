@@ -1885,31 +1885,43 @@ func (pg *page) leave() int {
 // under the closed id would not keep it (Q-42). Leaving again without returning ends rvw with
 // status 4.
 func TestBrowserBackForwardCache(t *testing.T) {
-	// Not parallel: while it ran beside other tests, their pages intermittently lost focus or
-	// stopped answering for 10 s in the shared Chrome (cause unconfirmed); run alone, none did.
+	// Not parallel: its timing bounds (a poll within 4 s of returning) have not been shown to hold
+	// beside other tests in the shared Chrome.
 	w := oneFileWorld(t)
 	p := w.start(procOptions{}, "last")
 	p.waitURL()
 	pg := openPage(t, p)
 	pg.ready()
-	pg.wrapStatusPolls()
-	pg.eval(`addEventListener("pageshow", (e) => { if (e.persisted) window.rvwRestored = true; })`, nil)
-	pg.waitTrue("a regular status poll", statusPolls+` > 0`)
-	n := pg.polls()
-	pg.waitTrue("the next regular status poll", fmt.Sprintf(statusPolls+` > %d`, n))
 
-	// The grace runs from the notice, which reaches rvw before leave returns: coming back at 6 s
-	// leaves the restored page's poll at least 4 s on a loaded machine.
-	back := pg.leave()
-	left := time.Now()
-	time.Sleep(6 * time.Second)
-	pg.send("Page.navigateToHistoryEntry", map[string]any{"entryId": back})
-	pg.waitTrue("the page restored from the back/forward cache", `window.rvwRestored === true`)
-	restored := time.Since(left)
+	var left, restored time.Time
+	for attempt := 1; ; attempt++ {
+		pg.wrapStatusPolls()
+		pg.eval(`addEventListener("pageshow", (e) => { if (e.persisted) window.rvwRestored = true; })`, nil)
+		pg.waitTrue("a regular status poll", statusPolls+` > 0`)
+		n := pg.polls()
+		pg.waitTrue("the next regular status poll", fmt.Sprintf(statusPolls+` > %d`, n))
+
+		// The grace runs from the notice, which reaches rvw before leave returns: coming back at
+		// 6 s leaves the restored page's poll at least 4 s on a loaded machine.
+		notes := len(pg.notesNow())
+		back := pg.leave()
+		left = time.Now()
+		time.Sleep(6 * time.Second)
+		pg.send("Page.navigateToHistoryEntry", map[string]any{"entryId": back})
+		if pg.restoredFromCache(notes) {
+			restored = time.Now()
+			break
+		}
+		if attempt == bfcacheAttempts {
+			pg.fatalf("Chrome timed out putting the page in the back/forward cache %d times", bfcacheAttempts)
+		}
+		t.Logf("attempt %d: Chrome timed out putting the page in the back/forward cache; leaving again", attempt)
+		pg.ready()
+	}
 	select {
 	case <-p.done:
 		t.Fatalf("rvw exited (%d) although the page came back %v after leaving, within the grace; stderr:\n%s",
-			p.cmd.ProcessState.ExitCode(), restored.Round(time.Millisecond), p.stderr)
+			p.cmd.ProcessState.ExitCode(), restored.Sub(left).Round(time.Millisecond), p.stderr)
 	case <-time.After(time.Until(left.Add(13 * time.Second))):
 	}
 
@@ -1918,6 +1930,37 @@ func TestBrowserBackForwardCache(t *testing.T) {
 		t.Fatalf("exit %d after leaving for good, want 4; stderr:\n%s", code, p.stderr)
 	}
 	pg.noPageErrors()
+}
+
+// bfcacheAttempts bounds TestBrowserBackForwardCache's leave-and-return cycles that Chrome ends
+// with TimeoutPuttingInCache: a loaded machine can be too slow to store the page, which says
+// nothing about the page.
+const bfcacheAttempts = 3
+
+// restoredFromCache waits after a return to the review page until it is restored from the
+// back/forward cache (true) or Chrome reports, in a note after the first notes ones, that it
+// timed out storing it (false). Any other reason the page was not cached fails the test: the page
+// itself kept the cache from being used.
+func (pg *page) restoredFromCache(notes int) bool {
+	pg.t.Helper()
+	const timedOut = "back/forward cache not used: TimeoutPuttingInCache"
+	deadline := time.Now().Add(pageWait)
+	for {
+		var ok bool
+		if err := pg.tryEval(`window.rvwRestored === true`, &ok); err == nil && ok {
+			return true
+		}
+		if fresh := pg.notesNow()[notes:]; len(fresh) > 0 {
+			if len(fresh) == 1 && fresh[0] == timedOut {
+				return false
+			}
+			pg.fatalf("the page was not restored from the back/forward cache: %s", strings.Join(fresh, "; "))
+		}
+		if time.Now().After(deadline) {
+			pg.fatalf("timed out waiting for the page restored from the back/forward cache")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // TestBrowserPollRestartKeepsOneLoop: a restore from the back/forward cache or a sibling's close,

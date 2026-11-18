@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -525,6 +526,13 @@ func (pg *page) waitIdle() {
 }
 
 // fatalf ends the test with what the page shows, the server's session, and rvw's stderr.
+// notesNow returns a copy of the page's notes so far.
+func (pg *page) notesNow() []string {
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	return slices.Clone(pg.notes)
+}
+
 func (pg *page) fatalf(format string, args ...any) {
 	pg.t.Helper()
 	var body, state string
