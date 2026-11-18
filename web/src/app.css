@@ -1185,10 +1185,56 @@ kbd {
   flex: none;
 }
 
+.fin-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.fin-titles {
+  flex: 1;
+  min-width: 0;
+}
+
+.fin-close {
+  width: 28px;
+  height: 28px;
+  margin: -4px -6px 0 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: none;
+  color: var(--muted);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.fin-close:hover {
+  background: var(--sheet-hover);
+  color: var(--fg);
+}
+
 .finish h2 {
   margin: 0;
   font-size: 18px;
   font-weight: 600;
+  line-height: 22px;
+}
+
+.fin-lede {
+  margin: 2px 0 0;
+  color: var(--muted);
+}
+
+.fin-label {
+  margin-bottom: -6px;
+  font-weight: 600;
+}
+
+.fin-optional {
+  color: var(--muted);
+  font-weight: 400;
 }
 
 .fin-summary {
@@ -1214,22 +1260,74 @@ kbd {
 }
 
 .fin-title {
+  display: flex;
   flex: 1;
+  align-items: baseline;
+  gap: 8px;
   font-weight: 600;
+}
+
+.fin-sep {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.fin-sep:has(+ .fin-delete-all[hidden]) {
+  display: none;
+}
+
+.fin-delete-all {
+  padding: 0;
+  font-weight: 400;
+}
+
+.fin-delete-all:disabled {
+  color: var(--muted);
+  opacity: 0.6;
+  cursor: default;
 }
 
 .fin-filter {
   display: inline-flex;
   white-space: nowrap;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   color: var(--muted);
   cursor: pointer;
 }
 
-.fin-filter input {
+/* A checkbox drawn as a switch; it keeps the checkbox's semantics and keyboard behaviour. */
+.switch {
+  appearance: none;
+  position: relative;
+  flex: none;
+  width: 28px;
+  height: 16px;
   margin: 0;
-  accent-color: var(--primary);
+  border-radius: 999px;
+  background: var(--control);
+  cursor: pointer;
+  transition: background 120ms;
+}
+
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--sheet);
+  transition: transform 120ms;
+}
+
+.switch:checked {
+  background: var(--primary);
+}
+
+.switch:checked::after {
+  transform: translateX(12px);
 }
 
 .fin-list {
@@ -1249,6 +1347,26 @@ kbd {
 
 .fin-comment .editor-text {
   margin-top: 2px;
+}
+
+.fin-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px dashed var(--control);
+  border-radius: var(--radius-card);
+  background: none;
+  color: var(--muted);
+  text-align: left;
+  cursor: pointer;
+}
+
+.fin-add:hover {
+  background: var(--sheet-hover);
+  color: var(--fg);
 }
 
 .fin-empty {
@@ -1276,7 +1394,7 @@ kbd {
   border-radius: var(--radius-control);
 }
 
-.fin-cancel {
+.fin-confirm {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1287,15 +1405,81 @@ kbd {
   color: var(--error-ink);
 }
 
-.fin-cancel span {
+.fin-confirm span {
   flex: 1;
 }
 
 .fin-actions {
   display: flex;
   gap: 8px;
-  padding-top: 4px;
+  margin: 4px -20px 0;
+  padding: 16px 20px 0;
+  border-top: 1px solid var(--rule);
 }
+
+.fin-discard {
+  padding: 0;
+}
+
+/* Send review and its menu toggle read as one split button. */
+.fin-send-group {
+  position: relative;
+  display: inline-flex;
+}
+
+.fin-send {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.fin-send-more {
+  width: 26px;
+  padding: 0;
+  border-left-color: color-mix(in srgb, var(--primary-fg) 30%, var(--primary));
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  font-size: 11px;
+}
+
+/* Opens upward: the footer is the dialog's last row. */
+.fin-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 2;
+  min-width: 180px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--sheet);
+  box-shadow: var(--float-shadow);
+}
+
+.fin-menu-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: none;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.fin-menu-item:hover:not(:disabled),
+.fin-menu-item:focus-visible {
+  background: var(--sheet-hover);
+  outline: none;
+}
+
+.fin-menu-item:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+
 
 /* Search palette */
 
@@ -1742,23 +1926,13 @@ kbd {
     padding: 16px;
   }
 
-  /* The send actions take the row and wrap right-aligned; Cancel review drops below them. */
-  .fin-list-head,
-  .fin-actions {
+  .fin-list-head {
     flex-wrap: wrap;
   }
 
   .fin-actions {
-    justify-content: flex-end;
-  }
-
-  .fin-actions > .spacer {
-    display: none;
-  }
-
-  .fin-actions > :first-child {
-    order: 1;
-    margin-right: auto;
+    margin: 4px -16px 0;
+    padding: 12px 16px 0;
   }
 }
 

@@ -16,7 +16,7 @@ import { type Api, type ChangedFile, type Comment, type CommentSite, compareOrde
 export type Change = "draft" | "counts" | "generated" | "changed" | "superseded" | "whitespace" | "hide";
 
 /** The server calls State makes. */
-export type ReviewApi = Pick<Api, "session" | "createComment" | "editComment" | "deleteComment" | "setViewed" | "setSummary" | "status" | "setHideWhitespace" | "copyEarlier">;
+export type ReviewApi = Pick<Api, "session" | "createComment" | "editComment" | "deleteComment" | "deleteComments" | "setViewed" | "setSummary" | "status" | "setHideWhitespace" | "copyEarlier">;
 
 /**
  * How saving a comment ended. A refused save (412) reloads the comments from the server first.
@@ -213,6 +213,26 @@ export class State {
       }
       this.commentById.delete(c.id);
       this.notify("draft");
+    });
+  }
+
+  /**
+   * Deletes comments as this page shows them, in one change. When another page has saved any of
+   * them since, nothing is deleted and the comments reload, so the human sees the newer text; the
+   * result says whether the delete happened.
+   */
+  deleteComments(comments: readonly Comment[]): Promise<boolean> {
+    return this.write(async () => {
+      try {
+        await this.api.deleteComments(comments);
+      } catch (err) {
+        if (!(err instanceof HttpError && err.status === 412)) throw err;
+        await this.reload();
+        return false;
+      }
+      for (const c of comments) this.commentById.delete(c.id);
+      this.notify("draft");
+      return true;
     });
   }
 

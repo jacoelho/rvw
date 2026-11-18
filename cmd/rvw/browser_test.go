@@ -31,8 +31,21 @@ func treeRow(name string) string {
 
 // button finds a visible button by its label within the elements selector matches.
 func button(within, label string) string {
-	return `[...document.querySelectorAll(` + jsString(within+" button") + `)].find((b) => b.textContent.trim() === ` +
-		jsString(label) + ` && b.getClientRects().length > 0) ?? null`
+	return `[...document.querySelectorAll(` + jsString(within+" button") + `)].find((b) => (b.textContent.trim() === ` +
+		jsString(label) + ` || b.getAttribute("aria-label") === ` + jsString(label) + `) && b.getClientRects().length > 0) ?? null`
+}
+
+// menuItem finds the Finish dialog's menu item labelled label, shown or not.
+func menuItem(label string) string {
+	return `[...document.querySelectorAll("dialog .fin-menu-item")].find((b) => b.textContent.trim() === ` + jsString(label) + `) ?? null`
+}
+
+// copyAndSend opens the Finish dialog's Send review menu and clicks Copy and send.
+func (pg *page) copyAndSend() {
+	pg.t.Helper()
+	pg.click("More send options", button("dialog .fin-actions", "More send options"), 0)
+	pg.waitTrue("the menu", `!document.querySelector("dialog .fin-menu").hidden`)
+	pg.click("Copy and send", menuItem("Copy and send"), 0)
 }
 
 // commentButton finds a button on the diff comment whose body is body.
@@ -296,7 +309,7 @@ func TestBrowserFinishSends(t *testing.T) {
 	pg.waitTrue("the dialog", `document.querySelector("dialog").open`)
 	pg.waitTrue("Send enabled", `!(`+button("dialog", "Send review")+`).disabled`)
 
-	pg.click("Add review comment", button("dialog", "Add review comment"), 0)
+	pg.click("Add review comment", button("dialog", "Add review comment…"), 0)
 	pg.waitFocus("the dialog editor", dialogEditor)
 	pg.insertText("overall")
 	pg.cmdEnter()
@@ -308,7 +321,7 @@ func TestBrowserFinishSends(t *testing.T) {
 	pg.click("the summary", summaryField, 0)
 	pg.waitFocus("the summary", summaryField)
 	pg.insertText("sum text")
-	pg.click("Close", button("dialog .fin-actions", "Close"), 0)
+	pg.click("Close", button("dialog .fin-head", "Close"), 0)
 	pg.waitTrue("the dialog closed", `!document.querySelector("dialog").open`)
 	waitSession(pg, func(s sessionView) bool { return s.Summary == "sum text" }, "the summary saved")
 
@@ -458,9 +471,9 @@ func TestBrowserCancel(t *testing.T) {
 	pg.ready()
 
 	pg.click("Finish…", button("header", "Finish…"), 0)
-	pg.click("Cancel review…", button("dialog", "Cancel review…"), 0)
+	pg.click("Discard review…", button("dialog .fin-actions", "Discard review…"), 0)
 	pg.click("Discard the review", button("dialog", "Discard the review"), 0)
-	pg.waitTrue("Review cancelled", endTitle+` === "Review cancelled"`)
+	pg.waitTrue("Review discarded", endTitle+` === "Review discarded"`)
 	if code := p.exitCode(); code != 3 {
 		t.Fatalf("exit %d, want 3; stderr:\n%s", code, p.stderr)
 	}
@@ -640,7 +653,7 @@ func TestBrowserCommentsInResultOrder(t *testing.T) {
 
 	pg.click("Finish…", button("header", "Finish…"), 0)
 	pg.waitTrue("the dialog", `document.querySelector("dialog").open`)
-	pg.click("Add review comment", button("dialog", "Add review comment"), 0)
+	pg.click("Add review comment", button("dialog", "Add review comment…"), 0)
 	pg.waitFocus("the dialog editor", dialogEditor)
 	pg.insertText("overall")
 	pg.cmdEnter()
@@ -796,6 +809,44 @@ func TestBrowserDeleteRefusedAsStale(t *testing.T) {
 	if c := p.sessionComments(); len(c) != 0 {
 		pg.fatalf("comments after deleting the reloaded comment: %+v", c)
 	}
+	pg.noPageErrors()
+}
+
+// TestBrowserDeleteAllComments: Delete all in the Finish dialog's comment list asks for confirmation naming the
+// count, then deletes every comment the page shows in one request (REQ-CMT-013). When another
+// writer saved one since, nothing is deleted and the dialog shows the newer text.
+func TestBrowserDeleteAllComments(t *testing.T) {
+	t.Parallel()
+	w := oneFileWorld(t)
+	p := w.start(procOptions{}, "last")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+
+	pg.commentOnNewLine(1, "A")
+	pg.commentOnNewLine(2, "B")
+	pg.waitBodies("A", "B")
+	pg.click("Finish…", button("header", "Finish…"), 0)
+	pg.waitTrue("the dialog", `document.querySelector("dialog").open`)
+	pg.click("Delete all", button("dialog .fin-list-head", "Delete all"), 0)
+	pg.waitTrue("the confirmation", `(`+button("dialog", "Delete 2 comments")+`) !== null`)
+	p.editAs(p.commentNamed("B"), "B2")
+	pg.click("Delete 2 comments", button("dialog", "Delete 2 comments"), 0)
+	pg.waitTrue("the refusal", `document.querySelector(".fin-status").textContent.includes("nothing was deleted")`)
+	pg.waitTrue("the reloaded comments", dialogBodies+` === `+jsString(`["A","B2"]`))
+	if c := p.sessionComments(); len(c) != 2 {
+		pg.fatalf("the refused delete changed the comments: %+v", c)
+	}
+
+	pg.click("Delete all", button("dialog .fin-list-head", "Delete all"), 0)
+	pg.click("Delete 2 comments", button("dialog", "Delete 2 comments"), 0)
+	pg.waitTrue("no comments in the dialog", dialogBodies+` === "[]"`)
+	if c := p.sessionComments(); len(c) != 0 {
+		pg.fatalf("comments after Delete all: %+v", c)
+	}
+	pg.waitTrue("Delete all hidden with nothing to delete", `document.querySelector("dialog .fin-delete-all").hidden`)
+	pg.click("Close", button("dialog .fin-head", "Close"), 0)
+	pg.waitBodies([]string{}...)
 	pg.noPageErrors()
 }
 
@@ -1212,7 +1263,7 @@ func TestBrowserFinishSwitchesEditors(t *testing.T) {
 	pg.click("B's editor", dialogEditor, 0)
 	pg.selectAll()
 	pg.insertText("B2")
-	pg.click("Add review comment", button("dialog", "Add review comment"), 0)
+	pg.click("Add review comment", button("dialog", "Add review comment…"), 0)
 	pg.waitTrue("the new review comment's editor alone", dialogEditorIs(""))
 	p.commentNamed("B2")
 	pg.noPageErrors()
@@ -1260,11 +1311,11 @@ func TestBrowserOneRowPerComment(t *testing.T) {
 		open: func(pg *page) {
 			pg.click("Finish…", button("header", "Finish…"), 0)
 			pg.waitTrue("the dialog", `document.querySelector("dialog").open`)
-			pg.click("Add review comment", button("dialog", "Add review comment"), 0)
+			pg.click("Add review comment", button("dialog", "Add review comment…"), 0)
 			pg.waitFocus("the dialog editor", dialogEditor)
 		},
 		leave: func(pg *page) {
-			pg.click("Add review comment", button("dialog", "Add review comment"), 0)
+			pg.click("Add review comment", button("dialog", "Add review comment…"), 0)
 			pg.waitTrue("the new review comment's editor alone", dialogEditorIs(""))
 		},
 	}
@@ -1275,7 +1326,7 @@ func TestBrowserOneRowPerComment(t *testing.T) {
 		pg.waitTrue("the dialog", `document.querySelector("dialog").open`)
 		pg.click("Agent comments only", `document.querySelector(".fin-filter input")`, 0)
 		pg.waitTrue("the agent comments alone", dialogBodies+` === `+jsString(`["`+agent+`"]`))
-		pg.click("Add review comment", button("dialog", "Add review comment"), 0)
+		pg.click("Add review comment", button("dialog", "Add review comment…"), 0)
 		pg.waitFocus("the dialog editor", dialogEditor)
 	}
 	// U+00A0 is not blank to the page and is empty to the server.
@@ -1765,8 +1816,8 @@ func (pg *page) polls() int {
 // its regular poll has just fired; either way rvw is still running 13 s after the close, and the
 // remaining tab finishes the review.
 func TestBrowserPageSurvivesReloadAndSiblingClose(t *testing.T) {
-	// Not parallel: while it ran beside other tests, their pages intermittently lost focus or
-	// stopped answering for 10 s in the shared Chrome (cause unconfirmed); run alone, none did.
+	// Not parallel: its timing bounds (a poll within 3 s) have not been shown to hold beside other
+	// tests in the shared Chrome.
 	w := oneFileWorld(t)
 	p := w.start(procOptions{}, "last")
 	p.waitURL()
@@ -1834,31 +1885,43 @@ func (pg *page) leave() int {
 // under the closed id would not keep it (Q-42). Leaving again without returning ends rvw with
 // status 4.
 func TestBrowserBackForwardCache(t *testing.T) {
-	// Not parallel: while it ran beside other tests, their pages intermittently lost focus or
-	// stopped answering for 10 s in the shared Chrome (cause unconfirmed); run alone, none did.
+	// Not parallel: its timing bounds (a poll within 4 s of returning) have not been shown to hold
+	// beside other tests in the shared Chrome.
 	w := oneFileWorld(t)
 	p := w.start(procOptions{}, "last")
 	p.waitURL()
 	pg := openPage(t, p)
 	pg.ready()
-	pg.wrapStatusPolls()
-	pg.eval(`addEventListener("pageshow", (e) => { if (e.persisted) window.rvwRestored = true; })`, nil)
-	pg.waitTrue("a regular status poll", statusPolls+` > 0`)
-	n := pg.polls()
-	pg.waitTrue("the next regular status poll", fmt.Sprintf(statusPolls+` > %d`, n))
 
-	// The grace runs from the notice, which reaches rvw before leave returns: coming back at 6 s
-	// leaves the restored page's poll at least 4 s on a loaded machine.
-	back := pg.leave()
-	left := time.Now()
-	time.Sleep(6 * time.Second)
-	pg.send("Page.navigateToHistoryEntry", map[string]any{"entryId": back})
-	pg.waitTrue("the page restored from the back/forward cache", `window.rvwRestored === true`)
-	restored := time.Since(left)
+	var left, restored time.Time
+	for attempt := 1; ; attempt++ {
+		pg.wrapStatusPolls()
+		pg.eval(`addEventListener("pageshow", (e) => { if (e.persisted) window.rvwRestored = true; })`, nil)
+		pg.waitTrue("a regular status poll", statusPolls+` > 0`)
+		n := pg.polls()
+		pg.waitTrue("the next regular status poll", fmt.Sprintf(statusPolls+` > %d`, n))
+
+		// The grace runs from the notice, which reaches rvw before leave returns: coming back at
+		// 6 s leaves the restored page's poll at least 4 s on a loaded machine.
+		notes := len(pg.notesNow())
+		back := pg.leave()
+		left = time.Now()
+		time.Sleep(6 * time.Second)
+		pg.send("Page.navigateToHistoryEntry", map[string]any{"entryId": back})
+		if pg.restoredFromCache(notes) {
+			restored = time.Now()
+			break
+		}
+		if attempt == bfcacheAttempts {
+			pg.fatalf("Chrome timed out putting the page in the back/forward cache %d times", bfcacheAttempts)
+		}
+		t.Logf("attempt %d: Chrome timed out putting the page in the back/forward cache; leaving again", attempt)
+		pg.ready()
+	}
 	select {
 	case <-p.done:
 		t.Fatalf("rvw exited (%d) although the page came back %v after leaving, within the grace; stderr:\n%s",
-			p.cmd.ProcessState.ExitCode(), restored.Round(time.Millisecond), p.stderr)
+			p.cmd.ProcessState.ExitCode(), restored.Sub(left).Round(time.Millisecond), p.stderr)
 	case <-time.After(time.Until(left.Add(13 * time.Second))):
 	}
 
@@ -1867,6 +1930,37 @@ func TestBrowserBackForwardCache(t *testing.T) {
 		t.Fatalf("exit %d after leaving for good, want 4; stderr:\n%s", code, p.stderr)
 	}
 	pg.noPageErrors()
+}
+
+// bfcacheAttempts bounds TestBrowserBackForwardCache's leave-and-return cycles that Chrome ends
+// with TimeoutPuttingInCache: a loaded machine can be too slow to store the page, which says
+// nothing about the page.
+const bfcacheAttempts = 3
+
+// restoredFromCache waits after a return to the review page until it is restored from the
+// back/forward cache (true) or Chrome reports, in a note after the first notes ones, that it
+// timed out storing it (false). Any other reason the page was not cached fails the test: the page
+// itself kept the cache from being used.
+func (pg *page) restoredFromCache(notes int) bool {
+	pg.t.Helper()
+	const timedOut = "back/forward cache not used: TimeoutPuttingInCache"
+	deadline := time.Now().Add(pageWait)
+	for {
+		var ok bool
+		if err := pg.tryEval(`window.rvwRestored === true`, &ok); err == nil && ok {
+			return true
+		}
+		if fresh := pg.notesNow()[notes:]; len(fresh) > 0 {
+			if len(fresh) == 1 && fresh[0] == timedOut {
+				return false
+			}
+			pg.fatalf("the page was not restored from the back/forward cache: %s", strings.Join(fresh, "; "))
+		}
+		if time.Now().After(deadline) {
+			pg.fatalf("timed out waiting for the page restored from the back/forward cache")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // TestBrowserPollRestartKeepsOneLoop: a restore from the back/forward cache or a sibling's close,
@@ -2199,7 +2293,7 @@ func TestBrowserLeaveGateReleasedAfterRefusedSave(t *testing.T) {
 	pg.noPageErrors()
 }
 
-// The Copy and finish tests that read the clipboard do not run in parallel: one Chrome serves
+// The Copy and send tests that read the clipboard do not run in parallel: one Chrome serves
 // every test, and its clipboard is shared by all browser contexts.
 
 const (
@@ -2246,12 +2340,12 @@ func requireOpen(t *testing.T, p *proc) {
 	}
 }
 
-// TestBrowserCopyAndFinish: Copy and finish saves the unsaved summary, copies the result and
+// TestBrowserCopyAndSend: Copy and send saves the unsaved summary, copies the result and
 // finishes; the clipboard holds what rvw printed.
-func TestBrowserCopyAndFinish(t *testing.T) {
+func TestBrowserCopyAndSend(t *testing.T) {
 	p, pg := startCopyReview(t)
 	pg.allowClipboard()
-	pg.click("Copy and finish", button("dialog", "Copy and finish"), 0)
+	pg.copyAndSend()
 	pg.waitTrue("Review sent and copied", endTitle+` === "Review sent and copied"`)
 	if code := p.exitCode(); code != 0 {
 		t.Fatalf("exit %d; stderr:\n%s", code, p.stderr)
@@ -2264,13 +2358,13 @@ func TestBrowserCopyAndFinish(t *testing.T) {
 	pg.noPageErrors()
 }
 
-// TestBrowserCopyAndFinishRefused: a refused clipboard write shows the text selectable and does not
+// TestBrowserCopyAndSendRefused: a refused clipboard write shows the text selectable and does not
 // finish; Send then prints that text.
-func TestBrowserCopyAndFinishRefused(t *testing.T) {
+func TestBrowserCopyAndSendRefused(t *testing.T) {
 	t.Parallel()
 	p, pg := startCopyReview(t)
 	pg.eval(`navigator.clipboard.write = () => Promise.reject(new DOMException("refused", "NotAllowedError"))`, nil)
-	pg.click("Copy and finish", button("dialog", "Copy and finish"), 0)
+	pg.copyAndSend()
 	pg.waitTrue("the selectable text", fallbackText+` !== ""`)
 	pg.waitIdle()
 	requireOpen(t, p)
@@ -2282,16 +2376,16 @@ func TestBrowserCopyAndFinishRefused(t *testing.T) {
 	pg.noPageErrors()
 }
 
-// TestBrowserCopyAndFinishFailedSave: when the dialog's editor cannot be saved, Copy and finish
+// TestBrowserCopyAndSendFailedSave: when the dialog's editor cannot be saved, Copy and send
 // neither copies nor finishes, and shows the save failure, not the selectable text.
-func TestBrowserCopyAndFinishFailedSave(t *testing.T) {
+func TestBrowserCopyAndSendFailedSave(t *testing.T) {
 	t.Parallel()
 	p, pg := startCopyReview(t)
 	pg.click("Edit on the seeded comment", dialogEdit("seeded body 41"), 0)
 	pg.waitFocus("the dialog editor", dialogEditor)
 	pg.selectAll()
 	pg.insertText("  ")
-	pg.click("Copy and finish", button("dialog", "Copy and finish"), 0)
+	pg.copyAndSend()
 	pg.waitTrue("the save failure", `document.querySelector(".fin-status").textContent.includes("Save or close the open comment editor first")`)
 	pg.waitIdle()
 	if pg.text(fallbackText) != "" {
@@ -2306,9 +2400,9 @@ func TestBrowserCopyAndFinishFailedSave(t *testing.T) {
 	}
 }
 
-// TestBrowserCopyAndFinishStale: when the draft changes between the copy and the finish, the end
+// TestBrowserCopyAndSendStale: when the draft changes between the copy and the finish, the end
 // page says so and its Copy holds what rvw printed.
-func TestBrowserCopyAndFinishStale(t *testing.T) {
+func TestBrowserCopyAndSendStale(t *testing.T) {
 	p, pg := startCopyReview(t)
 	pg.allowClipboard()
 	pg.eval(`(() => {
@@ -2322,7 +2416,7 @@ func TestBrowserCopyAndFinishStale(t *testing.T) {
 			return real(input, init);
 		};
 	})()`, nil)
-	pg.click("Copy and finish", button("dialog", "Copy and finish"), 0)
+	pg.copyAndSend()
 	pg.waitTrue("the finish held", `window.rvwFinishHeld === true`)
 	copied := pg.clipboardText()
 	p.must(http.MethodPut, "/api/summary", `{"summary":"changed after the copy"}`, http.StatusNoContent)
@@ -2346,11 +2440,12 @@ func TestBrowserCopyAndFinishStale(t *testing.T) {
 	pg.noPageErrors()
 }
 
-// TestBrowserCopyAndFinishOnce: a double click finishes once.
-func TestBrowserCopyAndFinishOnce(t *testing.T) {
+// TestBrowserCopyAndSendOnce: a double click finishes once.
+func TestBrowserCopyAndSendOnce(t *testing.T) {
 	p, pg := startCopyReview(t)
 	pg.allowClipboard()
-	pg.doubleClick("Copy and finish", button("dialog", "Copy and finish"))
+	pg.click("More send options", button("dialog .fin-actions", "More send options"), 0)
+	pg.waitTrue("Copy and send clicked twice", `(() => { const b = `+menuItem("Copy and send")+`; for (let i = 0; i < 2; i++) b.click(); return true; })()`)
 	pg.waitTrue("Review sent and copied", endTitle+` === "Review sent and copied"`)
 	if code := p.exitCode(); code != 0 {
 		t.Fatalf("exit %d; stderr:\n%s", code, p.stderr)
@@ -2367,7 +2462,7 @@ func TestBrowserCopyAndFinishOnce(t *testing.T) {
 func TestBrowserCopyKeepsSession(t *testing.T) {
 	p, pg := startCopyReview(t)
 	pg.allowClipboard()
-	pg.click("Copy as Markdown", button("dialog", "Copy as Markdown"), 0)
+	pg.click("Copy", button("dialog .fin-actions", "Copy"), 0)
 	pg.waitTrue("copied", `document.querySelector(".fin-status").textContent === "Copied the review as Markdown."`)
 	requireCopyText(t, "the clipboard", pg.clipboardText())
 	requireOpen(t, p)

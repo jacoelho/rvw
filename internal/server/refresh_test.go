@@ -182,6 +182,7 @@ func TestRefreshCarriesTheDraftToANewGeneration(t *testing.T) {
 	for _, req := range []struct{ method, path, body string }{
 		{http.MethodGet, "/api/file?i=0", ""},
 		{http.MethodPut, "/api/summary", `{"summary":"x"}`},
+		{http.MethodPost, "/api/comments/delete", `{"comments":[{"id":"x","version":1}]}`},
 		{http.MethodPost, "/api/refresh", ""},
 	} {
 		r := f.do(req.method, req.path, req.body, withHeader("Rvw-Generation", "1"))

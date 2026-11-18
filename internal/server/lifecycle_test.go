@@ -571,11 +571,13 @@ func TestQuoteStatesBytesCutFromAHugeLine(t *testing.T) {
 }
 
 // Close graces for the page-closed tests. Tests that wait for PageClosed use the short one; tests
-// that check the session survives use the long one and send their request at once. No test
-// depends on the exact edge of the grace.
+// that check the session survives use the long one and send their request at once; tests that
+// send requests after the notice and need their replies before the session ends use the answer
+// grace, which a loaded machine does not outrun. No test depends on the exact edge of the grace.
 const (
-	shortGrace = 100 * time.Millisecond
-	longGrace  = 500 * time.Millisecond
+	shortGrace  = 100 * time.Millisecond
+	longGrace   = 500 * time.Millisecond
+	answerGrace = 3 * time.Second
 )
 
 // postPageClosed sends the page's close notice and requires the 204.
@@ -632,7 +634,7 @@ func TestRequestAfterPageClosedKeepsSession(t *testing.T) {
 // a poll it had in flight, is answered but does not keep the session (Q-42).
 func TestClosedPageRequestIsNoPresence(t *testing.T) {
 	t.Parallel()
-	f := newFixture(t, smallRepo(t), fixtureOptions{closeGrace: shortGrace})
+	f := newFixture(t, smallRepo(t), fixtureOptions{closeGrace: answerGrace})
 	done, _ := f.serveRun()
 	f.postPageClosed()
 	f.mustStatus(f.do(http.MethodGet, "/api/status", ""), http.StatusOK, "the closed page's status")
@@ -645,7 +647,7 @@ func TestClosedPageRequestIsNoPresence(t *testing.T) {
 // page's presence; a notice without one starts no grace.
 func TestRequestWithoutPageIsRefused(t *testing.T) {
 	t.Parallel()
-	f := newFixture(t, smallRepo(t), fixtureOptions{closeGrace: shortGrace})
+	f := newFixture(t, smallRepo(t), fixtureOptions{closeGrace: answerGrace})
 	done, _ := f.serveRun()
 	for _, c := range []struct {
 		name string
@@ -655,7 +657,7 @@ func TestRequestWithoutPageIsRefused(t *testing.T) {
 		{"with a malformed page id", withPage("a b")},
 	} {
 		f.mustStatus(f.do(http.MethodPost, "/api/page-closed", "", c.opt), http.StatusBadRequest, "notice "+c.name)
-		assertStillRunning(t, done, 5*shortGrace, "notice "+c.name)
+		assertStillRunning(t, done, answerGrace+5*shortGrace, "notice "+c.name)
 	}
 	f.postPageClosed()
 	for _, c := range []reqOption{withPage(""), withPage("a b")} {
@@ -748,7 +750,7 @@ func TestCancelAfterPageClosed(t *testing.T) {
 // TestTwoPageClosedNotices: two notices, as from two closing tabs, end the session once.
 func TestTwoPageClosedNotices(t *testing.T) {
 	t.Parallel()
-	f := newFixture(t, smallRepo(t), fixtureOptions{closeGrace: shortGrace})
+	f := newFixture(t, smallRepo(t), fixtureOptions{closeGrace: answerGrace})
 	done, _ := f.serveRun()
 	var wg sync.WaitGroup
 	for range 2 {
@@ -798,7 +800,7 @@ func TestForgedPageClosedNotices(t *testing.T) {
 // does not keep the session.
 func TestUnauthorisedRequestIsNoPresence(t *testing.T) {
 	t.Parallel()
-	f := newFixture(t, smallRepo(t), fixtureOptions{closeGrace: shortGrace})
+	f := newFixture(t, smallRepo(t), fixtureOptions{closeGrace: answerGrace})
 	done, _ := f.serveRun()
 	f.postPageClosed()
 	f.mustStatus(f.do(http.MethodGet, "/api/status", "", withoutToken()), http.StatusUnauthorized, "status without token")

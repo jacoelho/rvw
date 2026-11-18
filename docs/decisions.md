@@ -761,7 +761,7 @@ Rejected:
 Decided by the repository owner on 2026-11-05. Proposed for contract revision 2 (new REQ-OUT-008, and a change to
 AC-CMT-002); not accepted with it.
 
-The Finish dialog gains a Copy and finish button between Copy as Markdown and Send review. It saves what the dialog
+The Finish dialog gains a Copy and finish button between Copy as Markdown and Send review (renamed Copy and send and moved into Send review's menu by [Q-59](#q-59--delete-all-comments)). It saves what the dialog
 shows, puts the Markdown result for the saved draft on the clipboard, and finishes only after the clipboard write
 succeeds. A refused write shows the selectable text and keeps the session open; a failed save shows the save failure
 and neither copies nor finishes.
@@ -1376,6 +1376,45 @@ Rejected:
   file comment loses the line but never points at the wrong code.
 - **Restoring a draft already saved for the new snapshot.** It belongs to an earlier session; restoring it would drop
   this session's work, so it is moved aside as an unrestorable draft is.
+
+### Q-59 — Delete all comments
+
+Proposed on 2026-11-18 for contract revision 13. The owner asked for a way to delete all comments: they copy the review
+without finishing, the agent addresses it, a refresh carries every comment over (REQ-DRF-006), and the addressed
+comments then have to go one by one.
+
+Decision: the comment list's header offers Delete all, or Delete agent comments under the Agent filter, as a quiet
+link beside the count, behind a confirmation that names the count. It acts on the list, so it sits where the list and
+its filter show which comments it deletes.
+
+The dialog's controls are arranged by consequence, so no control or menu mixes outcomes: × (and Esc) leaves the dialog
+and changes nothing; Delete all edits the draft; Copy (REQ-OUT-007) changes nothing; Send review delivers, and its menu
+holds Copy and send (REQ-OUT-008, formerly Copy and finish), which also delivers; Discard review (REQ-SES-005, formerly
+Cancel review) ends rvw without delivering and sits alone at the footer's left behind a confirmation that says the
+agent is told the review was cancelled. The owner found Close and Cancel review indistinguishable, 2026-11-18; a
+dialog-dismiss × and a verb naming the loss separate them by place and by name. The page sends `POST /api/comments/delete` with each shown comment's ID and version;
+`review.Session.DeleteComments` deletes all or none in one draft write, under the per-comment rule of
+[Q-27](#q-27--comment-order-file-index-and-save-preconditions): a comment saved since its version refuses the whole
+delete (412), an absent ID succeeds, and a comment not listed is kept. `DeleteComment` is the one-comment case of it.
+On a 412 the page reloads the comments and says nothing was deleted. The action is disabled while an editor is open in
+the dialog, since its comment's text would go with the delete. The summary and viewed marks stay: each has its own
+control, and a review whose comments were addressed may still keep its summary or marks.
+
+Rejected:
+
+- **A refresh that drops the comments.** Refresh means "show the current change"; mixing in deletion makes it
+  destructive, and a refused refresh would leave which of the two happened unclear.
+- **Treating Copy as a delivery, so copied comments become earlier comments.** Copy also serves tickets and chat, and
+  recording a round without finishing changes the ledger and retention refs (REQ-RND-002) for a problem a delete solves.
+- **One `DELETE /api/comments/{id}` per comment from the page.** Up to 4,096 draft writes, and a failure part-way leaves
+  some deleted and some not.
+- **One More actions menu for Copy and finish, Copy as Markdown, Delete all and Cancel review.** It hid the extra
+  buttons but mixed a delivery, an export, a draft edit and a discard in one list; the owner found it unclear.
+- **Grouping by verb: Close with Close and delete comments, Copy with Copy and finish.** Copy and finish delivers while
+  Copy does not, so the Copy group still mixed outcomes.
+- **Keeping Close and Cancel review as footer buttons.** Both read as "stop"; one is harmless and one ends the review.
+- **Deleting every comment the server holds, without versions.** A second page's comment or edit this page never
+  showed would go with it.
 
 ### Q-58 — Listing identity on refresh
 

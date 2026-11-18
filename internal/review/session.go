@@ -586,23 +586,33 @@ func (s *Session) EditComment(id string, version int64, body string) (Comment, e
 	return c, nil
 }
 
-// DeleteComment removes comment id at version. A comment saved since version is not deleted
-// (ErrStale), so a stale page cannot discard a newer edit (Q-27). Deleting an absent id succeeds,
-// so retries are idempotent.
+// DeleteComment removes comment id at version, as DeleteComments does for one comment.
 func (s *Session) DeleteComment(id string, version int64) error {
-	if err := checkID(id); err != nil {
-		return err
+	return s.DeleteComments(map[string]int64{id: version})
+}
+
+// DeleteComments removes each comment named in at, given the version the page showed, in one
+// draft change (REQ-CMT-013). If any named comment was saved since that version it deletes
+// nothing and fails with ErrStale, so a stale page cannot discard a newer edit (Q-27). Comments
+// not named are kept, and an absent id succeeds, so a resent delete does not fail.
+func (s *Session) DeleteComments(at map[string]int64) error {
+	for id := range at {
+		if err := checkID(id); err != nil {
+			return err
+		}
 	}
 	return s.mutate(func(next *state) error {
-		old, ok := next.comments[id]
-		switch {
-		case !ok:
-			return nil
-		case old.Version != version:
-			return ErrStale
+		for id, version := range at {
+			if old, ok := next.comments[id]; ok && old.Version != version {
+				return ErrStale
+			}
 		}
-		next.bytes -= len(old.Body)
-		delete(next.comments, id)
+		for id := range at {
+			if old, ok := next.comments[id]; ok {
+				next.bytes -= len(old.Body)
+				delete(next.comments, id)
+			}
+		}
 		return nil
 	})
 }

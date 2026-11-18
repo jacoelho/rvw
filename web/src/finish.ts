@@ -1,5 +1,7 @@
 // The Finish dialog: summary, the overview of every comment with its quoted code, edited in place,
-// Copy as Markdown, Copy and finish, Send and Cancel.
+// Delete all, Copy, Send review (with Copy and send in its menu) and Discard review. Each control has
+// one consequence: × leaves the dialog, Delete all edits the draft, Copy changes nothing, the Send
+// group delivers, and Discard ends the review without delivering.
 
 import { type Api, type Comment, type EarlierComment, type Quote, type Target } from "./api";
 import { h } from "./dom";
@@ -53,12 +55,23 @@ export class FinishDialog {
   readonly el: HTMLDialogElement;
   private readonly summary: HTMLTextAreaElement;
   private readonly agentOnly: HTMLInputElement;
+  private readonly listTitle: HTMLElement;
   private readonly list: VirtualList;
+  private readonly addReview: HTMLButtonElement;
   private readonly status: HTMLElement;
   private readonly sendButton: HTMLButtonElement;
+  private readonly sendMore: HTMLButtonElement;
+  private readonly menu: HTMLElement;
   private readonly copy: HTMLButtonElement;
   private readonly copyAndSend: HTMLButtonElement;
-  private readonly cancelBar: HTMLElement;
+  private readonly deleteAll: HTMLButtonElement;
+  private readonly confirmBar: HTMLElement;
+  private readonly confirmText: HTMLElement;
+  private readonly confirmYes: HTMLButtonElement;
+  /** What the confirmation's action button does, while the confirmation shows. */
+  private confirmAction: (() => Promise<void>) | null = null;
+  /** The confirmation names a comment count, so a change to the list withdraws it. */
+  private confirmCounts = false;
   private rows: Row[] = [];
   private edit: CommentEditor | null = null;
   /** An editor is being left so another can open; clicks meanwhile are ignored. */
@@ -78,59 +91,116 @@ export class FinishDialog {
   ) {
     this.el = h("dialog", "finish");
 
+    const head = h("div", "fin-head");
+    const titles = h("div", "fin-titles");
+    titles.append(h("h2", "", "Finish review"), h("p", "fin-lede", "Finalise your comments and send the review."));
+    const close = h("button", "fin-close", "×");
+    close.setAttribute("aria-label", "Close");
+    close.title = "Close (Esc)";
+    close.addEventListener("click", () => this.run(this.close()));
+    head.append(titles, close);
+
     this.summary = h("textarea", "fin-summary");
-    this.summary.rows = 4;
-    this.summary.placeholder = "Summary for the agent (optional)";
+    this.summary.id = "fin-summary";
+    this.summary.rows = 3;
+    this.summary.placeholder = "Enter a short summary for the agent…";
     this.summary.value = state.summary;
     this.summary.addEventListener("blur", () => this.run(this.saveSummary()));
+    const summaryLabel = h("label", "fin-label", "Summary");
+    summaryLabel.htmlFor = this.summary.id;
+    summaryLabel.append(h("span", "fin-optional", " (optional)"));
 
     const listHead = h("div", "fin-list-head");
-    listHead.append(h("span", "fin-title", "Comments"));
+    this.listTitle = h("span", "", "Comments");
     const filter = h("label", "fin-filter");
-    this.agentOnly = h("input");
+    this.agentOnly = h("input", "switch");
     this.agentOnly.type = "checkbox";
+    this.agentOnly.setAttribute("role", "switch");
     this.agentOnly.addEventListener("change", () => this.rebuild());
-    filter.append(this.agentOnly, document.createTextNode(" Agent comments only"));
-    const addReview = h("button", "btn", "Add review comment");
-    addReview.addEventListener("click", () => this.run(this.openEdit(null)));
-    listHead.append(filter, addReview);
+    filter.append(this.agentOnly, document.createTextNode("Agent comments only"));
+    this.deleteAll = h("button", "link quiet danger fin-delete-all", "Delete all");
+    this.deleteAll.addEventListener("click", () => this.askDelete());
+    const titleRow = h("div", "fin-title");
+    titleRow.append(this.listTitle, h("span", "fin-sep", "·"), this.deleteAll);
+    listHead.append(titleRow, filter);
 
     const listEl = h("div", "fin-list");
     this.list = new VirtualList(listEl, 32, 90);
 
+    this.addReview = h("button", "fin-add", "Add review comment…");
+    this.addReview.addEventListener("click", () => this.run(this.openEdit(null)));
+
+    this.confirmBar = h("div", "fin-confirm");
+    this.confirmBar.hidden = true;
+    this.confirmText = h("span");
+    this.confirmYes = h("button", "btn danger");
+    this.confirmYes.addEventListener("click", () => {
+      const action = this.confirmAction;
+      this.hideConfirm();
+      if (action) this.run(action());
+    });
+    const keep = h("button", "btn", "Keep");
+    keep.addEventListener("click", () => this.hideConfirm());
+    this.confirmBar.append(this.confirmText, this.confirmYes, keep);
+
     this.status = h("div", "fin-status");
-    this.copy = h("button", "btn", "Copy as Markdown");
-    this.copy.addEventListener("click", () => void this.copyMarkdown());
-    this.copyAndSend = h("button", "btn", "Copy and finish");
-    this.copyAndSend.addEventListener("click", () => void this.copyAndFinish());
-    this.sendButton = h("button", "btn primary", "Send review");
+
+    this.menu = h("div", "fin-menu");
+    this.menu.id = "fin-send-menu";
+    this.menu.setAttribute("role", "menu");
+    this.menu.hidden = true;
+    this.copyAndSend = this.menuItem("Copy and send", () => void this.copyThenSend());
+    this.menu.append(this.copyAndSend);
+    this.menu.addEventListener("keydown", (e) => this.menuKey(e));
+
+    this.sendButton = h("button", "btn primary fin-send", "Send review");
     this.sendButton.title = "⌘↵";
     this.sendButton.addEventListener("click", () => void this.finish());
-    const close = h("button", "btn", "Close");
-    close.addEventListener("click", () => this.run(this.close()));
-    const cancel = h("button", "btn", "Cancel review…");
-    cancel.addEventListener("click", () => this.cancelBar.hidden = false);
+    this.sendMore = h("button", "btn primary fin-send-more", "▾");
+    this.sendMore.setAttribute("aria-label", "More send options");
+    this.sendMore.title = "More send options";
+    this.sendMore.setAttribute("aria-haspopup", "menu");
+    this.sendMore.setAttribute("aria-controls", this.menu.id);
+    this.sendMore.setAttribute("aria-expanded", "false");
+    this.sendMore.addEventListener("click", () => (this.menu.hidden ? this.openMenu() : this.closeMenu(true)));
+    const sendGroup = h("div", "fin-send-group");
+    sendGroup.append(this.sendButton, this.sendMore, this.menu);
+    // A press outside the menu closes it, unless it is the toggle, whose click decides.
+    this.el.addEventListener("pointerdown", (e) => {
+      if (!this.menu.hidden && e.target instanceof Node && !sendGroup.contains(e.target)) this.closeMenu(false);
+    });
 
-    this.cancelBar = h("div", "fin-cancel");
-    this.cancelBar.hidden = true;
-    const yes = h("button", "btn danger", "Discard the review");
-    yes.addEventListener("click", () => this.run(this.cancelReview()));
-    const no = h("button", "btn", "Keep reviewing");
-    no.addEventListener("click", () => (this.cancelBar.hidden = true));
-    this.cancelBar.append(h("span", "", "Cancel deletes the draft and tells the agent the review was cancelled."), yes, no);
+    this.copy = h("button", "btn", "Copy");
+    this.copy.title = "Copy the review as Markdown; the review stays open";
+    this.copy.addEventListener("click", () => void this.copyMarkdown());
+
+    const discard = h("button", "link quiet danger fin-discard", "Discard review…");
+    discard.addEventListener("click", () =>
+      this.ask(
+        "Ends rvw without sending: the draft is deleted and the agent is told the review was cancelled.",
+        "Discard the review",
+        () => this.cancelReview(),
+      ),
+    );
 
     const actions = h("div", "fin-actions");
-    actions.append(cancel, h("span", "spacer"), close, this.copy, this.copyAndSend, this.sendButton);
+    actions.append(discard, h("span", "spacer"), this.copy, sendGroup);
 
-    this.el.append(h("h2", "", "Finish review"), this.summary, listHead, listEl, this.cancelBar, this.status, actions);
+    this.el.append(head, summaryLabel, this.summary, listHead, listEl, this.addReview, this.confirmBar, this.status, actions);
     this.el.addEventListener("cancel", (e) => {
-      // Esc closes the inner editor first.
+      // Esc closes the menu, then the inner editor, before the dialog.
+      if (!this.menu.hidden) {
+        e.preventDefault();
+        this.closeMenu(true);
+        return;
+      }
       if (this.edit) {
         e.preventDefault();
         this.run(this.discardEdit());
       }
     });
     this.el.addEventListener("close", () => {
+      this.closeMenu(false);
       this.quotes.clear();
       this.wanted.clear();
       this.run(this.saveSummary());
@@ -143,7 +213,7 @@ export class FinishDialog {
 
   open(): void {
     // Only this dialog edits the summary, so its text is the saved summary or one whose save failed.
-    this.cancelBar.hidden = true;
+    this.hideConfirm();
     this.status.textContent = "";
     this.syncBusy();
     this.el.showModal();
@@ -209,6 +279,7 @@ export class FinishDialog {
 
   private syncBusy(): void {
     this.sendButton.disabled = this.busy;
+    this.sendMore.disabled = this.busy;
     this.copy.disabled = this.busy;
     this.copyAndSend.disabled = this.busy;
   }
@@ -278,7 +349,7 @@ export class FinishDialog {
   }
 
   /** Copies the result and sends the review only once the clipboard holds it (REQ-OUT-008). */
-  private async copyAndFinish(): Promise<void> {
+  private async copyThenSend(): Promise<void> {
     // Busy from the click on, so a second click neither copies nor sends again.
     if (this.busy) return;
     this.setBusy(true);
@@ -298,7 +369,7 @@ export class FinishDialog {
   }
 
   /**
-   * The one path that finishes the review. copied is the text Copy and finish put on the
+   * The one path that finishes the review. copied is the text Copy and send put on the
    * clipboard, or null; the result is compared with it because the draft may change between the
    * copy and the finish.
    */
@@ -318,6 +389,93 @@ export class FinishDialog {
       this.status.textContent = err instanceof Error ? err.message : String(err);
       this.hooks.failed(err);
     }
+  }
+
+  /** The comments Delete all removes: those the list shows under the filter. */
+  private shownComments(): Comment[] {
+    const all = this.state.sortedComments();
+    return this.agentOnly.checked ? all.filter((c) => c.author === "agent") : all;
+  }
+
+  /** Asks to delete the shown comments, naming how many. */
+  private askDelete(): void {
+    const n = this.shownComments().length;
+    if (n === 0 || this.edit) return;
+    const what = this.agentOnly.checked ? (n === 1 ? "agent comment" : "agent comments") : n === 1 ? "comment" : "comments";
+    this.ask(`Delete ${n} ${what}? This cannot be undone.`, `Delete ${n} ${what}`, () => this.deleteComments(), true);
+  }
+
+  /**
+   * Deletes the shown comments as this page shows them (REQ-CMT-013). When another page saved one
+   * since, nothing is deleted, the list shows the reloaded comments and the human decides again.
+   */
+  private async deleteComments(): Promise<void> {
+    const shown = this.shownComments();
+    if (shown.length === 0 || this.edit) return;
+    const deleted = await this.state.deleteComments(shown);
+    this.status.textContent = deleted ? "" : "Another page changed a comment meanwhile; nothing was deleted. Check the list and delete again.";
+  }
+
+  /** Shows the confirmation bar for a destructive action; action runs only from its button. */
+  private ask(text: string, label: string, action: () => Promise<void>, counts = false): void {
+    this.confirmText.textContent = text;
+    this.confirmYes.textContent = label;
+    this.confirmAction = action;
+    this.confirmCounts = counts;
+    this.confirmBar.hidden = false;
+    this.confirmYes.focus();
+  }
+
+  private hideConfirm(): void {
+    this.confirmBar.hidden = true;
+    this.confirmAction = null;
+    this.confirmCounts = false;
+  }
+
+  private menuItem(label: string, act: () => void): HTMLButtonElement {
+    const b = h("button", "fin-menu-item", label);
+    b.setAttribute("role", "menuitem");
+    b.tabIndex = -1;
+    // The action runs in the click itself, so a copy keeps the click's user activation.
+    b.addEventListener("click", () => {
+      this.closeMenu(true);
+      act();
+    });
+    return b;
+  }
+
+  private menuItems(): HTMLButtonElement[] {
+    return [...this.menu.querySelectorAll<HTMLButtonElement>(".fin-menu-item")].filter((b) => !b.disabled);
+  }
+
+  private openMenu(): void {
+    this.menu.hidden = false;
+    this.sendMore.setAttribute("aria-expanded", "true");
+    this.menuItems()[0]?.focus();
+  }
+
+  /** Closes the menu; refocus returns focus to its button, as after a keyboard choice or Esc. */
+  private closeMenu(refocus: boolean): void {
+    if (this.menu.hidden) return;
+    this.menu.hidden = true;
+    this.sendMore.setAttribute("aria-expanded", "false");
+    if (refocus) this.sendMore.focus();
+  }
+
+  private menuKey(e: KeyboardEvent): void {
+    const items = this.menuItems();
+    const at = items.indexOf(document.activeElement as HTMLButtonElement);
+    let next: number;
+    if (e.key === "ArrowDown") next = (at + 1) % items.length;
+    else if (e.key === "ArrowUp") next = (at - 1 + items.length) % items.length;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = items.length - 1;
+    else if (e.key === "Tab") {
+      this.closeMenu(false);
+      return;
+    } else return;
+    e.preventDefault();
+    items[next]?.focus();
   }
 
   private async cancelReview(): Promise<void> {
@@ -400,6 +558,14 @@ export class FinishDialog {
     const earlier = this.state.earlier.filter((e) => e.file === null);
     if (earlier.length > 0) rows.push({ k: "earlier-head" }, ...earlier.map((e) => ({ k: "earlier" as const, e })));
     this.rows = rows;
+    const shown = this.shownComments().length;
+    this.listTitle.textContent = `Comments (${this.state.sortedComments().length})`;
+    this.deleteAll.textContent = this.agentOnly.checked ? "Delete agent comments" : "Delete all";
+    this.deleteAll.hidden = shown === 0;
+    this.deleteAll.disabled = ed !== null;
+    this.deleteAll.title = ed ? "Save or close the open editor first" : "";
+    // The delete confirmation names a count; any change to the list makes the human confirm again.
+    if (this.confirmCounts) this.hideConfirm();
     this.list.setSource({
       count: () => this.rows.length,
       variable: () => true,

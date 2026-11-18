@@ -1343,3 +1343,58 @@ func TestConcurrentEditsOfOneVersion(t *testing.T) {
 	s.End()
 	assertDraftRestores(t, fx, st, want)
 }
+
+// TestDeleteCommentsIsAllOrNothing: a bulk delete removes every listed comment at the version its
+// page showed in one draft change, or, when any listed comment was saved since, deletes nothing
+// (REQ-CMT-013). Unlisted comments are kept, absent ids succeed, and freed bytes count again
+// against the comment limits.
+func TestDeleteCommentsIsAllOrNothing(t *testing.T) {
+	t.Parallel()
+	fx := newFixture(t)
+	s, st := fx.start(t, t.TempDir(), review.NewSeed())
+	big := strings.Repeat("x", review.MaxBodyBytes)
+	var shown []review.Comment
+	for i := range review.MaxTotalBytes / review.MaxBodyBytes {
+		c, err := s.CreateComment(t.Context(), fmt.Sprintf("c%d", i), review.OnReview(), big)
+		if err != nil {
+			t.Fatal(err)
+		}
+		shown = append(shown, c)
+	}
+	if _, err := s.CreateComment(t.Context(), "over", review.OnReview(), "x"); err == nil {
+		t.Fatal("CreateComment past the total body limit succeeded; the test needs a full draft")
+	}
+	edited, err := s.EditComment("c1", shown[1].Version, big[1:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := map[string]int64{"c0": shown[0].Version, "c1": shown[1].Version, "absent": 1}
+	before := s.Draft()
+	if err := s.DeleteComments(at); !errors.Is(err, review.ErrStale) {
+		t.Errorf("DeleteComments with c1 at the version before its edit: err = %v; want ErrStale", err)
+	}
+	if after := s.Draft(); !reflect.DeepEqual(after, before) {
+		t.Errorf("draft after a refused bulk delete = %+v; want %+v", after, before)
+	}
+
+	at["c1"] = edited.Version
+	if err := s.DeleteComments(at); err != nil {
+		t.Fatalf("DeleteComments at the shown versions: %v", err)
+	}
+	var left []string
+	for _, c := range s.Draft().Comments {
+		left = append(left, c.ID)
+	}
+	if want := len(shown) - 2; len(left) != want || slices.Contains(left, "c0") || slices.Contains(left, "c1") {
+		t.Errorf("comments after the bulk delete = %v; want the %d others", left, want)
+	}
+	if err := s.DeleteComments(at); err != nil {
+		t.Errorf("DeleteComments resent: %v", err)
+	}
+	if _, err := s.CreateComment(t.Context(), "after", review.OnReview(), big); err != nil {
+		t.Errorf("CreateComment in the bytes the delete freed: %v", err)
+	}
+	want := s.Draft()
+	s.End()
+	assertDraftRestores(t, fx, st, want)
+}

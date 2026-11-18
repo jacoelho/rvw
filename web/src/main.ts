@@ -197,7 +197,7 @@ class Page {
         if (o.kind === "sent") {
           if (o.copied === "stale") this.end("Review sent", "The review changed after it was copied; copy it again below.", o.markdown);
           else this.end(o.copied === "yes" ? "Review sent and copied" : "Review sent", "rvw printed the review for the agent and exited.", o.markdown);
-        } else if (o.kind === "cancelled") this.end("Review cancelled", "The draft was deleted and rvw exited.");
+        } else if (o.kind === "cancelled") this.end("Review discarded", "The draft was deleted and rvw exited; the agent was told the review was cancelled.");
         else this.end("Review not delivered", `rvw could not write the result (${o.error}). The draft was kept: run rvw again to resume.`);
       },
     });

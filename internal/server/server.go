@@ -274,6 +274,7 @@ func (s *Server) handler(addr string) http.Handler {
 	api.HandleFunc("GET /api/search", s.bound(s.getSearch))
 	api.HandleFunc("PUT /api/comments/{id}", s.bound(draftOnly(s.putComment)))
 	api.HandleFunc("DELETE /api/comments/{id}", s.bound(draftOnly(s.deleteComment)))
+	api.HandleFunc("POST /api/comments/delete", s.bound(draftOnly(s.deleteComments)))
 	api.HandleFunc("PUT /api/viewed", s.bound(s.putViewed))
 	api.HandleFunc("PUT /api/hide-whitespace", s.bound(draftOnly(s.putHideWhitespace)))
 	api.HandleFunc("POST /api/earlier/{eid}/copy", s.bound(s.postEarlierCopy))

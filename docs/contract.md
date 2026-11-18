@@ -68,6 +68,12 @@ when such a blob arrives (Q-58). It changes REQ-SES-010, REQ-SES-013, REQ-SES-01
 Contract revision: 12, 2026-11-07, against workspace `main` at 25d66e5. The repository owner accepted it on 2026-11-07: a request from the
 page that sent the close notice, such as a poll it had in flight, no longer keeps the session (Q-42). It changes
 REQ-SES-012, which revision 2 proposed; the rest of REQ-SES-012 remains proposed with revision 2.
+
+Contract revision: 13, 2026-11-18, against workspace `main` at 507dfae. Proposed, not accepted: it adds deleting
+every comment the Finish dialog shows in one confirmed change (Q-59): new REQ-CMT-013 and AC-CMT-005.
+It also arranges the Finish dialog by consequence and renames its controls, without changing what any of them does:
+Close becomes ×, Copy as Markdown becomes Copy, Copy and finish becomes Copy and send in Send review's menu, and Cancel
+review becomes Discard review, apart at the footer's left (Q-59). REQ-OUT-008 is renamed with it.
 Decision owner: repository owner (jacoelho)
 Effective scope: target version only. No deployed contract, persisted data or compatibility promise binds this
 replacement (Q-03 in [decisions.md](decisions.md)).
@@ -423,10 +429,10 @@ Status: proposed
 Statement: When the human copies the review as Markdown, the review UI shall save every pending draft change and then put on the clipboard the Markdown review result for the saved draft, leaving stdout and the session unchanged.
 Basis: Proposed (Q-20). The human gets a copy for a ticket or chat without a new output mode; the agent's format stays chosen by `--json`. Revision 2 drops the verdict that Copy waited for (Q-31).
 
-#### REQ-OUT-008 — Copy and finish
+#### REQ-OUT-008 — Copy and send
 
 Status: proposed
-Statement: When the human chooses Copy and finish, the review UI shall save every pending draft change, put the Markdown review result for the saved draft on the clipboard, and only after the clipboard write succeeds finish the review (REQ-SES-004); if the clipboard write is refused, the review UI shall not finish and shall show the failure with the text selectable; if saving fails, the review UI shall neither copy nor finish and shall show the save failure.
+Statement: When the human chooses Copy and send, the review UI shall save every pending draft change, put the Markdown review result for the saved draft on the clipboard, and only after the clipboard write succeeds finish the review (REQ-SES-004); if the clipboard write is refused, the review UI shall not finish and shall show the failure with the text selectable; if saving fails, the review UI shall neither copy nor finish and shall show the save failure.
 Basis: Proposed (Q-43). The human who wants a copy and a finished review gets both from one click, and never a finished review without the copy the click promised.
 
 ### Comments
@@ -478,6 +484,12 @@ Basis: Proposed (Q-18). The author tells the agent whose words a comment holds (
 Status: proposed
 Statement: When the human clicks a line number, the review UI shall select that line and open a comment editor on the selection; when the human shift-clicks a line number on the same side as the selected lines, it shall extend the selection to include that line and open the editor on the extended selection; while the human drags from a line number with no modifier key held, it shall select the lines from the pressed line to the line under the pointer, on the pressed side only, keeping the last line while the pointer is over a row without a line on that side, and scroll the diff while the pointer is held at its top or bottom edge; on release, inside or outside the diff, it shall open one comment editor on that selection; and a press and release on one line shall act as a click. Opening an editor on a selection while a new comment's editor is open shall move that editor, its text kept, to the selection, or, if the move is refused, say why and keep the editor's own lines; while another comment is being edited, opening one leaves that edit first, and while a save or leave is pending nothing opens (Q-46).
 Basis: The repository owner asked for drag-select for multi-line ranges, 2026-11-06 (Q-48). Click and shift-click predate it and are recorded here with it.
+
+#### REQ-CMT-013 — Delete shown comments
+
+Status: proposed
+Statement: When the human confirms Delete all in the Finish dialog, the rvw command shall delete, in one draft change, every comment the dialog lists under its filter at the version the page shows, or, if any of them was saved since, delete none and the review UI shall show the comments as stored.
+Basis: The repository owner asked for a way to delete all comments after a review copied without finishing was addressed and the refresh carried its comments over, 2026-11-18 (Q-59). The summary, viewed marks and earlier comments are not comments of the draft's list and stay; the Agent filter narrows the delete to `agent` comments.
 
 #### REQ-CMT-009 — Earlier comments in a file
 
@@ -551,7 +563,7 @@ Basis: The repository owner asked to hide what was already reviewed and show wha
 
 Status: proposed
 Statement: When the review result has been written to stdout, the rvw command shall record in the review ledger before exiting the file version of each changed file whose viewed mark is set as its file key's reviewed version, the result's comments as the earlier comments in place of the ledger's, and the draft's Hide whitespace setting.
-Basis: The repository owner chose "files marked viewed" as what counts as reviewed, 2026-11-06 (Q-49). Recording only a delivered result means a cancelled, interrupted, closed or undelivered review records nothing, and a mark cleared before Finish does not count. A file whose mark is clear keeps its earlier reviewed version, so its next round still compares against what the human last saw. Copy and finish delivers through the same finish (REQ-OUT-008).
+Basis: The repository owner chose "files marked viewed" as what counts as reviewed, 2026-11-06 (Q-49). Recording only a delivered result means a cancelled, interrupted, closed or undelivered review records nothing, and a mark cleared before Finish does not count. A file whose mark is clear keeps its earlier reviewed version, so its next round still compares against what the human last saw. Copy and send delivers through the same finish (REQ-OUT-008).
 
 #### REQ-RND-003 — Ledger lock and merge
 
@@ -993,7 +1005,7 @@ Verification: Planned Go tests plus a browser test for editing.
 ### AC-CMT-002 — Comment overview and copy
 
 Covers: REQ-CMT-006, REQ-OUT-007, REQ-OUT-008
-Expected: For a draft with review, file, line and range comments by both authors, the Finish dialog lists them in the order of AC-OUT-001. Each line or range comment shows the code lines the result quotes for it. Editing or deleting one there changes the same comment in its file, and the draft, and leaves the dialog open at the same scroll position. Copying puts on the clipboard text equal to the stdout that finishing then produces without `--json`. The Agent filter shows only `agent` comments. A summary typed but not yet saved appears in the copied text. Copying writes nothing to stdout and leaves the session open. Copy succeeds in Safari and Chrome, and a refused clipboard write shows a failure with the text selectable. Copy and finish puts on the clipboard text equal to the stdout that finishing produces without `--json` and exits 0; a refused write or a failed save keeps the session open.
+Expected: For a draft with review, file, line and range comments by both authors, the Finish dialog lists them in the order of AC-OUT-001. Each line or range comment shows the code lines the result quotes for it. Editing or deleting one there changes the same comment in its file, and the draft, and leaves the dialog open at the same scroll position. Copying puts on the clipboard text equal to the stdout that finishing then produces without `--json`. The Agent filter shows only `agent` comments. A summary typed but not yet saved appears in the copied text. Copying writes nothing to stdout and leaves the session open. Copy succeeds in Safari and Chrome, and a refused clipboard write shows a failure with the text selectable. Copy and send puts on the clipboard text equal to the stdout that finishing produces without `--json` and exits 0; a refused write or a failed save keeps the session open.
 Verification: Planned browser test in Safari and Chrome.
 
 ### AC-CMT-003 — Line selection
@@ -1008,6 +1020,12 @@ Covers: REQ-CMT-009, REQ-CMT-010, REQ-CMT-011, REQ-CMT-012, REQ-PERF-005
 Expected: Round 1 delivers a line comment on `a.go:10`, a range comment on `a.go:20-22`, an old-side comment, a file comment, a review comment and a line comment on `gone.go`. Before round 2 the agent inserts 3 lines above line 10, edits line 21, and reverts `gone.go`. Round 2 shows the line comment as current at line 13, the range comment as outdated with its round 1 lines, the old-side comment as current, and the file comment at the top of the file; the Finish dialog lists the review comment as current and the `gone.go` comment as unplaced. None can be edited. With round 1's blob pruned, the line comment is unplaced. Still applies on the current line comment adds a draft comment at line 13 with the same author and body; on the outdated one, a file comment; choosing it again adds nothing. The round 2 result contains only the draft's comments. Round 3, after round 2 delivered only the copied comment, shows that one alone. Opening the session reads no blob for earlier comments; opening `a.go` runs the mapping.
 Verification: Go tests for status and placement with expectations written by hand; planned browser test.
 Counterexample: Placing by searching for the original text puts a comment on a duplicated line and fails the placement check.
+
+### AC-CMT-005 — Delete shown comments
+
+Covers: REQ-CMT-013
+Expected: With two human comments, Delete all asks to delete 2 comments; confirming deletes both in one request, and the draft file holds neither. If another page edited one after this page loaded it, confirming deletes neither, the dialog shows the edited text and says nothing was deleted. With the Agent filter on, only `agent` comments are deleted. A comment the page did not list, such as one another page created, is kept. The summary and viewed marks are unchanged. Delete all is disabled while an editor is open in the dialog and hidden while no comment is shown.
+Verification: Go tests in `internal/review` and `internal/server`; browser test in `cmd/rvw`.
 
 ### AC-SES-003 — Finish acknowledgement
 
@@ -1024,7 +1042,7 @@ Verification: Planned process test.
 ### AC-RND-001 — Recording rounds in the ledger
 
 Covers: REQ-RND-001, REQ-RND-002, REQ-RND-003, REQ-RND-004, REQ-RND-006, REQ-RND-007
-Expected: Finishing a review with two of three files marked viewed records exactly those two file versions, the result's comments and the Hide whitespace setting; Copy and finish records the same. Cancel, SIGINT, a closed page and a closed stdout record nothing. A mark set and then cleared before Finish records nothing for that file, and a file whose mark is clear keeps its earlier reviewed version. Two sessions on different snapshots of one worktree that finish in turn both leave their reviewed versions, the later one winning for a shared file key, and the earlier comments are the later delivery's. A second worktree of the same repository sees an empty ledger. With a fixed clock, reviewed versions and earlier comments 31 days old are dropped when the ledger is next read or written, and the 257th snapshot's write drops the oldest snapshot's versions. A ledger directory that cannot be written gives a stderr line and exit 0 with the result delivered. A ledger replaced by invalid JSON is moved aside on the next start, stderr names the moved file, and the session starts with no round states.
+Expected: Finishing a review with two of three files marked viewed records exactly those two file versions, the result's comments and the Hide whitespace setting; Copy and send records the same. Cancel, SIGINT, a closed page and a closed stdout record nothing. A mark set and then cleared before Finish records nothing for that file, and a file whose mark is clear keeps its earlier reviewed version. Two sessions on different snapshots of one worktree that finish in turn both leave their reviewed versions, the later one winning for a shared file key, and the earlier comments are the later delivery's. A second worktree of the same repository sees an empty ledger. With a fixed clock, reviewed versions and earlier comments 31 days old are dropped when the ledger is next read or written, and the 257th snapshot's write drops the oldest snapshot's versions. A ledger directory that cannot be written gives a stderr line and exit 0 with the result delivered. A ledger replaced by invalid JSON is moved aside on the next start, stderr names the moved file, and the session starts with no round states.
 Verification: Planned Go tests in the owning package and a process test driving the HTTP API.
 Counterexample: Recording at the time a mark is set records the cleared mark and fails.
 
