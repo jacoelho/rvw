@@ -50,6 +50,11 @@ type QuoteState = Quote | "loading" | "failed";
 
 type QuoteEntry = { target: string; quote: QuoteState };
 
+/**
+ * A destructive action awaiting its button. counts: the text names a comment count, so a change to
+ * the list withdraws it.
+ */
+type Confirmation = { action: () => Promise<void>; counts: boolean };
 
 export class FinishDialog {
   readonly el: HTMLDialogElement;
@@ -68,10 +73,8 @@ export class FinishDialog {
   private readonly confirmBar: HTMLElement;
   private readonly confirmText: HTMLElement;
   private readonly confirmYes: HTMLButtonElement;
-  /** What the confirmation's action button does, while the confirmation shows. */
-  private confirmAction: (() => Promise<void>) | null = null;
-  /** The confirmation names a comment count, so a change to the list withdraws it. */
-  private confirmCounts = false;
+  /** The confirmation that shows, or null. */
+  private confirm: Confirmation | null = null;
   private rows: Row[] = [];
   private edit: CommentEditor | null = null;
   /** An editor is being left so another can open; clicks meanwhile are ignored. */
@@ -135,9 +138,9 @@ export class FinishDialog {
     this.confirmText = h("span");
     this.confirmYes = h("button", "btn danger");
     this.confirmYes.addEventListener("click", () => {
-      const action = this.confirmAction;
+      const confirm = this.confirm;
       this.hideConfirm();
-      if (action) this.run(action());
+      if (confirm) this.run(confirm.action());
     });
     const keep = h("button", "btn", "Keep");
     keep.addEventListener("click", () => this.hideConfirm());
@@ -420,16 +423,14 @@ export class FinishDialog {
   private ask(text: string, label: string, action: () => Promise<void>, counts = false): void {
     this.confirmText.textContent = text;
     this.confirmYes.textContent = label;
-    this.confirmAction = action;
-    this.confirmCounts = counts;
+    this.confirm = { action, counts };
     this.confirmBar.hidden = false;
     this.confirmYes.focus();
   }
 
   private hideConfirm(): void {
     this.confirmBar.hidden = true;
-    this.confirmAction = null;
-    this.confirmCounts = false;
+    this.confirm = null;
   }
 
   private menuItem(label: string, act: () => void): HTMLButtonElement {
@@ -565,7 +566,7 @@ export class FinishDialog {
     this.deleteAll.disabled = ed !== null;
     this.deleteAll.title = ed ? "Save or close the open editor first" : "";
     // The delete confirmation names a count; any change to the list makes the human confirm again.
-    if (this.confirmCounts) this.hideConfirm();
+    if (this.confirm?.counts) this.hideConfirm();
     this.list.setSource({
       count: () => this.rows.length,
       variable: () => true,
