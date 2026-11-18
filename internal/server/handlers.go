@@ -646,6 +646,37 @@ func (s *Server) deleteComment(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// deleteComments deletes the listed comments at the versions the page showed, all or none
+// (REQ-CMT-013).
+func (s *Server) deleteComments(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Comments []struct {
+			ID      string `json:"id"`
+			Version int64  `json:"version"`
+		} `json:"comments"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if len(req.Comments) == 0 || len(req.Comments) > review.MaxComments {
+		http.Error(w, fmt.Sprintf("give 1 to %d comments", review.MaxComments), http.StatusBadRequest)
+		return
+	}
+	at := make(map[string]int64, len(req.Comments))
+	for _, c := range req.Comments {
+		if _, dup := at[c.ID]; dup {
+			http.Error(w, fmt.Sprintf("comment %q is listed twice", c.ID), http.StatusBadRequest)
+			return
+		}
+		at[c.ID] = c.Version
+	}
+	if err := s.cfg.Session.DeleteComments(at); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) putSummary(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Summary string `json:"summary"`

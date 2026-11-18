@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -678,6 +679,74 @@ func TestDeletePreconditions(t *testing.T) {
 	f.mustStatus(f.create("c1", review, "body-again"), http.StatusOK, "create c1 again")
 	f.mustStatus(f.deleteAt("c1", edited.Version), http.StatusPreconditionFailed, "delete at the deleted comment's version")
 	stored("body-again")
+}
+
+// TestBulkDelete: POST /api/comments/delete removes the listed comments at the versions the page
+// showed, all or none (REQ-CMT-013). One listed comment saved since its version refuses the whole
+// delete with 412; an unlisted comment is kept; an absent id succeeds; a malformed list is 400.
+func TestBulkDelete(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, smallRepo(t), fixtureOptions{})
+	f.serveHandler()
+	review := placementDTO{Target: "review"}
+	versions := map[string]int64{}
+	for _, id := range []string{"a", "b", "keep"} {
+		r := f.create(id, review, "body-"+id)
+		f.mustStatus(r, http.StatusOK, "create "+id)
+		var c commentDTO
+		decode(t, r.body, &c)
+		versions[id] = c.Version
+	}
+	r := f.edit("b", versions["b"], "body-b-edited")
+	f.mustStatus(r, http.StatusOK, "edit b")
+	var edited commentDTO
+	decode(t, r.body, &edited)
+	del := func(entries ...string) string {
+		var list []map[string]any
+		for i := 0; i < len(entries); i += 2 {
+			v, err := strconv.ParseInt(entries[i+1], 10, 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			list = append(list, map[string]any{"id": entries[i], "version": v})
+		}
+		return mustJSON(t, map[string]any{"comments": list})
+	}
+	ids := func() string { return strings.Join(commentIDs(f.session().Comments), ",") }
+	v := func(n int64) string { return strconv.FormatInt(n, 10) }
+
+	for _, c := range []struct{ name, body string }{
+		{"no comments", `{"comments":[]}`},
+		{"an id listed twice", del("a", v(versions["a"]), "a", v(versions["a"]))},
+		{"an invalid id", del("not an id", "1")},
+	} {
+		got := f.do(http.MethodPost, "/api/comments/delete", c.body)
+		if got.status != http.StatusBadRequest && got.status != http.StatusUnprocessableEntity {
+			t.Errorf("%s: status %d, want 400 or 422; body %q", c.name, got.status, got.body)
+		}
+	}
+	f.mustStatus(f.do(http.MethodPost, "/api/comments/delete", del("a", v(versions["a"]), "b", v(versions["b"]))),
+		http.StatusPreconditionFailed, "delete with b at the version before its edit")
+	if got := ids(); got != "a,b,keep" {
+		t.Errorf("comments after a refused delete = %s; want a,b,keep", got)
+	}
+
+	f.mustStatus(f.do(http.MethodPost, "/api/comments/delete", del("a", v(versions["a"]), "b", v(edited.Version), "gone", "7")),
+		http.StatusNoContent, "delete a and b at their versions")
+	if got := ids(); got != "keep" {
+		t.Errorf("comments after the delete = %s; want keep", got)
+	}
+	draft, err := os.ReadFile(f.draftPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, gone := range []string{"body-a", "body-b-edited"} {
+		if strings.Contains(string(draft), gone) {
+			t.Errorf("the draft still holds %q:\n%s", gone, draft)
+		}
+	}
+	f.mustStatus(f.do(http.MethodPost, "/api/comments/delete", del("a", v(versions["a"]), "b", v(edited.Version))),
+		http.StatusNoContent, "delete resent")
 }
 
 // TestConcurrentEditsOfOneVersion: two edits holding the same version race; one wins with 200, the

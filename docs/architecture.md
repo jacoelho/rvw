@@ -195,7 +195,9 @@ Inside a boundary, values are trusted; there is no re-validation.
   ([Q-27, Q-37](decisions.md#q-27--comment-order-file-index-and-save-preconditions)). On a 412 the UI reloads the
   comments, and the editor shows the stored comment, or closes when that comment is gone or at another target
   ([Q-41](decisions.md#q-41--a-refused-write-loads-the-stored-comment)). A delete sends the version the page shows, so
-  it never discards an edit the page has not loaded; on a 412 the UI reloads the comments. The summary and viewed marks
+  it never discards an edit the page has not loaded; on a 412 the UI reloads the comments. Delete all sends every shown
+  comment's version and deletes all or none in one draft write
+  ([Q-59](decisions.md#q-59--delete-all-comments)). The summary and viewed marks
   are last-writer-wins ([Q-27](decisions.md#q-27--comment-order-file-index-and-save-preconditions)).
 - **One open editor per page.** An editor is left (`CommentEditor.leave`: saved, or closed when blank) before another
   opens: Finish opens only after the diff view's editor is left, and the dialog leaves its editor before opening another.

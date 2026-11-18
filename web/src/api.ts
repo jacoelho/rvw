@@ -423,6 +423,14 @@ export class Api {
     await this.send("DELETE", `/api/comments/${encodeURIComponent(id)}`, undefined, undefined, { "If-Match": `"${version}"` });
   }
 
+  /**
+   * Deletes each comment in comments at the version given, all or none (REQ-CMT-013). A comment
+   * saved since its version fails the whole delete with 412; an absent one succeeds.
+   */
+  async deleteComments(comments: readonly Pick<Comment, "id" | "version">[]): Promise<void> {
+    await this.send("POST", "/api/comments/delete", { comments: comments.map((c) => ({ id: c.id, version: c.version })) });
+  }
+
   /** Sets the viewed mark of every file in files, in one draft change (REQ-NAV-010). */
   async setViewed(files: readonly number[], viewed: boolean): Promise<void> {
     await this.send("PUT", "/api/viewed", { files, viewed });
