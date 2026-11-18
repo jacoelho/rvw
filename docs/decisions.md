@@ -1456,3 +1456,31 @@ Rejected:
   changed file, stalling content reads; one batch run holds nothing shared.
 - **Returning the replaced and the opened stores to the caller.** `cmd/rvw` then kept a second copy of the current store
   to close at exit, two owners of one lock; it was safe only because refreshes run one at a time.
+
+### Q-60 — The page's lifecycle is one mode
+
+Proposed on 2026-11-18, within contract revision 12; no requirement changes. The page held its lifecycle in three
+fields, `ended`, `refreshing` and `supersededBanner`, and a refresh that moved the review called `location.reload()`
+directly. The human can open Finish or a comment editor while a refresh is in flight, so text typed then was lost on
+reload. The page's own refresh reply now follows the rule REQ-SES-015 sets for a refused request: reload, or offer to
+reload while an editor or the Finish dialog is open.
+
+Decision: one `PageMode` (live, refreshing, superseded, ended) with one writer, `setMode`; ended covers both a
+reload and the end page, which no reader tells apart. Every move to a
+new generation, whether by a 409, a status reply or the page's own refresh reply, goes through `superseded()`, which
+reloads at once or offers a reload. The refresh's cleanup returns to live only from refreshing, so a sibling's refresh
+that superseded the page meanwhile is not undone. Refresh is enabled only while live: a superseded page's refresh would
+be refused anyway.
+
+Rejected:
+
+- **Refusing editors and Finish while a refresh is in flight.** It blocks reviewing for the length of a source
+  resolve, and the refreshing state would then need a fourth reader in every host of an editor.
+- **Converting the other implicit machines in the same change.** None has a reachable flag combination with a visible
+  consequence, or a transition with two owners. The background facts' done flag and error (client, wire and server)
+  are set together and never misread, and changing the wire costs most. `CommentEditor`'s base, lost request and save
+  in flight are independent facts with one writer each (Q-37, Q-41). The one-transition gate in `FileView` and
+  `FinishDialog` (Q-46) is the same rule in two hosts that differ in how they rebuild and close; a shared owner is
+  warranted only when a third host appears. The palette's debounce timer and search, the line drag and its swallowed
+  click, `factRuns`, `Repo.closed` and `cmd/rvw`'s signal sequence each have one owner that sets their fields
+  together. The session phase, `Outcome`, `Fate`, round states and presence are already explicit.

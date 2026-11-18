@@ -9,8 +9,9 @@ import (
 )
 
 const (
-	changedBanner = `document.querySelector(".changed-banner")`
-	movedBanner   = `document.querySelector(".moved-banner")`
+	changedBanner    = `document.querySelector(".changed-banner")`
+	movedBanner      = `document.querySelector(".moved-banner")`
+	supersededBanner = `document.querySelector(".superseded-banner")`
 )
 
 // TestBrowserRefresh covers REQ-SES-010, REQ-SES-013, REQ-SES-015 and REQ-DRF-006 through rvw and
@@ -82,6 +83,61 @@ func TestBrowserRefresh(t *testing.T) {
 		}
 	}
 	pg.noPageErrors()
+}
+
+// TestBrowserRefreshKeepsTextTypedWhileInFlight covers REQ-SES-015 for the page's own refresh: the
+// human opens Finish and types a summary while the refresh is in flight, so when it moves the
+// review to a new generation the page offers a reload instead of reloading, and the text stays.
+func TestBrowserRefreshKeepsTextTypedWhileInFlight(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	w.write("b/x.go", "package b\n\nvar Y = 1\n")
+	w.commit("base")
+	w.write("b/x.go", "package b\n\nvar Y = 2\n")
+	p := w.start(procOptions{}, "uncommitted")
+	p.waitURL()
+	pg := openPage(t, p)
+	pg.ready()
+	w.write("b/x.go", "package b\n\nvar Y = 3\n")
+
+	// The server moves the review only once Finish is open, whichever reply, the refresh's or a
+	// status poll's, then reaches the page first.
+	pg.eval(`window.rvwBeforeReload = true`, nil)
+	pg.holdRefresh()
+	pg.click("Refresh", button("header", "Refresh"), 0)
+	pg.waitTrue("the refresh request", `window.rvwRefreshHeld === true`)
+	pg.click("Finish…", button("header", "Finish…"), 0)
+	pg.waitFocus("the summary", summaryField)
+	pg.insertText("Typed during the refresh")
+	pg.eval(`window.rvwReleaseRefresh()`, nil)
+
+	pg.waitTrue("the reload prompt", supersededBanner+` !== null`)
+	if !pg.bool(`window.rvwBeforeReload === true`) {
+		pg.fatalf("the refresh reloaded the page while the Finish dialog was open")
+	}
+	if got := pg.text(summaryField + `.value`); got != "Typed during the refresh" {
+		pg.fatalf("the summary is %q after the refresh; want the typed text", got)
+	}
+	if !pg.bool(`(` + button("header", "Refresh") + `)?.disabled === true`) {
+		pg.fatalf("Refresh is enabled on a page whose review moved to a new generation")
+	}
+	pg.noPageErrors()
+}
+
+// holdRefresh holds the page's refresh requests before they are sent: window.rvwRefreshHeld is
+// set once one is held, and window.rvwReleaseRefresh() sends it.
+func (pg *page) holdRefresh() {
+	pg.t.Helper()
+	pg.eval(`(() => {
+		const real = window.fetch;
+		window.fetch = async (input, init) => {
+			if (String(input).startsWith("/api/refresh")) {
+				window.rvwRefreshHeld = true;
+				await new Promise((release) => (window.rvwReleaseRefresh = release));
+			}
+			return real(input, init);
+		};
+	})()`, nil)
 }
 
 // TestBrowserRefreshNothingChanged: Refresh with nothing changed says so and keeps the page.

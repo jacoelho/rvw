@@ -108,8 +108,12 @@ Inside a boundary, values are trusted; there is no re-validation.
     running (`probeMu.TryLock`), no refresh holds the lock (`refreshMu.TryRLock`), the generation is still current and
     the last check ended at least 10 s ago. The result sticks in the generation until a refresh.
   - Page: a 409 naming a generation makes the page reload, or show a reload prompt while an editor or the Finish
-    dialog is open; a status reply naming another generation does the same, so other tabs follow a refresh. The moved
-    list shows until dismissed, per generation, in `sessionStorage`.
+    dialog is open; a status reply naming another generation does the same, so other tabs follow a refresh, and so
+    does the page's own refresh reply, since the human may open an editor or Finish while it is in flight. The page's
+    lifecycle is one `PageMode` in `main.ts` (live, refreshing, superseded, ended), changed only by
+    `setMode`, which also enables Refresh only while live
+    ([Q-60](decisions.md#q-60--the-pages-lifecycle-is-one-mode)). The moved list shows until dismissed, per
+    generation, in `sessionStorage`.
 - **Draft.** `review.Session` is its only writer. Each mutation is validated, written to a temporary file, fsynced and
   renamed into place, and only then applied in memory, so the draft on disk is never behind what the UI was told.
 - **Lock.** An exclusive `flock` per snapshot key makes one session the only writer. A second instance reports the

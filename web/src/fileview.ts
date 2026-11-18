@@ -144,8 +144,7 @@ export class FileView {
   readonly list: VirtualList;
   private readonly header: HTMLElement;
   private index = -1;
-  private diff: FileDiff | null = null;
-  /** The loaded file's reply: its scope, whitespace-only hunks and earlier comment placements. */
+  /** The loaded file's reply: its diff, scope, whitespace-only hunks and earlier comment placements. */
   private reply: FileReply | null = null;
   private spans: HunkSpan[] = [];
   /** Whitespace-only hunks the human or a navigation showed. */
@@ -361,7 +360,11 @@ export class FileView {
 
   /** The shown file's diff has loaded. */
   get loaded(): boolean {
-    return this.diff !== null;
+    return this.reply !== null;
+  }
+
+  private get diff(): FileDiff | null {
+    return this.reply?.diff ?? null;
   }
 
   /** The shown file is shown as its interdiff, whose old side is the reviewed version. */
@@ -397,7 +400,6 @@ export class FileView {
     const ctl = new AbortController();
     this.loading = ctl;
     this.index = i;
-    this.diff = null;
     this.reply = null;
     this.spans = [];
     this.revealed = new Set();
@@ -414,7 +416,6 @@ export class FileView {
       if (ctl.signal.aborted) return "superseded";
       const d = reply.diff;
       this.reply = reply;
-      this.diff = d;
       this.spans = d.kind === "text" ? d.hunks.map(hunkSpan) : [];
       for (const p of reply.earlier) this.placements.set(p.id, p);
       this.renderHeader();
